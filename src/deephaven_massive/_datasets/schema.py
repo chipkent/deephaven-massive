@@ -60,13 +60,13 @@ __all__ = [
     "ColumnType",
     "Schema",
     "SourceColumn",
-    "conform",
     "dataset_schema",
     "join",
     "key_column",
     "pascal_case",
     "rename",
     "required_fields",
+    "widen",
 ]
 
 logger = logging.getLogger(__name__)
@@ -131,30 +131,6 @@ KEY_COLUMNS: Final[Mapping[str, str]] = {
 }
 """The column each renamed key role takes. The `session` role keeps its generated column (the
 futures `SessionEndDate`), and so does a `fanout` key that is no instrument (`FilerCik`)."""
-
-
-def conform(values: pa.Array, column_type: ColumnType) -> pa.Array:
-    """Widen one source column to its dataset column's type, by the merge's lattice joins.
-
-    A source joins its kind with its own wire type, which the merged column may widen: a
-    `long` in a `double` column is cast, and a `long` in an `int[]` column becomes a
-    one-element list (a null stays null). A column already of its type is cast to itself, at
-    no cost. Every transport that builds Arrow columns from a source (the flat files, the
-    WebSocket flush) calls it last, so a column means the same on each.
-
-    Args:
-        values: The column as decoded, in its wire type's Arrow type.
-        column_type: The dataset column's type.
-
-    Returns:
-        The column in `column_type.arrow_type`.
-    """
-    target = column_type.arrow_type
-    if pa.types.is_list(target) and not pa.types.is_list(values.type):
-        offsets = pa.array(range(len(values) + 1), pa.int32())
-        items = pc.cast(values, target.value_type)
-        return pa.ListArray.from_arrays(offsets, items, mask=values.is_null())
-    return pc.cast(values, target)
 
 
 def key_column(role: str, key: KeySpec) -> str:
@@ -578,6 +554,28 @@ def join(first: WireType, second: WireType) -> WireType | None:
     if first is second:
         return first
     return _JOINS.get(frozenset({first, second}))
+
+
+def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
+    """Widen one source column to its dataset column's Arrow type, by the lattice joins.
+
+    A source joins its kind with its own wire type, which the merged column may widen
+    (`join`): a `long` in a `double` column is cast, and a `long` in an `int[]` column becomes
+    a one-element list (a null stays null). A column already of its type is cast to itself, at
+    no cost. Every transport converts its decoded columns with it, so they all widen alike.
+
+    Args:
+        values: The column as decoded, in its wire type's Arrow type.
+        target: The dataset column's Arrow type (`ColumnType.arrow_type`).
+
+    Returns:
+        The column in `target`.
+    """
+    if pa.types.is_list(target) and not pa.types.is_list(values.type):
+        offsets = pa.array(range(len(values) + 1), pa.int32())
+        items = pc.cast(values, target.value_type)
+        return pa.ListArray.from_arrays(offsets, items, mask=values.is_null())
+    return pc.cast(values, target)
 
 
 def dataset_schema(

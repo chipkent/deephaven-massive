@@ -134,7 +134,7 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
 def _read_symbol_table(
     core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
 ) -> tuple[str, ...]:
-    """Read a reactive symbol table once, for a static `history()` result.
+    """Read a reactive symbol table once, for a static result (`fetch()` or `history()`).
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
     it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
@@ -158,7 +158,7 @@ def _read_symbol_table(
         raw = {canonical_symbol(row[0]) for row in symbols.table.iter_tuple(cols="Symbol")}
     found = tuple(sorted(symbol for symbol in raw if symbol is not None))
     if not found:
-        raise ValueError(f"{spec.name} history: the symbol table holds no valid symbols")
+        raise ValueError(f"{spec.name}: the symbol table holds no valid symbols")
     return found
 
 
@@ -186,6 +186,18 @@ class QueryBase:
         suffix = f" {described}" if described else ""
         return f"<{type(self).__name__} {self._spec.name}{suffix}>"
 
+    def _static_request(self) -> Request:
+        """Return the request with a reactive symbol table read once, for a static verb.
+
+        Returns:
+            The request; for a reactive table, with its valid symbols (`_read_symbol_table`).
+        """
+        request = self._request
+        if isinstance(request.symbols, SymbolTable):
+            symbols = _read_symbol_table(self._core, self._spec, request.symbols)
+            return replace(request, symbols=symbols)
+        return request
+
 
 class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
@@ -199,10 +211,19 @@ class Query(QueryBase):
     def fetch(self) -> Table:
         """Return every row the dataset's endpoint returns, fully paginated, as a static table.
 
-        The request runs synchronously on the calling thread. `limit`, when the dataset was
-        built with one, caps the total number of rows; the page size is internal. Columns are
-        the dataset's schema. HTTP 403 raises `EntitlementError` and any other failure
-        `MassiveError`.
+        The requests run on the calling thread, or for an endpoint that takes one symbol per
+        request on up to `max_concurrency` threads. `limit`, when the dataset was built with
+        one, caps the total number of rows; the page size is internal. Columns are the
+        dataset's schema. A reactive symbol table is read once, when the verb is called. HTTP
+        401 raises `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
+        `MassiveError`; a symbol the endpoint answers with HTTP 404 is left out with a WARNING.
+
+        Before any request it raises `ValueError` if a path the call reads does not take a
+        parameter or filter the query set (an explicit `adjusted` on a path without it), or a
+        reactive symbol table holds no valid symbol. A failed request raises
+        `AuthenticationError` on HTTP 401, `EntitlementError` on HTTP 403, and `MassiveError`
+        for a rate limit that outlived the retries, a row that breaks the dataset's schema, or
+        any other failure.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -211,7 +232,7 @@ class Query(QueryBase):
             A static table.
         """
         self._core.require_verb_thread()
-        return self._core.rest_transport().fetch(self._spec, self._request)
+        return self._core.rest_transport().fetch(self._spec, self._static_request())
 
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
         """Return a live table that re-runs `fetch()` every `interval`.
@@ -222,6 +243,15 @@ class Query(QueryBase):
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
         non-positive `interval` raises `ValueError`.
 
+        Before the table exists it raises `ValueError` if a path does not take a parameter or
+        filter the query set: with static symbols any path the call reads, and with a reactive
+        table every fetch path of the dataset. Later, a cycle that fails with
+        `AuthenticationError`, `EntitlementError`, a row that breaks the dataset's schema, or
+        a parameter the path a reactive table's new symbol routes to does not take, fails the
+        table (its `m.streams()` row shows `FAILED`) and ends the poller. Any other failure is
+        logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next
+        cycle runs.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -231,7 +261,10 @@ class Query(QueryBase):
                 for news and filings and `REPLACE` otherwise.
 
         Returns:
-            A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`.
+            A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A
+            `REPLACE` table removes keys absent from the latest cycle, but its hidden state
+            keeps every key it has ever held, as `last_by()` does; over a key set that keeps
+            changing (an options chain, the day's movers) its memory grows with the keys seen.
         """
         self._core.require_verb_thread()
         period = _interval(interval)
@@ -537,9 +570,12 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
     def fetch(self) -> Table:
         """Return exactly one row per symbol, the latest, from the dataset's "last" endpoint.
 
-        One request per symbol, synchronously on the calling thread. The "last" endpoints are
-        absent from some plans; `snapshots(symbols).fetch()` is the alternative that works on
-        every plan. A failed request raises `MassiveError` (`EntitlementError` on HTTP 403).
+        The requests run on the calling thread, or on up to `max_concurrency` threads: one per
+        symbol for a per-symbol endpoint (`/v2/last/trade`), or one per batch of symbols for a
+        snapshot endpoint (the indices snapshot). A reactive symbol table is read once, when
+        the verb is called. The "last" endpoints are absent from some plans;
+        `snapshots(symbols).fetch()` is the alternative that works on every plan. A failed
+        request raises `MassiveError` (`EntitlementError` on HTTP 403).
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -550,7 +586,7 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         """
         self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
-        return self._core.rest_transport().fetch(self._spec, self._request)
+        return self._core.rest_transport().fetch(self._spec, self._static_request())
 
 
 class HistoryLatestQuery(HistoryQuery):
@@ -578,4 +614,4 @@ class HistoryLatestQuery(HistoryQuery):
         """
         self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
-        return self._core.rest_transport().fetch(self._spec, self._request)
+        return self._core.rest_transport().fetch(self._spec, self._static_request())

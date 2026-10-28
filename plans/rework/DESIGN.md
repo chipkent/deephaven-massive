@@ -937,8 +937,8 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
   Nothing in `BlinkTableTools` or `RingTableTools` copies attributes, so an append-only or
   ring table derived from a described blink table would lose them. The verb therefore calls
   `describe()` last: on the blink copy for `blink()`, on the append-only or ring table, on the
-  `last_by` table after any `where_in`, on the `poll()` table (the keyed `input_table` or the
-  publisher's append-only table), and on the static table of `fetch()` and `history()`.
+  `last_by` table after any `where_in`, on the `poll()` table (the shape derived from its
+  publisher's blink table), and on the static table of `fetch()` and `history()`.
 - **Threading and liveness.** `describe()` makes a new table, so it runs where every result
   table is made: on the caller thread, inside the result's `LivenessScope`
   ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), never under
@@ -946,8 +946,8 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
   take no update-graph lock. The described table depends on the table it copies, so the
   undescribed parent, and for a stream the blink table that owns `on_shutdown_callback`, lives
   exactly as long as the result does; a teardown test proves that releasing the result still
-  shuts the stream down. A `poll()` poller writes only through the `input_table` or publisher
-  it holds, never through the returned copy.
+  shuts the stream down. A `poll()` poller writes only through the publisher it holds, never
+  through the returned copy.
 - The diagnostics tables of [section 17](#17-diagnostics) are not dataset results and are not
   described.
 
@@ -1044,7 +1044,8 @@ Notation:
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
   Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
   [section 19.4](#194-generated-schemas)). Each dataset names its paths by role (`fetch_path`,
-  `history_path`, `grouped_daily_path`, `extra_paths`), and declares the key columns of each
+  `detail_path`, `fetch_paths_by_class`, `history_path`, `grouped_daily_path`, `extra_paths`),
+  and declares the key columns of each
   source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
   per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
   `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
@@ -1596,7 +1597,13 @@ life, and resolution is **single-flight**: the cache holds one future per (class
 created under the transport's own leaf lock (never `registry_lock`); the first caller makes
 the REST call and completes the future, and later callers wait on it outside every lock. A
 failed resolution completes the future with the error and removes it, so nothing is cached.
-Each new decision writes the pair's `Transport=REST` row of `m.connections()`.
+Each new decision writes the pair's `Transport=REST` row of `m.connections()`. The cache is
+the one place a decision lives: the explicit-verdict rule of
+[section 13.3](#133-connection-and-subscription-protocol) records its re-routed decision there
+through `RestTransport.record_verdict(asset_class, family, decision)`, which replaces the cached
+decision under the same leaf lock (a caller already waiting on the earlier decision still gets
+that one) and rewrites the pair's row with the new host, `Recency=DELAYED`, and evidence
+`"server verdict: <message>"`.
 
 ```
 resolve(asset_class, family) -> HostDecision(host, recency, evidence)
@@ -1883,9 +1890,14 @@ sees:
 - **Fan-out.** In a per-symbol `fetch()` or `poll()` cycle (`ticker_details`,
   `daily_open_close` on a holiday, `/prev`, the "last" endpoints), an HTTP 404 for one symbol
   drops that symbol, with one WARNING per symbol; every other error fails the call.
-- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, or hits
+- **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
   a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
-  unconvertible value, a timestamp out of bounds), fails the table through `publish_failure`.
+  unconvertible value, a timestamp out of bounds), or plans a request with a parameter the
+  chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
+  an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
+  `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
+  every path, with a reactive table the parameters against the dataset's fetch paths, at
+  least one of which must take every one of them. An emptied symbol table plans no request.
   Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`, keeps the
   previous rows, and the next cycle runs as scheduled.
 - **Drift.** `to_batch` returns each page's `DriftReport`; the transport routes it to the
@@ -1926,10 +1938,10 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Only declared parameters are sent.** A request carries only the parameters its chosen
   path declares in its generated parameters. A typed parameter the chosen path lacks raises
   `ValueError` naming the parameter and the path, rather than being dropped silently.
-- **Per-symbol detail paths.** A dataset with both a list path and a per-symbol detail path in
-  `extra_paths` (`options.contracts`: `/v3/reference/options/contracts` and
-  `/v3/reference/options/contracts/{o}`) calls the detail path once per symbol when symbols
-  are given and the list path when they are not. The choice follows from the spec's role
+- **Per-symbol detail paths.** A dataset with both a list path (`fetch_path`) and a per-symbol
+  detail path (`DatasetSpec.detail_path`; `options.contracts`:
+  `/v3/reference/options/contracts` and `/v3/reference/options/contracts/{o}`) calls the
+  detail path once per symbol when symbols are given and the list path when they are not. The choice follows from the spec's role
   paths, never from the dataset's name.
 - **Row symbols are canonical.** A `symbol` key read from the rows, not from the request,
   goes through `canonical(spec.asset_class, value)`, exactly as WebSocket rows do, so forex
@@ -2000,8 +2012,18 @@ How a request is built from a `DatasetSpec` and a `Request`:
   while a derived table or an open panel still keeps the publisher alive (the row moves from
   `RELEASED` to `FAILED` with its `Error`), or after the blink table shut down while results
   are still held. A failure reported for a stream that has left the registry is only logged.
-- REST `poll()` tables use a per-table publisher (`APPEND`) or a keyed `input_table`
-  (`REPLACE`, `UPSERT`), created in the result scope.
+- Each REST `poll()` table has its own publisher, named `massive.<dataset>#<stream id>` and
+  created with the result in the result scope; every mode is shaped from its blink table, so
+  `publish_failure` fails the table in every mode. (A keyed `input_table` cannot be failed:
+  Deephaven notifies failures only inside an update cycle.) `APPEND` is
+  `blink_to_append_only(blink)`; `UPSERT` is `blink.last_by(poll_keys)`; `REPLACE` is that
+  `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone row for
+  every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`, so its
+  rows and its removals land in one update. The `last_by` state keeps a hidden row for every key
+  ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a churning
+  key set (an options chain, the day's movers) grows with the keys it has held. The `poll()`
+  docstring says so. The poller holds the session core only weakly, so a `poll()` table never
+  keeps an unclosed session alive.
 
 ## 15. Options contract cap
 
@@ -2191,7 +2213,7 @@ without the GIL.
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream; enqueue diagnostics row snapshots | touch loop-owned state directly |
-| poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` or `input_table` operations | run inside a listener |
+| poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
@@ -3772,7 +3794,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 13 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
 | 14 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/ingest/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
 | 15 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
-| 16 | Whether the described copy of a keyed `input_table` (a `poll()` result in `REPLACE` or `UPSERT` mode) keeps the input-table attribute, which the web UI reads to offer editing ([section 7.4](#74-column-descriptions)) | The poller writes only through the `input_table` it holds, never through the returned copy, so either outcome keeps the rows correct; the copy carries the descriptions either way | `tests/tables/test_columns.py`: the copy of a keyed `input_table` ticks with its parent, carries `ColumnDescriptions`, and pins whichever input-table attribute behaviour 42.7 shows | None: the embedded JVM settles it |
+| 16 | Retired: `poll()` results are no longer keyed `input_table`s but shapes of a publisher's blink table ([section 14](#14-publishers-fan-out-and-failure-semantics)), so no input-table attribute is involved | | | |
 | 17 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
 | 18 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/namespaces/test_forex_integration.py`: one `C` frame; record the form of `x` |
 | 19 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |

@@ -60,7 +60,7 @@ from deephaven.arrow import to_table
 from deephaven.column import string_col
 from deephaven.stream.table_publisher import table_publisher
 
-from deephaven_massive._datasets.schema import conform, key_column, rename, required_fields
+from deephaven_massive._datasets.schema import key_column, rename, required_fields, widen
 from deephaven_massive._datasets.symbols import SymbolTable, canonical
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
 from deephaven_massive._errors import MassiveError, log_once
@@ -252,7 +252,7 @@ class ChannelPlan:
                         failures.append((index, mismatch_message(label, unit, sent)))
                     failed = bad if failed is None else pc.or_(failed, bad)
                 values = nanos
-            arrays.append(conform(values, column_type))
+            arrays.append(widen(values, column_type.arrow_type))
         batch = pa.Table.from_arrays(arrays, schema=self.arrow_schema)
         if failed is None:
             return batch, []

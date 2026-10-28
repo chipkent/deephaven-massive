@@ -20,9 +20,9 @@ to keep.
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
   columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
   do not carry is null and a column a kind widens (an integer size in a `double` column) is
-  widened. A
-  file's surviving rows become one static Deephaven table per `_TABLE_BLOCKS` blocks of data
-  (usually one table per file), and the tables are merged at the end. No block is ever
+  widened (`schema.widen`). A file's surviving rows become one static Deephaven table per
+  `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at
+  the end. No block is ever
   converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on its own
   I/O threads, so a reader holds about 32 blocks of decompressed text plus at most
   `_TABLE_BLOCKS` blocks of surviving rows, whatever the file's length.
@@ -87,7 +87,7 @@ from deephaven.arrow import to_table
 
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import within_publication_grace
-from deephaven_massive._datasets.schema import conform, rename, required_fields
+from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
@@ -348,7 +348,7 @@ class _Transform:
         if source.unit is not None:
             label = f"{self.dataset}.{name}"
             values = instants(label, source.unit, values, time_column=name == "Timestamp")
-        return conform(values, column_type)
+        return widen(values, column_type.arrow_type)
 
 
 class _CancelledError(Exception):

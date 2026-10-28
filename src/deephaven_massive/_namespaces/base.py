@@ -28,14 +28,14 @@ thread, makes no network call, and creates no table.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar
 
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._datasets.catalog import filter_key
+from deephaven_massive._datasets.catalog import filter_key, param_family
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
@@ -181,6 +181,8 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
 
     Raises:
         TypeError: If `sort` is not a `str`.
+        ValueError: If `order` is given without `sort`: most list endpoints take the direction
+            as the `.asc` or `.desc` suffix of `sort`, which the REST transport adds.
     """
     params: dict[str, ParamValue] = {}
     if sort is not None:
@@ -189,6 +191,11 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
         params["sort"] = sort
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
+        if sort is None:
+            raise ValueError(
+                "order needs sort: most list endpoints take the direction as a suffix of the "
+                "sort field"
+            )
     return params
 
 
@@ -228,12 +235,16 @@ def _value(name: str, value: object) -> ParamValue:
     )
 
 
-def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue], ...]:
+def _filters(
+    spec: DatasetSpec, filters: object, *, typed: Iterable[str]
+) -> tuple[tuple[str, ParamValue], ...]:
     """Normalize the `filters` mapping into a sorted tuple.
 
     Args:
         spec: The dataset, for its time-axis parameter pair.
         filters: The mapping as passed.
+        typed: The wire names of the factory's typed parameters, set or not; a filter may not
+            name one of them, nor any of its suffixed forms.
 
     Returns:
         `(name, value)` pairs sorted by name.
@@ -242,12 +253,14 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
         TypeError: If `filters` is not a mapping, a key is not a `str`, or a value has an
             unsupported type.
         ValueError: If a key is a parameter of the dataset's time axis (`DatasetSpec.axis_params`,
-            the `start`/`end` pair's base name and every suffixed form), or `adjusted`,
-            which has its own typed argument: a filter would reach REST but not the flat-file
+            the `start`/`end` pair's base name and every suffixed form), a typed parameter of
+            the factory or one of its suffixed forms (`param_family`), or `adjusted`, which
+            has its own typed argument: a filter would reach REST but not the flat-file
             source choice, which reads only `Request.adjusted`.
     """
     if not isinstance(filters, Mapping):
         raise TypeError(f"filters must be a mapping, not {type(filters).__name__}")
+    reserved = {filter_key(form) for name in typed for form in param_family(name)}
     pairs: list[tuple[str, ParamValue]] = []
     for key, value in filters.items():
         if not isinstance(key, str):
@@ -256,6 +269,8 @@ def _filters(spec: DatasetSpec, filters: object) -> tuple[tuple[str, ParamValue]
             raise ValueError(f"{key} is set through start= and end=, not filters")
         if key == "adjusted":
             raise ValueError("adjusted is set through build_query(adjusted=...), not filters")
+        if key in reserved:
+            raise ValueError(f"{key} is set through its own argument, not filters")
         pairs.append((key, _value(key, value)))
     return tuple(sorted(pairs))
 
@@ -294,7 +309,8 @@ def build_query(
             parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None.
         end: The upper bound of the dataset's time axis, or None.
-        params: The dataset's other typed parameters by wire name; None values are dropped.
+        params: The dataset's other typed parameters by wire name; None values are dropped,
+            but every key, set or not, is reserved from `filters` with its suffixed forms.
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
             as underscores (`Catalog.check_filters`).
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
@@ -348,7 +364,7 @@ def build_query(
         start=first,
         end=last,
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
-        filters=() if filters is None else _filters(spec, filters),
+        filters=() if filters is None else _filters(spec, filters, typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
     core.catalog.check_filters(spec, dict(request.filters))

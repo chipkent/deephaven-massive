@@ -3,15 +3,16 @@
 import gc
 import threading
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
-from deephaven_massive._enums import ChannelFamily
-from deephaven_massive._ingest import flatfiles, ws
+from deephaven_massive._datasets.request import HostDecision
+from deephaven_massive._enums import ChannelFamily, Recency
+from deephaven_massive._ingest import flatfiles, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.core import SessionCore
 from tests._fakes.s3 import FakeS3
@@ -87,11 +88,6 @@ def test_the_flat_file_transport_needs_s3_credentials(fake_s3: FakeS3) -> None:
     assert clients_of(m)._flat_files is None
 
 
-def test_the_rest_transport_is_not_implemented_yet(session: dm.MassiveSession) -> None:
-    with pytest.raises(NotImplementedError, match="the REST transport is not implemented yet"):
-        session._core.rest_transport()
-
-
 def test_every_stream_transport_shares_the_sessions_connections(
     session: dm.MassiveSession,
 ) -> None:
@@ -113,10 +109,32 @@ def test_the_connections_close_with_the_session(fake_s3: FakeS3) -> None:
     assert connections._closed
 
 
-def test_the_host_is_decided_through_the_rest_transport(session: dm.MassiveSession) -> None:
-    # Until the REST transport exists, a stream's host decision reaches its placeholder.
-    with pytest.raises(NotImplementedError, match="the REST transport is not implemented yet"):
-        clients_of(session)._resolve_host(dm.AssetClass.STOCKS, ChannelFamily.TICK)
+class _HostCache:
+    # The two host-decision calls the WebSocket side makes of the REST transport.
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def resolve_host(self, asset_class: dm.AssetClass, family: ChannelFamily) -> HostDecision:
+        self.calls.append(("resolve", asset_class, family))
+        return HostDecision("socket.massive.com", Recency.REALTIME, "test")
+
+    def record_verdict(
+        self, asset_class: dm.AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        self.calls.append(("record", asset_class, family, decision))
+
+
+def test_host_decisions_go_through_the_rest_transport(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = _HostCache()
+    monkeypatch.setattr(SessionClients, "rest", lambda _: cache)
+    clients = clients_of(session)
+    decision = clients._resolve_host(dm.AssetClass.STOCKS, ChannelFamily.TICK)
+    assert decision.host == "socket.massive.com"
+    assert cache.calls == [
+        ("resolve", dm.AssetClass.STOCKS, ChannelFamily.TICK),
+    ]
 
 
 def test_the_connections_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
@@ -139,6 +157,77 @@ def test_the_connections_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
             break
         closed.wait(0.05)
     assert connections._closed
+
+
+def test_every_rest_call_of_a_session_shares_one_client(session: dm.MassiveSession) -> None:
+    assert clients_of(session)._rest is None  # nothing is created before the first REST call
+    first = session._core.rest_transport()
+    second = session._core.rest_transport()
+    assert isinstance(first, rest.RestEndpoints)
+    assert isinstance(second, rest.RestEndpoints)
+    state = clients_of(session)._rest
+    assert state is not None
+    assert first._state is second._state is state
+    assert first._core is session._core  # a transport holds the core itself
+    session.close()
+    assert state.closed  # registered with the session's closers
+
+
+def test_a_rest_client_created_after_close_is_closed_at_once(fake_s3: FakeS3) -> None:
+    m = dm.MassiveSession(config())
+    m.close()
+    m._core.rest_transport()
+    state = clients_of(m)._rest
+    assert state is not None
+    assert state.closed
+
+
+def test_racing_first_rest_calls_keep_one_client(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The client is built outside the lock; a call that loses the race closes its own.
+    built: list[_massive.RestClient] = []
+    real = _massive.RestClient
+
+    def factory(api_key: str, **settings: object) -> _massive.RestClient:
+        client = real(api_key, **cast("dict[str, Any]", settings))
+        built.append(client)
+        if len(built) == 1:  # the other call installs its client first
+            session._core.rest_transport()
+        return client
+
+    monkeypatch.setitem(vars(_massive), "RestClient", factory)
+    transport = session._core.rest_transport()
+    assert isinstance(transport, rest.RestEndpoints)
+    assert len(built) == 2
+    assert transport._state.client is built[1]
+    with pytest.raises(_massive.WireError, match="closed"):
+        built[0].get(_massive.source(_massive.Transport.REST, "/v3/snapshot"), {}, {})
+
+
+def test_the_rest_state_does_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
+    m = dm.MassiveSession(config())
+    m._core.rest_transport()
+    core = weakref.ref(m._core)
+    state = clients_of(m)._rest
+    assert state is not None
+    gc.disable()
+    try:
+        del m
+        assert core() is None  # freed by reference counting alone
+    finally:
+        gc.enable()
+    # The collected session's closer runs on its reaper; it closes the client.
+    assert _wait_for(lambda: state.closed)
+
+
+def _wait_for(condition: Callable[[], bool]) -> bool:
+    deadline = threading.Event()
+    for _ in range(1000):
+        if condition():
+            return True
+        deadline.wait(0.01)
+    return condition()
 
 
 def test_the_clients_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
