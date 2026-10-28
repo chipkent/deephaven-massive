@@ -67,7 +67,7 @@ def _list_spec(
     path: str,
     *,
     summary: str,
-    symbol: str | None = None,
+    symbol: str | KeySpec | None = None,
     symbol_param: str | None = None,
     poll_keys: tuple[str, ...],
     page_size: int,
@@ -83,8 +83,9 @@ def _list_spec(
         name: The dataset's dotted name, such as `"partners.benzinga.ratings"`.
         path: The REST path template behind `fetch()` and `poll()`.
         summary: The dataset's one-sentence summary, the first line of its factory's docstring.
-        symbol: The path's column that holds the row's instrument, renamed to `Symbol`; None
-            for a dataset whose rows describe no single instrument.
+        symbol: The path's column that holds the row's instrument, renamed to `Symbol`, or
+            a `KeySpec` that fills `Symbol` from the request; None for a dataset whose rows
+            describe no single instrument.
         symbol_param: The query parameter that carries the requested symbols, or None.
         poll_keys: The key columns of a keyed `poll()` table, unique per row.
         page_size: The page size requested: the endpoint's documented maximum `limit`.
@@ -95,10 +96,11 @@ def _list_spec(
         per_symbol: True when the path takes one ticker per request.
 
     Returns:
-        The spec. `DatasetSpec` raises `ValueError` for an inconsistent declaration.
+        The spec; `DatasetSpec` raises its `ValueError` for an inconsistent
+        declaration.
     """
     keys = SourceKeys(
-        symbol=None if symbol is None else KeySpec(symbol),
+        symbol=KeySpec(symbol) if isinstance(symbol, str) else symbol,
         time=None if time is None else KeySpec(time),
     )
     return DatasetSpec(
@@ -193,7 +195,9 @@ BENZINGA_CONSENSUS_RATINGS: Final = _list_spec(
     "/benzinga/v1/consensus-ratings/{ticker}",
     summary="The consensus of analyst ratings and price targets for each US stock, from Benzinga.",
     asset_class=AssetClass.STOCKS,
-    symbol="Ticker",
+    # The symbol requested fills `Symbol`, so it is canonical even when the row's own `ticker`
+    # echo is missing or spelled another way; `Ticker` keeps the echo.
+    symbol=KeySpec("ticker", from_request=True),
     poll_keys=("Symbol",),
     page_size=50_000,
     per_symbol=True,
@@ -581,10 +585,12 @@ class _Benzinga(Namespace):
 
         One row per requested stock: the counts of strong-buy, buy, hold, sell, and
         strong-sell ratings, the consensus rating and its numeric value, the consensus, high,
-        and low price targets, and the number of contributing analysts. By default the
-        consensus aggregates every rating Benzinga holds for the stock; the `date` filters
-        restrict it to the ratings published in a range (`{"date_gte": "2024-10-01",
-        "date_lt": "2025-01-01"}` aggregates the fourth quarter of 2024).
+        and low price targets, and the number of contributing analysts. `Symbol` is the
+        symbol requested, in its canonical form; `Ticker` is Benzinga's echo of it. By
+        default the consensus aggregates every rating Benzinga holds for the stock; the
+        `date` filters restrict it to the ratings published in a range
+        (`{"date_gte": "2024-10-01", "date_lt": "2025-01-01"}` aggregates the fourth quarter
+        of 2024).
 
         Served by REST only, from `GET /benzinga/v1/consensus-ratings/{ticker}`, which takes
         one ticker as a path segment, so a list of symbols sends one request per symbol, at
@@ -699,7 +705,8 @@ class _Benzinga(Namespace):
         """Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 
         One row per guidance release: the stock, the fiscal period, the guided EPS and revenue
-        ranges with the previous ones, and the positioning against prior guidance, dated by
+        ranges with the previous ones, and whether the figure is the primary or a secondary
+        one (`Positioning`), dated by
         `Date`. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...), since the
         dataset has no `start` and `end`.
 
@@ -724,7 +731,7 @@ class _Benzinga(Namespace):
             limit: The cap on the total number of rows across all pages, a positive `int`,
                 or None (the default) for every row. The page size is internal.
             filters: Further query parameters of the endpoint, keyed by wire name with dots
-                written as underscores (`{"fiscal_year": 2025, "positioning": "up"}`); None
+                written as underscores (`{"fiscal_year": 2025, "positioning": "primary"}`); None
                 sends none.
 
         Returns:
@@ -881,9 +888,11 @@ class _Benzinga(Namespace):
         Served by REST only, from `GET /benzinga/v2/news`: `fetch()` reads every page into a
         static table, and `poll(interval)` re-reads the endpoint into a live table that, by
         default (`PollMode.APPEND`), only grows: each cycle appends the articles it has not
-        seen before, keyed by `BenzingaId`, so every article appears once. There is no
-        stream and no `history()`; use `start` and `end` for a past range. The columns and
-        what they mean are in the column reference,
+        seen before, keyed by `BenzingaId`, so every article appears once. Always give
+        `poll()` a `start`: every cycle reads every page of the range, and without one
+        the range is the whole Benzinga archive. There is no stream and no `history()`;
+        use `start` and `end` for a past range. The columns and what they mean are in
+        the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-news,
         in the web UI's column tooltips, and in `columns()`.
 
@@ -922,9 +931,12 @@ class _Benzinga(Namespace):
         Example:
             ::
 
+                from datetime import date, timedelta
+
                 q = m.partners.benzinga.news(symbols=["AAPL", "NVDA"], start="2025-06-02")
                 headlines = q.fetch().view(["Timestamp", "Title", "Tickers"])
-                feed = m.partners.benzinga.news().poll(30)
+                yesterday = date.today() - timedelta(days=1)
+                feed = m.partners.benzinga.news(start=yesterday).poll(30)
         """
         return _list_query(
             self._core,
@@ -1326,10 +1338,12 @@ class _Tmx(Namespace):
                 or a Deephaven table with a `Symbol` column, which `poll()` re-reads every
                 cycle. None, the default, applies no ticker filter. `dm.ALL` raises
                 `ValueError`; pass None instead.
-            start: The first event date to return, inclusive, as an ISO date
-                (`"2025-07-01"`) or a `date`. None, the default, sets no lower bound.
-            end: The last event date to return, inclusive, in the same forms. None, the
-                default, sets no upper bound.
+            start: The first event date to return, inclusive: an ISO date
+                (`"2025-07-01"`), a `date`, or a timezone-aware `datetime`, which names
+                the day it falls on in New York. None, the default, sets no lower bound.
+            end: The last event date to return, inclusive, in the same forms; an
+                aware `datetime` is the first instant excluded, so it names the day of
+                the instant just before it. None, the default, sets no upper bound.
             sort: The column to sort by, by its wire name (`"date"`); None keeps the
                 endpoint's default order.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
@@ -1421,17 +1435,20 @@ class _Fable(Namespace):
         Served by REST only, from `GET /consumer-spending/eu/v1/merchant-aggregates`:
         `fetch()` reads every page into a static table, and `poll(interval)` re-reads it into
         a live table keyed by `TransactionDate`, `PublishedDate`, `Name`, `Type`,
-        `UserCountry`, `Channel`, and `ConsumerType`. There is no stream and no `history()`;
+        `UserCountry`, `Channel`, `ConsumerType`, `MccGroup`, and `TransactionCurrency`.
+        There is no stream and no `history()`;
         use `start` and `end` for a range of transaction days. The columns and what they mean
         are in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#fable-merchant_aggregates,
         in the web UI's column tooltips, and in `columns()`.
 
         Args:
-            start: The first transaction date to return, inclusive, as an ISO date
-                (`"2025-06-01"`) or a `date`. None, the default, sets no lower bound.
-            end: The last transaction date to return, inclusive, in the same forms. None, the
-                default, sets no upper bound.
+            start: The first transaction date to return, inclusive: an ISO date
+                (`"2025-06-01"`), a `date`, or a timezone-aware `datetime`, which names
+                the day it falls on in New York. None, the default, sets no lower bound.
+            end: The last transaction date to return, inclusive, in the same forms; an
+                aware `datetime` is the first instant excluded, so it names the day of
+                the instant just before it. None, the default, sets no upper bound.
             sort: The column to sort by, by its wire name (`"transaction_date"`); None keeps the
                 endpoint's default order.
             order: The direction of `sort`, sent as its `.asc` or `.desc` suffix
@@ -1561,12 +1578,12 @@ class _Partners(Namespace):
 
     @property
     def benzinga(self) -> _Benzinga:
-        """The Benzinga datasets: analysts, ratings, consensus, guidance, earnings, and news."""
+        """Every Benzinga dataset: analysts, firms, ratings, insights, guidance, and news."""
         return self._benzinga
 
     @property
     def etf_global(self) -> _EtfGlobal:
-        """The ETF Global datasets: fund analytics, constituents, flows, and profiles."""
+        """Every ETF Global dataset: analytics, constituents, flows, profiles, taxonomies."""
         return self._etf_global
 
     @property

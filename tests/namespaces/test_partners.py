@@ -34,13 +34,15 @@ if TYPE_CHECKING:
 
 FIXTURES = "namespaces/partners"
 
-# Each dataset's factory below `m.partners`, the REST path it reads, its `Symbol` source
-# column (None for no `Symbol`), and the fixture shaped from the vendor's sample.
+# The `Symbol` of a dataset whose path takes the ticker, which fills `Symbol` from the request.
+FROM_PATH = "{ticker}"
+# Each dataset's factory below `m.partners`, the REST path it reads, and the wire field its
+# `Symbol` comes from (`FROM_PATH` for the request, None for no `Symbol`).
 DATASETS = {
     "partners.benzinga.analysts": ("/benzinga/v1/analysts", None),
     "partners.benzinga.analyst_insights": ("/benzinga/v1/analyst-insights", "ticker"),
     "partners.benzinga.ratings": ("/benzinga/v1/ratings", "ticker"),
-    "partners.benzinga.consensus_ratings": ("/benzinga/v1/consensus-ratings/{ticker}", "ticker"),
+    "partners.benzinga.consensus_ratings": ("/benzinga/v1/consensus-ratings/{ticker}", FROM_PATH),
     "partners.benzinga.bulls_bears_say": ("/benzinga/v1/bulls-bears-say", "ticker"),
     "partners.benzinga.guidance": ("/benzinga/v1/guidance", "ticker"),
     "partners.benzinga.earnings": ("/benzinga/v1/earnings", "ticker"),
@@ -59,6 +61,13 @@ DATASETS = {
 LIST_DATASETS = [n for n in DATASETS if n != "partners.benzinga.consensus_ratings"]
 WITH_SYMBOLS = [name for name, (_, symbol) in DATASETS.items() if symbol is not None]
 LIST_WITH_SYMBOLS = [n for n in WITH_SYMBOLS if n != "partners.benzinga.consensus_ratings"]
+# The query parameter that carries the requested symbols, one request for all of them.
+SYMBOL_PARAMS = {
+    **{n: "ticker.any_of" for n in LIST_WITH_SYMBOLS if n.startswith("partners.benzinga.")},
+    **{n: "composite_ticker.any_of" for n in LIST_WITH_SYMBOLS if ".etf_global." in n},
+    "partners.tmx.corporate_events": "ticker.any_of",
+    "partners.benzinga.news": "tickers.any_of",
+}
 WITHOUT_SYMBOLS = [
     "partners.benzinga.analysts",
     "partners.benzinga.firms",
@@ -150,7 +159,8 @@ def test_symbol_is_the_one_instrument_of_a_row(name: str) -> None:
         assert not CATALOG.takes_symbols(spec_of(name))
     else:
         assert names[0] == "Symbol"
-        assert fields[symbol] not in names  # renamed, not repeated
+        if symbol != FROM_PATH:
+            assert fields[symbol] not in names  # renamed, not repeated
         assert CATALOG.takes_symbols(spec_of(name))
     # Every other generated field is a column under its generated name.
     others = {column for key, column in fields.items() if key != symbol}
@@ -233,7 +243,8 @@ ETF_KEYS = ("Symbol", "EffectiveDate", "ProcessedDate")
     ],
 )
 def test_poll_keys_tell_rows_apart(name: str, keys: tuple[str, ...]) -> None:
-    # A keyed poll replaces rows by these keys, and an appending poll skips rows it has seen.
+    # A keyed poll replaces rows by these keys; an appending poll (news) appends only the rows
+    # whose keys it has not published before.
     assert spec_of(name).poll_keys == keys
 
 
@@ -250,14 +261,28 @@ def test_each_fixture_has_every_generated_field(
     assert rows
     for row in rows:
         assert set(row) == {f.wire_key for f in fields}
-        if symbol is not None:
+        if symbol not in {None, FROM_PATH}:
             assert row[symbol]
-    # The poll keys tell the rows apart.
-    wire_keys = {f.column: f.wire_key for f in fields}
+
+
+@pytest.mark.parametrize("name", [n for n in DATASETS if DATASETS[n][1] != FROM_PATH])
+def test_every_poll_key_tells_fixture_rows_apart(
+    name: str, load_fixture: Callable[[str, str], bytes]
+) -> None:
+    # The fixture's first and last rows differ only in the last poll key column, so the keys
+    # tell the rows apart only with every column. (Consensus ratings are one row per request.)
+    path, symbol = DATASETS[name]
+    rows = fixture_rows(load_fixture, name)
+    wire_keys = {f.column: f.wire_key for f in sources(Transport.REST)[path].fields}
     if symbol is not None:
         wire_keys["Symbol"] = symbol
     keys = [wire_keys[column] for column in spec_of(name).poll_keys]
     assert len({tuple(row[key] for key in keys) for row in rows}) == len(rows)
+    first, second = rows[0], rows[-1]
+    assert [first[key] == second[key] for key in keys] == [True] * (len(keys) - 1) + [False]
+    assert {k: v for k, v in first.items() if k != keys[-1]} == {
+        k: v for k, v in second.items() if k != keys[-1]
+    }
 
 
 # The factories.
@@ -559,10 +584,12 @@ def test_fetch_returns_every_fixture_value(
     rows = fixture_rows(load_fixture, name)
     assert len(out) == len(rows)
     columns = {f.wire_key: f.column for f in sources(Transport.REST)[path].fields}
-    if symbol is not None:
+    if symbol not in {None, FROM_PATH}:
         columns[symbol] = "Symbol"
     if name == "partners.benzinga.news":
         columns["published"] = "Timestamp"
+    if symbol == FROM_PATH:
+        assert {r["Symbol"] for r in out} == {"AAPL"}  # the symbol requested
     types = {c.name: c.type for c in schema.columns}
     for got, row in zip(out, rows, strict=True):
         for key, value in row.items():
@@ -663,19 +690,35 @@ def test_consensus_ratings_send_one_request_per_symbol(
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    for ticker, buys in (("AAPL", 6), ("MSFT", 9)):
-        row = {"ticker": ticker, "buy_ratings": buys, "consensus_rating": "buy"}
+    # The echo of one is spelled another way and the other has none: `Symbol` is the request's.
+    echoes = {"BRK.B": {"ticker": "BRK/B", "buy_ratings": 6}, "MSFT": {"buy_ratings": 9}}
+    for ticker, row in echoes.items():
         fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
     table = rest_session.partners.benzinga.consensus_ratings(
-        ["msft", "aapl"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
+        ["msft", "brk.b"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
     ).fetch()
     window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
     assert sorted(sent(fake_rest)) == [
-        ("/benzinga/v1/consensus-ratings/AAPL", window),
+        ("/benzinga/v1/consensus-ratings/BRK.B", window),
         ("/benzinga/v1/consensus-ratings/MSFT", window),
     ]
-    out = dh_to_pylist(table.view(["Symbol", "BuyRatings"]))
-    assert sorted((r["Symbol"], r["BuyRatings"]) for r in out) == [("AAPL", 6), ("MSFT", 9)]
+    out = dh_to_pylist(table.view(["Symbol", "Ticker", "BuyRatings"]))
+    assert sorted((r["Symbol"], r["Ticker"], r["BuyRatings"]) for r in out) == [
+        ("BRK.B", "BRK/B", 6),
+        ("MSFT", None, 9),
+    ]
+
+
+@pytest.mark.parametrize(("name", "param"), SYMBOL_PARAMS.items())
+def test_every_symbol_list_goes_in_one_request(
+    name: str, param: str, *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    path, _ = DATASETS[name]
+    fake_rest.reply(path, Reply(envelope([])))
+    factory(rest_session, name)(symbols=["MSFT", "AAPL"]).fetch()
+    assert sent(fake_rest) == [
+        (path, {param: ["AAPL,MSFT"], "limit": [str(spec_of(name).page_size)]})
+    ]
 
 
 @pytest.mark.parametrize("name", LIST_DATASETS)

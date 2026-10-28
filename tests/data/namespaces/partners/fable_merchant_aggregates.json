@@ -27,6 +27,33 @@
       "twenty_eight_day_rolling_total_accounts": 524917,
       "type": "merchant",
       "user_country": "UK"
+    },
+    {
+      "channel": "offline",
+      "consumer_type": "open_banking",
+      "eight_day_rolling_category_accounts": 40346,
+      "eight_day_rolling_total_accounts": 463648,
+      "mcc_group": "memberships & organizations",
+      "merchant_industry": "Leisure Clubs & Facilities",
+      "merchant_ticker": "0206472D US",
+      "name": "zumba fitness",
+      "parent_name": "Zumba Fitness Llc",
+      "published_date": "2026-01-25",
+      "spend_in_distinct_account_key_count": 0,
+      "spend_in_spend": 0,
+      "spend_in_transaction_count": 0,
+      "spend_out_distinct_account_key_count": 1,
+      "spend_out_spend": -3,
+      "spend_out_transaction_count": 1,
+      "total_accounts": 1,
+      "total_spend": -3,
+      "total_transactions": 1,
+      "transaction_currency": "EUR",
+      "transaction_date": "2026-01-18",
+      "twenty_eight_day_rolling_category_accounts": 91642,
+      "twenty_eight_day_rolling_total_accounts": 524917,
+      "type": "merchant",
+      "user_country": "UK"
     }
   ],
   "status": "OK"
