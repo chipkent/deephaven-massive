@@ -566,18 +566,20 @@ def test_trades_fetch_reads_the_last_trade_of_each_pair(
     serve(fake_rest, "/v1/last/crypto/BTC/USD", load_fixture(OWNER, "last_trade.json"))
     out = rows(rest_session.crypto.trades("BTC-USD").fetch())
     assert sent(fake_rest) == [("/v1/last/crypto/BTC/USD", {})]
-    assert out == [
-        {
-            "Symbol": "X:BTCUSD",
-            "Timestamp": 1605560885027 * MS,
-            "Conditions": [1],
-            "Exchange": 4,
-            "Id": None,
-            "Price": 16835.42,
-            "Size": 0.006909,
-            "ReceivedTimestamp": None,
-        }
-    ]
+    [row] = out
+    supplied = {
+        "Symbol": "X:BTCUSD",
+        "Timestamp": 1605560885027 * MS,
+        "Conditions": [1],
+        "Exchange": 4,
+        "Price": 16835.42,
+        "Size": 0.006909,
+    }
+    assert {name: row[name] for name in supplied} == supplied
+    # The trades kind's other columns (the trade ID, the received time, and the columns other
+    # asset classes supply) are null: the last-trade endpoint does not carry them.
+    assert {"Id", "ReceivedTimestamp"} <= set(row)
+    assert all(row[name] is None for name in set(row) - set(supplied))
 
 
 def test_trades_history_over_rest_bounds_the_utc_day(
