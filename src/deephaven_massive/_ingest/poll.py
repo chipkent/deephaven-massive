@@ -29,12 +29,12 @@ table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, `SymbolCount`
 table, and `SchemaDrift` from each page's drift.
 
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, `RowDataError` (a
-row that breaks the schema), or `UnsupportedParameterError` (a symbol of a reactive table
-routed to a path that lacks a parameter the caller set) fails the table through
-`publish_failure`, marks the row `FAILED` (`SessionCore.fail_stream`), and ends the poller. Any
-other error, also one while publishing, is logged at ERROR and shown in the row's `Error`; the
-table keeps its rows and the next cycle runs as scheduled, and clears the `Error` once it
-succeeds.
+row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
+rows), or `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks
+a parameter the caller set) fails the table through `publish_failure`, marks the row `FAILED`
+(`SessionCore.fail_stream`), and ends the poller. Any other error, also one while publishing,
+is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
+runs as scheduled, and clears the `Error` once it succeeds.
 
 **Lifetime.** The poller ends when its table is released (`m.release`, or garbage collection
 through the reaper), when the table's blink table shuts down, when it fails, or when the
@@ -111,7 +111,8 @@ class RowDataError(MassiveError):
     """A REST row that breaks its dataset's schema.
 
     A row that lacks a key the dataset requires, a value that does not convert to its field's
-    type, or a timestamp outside 1990 to 2100. `fetch()` and `history()` raise it like any
+    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null value in one of
+    the dataset's poll keys. `fetch()` and `history()` raise it like any
     `MassiveError`; a `poll()` table fails with it, since the next cycle would fail alike.
     """
 
@@ -515,6 +516,7 @@ class Poller:
         Returns:
             How many of the cycle's rows were published (tombstones not counted).
         """
+        self._check_keys(table)
         keys = None
         cycle_keys = None
         published: int = table.num_rows
@@ -532,6 +534,28 @@ class Poller:
         if cycle_keys is not None:
             self._remember(cycle_keys)
         return published
+
+    def _check_keys(self, table: pa.Table) -> None:
+        """Fail the cycle if any row has a null poll key, in every mode.
+
+        A null key would silently merge unrelated rows: one keyed row for all of them, or
+        every later row with the same null skipped by `APPEND`. Like a missing required key,
+        it is a data failure, so it fails the table.
+
+        Args:
+            table: The cycle's rows.
+
+        Raises:
+            RowDataError: Naming the dataset, the key column, and the first such row's
+                position in the cycle.
+        """
+        for name in self._spec.poll_keys:
+            column = table.column(name)
+            if column.null_count:
+                row = column.is_null().to_pylist().index(True)
+                raise RowDataError(
+                    f"{self._spec.name} poll(): row {row} has a null poll key {name!r}"
+                )
 
     def _fresh(self, table: pa.Table) -> tuple[pa.Table, list[tuple[Hashable, ...]]]:
         """Keep the rows of an `APPEND` cycle whose key the poller has not appended yet.

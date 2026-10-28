@@ -806,7 +806,8 @@ request per cycle.
 is a reference list that is revised in place, not a feed of new rows). `REPLACE` is a keyed
 table from which keys absent in the latest cycle are deleted. `UPSERT` is keyed and never
 deletes. `APPEND` is append-only and appends only rows it has not seen before: a row is
-identified by its `poll_keys` tuple, and each cycle skips every row whose key it already
+identified by its `poll_keys` tuple (a null key value fails the table in every mode, as a
+missing required key does), and each cycle skips every row whose key it already
 appended, also a second row with the same key in one cycle, and appends the rest. The keys it
 remembers are those of the last 100 published cycles: a key is remembered for 100 cycles after
 the last cycle that returned it, so a row that every response repeats is never appended twice.
@@ -1981,14 +1982,16 @@ sees:
   drops that symbol, with one WARNING per symbol; every other error fails the call.
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
   a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
-  unconvertible value, a timestamp out of bounds), or plans a request with a parameter the
-  chosen path does not take (a reactive symbol table's new symbol routed to a path that lacks
-  an explicit parameter; retrying cannot fix it) fails the table through `publish_failure`.
-  `poll()` checks synchronously whatever does not depend on the symbols: with static symbols
-  every path, with a reactive table the parameters against the dataset's fetch paths, at
-  least one of which must take every one of them. An emptied symbol table plans no request.
-  Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`, keeps the
-  previous rows, and the next cycle runs as scheduled.
+  unconvertible value, a timestamp out of bounds, or, in every mode, a null value in a
+  `poll_keys` column, which would otherwise merge unrelated rows into one key; the
+  `RowDataError` names the dataset, the key column, and the row), or plans a request with a
+  parameter the chosen path does not take (a reactive symbol table's new symbol routed to a
+  path that lacks an explicit parameter; retrying cannot fix it) fails the table through
+  `publish_failure`. `poll()` checks synchronously whatever does not depend on the symbols:
+  with static symbols every path, with a reactive table the parameters against the dataset's
+  fetch paths, at least one of which must take every one of them. An emptied symbol table plans
+  no request. Any other error is logged at ERROR, sets the stream's `Error` in `m.streams()`,
+  keeps the previous rows, and the next cycle runs as scheduled.
 - **Drift.** `to_batch` returns each page's `DriftReport`; the transport routes it to the
   session's `DriftRegistry` (one WARNING per (dataset, transport, field), and `SchemaDrift` in
   `m.streams()` for `poll()`). Static verbs report drift only in the log.

@@ -309,9 +309,11 @@ class Query(QueryBase):
         Before the table exists it raises `ValueError` if a path does not take a parameter or
         filter the query set: with static symbols any path the call reads, and with a reactive
         table every fetch path of the dataset. Later, a cycle that fails with
-        `AuthenticationError`, `EntitlementError`, a row that breaks the dataset's schema, or
-        a parameter the path a reactive table's new symbol routes to does not take, fails the
-        table (its `m.streams()` row shows `FAILED`) and ends the poller. Any other failure is
+        `AuthenticationError`, `EntitlementError`, a row that breaks the dataset's schema, a
+        row with a null value in one of the dataset's poll keys (in every mode: a null key
+        would merge unrelated rows), or a parameter the path a reactive table's new symbol
+        routes to does not take, fails the table (its `m.streams()` row shows `FAILED`) and
+        ends the poller. Any other failure is
         logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next
         cycle runs.
 

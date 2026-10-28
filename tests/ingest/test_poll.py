@@ -988,3 +988,25 @@ def test_a_failed_append_remembers_nothing(
     assert ids(table, dh_to_pylist) == [("a", 1.0)]
     next_cycle(clock)  # so the next cycle appends b, and still skips a
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_null_poll_key_fails_the_table_in_every_mode(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    rows = [{"id": "a", "ticker": "AAPL"}, {"id": None, "ticker": "AAPL"}]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(feed_session._core, FEED, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.poll(60, mode=mode)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == (
+        "FAILED",
+        "stocks.dividends poll(): row 1 has a null poll key 'Id'",
+    )
+    assert row["RowsPublished"] == 0  # nothing of the cycle was published
