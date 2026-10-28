@@ -1,0 +1,13 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "date": "1962-01-02",
+      "yield_10_year": 4.06,
+      "yield_1_year": 3.22,
+      "yield_5_year": 3.88
+    }
+  ],
+  "status": "OK"
+}

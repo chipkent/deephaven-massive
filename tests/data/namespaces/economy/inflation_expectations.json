@@ -1,0 +1,17 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "date": "2025-06-17",
+      "forward_years_5_to_10": 2.6,
+      "market_10_year": 2.36,
+      "market_5_year": 2.12,
+      "model_10_year": 2.95,
+      "model_1_year": 2.85,
+      "model_30_year": 3,
+      "model_5_year": 2.91
+    }
+  ],
+  "status": "OK"
+}

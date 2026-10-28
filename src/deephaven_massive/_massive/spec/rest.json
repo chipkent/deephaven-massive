@@ -2811,11 +2811,11 @@
    "result_key": null,
    "params": [],
    "fields": [
-    {"column": "Close", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "close"},
+    {"column": "Close", "conversion": "iso-text-instant", "required": false, "type": "iso-instant", "unit": null, "wire_key": "close"},
     {"column": "Date", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "date"},
     {"column": "Exchange", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "exchange"},
     {"column": "Name", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "name"},
-    {"column": "Open", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "open"},
+    {"column": "Open", "conversion": "iso-text-instant", "required": false, "type": "iso-instant", "unit": null, "wire_key": "open"},
     {"column": "Status", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "status"}
    ],
    "memberships": []

@@ -1,0 +1,14 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "avg_hourly_earnings": 35.06,
+      "date": "2024-12-01",
+      "job_openings": 8098,
+      "labor_force_participation_rate": 62.5,
+      "unemployment_rate": 4.2
+    }
+  ],
+  "status": "OK"
+}

@@ -1,0 +1,32 @@
+{
+  "count": 1,
+  "request_id": "31d59dda-80e5-4721-8496-d0d32a654afe",
+  "results": [
+    {
+      "asset_class": "stocks",
+      "data_types": [
+        "trade"
+      ],
+      "id": 2,
+      "name": "Average Price Trade",
+      "sip_mapping": {
+        "CTA": "B",
+        "UTP": "W"
+      },
+      "type": "sale_condition",
+      "update_rules": {
+        "consolidated": {
+          "updates_high_low": false,
+          "updates_open_close": false,
+          "updates_volume": true
+        },
+        "market_center": {
+          "updates_high_low": false,
+          "updates_open_close": false,
+          "updates_volume": true
+        }
+      }
+    }
+  ],
+  "status": "OK"
+}
