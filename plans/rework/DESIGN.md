@@ -855,7 +855,7 @@ DaySpan = Literal[Timespan.DAY]
 FuturesSpan = Literal[Timespan.SECOND, Timespan.MINUTE, Timespan.HOUR, Timespan.SESSION,
                       Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR]   # no DAY
 
-class _Stocks:   # same shape on m.options and m.forex; m.indices and m.crypto have no `adjusted`
+class _Stocks:   # same shape on m.options; m.indices, m.forex, and m.crypto have no `adjusted`
     @overload
     def bars(self, symbols: Symbols, timespan: StreamSpan = Timespan.MINUTE, *,
              multiplier: Literal[1] = 1, adjusted: bool = True) -> StreamHistoryQuery: ...
@@ -1151,7 +1151,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
 | `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}`; history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
 | `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
@@ -2237,7 +2237,7 @@ reaches that instant; comparing full instants, not a time of day, keeps the rule
 every day zone. Futures files are named by session date, and their clock starts at the next
 midnight in America/Chicago, where Massive standardizes futures data. `indices.values` is
 flat-file only.
-`indices.bars` and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
+`indices.bars`, `forex.bars`, and `crypto.bars` have no `adjusted`, so the predicate is satisfied.
 
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. A dataset without instruments counts as `ALL`.
