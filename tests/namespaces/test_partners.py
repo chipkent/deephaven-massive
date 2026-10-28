@@ -311,7 +311,8 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
     ]
     window: dict[str, FilterValue] = {"date_gte": "2024-10-01", "date_lt": date(2025, 1, 1)}
     q = massive_session.partners.benzinga.consensus_ratings("AAPL", filters=window)
-    assert dict(q._request.filters) == window
+    # ISO text is parsed when the query is built.
+    assert dict(q._request.filters) == {"date_gte": date(2024, 10, 1), "date_lt": date(2025, 1, 1)}
     with pytest.raises(ValueError, match="has no filter 'ticker'"):
         massive_session.partners.benzinga.consensus_ratings("AAPL", filters={"ticker": "MSFT"})
 
@@ -409,9 +410,13 @@ def test_filters_reach_the_endpoint_parameters(
 @pytest.mark.parametrize(
     "case",
     [
-        ("partners.fable.merchant_aggregates", {"channel": "mail"}, r"takes \['online'"),
-        ("partners.fable.merchant_hierarchy", {"listing_status": "listed"}, r"takes \['public'"),
-        ("partners.benzinga.earnings", {"importance": "high"}, "takes a integer value"),
+        ("partners.fable.merchant_aggregates", {"channel": "mail"}, r"takes one of \['online'"),
+        (
+            "partners.fable.merchant_hierarchy",
+            {"listing_status": "listed"},
+            r"takes one of \['public'",
+        ),
+        ("partners.benzinga.earnings", {"importance": "high"}, "takes integer values"),
         ("partners.benzinga.analysts", {"ticker": "AAPL"}, "has no filter 'ticker'"),
     ],
 )
@@ -560,7 +565,7 @@ def test_etf_symbols_filter_the_fund(
 ) -> None:
     fake_rest.reply("/etf-global/v1/constituents", Reply(envelope([])))
     rest_session.partners.etf_global.constituents(
-        "SPY", filters={"effective_date": date(2025, 9, 18)}
+        "SPY", filters={"effective_date": "2025-09-18"}
     ).fetch()
     assert sent(fake_rest) == [
         (
@@ -624,7 +629,7 @@ def test_consensus_ratings_send_one_request_per_symbol(
         row = {"ticker": ticker, "buy_ratings": buys, "consensus_rating": "buy"}
         fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
     table = rest_session.partners.benzinga.consensus_ratings(
-        ["msft", "aapl"], filters={"date_gte": date(2024, 10, 1), "date_lt": date(2025, 1, 1)}
+        ["msft", "aapl"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
     ).fetch()
     window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
     assert sorted(sent(fake_rest)) == [
