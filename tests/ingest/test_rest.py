@@ -1212,7 +1212,7 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
         "futures.trades history: at least 6 requests, one per session and symbol, more where a "
         "session spans several pages; at a Basic key's 5 requests a minute that takes at least "
         "1 minute"
-    ) in caplog.text
+    ) in caplog.messages
 
 
 def test_a_short_session_download_is_not_announced(
