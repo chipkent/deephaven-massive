@@ -57,16 +57,20 @@ PYTHON_GIL=0 uv run --python 3.14t pytest <the new test files> -q
   and side effect, and examples that run. They describe the code as it is now.
 - `DESIGN.md`, `PLAN.md` and `AGENTS.md` say exactly what the code does.
 - No planning references in code, comments, tests or messages.
-- The PR description meets "Pull request descriptions" in `AGENTS.md`. Read it as the owner
-  will, knowing nothing about the work, and check that:
-  - the Summary alone lets a newcomer explain the PR to someone else: it gives the background
-    with every term defined, exactly what the PR does step by step (every user-visible change
-    and every rule it adds or changes), why it matters with a concrete example, and what the
-    reader should check or decide, with no file names, internal names, or decision numbers;
-  - Summary, Why, What changes, Decisions, Verification, and Follow-ups are present in that order (How
-    it works only when a reviewer needs it), Decisions lists every departure from the plan with
-    its reason or says "None", and What changes shows before and after wherever the public API
-    or a result changes;
+- The PR description meets "Pull request descriptions" in `AGENTS.md`. Read it twice: as a
+  very intelligent reviewer arriving with no context, and as a less experienced user reading it
+  much later to learn what the feature does. Check that:
+  - the Summary alone lets either reader explain the PR to someone else: it gives the big
+    picture (what the library is for, which feature the PR is about, what a user does with it,
+    and where the PR fits in the overall work), the background with every term defined, exactly
+    what the PR does step by step (every user-visible change and every rule it adds or
+    changes), why it matters with a concrete example, and what the reader should check or
+    decide, with no file names, internal names, or decision numbers;
+  - Summary, Why, What changes, Decisions, How it works, Verification, and Follow-ups are present
+    in that order; Decisions lists every departure from the plan with its reason or says
+    "None"; What changes shows before and after wherever the public API or a result changes;
+    How it works carries the engineering detail (approach, main modules and functions, anything
+    subtle), organized by idea;
   - it has no review-finding labels, agent identifiers, commit-by-commit narration,
     first-person process, stale counts, or undefined terms;
   - it describes the branch as it will be after this push, rewritten rather than appended to;
