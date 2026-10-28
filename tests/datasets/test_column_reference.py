@@ -428,7 +428,7 @@ _PROVENANCE = Provenance(
         # A shared source: `stocks.trades` keeps only the page whose path names `stocks`.
         (W, "stocks/T"): [
             "https://docs.example/ws/crypto/trades.md",
-            "https://docs.example/ws/stocks/trades.md?v=1#top",
+            "https://docs.example/ws/stocks/trades.md",
         ],
         # No page names the class, so the dataset keeps them all; the duplicate is listed once.
         (R, "/trades/{ticker}"): ["https://docs.example/a.md", "https://docs.example/a.md"],
@@ -495,7 +495,7 @@ Trades of stocks, tick by tick.
 Massive's documentation of this dataset:
 
 - <https://docs.example/a.md>
-- <https://docs.example/ws/stocks/trades.md?v=1#top>
+- <https://docs.example/ws/stocks/trades.md>
 
 <a id="financials-ratios"></a>
 

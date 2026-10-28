@@ -342,17 +342,17 @@ def _dataset_urls(spec: DatasetSpec, provenance: Provenance) -> list[str]:
 
 
 def _segments(url: str) -> list[str]:
-    """Return the slash-separated parts of a URL, before any query or fragment.
+    """Return the slash-separated parts of a URL.
 
     Args:
-        url: A URL, such as `"https://massive.com/docs/rest/options/trades.md?v=1"`.
+        url: A URL, such as `"https://massive.com/docs/rest/options/trades.md"`.
 
     Returns:
         Its parts, such as `["https:", "", "massive.com", "docs", "rest", "options",
         "trades.md"]`. The scheme and host are parts too; no asset class's value equals
         either, so they never match one.
     """
-    return url.partition("#")[0].partition("?")[0].split("/")
+    return url.split("/")
 
 
 def sync(directory: Path, pages: Mapping[str, str]) -> SyncResult:
