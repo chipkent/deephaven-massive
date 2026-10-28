@@ -1641,8 +1641,8 @@ class _StockFilings(Namespace):
                 the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"issuer_cik_any_of": ["0001045810", "0000320193"]}`;
-                checked now.
+                as underscores; checked now. Every parameter the endpoint documents is
+                already an argument here, so today any key raises `ValueError`.
 
         Returns:
             The query; nothing is requested until a verb runs.
@@ -1729,8 +1729,8 @@ class _StockFilings(Namespace):
                 the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"owner_cik_any_of": ["0001588670", "0001214156"]}`;
-                checked now.
+                as underscores; checked now. Every parameter the endpoint documents is
+                already an argument here, so today any key raises `ValueError`.
 
         Returns:
             The query; nothing is requested until a verb runs.

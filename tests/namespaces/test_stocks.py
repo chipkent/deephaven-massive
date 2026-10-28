@@ -661,6 +661,16 @@ def test_insider_activity_takes_an_issuer_and_no_owner(massive_session: dm.Massi
         activity(issuer_cik=cast("Any", 1045810))
 
 
+@pytest.mark.parametrize("name", ["filings.insider_activity", "filings.insider_roster"])
+def test_insider_aggregates_leave_no_parameter_to_filters(
+    massive_session: dm.MassiveSession, name: str
+) -> None:
+    # Every documented parameter is a typed argument (symbols, CIKs, the date axis), as the
+    # docstrings say; a parameter Massive adds later shows up here.
+    with pytest.raises(ValueError, match=r"valid filters: \[\]"):
+        factory(massive_session, name)(filters={"anything": "x"})
+
+
 # --- Fixtures ------------------------------------------------------------------------------------
 
 
