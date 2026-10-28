@@ -2,3 +2,6 @@
 # the code and hand-input changes first. The files stay committed and diffable.
 vendor/massive/** linguist-generated=true
 src/deephaven_massive/_massive/spec/*.json linguist-generated=true
+# The generated column reference: collapsed in diffs like the other generated files, and always
+# LF, since its parity test compares the committed bytes with the rendered pages.
+docs/datasets/*.md linguist-generated=true eol=lf

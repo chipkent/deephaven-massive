@@ -61,13 +61,13 @@ fi
 export UV_NO_SYNC=1
 
 if ((fix)); then
-    step "ruff check --fix" uv run ruff check --fix ${ruff_output[@]+"${ruff_output[@]}"} src tests
-    step "ruff format" uv run ruff format src tests
+    step "ruff check --fix" uv run ruff check --fix ${ruff_output[@]+"${ruff_output[@]}"} src tests scripts
+    step "ruff format" uv run ruff format src tests scripts
 else
-    step "ruff check" uv run ruff check ${ruff_output[@]+"${ruff_output[@]}"} src tests
-    step "ruff format --check" uv run ruff format --check ${ruff_output[@]+"${ruff_output[@]}"} src tests
+    step "ruff check" uv run ruff check ${ruff_output[@]+"${ruff_output[@]}"} src tests scripts
+    step "ruff format --check" uv run ruff format --check ${ruff_output[@]+"${ruff_output[@]}"} src tests scripts
 fi
-step "mypy" uv run mypy src tests
+step "mypy" uv run mypy src tests scripts
 
 if [[ "$tier" == "full" ]]; then
     step "pytest with coverage" uv run pytest --cov --cov-report=term-missing:skip-covered
