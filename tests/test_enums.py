@@ -35,7 +35,7 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.Direction: ["gainers", "losers"],
     dm.ContractType: ["call", "put"],
     dm.SeriesType: ["open", "high", "low", "close"],
-    dm.Timeframe: ["annual", "quarterly"],
+    dm.Timeframe: ["annual", "quarterly", "trailing_twelve_months"],
     dm.Order: ["asc", "desc"],
     dm.Market: ["stocks", "otc", "indices", "fx", "crypto"],
     dm.Locale: ["us", "global"],
@@ -266,8 +266,33 @@ ENUM_PARAMETERS = {
     "_Futures.contracts.order": _FUTURES_ENUMS,
     "_Futures.products.order": _FUTURES_ENUMS,
     "_Futures.schedules.order": _FUTURES_ENUMS,
+    "_Indices.bars.timespan": "namespaces/test_indices.py::test_bars_check_their_argument_types",
+    "_Indices.snapshots.order": (
+        "namespaces/test_indices.py::test_snapshots_check_their_list_parameters"
+    ),
     "_Crypto.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
     "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
+    **dict.fromkeys(
+        (
+            "_Benzinga.analysts.order",
+            "_Benzinga.analyst_insights.order",
+            "_Benzinga.ratings.order",
+            "_Benzinga.bulls_bears_say.order",
+            "_Benzinga.guidance.order",
+            "_Benzinga.earnings.order",
+            "_Benzinga.firms.order",
+            "_Benzinga.news.order",
+            "_EtfGlobal.analytics.order",
+            "_EtfGlobal.constituents.order",
+            "_EtfGlobal.fund_flows.order",
+            "_EtfGlobal.profiles.order",
+            "_EtfGlobal.taxonomies.order",
+            "_Tmx.corporate_events.order",
+            "_Fable.merchant_aggregates.order",
+            "_Fable.merchant_hierarchy.order",
+        ),
+        "namespaces/test_partners.py::test_order_is_an_enum",
+    ),
     **dict.fromkeys(
         (
             "_Options.bars.timespan",
@@ -279,6 +304,32 @@ ENUM_PARAMETERS = {
         ),
         "namespaces/test_options.py::test_enum_arguments_reject_plain_strings",
     ),
+}
+
+# The `m.stocks` factories' enum parameters, each rejected in `tests/namespaces/test_stocks.py`.
+_STOCKS = "namespaces/test_stocks.py::"
+_STOCK_LIST_DATASETS = (
+    *(f"_Stocks.{name}" for name in ("dividends", "splits", "ipos", "short_interest")),
+    *(f"_Stocks.{name}" for name in ("short_volume", "share_float")),
+    *(f"_StockFinancials.{name}" for name in ("balance_sheets", "income_statements")),
+    *(f"_StockFinancials.{name}" for name in ("cash_flow_statements", "ratios")),
+    *(f"_StockFilings.{name}" for name in ("index", "sections_10k", "text_8k")),
+    *(f"_StockFilings.{name}" for name in ("disclosures_8k", "risk_factors")),
+    *(f"_StockFilings.{name}" for name in ("institutional_holdings", "insider_holdings")),
+    *(f"_StockFilings.{name}" for name in ("insider_transactions", "risk_factor_taxonomy")),
+    "_StockFilings.disclosure_taxonomy",
+)
+ENUM_PARAMETERS |= {
+    "_Stocks.bars.timespan": f"{_STOCKS}test_bars_reject_bad_arguments",
+    "_Stocks.movers.direction": f"{_STOCKS}test_movers_take_a_direction",
+    **{
+        f"{name}.order": f"{_STOCKS}test_list_datasets_take_the_list_block"
+        for name in _STOCK_LIST_DATASETS
+    },
+    **{
+        f"_StockFinancials.{name}.timeframe": f"{_STOCKS}test_statements_take_a_timeframe"
+        for name in ("balance_sheets", "income_statements", "cash_flow_statements")
+    },
 }
 
 

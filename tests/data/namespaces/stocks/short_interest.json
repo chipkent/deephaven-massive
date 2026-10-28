@@ -1,0 +1,14 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "avg_daily_volume": 2340158,
+      "days_to_cover": 1.67,
+      "settlement_date": "2025-03-14",
+      "short_interest": 3906231,
+      "ticker": "A"
+    }
+  ],
+  "status": "OK"
+}
