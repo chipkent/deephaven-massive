@@ -827,7 +827,9 @@ taxonomy is a reference list revised in place, not a feed of new rows).
   `LastTimestamp`, the time of the quote it used; the indices snapshots `LastUpdated`; the
   options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`; the unified
   snapshots `LastUpdated`, `LastQuoteLastUpdated`, and `LastTradeLastUpdated`, which together
-  cover every asset class; and `reference.market_status`, a one-row dataset with no
+  cover every asset class; the futures snapshots `LastQuoteLastUpdated` and
+  `LastTradeLastUpdated`; `futures.market_status` its `Timestamp`, the time of a product's
+  latest market event; and `reference.market_status`, a one-row dataset with no
   `poll_keys`, its `ServerTime`. A null in a revision column is a value (a ticker not yet
   updated). On a dataset with neither unique `poll_keys` nor `revision_keys` (the default
   `Symbol`), an explicit `APPEND` appends one row per symbol.
@@ -835,7 +837,8 @@ taxonomy is a reference list revised in place, not a feed of new rows).
   `nullable_poll_keys`, each with its reason from the vendor's description (the 13-F `PutCall`
   is empty for common stock; the Form 3 and Form 4 exercise price and dates are set only for
   derivatives, and their `NatureOfOwnership` only for indirect ownership; a Form 4 holding
-  record has no transaction columns). A null there is a value. The catalog gate requires at
+  record has no transaction columns; no futures key is nullable, since no vendor description or
+  fixture leaves one empty). A null there is a value. The catalog gate requires at
   least one poll-key column outside that map, so no row is identified by nulls alone.
 - A null value in any other `poll_keys` column, or a NaN in a float one, fails the table in
   every mode, as a missing required key does: it would otherwise merge unrelated rows into one

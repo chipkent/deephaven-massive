@@ -1027,3 +1027,20 @@ def test_one_block_round_trips_through_the_flat_files(
         assert (row["Close"], row["Volume"]) == (float(wire["close"]), float(wire["volume"]))
     else:
         assert row["SequenceNumber"] == int(wire["sequence_number"])
+
+
+def test_the_current_state_datasets_revise_on_their_update_times() -> None:
+    # An explicit APPEND poll appends each new state of a contract, or each status change.
+    revised = {spec.name: spec.revision_keys for spec in futures.DATASETS if spec.revision_keys}
+    assert revised == {
+        "futures.snapshots": ("LastQuoteLastUpdated", "LastTradeLastUpdated"),
+        "futures.market_status": ("Timestamp",),
+    }
+    for name, keys in revised.items():
+        assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)
+
+
+def test_no_futures_poll_key_is_nullable() -> None:
+    # No vendor description says a key column of these datasets is left empty, and no fixture
+    # leaves one empty: a null there fails the table.
+    assert all(not spec.nullable_poll_keys for spec in futures.DATASETS)
