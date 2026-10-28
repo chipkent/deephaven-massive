@@ -1050,9 +1050,17 @@ result order. The table's columns are **Column**, **Deephaven type**, **Descript
 **Wire field** column per transport the dataset uses (`REST field`, `Flat-file field`,
 `WebSocket field`). A wire-field cell lists the distinct wire keys of that
 transport's sources that feed the column, in source order and before any projection, or
-`request` for a key filled from the request. A footer names the snapshot's fetch date and the
-vendor URLs of the sources the page's datasets use, from the `Provenance` passed to the renderer
-([section 19.4](#194-generated-schemas)). Units and nullability get no columns: every
+`request` for a key filled from the request. Under the table, a list headed "Massive's
+documentation of this dataset:" gives the vendor pages of that dataset's own sources, sorted and
+distinct, from the `Provenance` passed to the renderer ([section 19.4](#194-generated-schemas));
+a dataset whose sources have no URLs gets no list. A source several asset classes share (the
+unified snapshot `/v3/snapshot`, `/v3/reference/tickers`) has one page per class; for a dataset
+with an `asset_class`, only the pages whose URL path has a segment equal to that class's value
+(`/docs/rest/options/snapshots/unified-snapshot.md` for `options.snapshots`) are listed, and all
+of the source's pages when none matches, so a dataset never loses its links to a change in the
+vendor's URL layout. A dataset that spans classes (`asset_class` None, such as
+`reference.snapshots` or `reference.tickers`) lists every class's page. The page ends with a
+footer naming the generator command and the snapshot's fetch date. Units and nullability get no columns: every
 timestamp is an `Instant`, and **Supplied by** with the description already says when a
 column is null. Readers can see what each table holds before they install.
 
@@ -4282,6 +4290,13 @@ document already reflects them.
     `DESCRIPTION_FIXES` entry quotes the empty text and takes the sibling's, with its reason,
     so no column of a dataset is left blank for want of text Massive already wrote
     ([section 19.4](#194-generated-schemas)).
+55. **Each dataset links its own Massive documentation** (2026-10-28). The column
+    reference lists each dataset's vendor pages under that dataset's section instead of one
+    page-wide list at the foot of the page, which tied no link to a dataset and, through a
+    source several asset classes share, linked unrelated classes' pages (the options page
+    listed the stocks, forex, crypto, and indices unified-snapshot pages). A dataset of one
+    asset class links only that class's page of a shared source; the footer keeps the fetch
+    date ([section 7.4](#74-column-descriptions)).
 
 ## 23. Open verification items
 

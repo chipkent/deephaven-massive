@@ -31,6 +31,15 @@ Trades of futures contracts, tick by tick.
 | `Channel` | long | The CME multicast channel this event was sourced from. | REST | `channel` |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `futures.trades`; supplied by `crypto.trades`. |  |  |  |  |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/futures/trades/cbot.md>
+- <https://massive.com/docs/flat-files/futures/trades/cme.md>
+- <https://massive.com/docs/flat-files/futures/trades/comex.md>
+- <https://massive.com/docs/flat-files/futures/trades/nymex.md>
+- <https://massive.com/docs/rest/futures/trades-quotes/trades.md>
+- <https://massive.com/docs/websocket/futures/trades.md>
+
 <a id="quotes"></a>
 
 ## `m.futures.quotes`
@@ -61,6 +70,15 @@ Quotes of futures contracts: every change of the best bid and offer.
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
 | `ReceivedTimestamp` | Instant | Always null for `futures.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/futures/quotes/cbot.md>
+- <https://massive.com/docs/flat-files/futures/quotes/cme.md>
+- <https://massive.com/docs/flat-files/futures/quotes/comex.md>
+- <https://massive.com/docs/flat-files/futures/quotes/nymex.md>
+- <https://massive.com/docs/rest/futures/trades-quotes/quotes.md>
+- <https://massive.com/docs/websocket/futures/quotes.md>
+
 <a id="bars"></a>
 
 ## `m.futures.bars`
@@ -90,6 +108,20 @@ Open, high, low, close, and volume bars of futures contracts.
 | `DollarVolume` | double | The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume. | REST, flat files, WebSocket | `dollar_volume` | `dollar_volume` | `dv` |
 | `SettlementPrice` | double | The price the contract settled at for this session. Included for session, week, month, quarter, and year candles; for multi-session candles it is the settlement of the final session in the period. Not returned for intraday candles (sec, min, hour). | REST, flat files | `settlement_price` | `settlement_price` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/flat-files/futures/minute-aggregates/cbot.md>
+- <https://massive.com/docs/flat-files/futures/minute-aggregates/cme.md>
+- <https://massive.com/docs/flat-files/futures/minute-aggregates/comex.md>
+- <https://massive.com/docs/flat-files/futures/minute-aggregates/nymex.md>
+- <https://massive.com/docs/flat-files/futures/session-aggregates/cbot.md>
+- <https://massive.com/docs/flat-files/futures/session-aggregates/cme.md>
+- <https://massive.com/docs/flat-files/futures/session-aggregates/comex.md>
+- <https://massive.com/docs/flat-files/futures/session-aggregates/nymex.md>
+- <https://massive.com/docs/rest/futures/aggregates.md>
+- <https://massive.com/docs/websocket/futures/aggregates-per-minute.md>
+- <https://massive.com/docs/websocket/futures/aggregates-per-second.md>
 
 <a id="snapshots"></a>
 
@@ -131,6 +163,10 @@ Snapshots of futures contracts: the latest trade, quote, minute bar, and session
 | `SessionSettlementPrice` | double | The final settlement price at the end of the session. | REST | `session.settlement_price` |
 | `SessionVolume` | long | The number of contracts traded in the session. | REST | `session.volume` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/futures/snapshots/contracts-snapshot.md>
+
 <a id="contracts"></a>
 
 ## `m.futures.contracts`
@@ -158,6 +194,10 @@ Futures contracts: the specification of every listed contract.
 | `TradeTickSize` | double | The tick size for trades. | REST | `trade_tick_size` |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this contract trades. | REST | `trading_venue` |
 | `Type` | String | The type of contract, one of 'single' or 'combo'. Leaving this filter blank will query for contracts where type is 'single', 'combo' or empty. This field only exists on contracts as of 2025-03-12 and later. It will be null when date < 2025-03-12. | REST | `type` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/futures/contracts.md>
 
 <a id="products"></a>
 
@@ -189,6 +229,10 @@ Futures products: the specification of every product, the family of its contract
 | `UnitOfMeasure` | String | The unit of measure for this product. | REST | `unit_of_measure` |
 | `UnitOfMeasureQty` | double | The quantity of the unit of measure for this product. | REST | `unit_of_measure_qty` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/futures/products.md>
+
 <a id="exchanges"></a>
 
 ## `m.futures.exchanges`
@@ -206,6 +250,10 @@ Futures exchanges: the exchanges and trading venues of US futures.
 | `Type` | String | Type of venue - 'exchange' for futures exchanges and derivatives trading platforms. | REST | `type` |
 | `Url` | String | Official website URL of the futures exchange organization. | REST | `url` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/futures/market-operations/exchanges.md>
+
 <a id="market_status"></a>
 
 ## `m.futures.market_status`
@@ -220,6 +268,10 @@ Futures market status: whether each futures product is trading right now.
 | `SessionEndDate` | LocalDate | The trading date for the current session. | REST | `session_end_date` |
 | `Timestamp` | Instant | The timestamp for the given market event. | REST | `timestamp` |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which the corresponding product trades. | REST | `trading_venue` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/futures/market-operations/market-status.md>
 
 <a id="schedules"></a>
 
@@ -236,38 +288,10 @@ Futures schedules: the timed events of each product's trading sessions.
 | `Timestamp` | Instant | The timestamp for the given market event. | REST | `timestamp` |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this schedule's product trades. | REST | `trading_venue` |
 
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/futures/schedules.md>
+
 ---
 
 Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-28. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
-
-Massive's documentation of these datasets:
-
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/cbot.md>
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/cme.md>
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/comex.md>
-- <https://massive.com/docs/flat-files/futures/minute-aggregates/nymex.md>
-- <https://massive.com/docs/flat-files/futures/quotes/cbot.md>
-- <https://massive.com/docs/flat-files/futures/quotes/cme.md>
-- <https://massive.com/docs/flat-files/futures/quotes/comex.md>
-- <https://massive.com/docs/flat-files/futures/quotes/nymex.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/cbot.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/cme.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/comex.md>
-- <https://massive.com/docs/flat-files/futures/session-aggregates/nymex.md>
-- <https://massive.com/docs/flat-files/futures/trades/cbot.md>
-- <https://massive.com/docs/flat-files/futures/trades/cme.md>
-- <https://massive.com/docs/flat-files/futures/trades/comex.md>
-- <https://massive.com/docs/flat-files/futures/trades/nymex.md>
-- <https://massive.com/docs/rest/futures/aggregates.md>
-- <https://massive.com/docs/rest/futures/contracts.md>
-- <https://massive.com/docs/rest/futures/market-operations/exchanges.md>
-- <https://massive.com/docs/rest/futures/market-operations/market-status.md>
-- <https://massive.com/docs/rest/futures/products.md>
-- <https://massive.com/docs/rest/futures/schedules.md>
-- <https://massive.com/docs/rest/futures/snapshots/contracts-snapshot.md>
-- <https://massive.com/docs/rest/futures/trades-quotes/quotes.md>
-- <https://massive.com/docs/rest/futures/trades-quotes/trades.md>
-- <https://massive.com/docs/websocket/futures/aggregates-per-minute.md>
-- <https://massive.com/docs/websocket/futures/aggregates-per-second.md>
-- <https://massive.com/docs/websocket/futures/quotes.md>
-- <https://massive.com/docs/websocket/futures/trades.md>

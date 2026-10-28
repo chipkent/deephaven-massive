@@ -420,9 +420,18 @@ _CATALOG = Catalog(
 _PROVENANCE = Provenance(
     fetched=dt.date(2026, 10, 27),
     urls={
-        (R, "/ratios"): ["https://docs.example/rest/ratios.md"],
-        (W, "stocks/T"): ["https://docs.example/ws/trades.md", "https://docs.example/a.md"],
-        (R, "/trades/{ticker}"): ["https://docs.example/a.md"],
+        # A source of no asset class: its dataset, which has none either, keeps every page.
+        (R, "/ratios"): [
+            "https://docs.example/rest/crypto/ratios.md",
+            "https://docs.example/rest/stocks/ratios.md",
+        ],
+        # A shared source: `stocks.trades` keeps only the page whose path names `stocks`.
+        (W, "stocks/T"): [
+            "https://docs.example/ws/crypto/trades.md",
+            "https://docs.example/ws/stocks/trades.md",
+        ],
+        # No page names the class, so the dataset keeps them all; the duplicate is listed once.
+        (R, "/trades/{ticker}"): ["https://docs.example/a.md", "https://docs.example/a.md"],
         (W, "crypto/XT"): ["https://docs.example/ws/crypto.md"],
     },
 )
@@ -483,6 +492,11 @@ Trades of stocks, tick by tick.
 {price}
 | `Received` | Instant | {received} |  |  |  |  |
 
+Massive's documentation of this dataset:
+
+- <https://docs.example/a.md>
+- <https://docs.example/ws/stocks/trades.md>
+
 <a id="financials-ratios"></a>
 
 ## `m.stocks.financials.ratios`
@@ -493,15 +507,14 @@ Financial ratios.
 | --- | --- | --- | --- | --- |
 | `PriceEarnings` | double | Price \\| earnings. | REST | `pe` |
 
+Massive's documentation of this dataset:
+
+- <https://docs.example/rest/crypto/ratios.md>
+- <https://docs.example/rest/stocks/ratios.md>
+
 ---
 
 {_FOOTER}
-
-Massive's documentation of these datasets:
-
-- <https://docs.example/a.md>
-- <https://docs.example/rest/ratios.md>
-- <https://docs.example/ws/trades.md>
 """
     assert page == expected
 
@@ -510,15 +523,28 @@ def test_the_rendered_crypto_page() -> None:
     page = render(_CATALOG, _PROVENANCE)["crypto.md"]
     # One wire-field column for the one transport the dataset reads, and its own URLs only.
     assert "| Column | Deephaven type | Description | Supplied by | WebSocket field |\n" in page
-    assert "| `Received` | Instant | When Massive received it. | WebSocket | `r` |\n" in page
-    assert page.endswith("\n\n- <https://docs.example/ws/crypto.md>\n")
+    received = "| `Received` | Instant | When Massive received it. | WebSocket | `r` |\n"
+    links = "\nMassive's documentation of this dataset:\n\n- <https://docs.example/ws/crypto.md>\n"
+    assert page.endswith(f"{received}{links}\n---\n\n{_FOOTER}\n")
 
 
-def test_a_page_whose_sources_have_no_urls_has_no_url_list() -> None:
+def test_a_dataset_whose_sources_have_no_urls_has_no_url_list() -> None:
     bare = Provenance(fetched=dt.date(2026, 10, 27), urls={})
     page = render(_CATALOG, bare)["crypto.md"]
-    assert page.endswith(f"---\n\n{_FOOTER}\n")
-    assert "documentation of these datasets" not in page
+    assert page.endswith(f"| WebSocket | `r` |\n\n---\n\n{_FOOTER}\n")
+    assert "documentation of this dataset" not in page
+
+
+def test_the_real_pages_link_only_the_datasets_own_class() -> None:
+    options = rendered()["options.md"]
+    snapshot = "https://massive.com/docs/rest/{}/snapshots/unified-snapshot.md"
+    assert f"- <{snapshot.format('options')}>" in options
+    for other in ("stocks", "forex", "crypto", "indices"):
+        assert snapshot.format(other) not in options
+    # The session-wide snapshot spans classes, so it links every class's page.
+    reference = rendered()["reference.md"]
+    for every in ("stocks", "options", "forex", "crypto", "indices"):
+        assert f"- <{snapshot.format(every)}>" in reference
 
 
 def test_every_page_line_is_clean() -> None:
