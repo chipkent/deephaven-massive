@@ -238,3 +238,7 @@ uv.lock
 # An interrupted `refresh --fetch` leaves its staging or backup directory beside the snapshot.
 vendor/massive-incoming/
 vendor/massive-previous/
+
+# The output of a live integration run (`uv run pytest -m integration | tee live-checks.log`),
+# which shows what Massive sent; the owner shares it, it is never committed.
+live-checks.log

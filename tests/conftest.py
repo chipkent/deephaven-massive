@@ -7,30 +7,48 @@ fixtures, never through a module-level import.
 
 Test modules never import from this file; they request its fixtures by name. Fakes from
 `tests/_fakes/` are handed to tests through thin fixtures defined here.
+
+The live integration tests (`tests/**/test_*_integration.py`) get their own fixtures here too:
+the `integration` marker check, the key skip, live sessions and wire clients, raw flat-file
+and REST readers, and the `evidence` recorder whose lines close the terminal summary.
 """
 
 from __future__ import annotations
 
 import atexit
+import contextlib
 import gzip
 import importlib
 import os
 import sys
 import threading
 import time
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
+import pyarrow as pa
 import pytest
 from deephaven_server import Server
 
+from deephaven_massive._massive import (
+    FlatFileClient,
+    ReadColumn,
+    ReadPlan,
+    RestClient,
+    Transport,
+    object_key,
+    source,
+)
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator
+    from collections.abc import Callable, Collection, Generator, Iterator, Mapping
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
-    from deephaven_massive import MassiveSession
+    from deephaven_massive import MassiveConfig, MassiveSession
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
@@ -412,3 +430,552 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
     fake: FakeS3 = s3.FakeS3()
     fake.install(monkeypatch)
     return fake
+
+
+# --- Live integration tests --------------------------------------------------------------------
+# Live tests live in `tests/**/test_*_integration.py` and carry the `integration` marker, which
+# `addopts` deselects by default; `uv run pytest -m integration` runs them. Each one skips
+# without `MASSIVE_API_KEY`, so CI, which has no key, never reaches Massive even when it selects
+# them. What each test observed is recorded with the `evidence` fixture and printed in a
+# "live evidence" section at the end of the run, for passed, failed, and skipped tests alike.
+
+_INTEGRATION = "integration"
+_INTEGRATION_FILE_SUFFIX = "_integration.py"
+
+_EVIDENCE: Final = pytest.StashKey[list[tuple[str, str]]]()
+"""The config stash key of the evidence lines recorded so far, as (test id, line) pairs."""
+
+_EVIDENCE_LOCK = threading.Lock()
+"""Guards the evidence list, so a line may be recorded from any thread."""
+
+_FLAT_FILE_BLOCK = 1 << 20
+"""Bytes of decompressed CSV per block when a live test reads a flat file."""
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Require the `integration` marker on exactly the tests of the live test files.
+
+    Runs before the `-m` deselection, so the check covers every collected test, also those a
+    default run deselects. A live test without the marker would run in CI, and a marked test
+    elsewhere would never run by default.
+
+    Args:
+        config: The pytest configuration (unused; required by the hook signature).
+        items: The collected tests.
+
+    Raises:
+        pytest.UsageError: If a test of a `*_integration.py` file lacks the marker, or a test
+            of another file has it; the message lists them.
+    """
+    wrong = [
+        item.nodeid
+        for item in items
+        if item.path.name.endswith(_INTEGRATION_FILE_SUFFIX)
+        != (item.get_closest_marker(_INTEGRATION) is not None)
+    ]
+    if wrong:
+        raise pytest.UsageError(
+            "the integration marker must be on exactly the tests of *_integration.py files "
+            "(pytestmark = pytest.mark.integration): " + ", ".join(wrong)
+        )
+
+
+@pytest.fixture(autouse=True)
+def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
+    """Skip a live test when `MASSIVE_API_KEY` is not set, before the test's own fixtures run.
+
+    Args:
+        request: The requesting test, for its markers.
+    """
+    if request.node.get_closest_marker(_INTEGRATION) is not None:
+        _required_env("MASSIVE_API_KEY")
+
+
+def _required_env(name: str) -> str:
+    """Return an environment variable's value, or skip the test when it is unset or blank.
+
+    Args:
+        name: The variable, such as `"MASSIVE_API_KEY"`.
+
+    Returns:
+        The value, stripped of surrounding whitespace.
+    """
+    value = os.environ.get(name, "").strip()
+    if not value:
+        pytest.skip(f"{name} is not set")
+    return value
+
+
+@pytest.fixture
+def live_env() -> Callable[[str], str]:
+    """Return a function that reads a required environment variable or skips the test.
+
+    Live tests that need a second key (a Business or a delayed one) or a named Basic
+    subscription call it first.
+
+    Returns:
+        A function mapping a variable's name to its stripped value; it skips the test when
+        the variable is unset or blank.
+    """
+    return _required_env
+
+
+@pytest.fixture
+def live_opt_in() -> Callable[[str], None]:
+    """Return a function that skips the test unless an opt-in variable is set to `1`.
+
+    The live tests that go beyond one symbol per class (`MASSIVE_LIVE_WIDE`) or one connection
+    per cluster (`MASSIVE_LIVE_SECOND_CONNECTION`) run only when the owner opts in.
+
+    Returns:
+        A function taking the variable's name; it skips the test unless the value is `1`.
+    """
+
+    def require(name: str) -> None:
+        if os.environ.get(name, "").strip() != "1":
+            pytest.skip(f"{name} is not 1")
+
+    return require
+
+
+@pytest.fixture
+def evidence(request: pytest.FixtureRequest) -> Callable[[str], None]:
+    """Return a function that records one line of what a live test observed.
+
+    The lines are printed, grouped by test, in the "live evidence" section of the terminal
+    summary, whatever the test's outcome; a skipped test's lines show what was missing. Safe
+    to call from any thread.
+
+    Args:
+        request: The requesting test, whose id heads its lines.
+
+    Returns:
+        A function taking one line of text.
+    """
+    records = request.config.stash.setdefault(_EVIDENCE, [])
+    test_id = request.node.nodeid
+
+    def record(line: str) -> None:
+        with _EVIDENCE_LOCK:
+            records.append((test_id, line))
+
+    return record
+
+
+def pytest_terminal_summary(
+    terminalreporter: pytest.TerminalReporter, config: pytest.Config
+) -> None:
+    """Print the evidence the live tests recorded, grouped by test, after the test results.
+
+    Args:
+        terminalreporter: The terminal reporter that writes the summary.
+        config: The pytest configuration, whose stash holds the evidence.
+    """
+    stored: list[tuple[str, str]] = config.stash.setdefault(_EVIDENCE, [])
+    with _EVIDENCE_LOCK:
+        records = list(stored)
+    if not records:
+        return
+    terminalreporter.write_sep("=", "live evidence")
+    current = None
+    for test_id, line in records:
+        if test_id != current:
+            terminalreporter.write_line(test_id)
+            current = test_id
+        terminalreporter.write_line(f"    {line}")
+
+
+@pytest.fixture
+def live_config() -> MassiveConfig:
+    """Return a `MassiveConfig` with `MASSIVE_API_KEY`, and the S3 credentials when set.
+
+    Returns:
+        The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    config: MassiveConfig = dm.MassiveConfig(api_key=_required_env("MASSIVE_API_KEY"))
+    return config
+
+
+@pytest.fixture
+def live_s3_config(live_config: MassiveConfig) -> MassiveConfig:
+    """Return the live configuration, or skip the test when it has no S3 credentials.
+
+    Args:
+        live_config: The live configuration.
+
+    Returns:
+        `live_config`, whose `s3_access_key_id` and `s3_secret_access_key` are set.
+    """
+    if live_config.s3_access_key_id is None:
+        pytest.skip("MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY are not set")
+    return live_config
+
+
+@pytest.fixture
+def live_session(live_config: MassiveConfig) -> Iterator[MassiveSession]:
+    """Yield a `MassiveSession` on the live key, closed at teardown.
+
+    Closing the session closes its connections, so no stream outlives the test.
+
+    Args:
+        live_config: The live configuration.
+
+    Yields:
+        An open session on the embedded server's execution context.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    session: MassiveSession = dm.MassiveSession(live_config)
+    yield session
+    session.close()
+
+
+@pytest.fixture
+def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
+    """Yield the wire REST client on the live key, for raw responses; closed at teardown.
+
+    Live tests read raw rows through it where the evidence is the wire form itself (a stamp
+    before the library moves it, a key the library renames).
+
+    Args:
+        live_config: The live configuration, for the key and the base URL.
+
+    Yields:
+        A `RestClient` with one connection.
+    """
+    client = RestClient(live_config.api_key, base_url=live_config.rest_base_url, max_concurrency=1)
+    yield client
+    client.close()
+
+
+@pytest.fixture
+def live_flat_files(live_s3_config: MassiveConfig) -> Iterator[FlatFileClient]:
+    """Yield the wire flat-file client on the live S3 credentials; closed at teardown.
+
+    Args:
+        live_s3_config: The live configuration with S3 credentials.
+
+    Yields:
+        A `FlatFileClient` with one connection.
+    """
+    assert live_s3_config.s3_access_key_id is not None
+    assert live_s3_config.s3_secret_access_key is not None
+    client = FlatFileClient(
+        access_key_id=live_s3_config.s3_access_key_id,
+        secret_access_key=live_s3_config.s3_secret_access_key,
+        endpoint_url=live_s3_config.s3_endpoint_url,
+        bucket=live_s3_config.s3_bucket,
+        max_pool=1,
+    )
+    yield client
+    client.close()
+
+
+FlatFileRows = tuple[list[dict[str, str | None]], frozenset[str]]
+"""The raw rows of a flat file, every value as its CSV text, and its undocumented headers."""
+
+
+def _read_flat_file(
+    client: FlatFileClient,
+    key: str,
+    prefix: str,
+    *,
+    max_rows: int | None,
+    tickers: list[str] | None,
+) -> FlatFileRows | None:
+    """Read the raw rows of one flat file: every documented header as its CSV text.
+
+    Nothing is converted (no unit, no type) and futures rows are not checked against their
+    session, so the rows show the wire form.
+
+    Args:
+        client: The live flat-file client.
+        key: The object's key.
+        prefix: The generated prefix whose documented headers are read, such as
+            `"us_futures_{venue}/session_aggs_v1"`.
+        max_rows: The most rows to keep; reading stops after the block that reaches it. None
+            reads the whole file.
+        tickers: The `ticker` values to keep, as a sorted list, or None for every row.
+
+    Returns:
+        The rows and the headers the file has beyond the documented ones, or None when the
+        file does not exist.
+    """
+    headers = [field.wire_key for field in source(Transport.FLAT_FILES, prefix).fields]
+    plan = ReadPlan(
+        columns=tuple(ReadColumn(header, header, pa.string()) for header in headers),
+        symbol_header="ticker",
+        symbols=None if tickers is None else pa.array(tickers, pa.string()),
+        time_header=headers[0],
+        window_ns=None,
+        to_ns=lambda values: values,
+        session=None,
+        block_size=_FLAT_FILE_BLOCK,
+        required=frozenset(),
+    )
+    file = client.open(key)
+    if file is None:
+        return None
+    rows: list[dict[str, str | None]] = []
+    extra: frozenset[str] = frozenset()
+    with file, contextlib.closing(file.batches(plan)) as batches:
+        for batch, drift in batches:
+            extra = drift.extra
+            rows.extend(batch.to_pylist())
+            if max_rows is not None and len(rows) >= max_rows:
+                break
+    return (rows if max_rows is None else rows[:max_rows]), extra
+
+
+_HEAD_ROWS = 1000
+"""How many rows `flat_file_head` keeps from the start of a file."""
+
+
+@pytest.fixture
+def flat_file_head(
+    live_flat_files: FlatFileClient,
+) -> Callable[[str, date, str | None], FlatFileRows | None]:
+    """Return a function that reads the first rows of one flat file, as raw text.
+
+    Only the first block is downloaded and decoded, so even a quotes file costs little.
+
+    Args:
+        live_flat_files: The live flat-file client.
+
+    Returns:
+        A function `(prefix, day, venue)`: the generated prefix (such as
+        `"global_forex/quotes_v1"`), the file's day, and the venue that fills a futures
+        prefix (`"cme"`; None for every other prefix). It returns the first 1,000 rows, every
+        value as the file's text, and the file's undocumented headers, or None when the file
+        does not exist.
+    """
+
+    def read(prefix: str, day: date, venue: str | None) -> FlatFileRows | None:
+        key = object_key(prefix, day, venue)
+        return _read_flat_file(live_flat_files, key, prefix, max_rows=_HEAD_ROWS, tickers=None)
+
+    return read
+
+
+@pytest.fixture
+def flat_file_tickers(
+    live_flat_files: FlatFileClient,
+) -> Callable[[str, date, Collection[str] | None], FlatFileRows | None]:
+    """Return a function that reads every row of some tickers from one flat file, as raw text.
+
+    Args:
+        live_flat_files: The live flat-file client.
+
+    Returns:
+        A function `(prefix, day, tickers)`: the generated prefix of a file without a venue
+        (such as `"global_crypto/minute_aggs_v1"`), the file's day, and the `ticker` values to
+        keep, or None for every row. It returns the rows, every value as the file's text, and
+        the file's undocumented headers, or None when the file does not exist.
+    """
+
+    def read(prefix: str, day: date, tickers: Collection[str] | None) -> FlatFileRows | None:
+        wanted = None if tickers is None else sorted(tickers)
+        key = object_key(prefix, day)
+        return _read_flat_file(live_flat_files, key, prefix, max_rows=None, tickers=wanted)
+
+    return read
+
+
+@pytest.fixture
+def table_rows() -> Callable[[Table], list[dict[str, Any]]]:
+    """Return a function that snapshots a table into row dictionaries, instants as epoch ns.
+
+    Unlike `dh_to_pylist`, every timestamp column becomes an `int` of nanoseconds since the
+    epoch, so evidence shows exact values.
+
+    Returns:
+        A function mapping a table to one `{column: value}` dictionary per row.
+    """
+    dh_arrow = importlib.import_module("deephaven.arrow")
+
+    def read(table: Table) -> list[dict[str, Any]]:
+        data = dh_arrow.to_arrow(table)
+        columns = [
+            column.cast(pa.int64()) if pa.types.is_timestamp(column.type) else column
+            for column in data.columns
+        ]
+        rows: list[dict[str, Any]] = pa.table(columns, names=data.column_names).to_pylist()
+        return rows
+
+    return read
+
+
+@pytest.fixture
+def stream_report(
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[MassiveSession], list[str]]:
+    """Return a function that describes a session's connections and streams, one line each.
+
+    Returns:
+        A function mapping a session to lines such as `connection stocks/TICK
+        socket.massive.com CONNECTED acked=1 ...` and `stream 1 stocks.trades RUNNING ...`.
+    """
+
+    def report(session: MassiveSession) -> list[str]:
+        lines = [
+            f"connection {r['Transport']} {r['AssetClass']}/{r['Family']} host={r['Host']} "
+            f"recency={r['Recency']} evidence={r['Evidence']!r} state={r['State']} "
+            f"topics={r['Topics']} acked={r['AckedTopics']} pending={r['PendingTopics']} "
+            f"error={r['LastError']!r} drift={r['SchemaDrift']!r}"
+            for r in table_rows(session.connections())
+        ]
+        lines.extend(
+            f"stream {r['StreamId']} {r['Dataset']} host={r['Host']} state={r['State']} "
+            f"rows={r['RowsPublished']} error={r['Error']!r} drift={r['SchemaDrift']!r}"
+            for r in table_rows(session.streams())
+        )
+        return lines
+
+    return report
+
+
+@pytest.fixture
+def wait_rows(
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[MassiveSession, Table, float], list[dict[str, Any]]]:
+    """Return a function that waits for a live table's first rows.
+
+    Returns:
+        A function `(session, table, timeout)`: it returns the table's rows once it holds any,
+        once any of the session's streams has `FAILED`, or once `timeout` seconds have passed,
+        whichever comes first, so the caller records what happened (a closed market sends
+        nothing; a refusal fails the stream).
+    """
+
+    def wait(session: MassiveSession, table: Table, timeout: float) -> list[dict[str, Any]]:
+        pause = threading.Event()  # never set; only paces the polling
+        deadline = time.monotonic() + timeout
+        while True:
+            rows = table_rows(table)
+            if rows or time.monotonic() >= deadline:
+                return rows
+            if any(r["State"] == "FAILED" for r in table_rows(session.streams())):
+                return rows
+            pause.wait(0.25)
+
+    return wait
+
+
+def _instant_text(nanos: int) -> str:
+    """Write epoch nanoseconds as a UTC instant and its weekday.
+
+    Args:
+        nanos: Nanoseconds since the Unix epoch.
+
+    Returns:
+        Text such as `"2025-01-02T00:00:00.000000000Z Thu"`.
+    """
+    seconds, fraction = divmod(nanos, 1_000_000_000)
+    moment = datetime.fromtimestamp(seconds, UTC)
+    return f"{moment:%Y-%m-%dT%H:%M:%S}.{fraction:09d}Z {moment:%a}"
+
+
+@pytest.fixture
+def instant_text() -> Callable[[int], str]:
+    """Return a function that writes epoch nanoseconds as a UTC instant and its weekday.
+
+    Returns:
+        A function mapping `1735776000000000000` to `"2025-01-02T00:00:00.000000000Z Thu"`.
+    """
+    return _instant_text
+
+
+@pytest.fixture
+def rest_rows(
+    live_rest: RestClient,
+) -> Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]]:
+    """Return a function that reads every raw row of one REST request, following its pages.
+
+    Args:
+        live_rest: The live REST client.
+
+    Returns:
+        A function `(path, path_params, query_params)`: the generated path template (such as
+        `"/v2/aggs/ticker/{cryptoTicker}/prev"`), its placeholder values, and its query
+        values, by wire name. It returns the rows as Massive sent them (wire keys, epoch
+        integers, nested objects). A failed request raises the wire error.
+    """
+
+    def read(
+        path: str, path_params: Mapping[str, object], query_params: Mapping[str, object]
+    ) -> list[dict[str, Any]]:
+        rest_path = source(Transport.REST, path)
+        return [
+            row
+            for page in live_rest.pages(rest_path, path_params, query_params)
+            for row in page.rows
+        ]
+
+    return read
+
+
+_MS = 1_000_000
+"""Nanoseconds per millisecond."""
+
+_WEEK_MS = 7 * 86_400_000
+"""Milliseconds per week."""
+
+_WEEK_RANGE = (date(2025, 2, 24), date(2025, 3, 23))
+"""The four calendar weeks, Monday to Sunday, whose week bars the week-start checks read."""
+
+
+@pytest.fixture
+def week_bar_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+) -> Callable[[str, str], list[str]]:
+    """Return a function that shows where Massive starts a week bar, from raw REST bars.
+
+    It reads the week bars and the hour bars of one ticker over four calendar weeks
+    (2025-02-24 to 2025-03-23) from the aggregates range endpoint, unfiltered. For each week
+    bar it reports its stamp, its volume, the first and last hour bar inside the seven days
+    from its stamp, and the hour-bar volume of three candidate weeks: from Monday 00:00 UTC,
+    from the Sunday before at 00:00 UTC, and from the stamp itself. The candidate whose volume
+    equals the week bar's is the bucket Massive uses.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+
+    Returns:
+        A function `(ticker_param, ticker)`: the path placeholder of the class (such as
+        `"stocksTicker"`) and the ticker. It returns the evidence lines.
+    """
+
+    def report(ticker_param: str, ticker: str) -> list[str]:
+        path = (
+            f"/v2/aggs/ticker/{{{ticker_param}}}/range/{{multiplier}}/{{timespan}}/{{from}}/{{to}}"
+        )
+        first, last = _WEEK_RANGE
+
+        def bars(span: str) -> list[dict[str, Any]]:
+            params = {ticker_param: ticker, "multiplier": 1, "timespan": span}
+            params |= {"from": first, "to": last}
+            return rest_rows(path, params, {"sort": "asc", "limit": 50_000})
+
+        weeks, hours = bars("week"), bars("hour")
+
+        def volume(start_ms: int) -> float:
+            return float(sum(h["v"] for h in hours if start_ms <= h["t"] < start_ms + _WEEK_MS))
+
+        lines = [f"{ticker}: {len(weeks)} week bars, {len(hours)} hour bars"]
+        for week in weeks:
+            stamp = int(week["t"])
+            inside = [h for h in hours if stamp <= h["t"] < stamp + _WEEK_MS]
+            day = datetime.fromtimestamp(stamp / 1000, UTC).date()
+            monday = datetime.combine(day - timedelta(days=day.weekday()), dt_time(), UTC)
+            monday_ms = int(monday.timestamp()) * 1000
+            lines.append(
+                f"week t={_instant_text(stamp * _MS)} v={week['v']} "
+                f"first_hour={_instant_text(inside[0]['t'] * _MS) if inside else None} "
+                f"last_hour={_instant_text(inside[-1]['t'] * _MS) if inside else None} "
+                f"hour_volume_from_monday_utc={volume(monday_ms)} "
+                f"from_sunday_utc={volume(monday_ms - 86_400_000)} from_stamp={volume(stamp)}"
+            )
+        return lines
+
+    return report

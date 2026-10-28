@@ -27,6 +27,24 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 Always go through `uv run`: bare `python`, `pytest`, `ruff`, and `mypy` use the wrong
 environment. [`AGENTS.md`](AGENTS.md) has the full command list and the contribution rules.
 
+### Live integration tests
+
+The tests in `tests/**/test_*_integration.py` call Massive itself. They carry the `integration`
+marker, which the default run deselects, and they skip without `MASSIVE_API_KEY`, so neither
+`./scripts/check.sh` nor CI ever reaches Massive. Run them, and only them, with a key:
+
+```bash
+MASSIVE_API_KEY=... uv run pytest -m integration 2>&1 | tee live-checks.log
+```
+
+The flat-file tests also need `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY`.
+A few tests need more and skip without it: `MASSIVE_BUSINESS_API_KEY` (a Business key),
+`MASSIVE_DELAYED_API_KEY` (a delayed key), `MASSIVE_LIVE_BASIC_SUBSCRIPTION` (a subscription on
+the free Basic tier, such as `options`), `MASSIVE_LIVE_WIDE=1` (tests that subscribe to many
+topics or a wildcard), and `MASSIVE_LIVE_SECOND_CONNECTION=1` (a test that opens a second
+connection with the same key). Each test records what Massive sent; the "live evidence"
+section at the end of the run lists it, test by test.
+
 ## License
 
 Apache License 2.0. See [`LICENSE`](LICENSE).
