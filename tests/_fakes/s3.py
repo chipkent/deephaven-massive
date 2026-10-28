@@ -14,7 +14,8 @@ Objects are stored by key, as bytes or, through `put_csv`, as a flat file with a
 reorder, add, or drop columns by name). A key can also be refused with any status (403
 `AccessDenied` for a plan without the dataset, 500 for a server error), fail before any response
 by name (`"unreachable"`: the endpoint cannot be reached), or fail part-way through its body (a
-dropped connection while streaming). Every request, every client close, and every body close is
+dropped connection while streaming): always (`put_dropped`), or for its first few requests and
+then serve it whole (`drop`). Every request, every client close, and every body close is
 recorded. A listing is recorded in `listings` by the continuation token it sent, and `refuse`,
 `fail`, and `before_answer` treat it as a request for the key `""`. Built by the `fake_s3`
 fixture in `tests/conftest.py`; thread-safe, since the library reads several keys at once.
@@ -82,6 +83,8 @@ class FakeS3:
         self._lock = threading.Lock()
         self._objects: dict[str, bytes] = {}
         self._dropped: dict[str, bytes] = {}
+        # Per stored key: how many more requests drop, and after how many bytes.
+        self._drops: dict[str, tuple[int, int]] = {}
         self._refusals: dict[str, tuple[int, str, str]] = {}
         self._failures: dict[str, str] = {}
         self.requests: list[tuple[str, str]] = []
@@ -122,6 +125,11 @@ class FakeS3:
         with self._lock:
             self._objects[key] = data
 
+    def data(self, key: str) -> bytes:
+        """Return the bytes stored under `key` with `put` or `put_csv`."""
+        with self._lock:
+            return self._objects[key]
+
     def put_csv(
         self, key: str, header: Sequence[str], rows: Iterable[Mapping[str, object]]
     ) -> None:
@@ -146,6 +154,17 @@ class FakeS3:
         """Store an object whose body fails after `data`, as a connection dropped mid-read."""
         with self._lock:
             self._dropped[key] = data
+
+    def drop(self, key: str, *, times: int, at: int) -> None:
+        """Cut the body of a stored object short for its next `times` requests, then serve it.
+
+        Args:
+            key: A key stored with `put` or `put_csv`.
+            times: How many requests, from the next one, drop the connection.
+            at: How many bytes of the object each of them serves before the drop.
+        """
+        with self._lock:
+            self._drops[key] = (times, at)
 
     def refuse(self, prefix: str, *, status: int, code: str, message: str) -> None:
         """Answer every key under `prefix` with an S3 error response."""
@@ -271,6 +290,10 @@ class FakeS3:
             )
             data = self._objects.get(key)
             dropped = self._dropped.get(key)
+            times, at = self._drops.get(key, (0, 0))
+            if data is not None and times:
+                self._drops[key] = (times - 1, at)
+                dropped = data[:at]
         if failure is not None:
             raise EndpointConnectionError(endpoint_url="https://files.massive.com")
         if refusal is not None:
