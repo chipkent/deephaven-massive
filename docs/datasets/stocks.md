@@ -546,7 +546,7 @@ Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 
 ## `m.stocks.filings.index`
 
-The index of SEC EDGAR filings by US-listed companies, one row per filing.
+The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
@@ -578,7 +578,7 @@ The text of sections of 10-K annual reports, one row per filing and section.
 
 ## `m.stocks.filings.text_8k`
 
-The item text of 8-K current reports, one row per filing.
+The item text of 8-K current reports, one row per filing and filer.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |

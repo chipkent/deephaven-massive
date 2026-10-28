@@ -1,0 +1,19 @@
+{
+  "count": 1,
+  "request_id": 1,
+  "results": [
+    {
+      "benzinga_firm_id": "606af0aa6538960001bced21",
+      "benzinga_id": "681363c1fd0258abcbedc074",
+      "benzinga_rating_id": "6813624c09c1f6000103ac25",
+      "date": "2025-05-01",
+      "firm": "Needham",
+      "insight": "Needham maintained their Buy rating on Etsy's stock with a price target of $55.00.  \n\n **Growth Initiatives and Market Penetration**: Etsy's focus on growth initiatives, including leveraging its app for a more personalized shopping experience and marketing, has been a key factor in maintaining its Buy rating. The company's ability to drive greater consideration and purchase frequency through technology and product initiatives, alongside its significant app penetration of gross merchandise sales (GMS), showcases its strong position to capture more of the consumer wallet.\n\n**Resilience Amid Economic Uncertainty**: Despite the economic uncertainty, including potential impacts from tariffs, Etsy's asset-light model and strategic focus on product enhancements position it to navigate macro headwinds effectively. The company's efforts to lean into paid social channels for marketing and its ability to adapt to changes in consumer behavior underline its resilience and potential for sustained growth, supporting the Buy rating.",
+      "last_updated": "2025-05-01T12:06:36Z",
+      "price_target": 55,
+      "rating": "buy",
+      "rating_action": "maintains"
+    }
+  ],
+  "status": "OK"
+}

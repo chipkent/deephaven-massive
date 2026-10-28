@@ -177,6 +177,16 @@ def test_the_ticker_event_type_is_read_as_the_samples_send_it() -> None:
     assert naming.column_name([fix.wire_key]) == "Type"
 
 
+def test_the_futures_snapshot_ticker_and_product_code_are_read_at_the_top_level() -> None:
+    # The schema nests both under `details`; every documented sample sends them at the top.
+    found = {
+        declared: overrides.KEY_FIXES["/futures/v1/snapshot", declared].wire_key
+        for declared in ("details.ticker", "details.product_code")
+    }
+    assert found == {"details.ticker": "ticker", "details.product_code": "product_code"}
+    assert [naming.column_name([key]) for key in found.values()] == ["Ticker", "ProductCode"]
+
+
 def test_result_keys_may_be_nested_or_the_body() -> None:
     assert overrides.RESULT_KEYS["/v1/indicators/macd/{stockTicker}"].key == "results.values"
     assert overrides.RESULT_KEYS["/v1/marketstatus/now"].key is None

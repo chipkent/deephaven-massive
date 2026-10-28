@@ -264,6 +264,12 @@ IPOS: Final = DatasetSpec(
     time_axis=("listing_date.gte", "listing_date.lte"),
     symbol_param="ticker",
     poll_mode=PollMode.UPSERT,
+    # One offering is one issuer listing under one ticker. Both are required on every row, and
+    # neither changes as the offering moves through its statuses, so the row is revised in
+    # place; a ticker an earlier, different issuer used (a recycled SPAC ticker) stays apart.
+    # The listing date and ISIN are no key: an offering can be postponed to a new date, and
+    # either can be missing before the listing.
+    poll_keys=("Symbol", "IssuerName"),
     page_size=1_000,
 )
 SHORT_INTEREST: Final = DatasetSpec(
@@ -439,9 +445,11 @@ FILINGS_INDEX: Final = _filing(
     "index",
     _INDEX,
     symbol_param="ticker.any_of",
-    poll_keys=("AccessionNumber",),
+    # EDGAR lists a filing once under each filer: a Form 4 under the issuer and each reporting
+    # owner, a joint filing under each co-registrant.
+    poll_keys=("Cik", "AccessionNumber"),
     page_size=10_000,
-    summary="The index of SEC EDGAR filings by US-listed companies, one row per filing.",
+    summary="The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.",
 )
 SECTIONS_10K: Final = _filing(
     "sections_10k",
@@ -455,9 +463,10 @@ TEXT_8K: Final = _filing(
     "text_8k",
     _TEXT_8K,
     symbol_param="ticker.any_of",
-    poll_keys=("AccessionNumber",),
+    # A joint 8-K of several co-registrants comes once under each filer's CIK.
+    poll_keys=("Cik", "AccessionNumber"),
     page_size=100,
-    summary="The item text of 8-K current reports, one row per filing.",
+    summary="The item text of 8-K current reports, one row per filing and filer.",
 )
 DISCLOSURES_8K: Final = _filing(
     "disclosures_8k",
@@ -487,6 +496,14 @@ INSTITUTIONAL_HOLDINGS: Final = _filing(
         "PutCall",
         "InvestmentDiscretion",
         "OtherManagers",
+        # One filing can list the same security on several lines, split by amount or voting
+        # authority; Form 13-F requires each of these on every line.
+        "SharesOrPrincipalAmount",
+        "SharesOrPrincipalType",
+        "MarketValue",
+        "VotingAuthoritySole",
+        "VotingAuthorityShared",
+        "VotingAuthorityNone",
     ),
     nullable_poll_keys={
         "PutCall": "PUT or CALL for an option, and empty for common stock",
@@ -517,19 +534,26 @@ INSIDER_TRANSACTIONS: Final = _filing(
         "TransactionCode",
         "TransactionShares",
         "TransactionPricePerShare",
+        "TransactionAcquiredDisposed",
+        "SharesOwnedFollowingTransaction",
         "ExercisePrice",
+        "ExerciseDate",
         "ExpirationDate",
     ),
     nullable_poll_keys={
         **_INDIRECT,
         **_DERIVATIVE,
+        "ExerciseDate": _DERIVATIVE_ONLY,
         "ExpirationDate": _DERIVATIVE_ONLY,
+        "SharesOwnedFollowingTransaction": "Form 4 lets a filer report the value owned "
+        "afterwards instead of the shares, which the row does not carry",
         **dict.fromkeys(
             (
                 "TransactionDate",
                 "TransactionCode",
                 "TransactionShares",
                 "TransactionPricePerShare",
+                "TransactionAcquiredDisposed",
             ),
             "a 'holding' record (RecordType) reports no transaction",
         ),
@@ -1010,13 +1034,15 @@ class _StockFilings(Namespace):
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
     ) -> Query:
-        """The index of SEC EDGAR filings by US-listed companies, one row per filing.
+        """The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
         Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and the URL of
-        the document on EDGAR. Served by REST (`/stocks/filings/vX/index`) through `fetch()` and
+        the document on EDGAR. A filing with several filers has a row under each filer's CIK: a
+        Form 4 under the issuer and each reporting owner, a joint 10-K or 8-K under each
+        co-registrant. Served by REST (`/stocks/filings/vX/index`) through `fetch()` and
         `poll()`. By default `poll()` appends only the rows it has not seen before, telling rows
-        apart by the dataset's key columns. A filing whose company has no ticker keeps a null
-        `Symbol`.
+        apart by `Cik` and `AccessionNumber`, so every filer's row is kept. A filing whose
+        company has no ticker keeps a null `Symbol`.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -1136,13 +1162,14 @@ class _StockFilings(Namespace):
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
     ) -> Query:
-        """The item text of 8-K current reports, one row per filing.
+        """The item text of 8-K current reports, one row per filing and filer.
 
         Each row holds the text of the items a company reported on an 8-K (or an amendment), with
-        its ticker, CIK, form type, and filing date. Served by REST (`/stocks/filings/8-K/vX/text`)
-        through `fetch()` and `poll()`. By default `poll()` appends only the rows it has not seen
-        before, telling rows apart by the dataset's key columns. A filing whose company has no
-        ticker keeps a null `Symbol`.
+        its ticker, CIK, form type, and filing date. A joint 8-K of several co-registrants has a
+        row under each filer's CIK. Served by REST (`/stocks/filings/8-K/vX/text`) through
+        `fetch()` and `poll()`. By default `poll()` appends only the rows it has not seen before,
+        telling rows apart by `Cik` and `AccessionNumber`, so every filer's row is kept. A
+        filing whose company has no ticker keeps a null `Symbol`.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every filer. Columns:
@@ -2230,8 +2257,11 @@ class _Stocks(Namespace):
         pending, new, withdrawn, and so on), offer price range, final issue price, shares offered,
         and the listing exchange. Served by REST (`/vX/reference/ipos`) through `fetch()` and
         `poll()`; the endpoint filters one ticker per request, so a symbol list fans out to one
-        request per symbol. By default `poll()` appends only the rows it has not seen before,
-        telling rows apart by the dataset's key columns.
+        request per symbol. By default `poll()` updates each offering in place, keyed by
+        `Symbol` and `IssuerName`, as it moves from rumor or pending to new and history (or is
+        postponed or withdrawn); rows are never deleted. Two issuers that used one ticker stay
+        two rows, while an issuer's withdrawn offering and its later offering under the same
+        ticker share one row, which shows the latest.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every offering. Columns:

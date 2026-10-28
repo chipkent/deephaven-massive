@@ -1040,7 +1040,7 @@
     "trading_venue": "The trading venue (MIC) for the exchange on which this schedule's product trades."
    },
    "/futures/v1/snapshot": {
-    "details.product_code": "The identifier for the contract's product.",
+    "product_code": "The identifier for the contract's product.",
     "details.settlement_date": "The day that this contract is settled.",
     "last_minute.close": "The price at the end of the minute bar.",
     "last_minute.high": "The highest price reached in the minute bar.",

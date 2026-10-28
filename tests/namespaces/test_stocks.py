@@ -330,8 +330,12 @@ def test_poll_appends_filings_upserts_ipos_and_replaces_taxonomies_and_the_rest(
     assert spec_of(name).poll_mode is expected
 
 
-def test_ipos_are_upserted_by_symbol() -> None:
-    assert spec_of("ipos").poll_keys == ("Symbol",)
+def test_ipos_are_upserted_by_symbol_and_issuer() -> None:
+    # Both are required on every row and stay fixed as an offering changes status.
+    assert spec_of("ipos").poll_keys == ("Symbol", "IssuerName")
+    fields = cast("RestPath", source(R, "/vX/reference/ipos"))
+    assert fields.field("Ticker").required
+    assert fields.field("IssuerName").required
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
@@ -1487,11 +1491,14 @@ NULLABLE_KEYS = {
     "filings.insider_transactions": {
         "NatureOfOwnership",
         "ExercisePrice",
+        "ExerciseDate",
         "ExpirationDate",
         "TransactionDate",
         "TransactionCode",
         "TransactionShares",
         "TransactionPricePerShare",
+        "TransactionAcquiredDisposed",
+        "SharesOwnedFollowingTransaction",
     },
 }
 
@@ -1523,6 +1530,78 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
     assert not table.j_table.isFailed()
     assert any(row[column] is None for row in rows for column in NULLABLE_KEYS[name])
     rest_session.release(table)
+
+
+# --- Rows that share a ticker or an accession number -----------------------------------------
+
+
+@pytest.mark.parametrize("name", ["filings.index", "filings.text_8k"])
+def test_a_filing_under_two_filers_polls_as_two_rows(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    name: str,
+) -> None:
+    # EDGAR lists one accession under each filer: an issuer and the reporting owner, who has
+    # no ticker. Both rows must survive the poll, not only the first.
+    path = cast("str", spec_of(name).fetch_path)
+    body = json.loads(load_fixture(FIXTURES, SOURCES[path][0]))
+    first = body["results"][0]
+    owner = {k: v for k, v in first.items() if k != "ticker"} | {"cik": "0001214128"}
+    body["results"] = [first, owner]
+    fake_rest.reply(path, Reply(body=body))
+    table = cast("Query", factory(rest_session, name)()).poll(60)
+    rows = _rows_when(table, 2)
+    assert sorted((row["Cik"], row["AccessionNumber"]) for row in rows) == sorted(
+        [(first["cik"], first["accession_number"]), ("0001214128", first["accession_number"])]
+    )
+    rest_session.release(table)
+
+
+def test_two_issuers_of_one_ticker_poll_as_two_offerings(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # A recycled ticker: an earlier issuer's withdrawn offering and a later issuer's listing.
+    path = "/vX/reference/ipos"
+    body = json.loads(load_fixture(FIXTURES, "ipos.json"))
+    first = body["results"][0]
+    earlier = first | {"issuer_name": "Rapport Acquisition Corp.", "ipo_status": "withdrawn"}
+    body["results"] = [earlier, first]
+    fake_rest.reply(path, Reply(body=body))
+    table = rest_session.stocks.ipos().poll(60)
+    rows = _rows_when(table, 2)
+    assert sorted((row["Symbol"], row["IssuerName"], row["IpoStatus"]) for row in rows) == [
+        ("RAPP", "Rapport Acquisition Corp.", "withdrawn"),
+        ("RAPP", "Rapport Therapeutics Inc.", "history"),
+    ]
+    rest_session.release(table)
+
+
+# The poll-key columns that tell apart lines of one filing that agree on every other key: a
+# 13-F lists one security on several lines split by amount or voting authority, and a Form 4
+# reports option tranches that differ only in when they become exercisable, or two sales that
+# differ only in the shares owned afterwards, or one acquisition and one disposal.
+DISTINGUISHING_KEYS = {
+    "filings.institutional_holdings": {
+        "SharesOrPrincipalAmount",
+        "SharesOrPrincipalType",
+        "MarketValue",
+        "VotingAuthoritySole",
+        "VotingAuthorityShared",
+        "VotingAuthorityNone",
+    },
+    "filings.insider_transactions": {
+        "ExerciseDate",
+        "SharesOwnedFollowingTransaction",
+        "TransactionAcquiredDisposed",
+    },
+}
+
+
+@pytest.mark.parametrize("name", list(DISTINGUISHING_KEYS))
+def test_ownership_filing_lines_that_differ_only_in_amounts_stay_apart(name: str) -> None:
+    assert DISTINGUISHING_KEYS[name] <= set(spec_of(name).poll_keys)
 
 
 # --- Filings without a ticker --------------------------------------------------------------------
