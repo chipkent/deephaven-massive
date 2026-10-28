@@ -321,6 +321,30 @@ def test_poll_appends_for_ipos_and_filings_and_replaces_otherwise(name: str) -> 
     assert spec_of(name).poll_mode is expected
 
 
+# The key of each REST dataset that `poll()` replaces by default: what identifies one row.
+REPLACE_KEYS = {
+    "snapshots": ("Symbol",),
+    "movers": ("Symbol",),
+    "daily_open_close": ("Symbol",),
+    "dividends": ("Id",),
+    "splits": ("Id",),
+    "short_interest": ("Symbol", "SettlementDate"),
+    "short_volume": ("Symbol", "Date"),
+    "share_float": ("Symbol",),
+    "financials.balance_sheets": ("Cik", "PeriodEnd", "Timeframe"),
+    "financials.income_statements": ("Cik", "PeriodEnd", "Timeframe"),
+    "financials.cash_flow_statements": ("Cik", "PeriodEnd", "Timeframe"),
+    "financials.ratios": ("Symbol", "Date"),
+}
+
+
+@pytest.mark.parametrize(("name", "keys"), list(REPLACE_KEYS.items()))
+def test_replaced_polls_key_one_row_each(name: str, keys: tuple[str, ...]) -> None:
+    assert spec_of(name).poll_mode is dm.PollMode.REPLACE
+    assert spec_of(name).poll_keys == keys
+    assert set(keys) <= set(columns(name))
+
+
 # --- Market data factories ---------------------------------------------------------------------
 
 
@@ -394,6 +418,8 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
         bars("AAPL", "minute")
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         bars("AAPL", adjusted="yes")
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        bars("AAPL", adjusted=None)  # None would otherwise mean a path without `adjusted`
     with pytest.raises(ValueError, match="multiplier"):
         bars("AAPL", dm.Timespan.MINUTE, multiplier=0)
 

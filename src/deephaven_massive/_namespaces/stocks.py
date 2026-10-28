@@ -659,7 +659,8 @@ class _StockFinancials(Namespace):
                 no lower bound.
             end: The last period end date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
@@ -728,7 +729,8 @@ class _StockFinancials(Namespace):
                 no lower bound.
             end: The last period end date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
@@ -796,7 +798,8 @@ class _StockFinancials(Namespace):
                 no lower bound.
             end: The last period end date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
@@ -853,7 +856,8 @@ class _StockFinancials(Namespace):
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
             sort: The field to sort by, such as `"market_cap"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"price_to_earnings_lt": 15}`; checked now.
@@ -979,7 +983,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"cik": "0000320193"}`; checked now.
@@ -1039,7 +1044,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"section": "risk_factors"}`; checked now.
@@ -1098,7 +1104,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"form_type": "8-K/A"}`; checked now.
@@ -1158,7 +1165,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"tertiary_category": "Dividends"}`; checked now.
@@ -1217,7 +1225,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"cik": "0000320193"}`; checked now.
@@ -1277,7 +1286,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores; checked now.
@@ -1344,7 +1354,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores; checked now.
@@ -1412,7 +1423,8 @@ class _StockFilings(Namespace):
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"transaction_code": "P"}`; checked now.
@@ -1467,7 +1479,8 @@ class _StockFilings(Namespace):
         Args:
             sort: The field to sort by, such as `"primary_category"`; None for the server
                 default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"primary_category": "Financial"}`; checked now.
@@ -1516,7 +1529,8 @@ class _StockFilings(Namespace):
         Args:
             sort: The field to sort by, such as `"primary_category"`; None for the server
                 default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"taxonomy": "1.0"}`; checked now.
@@ -2041,7 +2055,8 @@ class _Stocks(Namespace):
             end: The last ex-dividend date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"ex_dividend_date"`; None for the server
                 default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"distribution_type": "special"}`; checked now.
@@ -2101,7 +2116,8 @@ class _Stocks(Namespace):
             end: The last execution date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"execution_date"`; None for the server
                 default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"adjustment_type": "reverse_split"}`; checked now.
@@ -2162,7 +2178,8 @@ class _Stocks(Namespace):
             start: The first listing date to include, inclusive; None for no lower bound.
             end: The last listing date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"listing_date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"ipo_status": "pending"}`; checked now.
@@ -2223,7 +2240,8 @@ class _Stocks(Namespace):
             end: The last settlement date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"settlement_date"`; None for the server
                 default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"days_to_cover_gte": 5}`; checked now.
@@ -2283,7 +2301,8 @@ class _Stocks(Namespace):
             start: The first trading day to include, inclusive; None for no lower bound.
             end: The last trading day to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"date"`; None for the server default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"short_volume_ratio_gte": 50}`; checked now.
@@ -2339,7 +2358,8 @@ class _Stocks(Namespace):
                 re-read each `poll()` cycle); None for every ticker.
             sort: The field to sort by, such as `"free_float_percent"`; None for the server
                 default.
-            order: The sort direction, or None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"free_float_percent_lt": 20}`; checked now.
