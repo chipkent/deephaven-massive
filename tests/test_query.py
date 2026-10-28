@@ -1,4 +1,4 @@
-"""Tests for the query classes and the verbs' synchronous validation."""
+"""Tests for the query classes, the verbs' synchronous validation, and their columns' order."""
 
 import logging
 import threading
@@ -10,6 +10,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
+from deephaven.dherror import DHError
 from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
@@ -17,7 +18,7 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _errors
+from deephaven_massive import _errors, _session
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
@@ -25,6 +26,7 @@ from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
+from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import (
@@ -37,6 +39,9 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._tables.liveness import entered, new_scope
+from deephaven_massive._types import override
+from tests._fakes.clock import FakeClock
+from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0
 
@@ -880,3 +885,136 @@ def test_ring_accepts_its_lower_bound(
     result = trades(massive_session).ring(1)
     assert result.is_refreshing
     massive_session.release(result)
+
+
+# --- column order: every dataset, every verb -------------------------------------------------
+
+
+class EmptyTransport(Recorder):
+    # Stands in for the REST and flat-file transports of every dataset at once. `fetch()` and
+    # `history()` get an empty table in the dataset's schema, as `Recorder` gives; `poll()`
+    # opens a real poll table (its publisher and `last_by` shaping) whose cycles return no rows,
+    # so the result's columns come from the same code as a real poll's.
+    def __init__(self, session: dm.MassiveSession) -> None:
+        super().__init__(session._core.catalog)
+        self._core = session._core
+        self.pollers = poll.Pollers(session._core.label)
+        self._clock = FakeClock(manual=True)  # one cycle per table, then a wait never ended
+
+    @override
+    def poll(
+        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
+    ) -> Table:
+        empty = self._catalog.dataset_schema(spec).arrow_schema().empty_table()
+        return poll.open_poll(
+            self._core,
+            spec=spec,
+            request=request,
+            interval=interval,
+            mode=mode,
+            read=lambda **_: (empty, 0),
+            pollers=self.pollers,
+            host="api.massive.com",
+            path=spec.fetch_path or "",
+            clock=self._clock,
+        )
+
+
+@pytest.fixture
+def faked_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
+    # A session whose three transports are fakes: `EmptyTransport` for REST and flat files,
+    # which the S3 keys make a possible `history()` source, and the fake stream factory.
+    unused = "never-sent"  # no request is made: the flat-file transport is the fake
+    session = dm.MassiveSession(
+        dm.MassiveConfig(api_key="test-key", s3_access_key_id="id", s3_secret_access_key=unused)
+    )
+    transport = EmptyTransport(session)
+    streams = FakeStreamTransport(session._core)
+    monkeypatch.setattr(session._core, "rest_transport", lambda: transport)
+    monkeypatch.setattr(session._core, "flat_file_transport", lambda: transport)
+    monkeypatch.setattr(session._core, "stream_transport", lambda: streams)
+    yield session
+    transport.pollers.close()
+    session.close()
+
+
+# A valid symbol of each asset class, for the symbols every query below names; a dataset
+# without a class reads it as a stock ticker, and one without instruments ignores it.
+SAMPLE_SYMBOLS = {
+    AssetClass.STOCKS: "AAPL",
+    AssetClass.OPTIONS: "O:AAPL250117C00150000",
+    AssetClass.FUTURES: "ESZ5",
+    AssetClass.INDICES: "I:SPX",
+    AssetClass.FOREX: "C:EURUSD",
+    AssetClass.CRYPTO: "X:BTCUSD",
+    None: "AAPL",
+}
+
+
+def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[QueryBase]:
+    # One query per query class the dataset's calls can make, each with a symbol list and with
+    # a reactive symbol table (which changes the shape of `last_by()`): a bars dataset gets
+    # them for every timespan it accepts (the timespan picks the class), any other dataset once.
+    symbol = SAMPLE_SYMBOLS[spec.asset_class]
+    refused = Timespan.DAY if spec.asset_class is AssetClass.FUTURES else Timespan.SESSION
+    spans = [span for span in Timespan if span is not refused] if spec.is_bars else [None]
+    for symbols in ((symbol,), new_table([string_col("Symbol", [symbol])])):
+        for span in spans:
+            yield make(session, spec, symbols=symbols, timespan=span)
+
+
+def keyed_on_every_column(spec: DatasetSpec, columns: Sequence[str]) -> bool:
+    # An `UPSERT` poll of such a dataset fails: its `last_by` has no column left to aggregate
+    # (see the expected failure below), so it has no column order to check.
+    return set(spec.poll_keys) >= set(columns)
+
+
+def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
+    # Every result shape the query's verbs make, labelled by the call. The last column is a
+    # `last_by` key that the aggregation itself would move to the front.
+    if isinstance(query, StreamQuery):
+        yield "blink()", query.blink()
+        yield "append_only()", query.append_only()
+        yield "ring(5)", query.ring(5)
+        yield "last_by()", query.last_by()
+        yield f"last_by({columns[-1]!r})", query.last_by(columns[-1])
+    if isinstance(query, Query | StreamHistoryLatestQuery | HistoryLatestQuery):
+        yield "fetch()", query.fetch()
+    if isinstance(query, Query):
+        for mode in PollMode:
+            if mode is not PollMode.UPSERT or not keyed_on_every_column(query._spec, columns):
+                yield f"poll(mode={mode.name})", query.poll(60, mode=mode)
+    if isinstance(query, HistoryQuery):
+        yield "history()", query.history("2025-03-03", "2025-03-04")
+
+
+@pytest.mark.parametrize("name", list(_session.CATALOG.by_name))
+def test_every_verb_returns_the_columns_in_the_order_columns_lists(
+    faked_session: dm.MassiveSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    name: str,
+) -> None:
+    calls = []
+    for query in every_query(faked_session, _session.CATALOG.by_name[name]):
+        listed = [row["Name"] for row in dh_to_pylist(query.columns())]
+        for call, result in verb_results(query, listed):
+            calls.append(call)
+            assert result.column_names == listed, f"{type(query).__name__}.{call}"
+            if result.is_refreshing:
+                faked_session.release(result)
+    assert calls  # every dataset has a verb
+
+
+@pytest.mark.xfail(
+    raises=DHError,
+    strict=True,
+    reason="the last_by of an UPSERT poll keyed on every column has nothing to aggregate",
+)
+def test_an_upsert_poll_keyed_on_every_column(faked_session: dm.MassiveSession) -> None:
+    spec = _session.CATALOG.by_name["reference.related_companies"]
+    columns = _session.CATALOG.dataset_schema(spec).column_names
+    assert keyed_on_every_column(spec, columns)
+    query = next(every_query(faked_session, spec))
+    assert isinstance(query, Query)
+    result = query.poll(60, mode=PollMode.UPSERT)
+    assert result.column_names == list(columns)

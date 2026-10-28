@@ -2,9 +2,9 @@
 
 The description tests build every result shape directly in the embedded JVM (a static table,
 a publisher's blink table, and its append-only, ring, and `last_by` tables) and check that
-`describe` gives each one the schema's descriptions without changing what it is: the copy
-ticks with its parent, keeps the blink attribute, and keeps its parent, and so the stream's
-`on_shutdown_callback`, alive exactly as long as it lives.
+`describe` gives each one the schema's descriptions and column order without changing what it
+is: the copy ticks with its parent, keeps the blink attribute, and keeps its parent, and so the
+stream's `on_shutdown_callback`, alive exactly as long as it lives.
 """
 
 import threading
@@ -124,9 +124,10 @@ def wait_for(condition: Callable[[], bool]) -> bool:
 
 
 def test_a_static_table_is_described(dh_exec_ctx: ExecutionContext) -> None:
-    parent = rows("AAPL", "MSFT")
+    parent = rows("AAPL", "MSFT").move_columns_up(["Note"])
     result = describe(parent, SPEC, SCHEMA)
     assert_described(result)
+    assert result.column_names == list(SCHEMA.column_names)  # back in schema order
     assert result.j_table is not parent.j_table
     assert "TableDescription" not in parent.attributes()  # the parent is unchanged
     assert not result.is_refreshing
@@ -151,6 +152,7 @@ SHAPES: dict[str, Callable[[Table], Table]] = {
     "append_only": blink_to_append_only,
     "ring": lambda blink: ring_table(blink, 10),
     "last_by": lambda blink: blink.last_by("Symbol"),
+    "last_by_price": lambda blink: blink.last_by("Price"),  # puts Price first
     "last_by_where_in": lambda blink: blink.last_by("Symbol").where_in(rows("AAPL"), "Symbol"),
 }
 
@@ -168,10 +170,13 @@ def test_every_live_shape_is_described_and_ticks(
         # A blink table empties every cycle; an append-only view of it shows what arrived.
         seen = blink_to_append_only(result) if shape == "blink" else result
     assert_described(result)
+    assert result.column_names == list(SCHEMA.column_names)
     assert result.is_refreshing
     assert result.is_blink == (shape == "blink")
     stream.publisher.add(rows("AAPL", "MSFT"))
-    expected = ["AAPL"] if shape == "last_by_where_in" else ["AAPL", "MSFT"]
+    # Every row has the same price, so the `last_by` on it keeps only the last row, MSFT.
+    only = {"last_by_where_in": ["AAPL"], "last_by_price": ["MSFT"]}
+    expected = only.get(shape, ["AAPL", "MSFT"])
     rows_when(seen, lambda arrived: sorted(row["Symbol"] for row in arrived) == expected)
     scope.release()
     stream.scope.release()
@@ -248,7 +253,7 @@ def test_a_description_of_a_missing_column_fails(dh_exec_ctx: ExecutionContext) 
     lacking = new_table([string_col("Symbol", ["AAPL"])])  # no Price column
     with pytest.raises(
         RuntimeError,
-        match=r"^describing a stocks\.trades result failed: .*Unknown column names \[Price\]",
+        match=r"^describing a stocks\.trades result failed: .*Column\(s\) not found: Price, Note",
     ) as raised:
         describe(lacking, SPEC, SCHEMA)
     assert type(raised.value.__cause__) is RuntimeError  # jpy's form of the Java exception

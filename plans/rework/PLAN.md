@@ -2471,7 +2471,7 @@ uv run pytest tests/test_readme.py tests/datasets/test_catalog.py -q
 
 | | |
 |---|---|
-| **Branch** | `test/live-integration` |
+| **Branch** | `test/live-integration-suite` |
 | **Base** | `origin/main` after `git fetch` |
 | **Issue** | #26 |
 
@@ -2483,11 +2483,21 @@ column).
 
 **Depends on.** Every dataset planned PR. **Parallel with.** finish-rework.
 
-**Files.** Create `tests/ingest/test_hosts_integration.py`, `tests/ingest/test_ws_integration.py`,
-`tests/datasets/test_timestamps_integration.py`, `tests/ingest/test_flatfiles_integration.py`,
-`tests/namespaces/test_stocks_integration.py`. Modify `pyproject.toml` (the `integration`
-marker), `tests/conftest.py`, `.github/workflows/ci.yml`, `tests/data/datasets/symbols/crypto_tickers.csv`
-(regenerated from the live reference endpoint, with its date in the PR).
+**Files.** Create one `test_<name>_integration.py` beside each mirrored unit test whose module
+a row concerns: `tests/namespaces/test_{crypto,forex,stocks,indices,options,futures,reference}_integration.py`,
+`tests/datasets/test_timestamps_integration.py`,
+`tests/ingest/test_{hosts,ws,flatfiles}_integration.py`, `tests/massive/ws/test_client_integration.py`
+(raw frames and statuses), `tests/massive/rest/test_client_integration.py` (the rate limit), and
+`tests/massive/flatfiles/test_client_integration.py` (publication times, missing keys). Create
+`docs/live-tests.md`, the runbook; each test's docstring says what its evidence means, and a
+comment on issue #26 holds the one-time outcome tables. Create `tests/datasets/test_catalog_integration.py`, the smoke tier (every dataset and verb
+once). Modify `pyproject.toml` (the `integration`, `integration_limits`, `integration_smoke`,
+`needs`, `settles`, and `requests` markers, `integration` deselected in `addopts`),
+`tests/conftest.py` (the marker checks, the key and CI skip, live fixtures, the evidence log),
+`tests/test_layout.py` (the `addopts` exclusion and the marker check's order are pinned),
+`README.md` and `AGENTS.md` (how to run), `.gitignore` (the run logs). CI needs no change:
+`addopts` deselects the live tests. `tests/data/datasets/symbols/crypto_tickers.csv` is
+regenerated from the live reference endpoint after the owner's run, not here.
 
 **Tasks.**
 - [ ] One test per DESIGN § 23 row, printing the evidence it observed; at most one symbol per
@@ -2499,7 +2509,7 @@ marker), `tests/conftest.py`, `.github/workflows/ci.yml`, `tests/data/datasets/s
 **Verification.**
 ```bash
 ./scripts/check.sh
-MASSIVE_API_KEY=… uv run pytest -m integration -q    # owner only
+MASSIVE_API_KEY=… uv run pytest -m integration 2>&1 | tee live-checks.log   # owner only
 ```
 
 **Pitfalls.** These tests are evidence, never design input; never probe an unsupported endpoint.
