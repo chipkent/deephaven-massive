@@ -301,10 +301,9 @@ def test_every_dataset_and_verb_returns_its_columns(
     """One dataset's verb, called once, works and returns exactly the dataset's columns.
 
     Reading it needs nobody: a pass means the call succeeded (an empty result included) with
-    exactly the dataset's columns, in order (a keyed `poll()` table that puts its keys first
-    is an expected failure until the library's fix lands); "not entitled: needs <plan>" is a
-    skip; anything else fails. A history the request cannot be served without S3 credentials
-    skips, naming them.
+    exactly the dataset's columns, in the order `columns()` lists them; "not entitled: needs
+    <plan>" is a skip; anything else fails. A history the request cannot be served without S3
+    credentials skips, naming them.
 
     Raises:
         ValueError: When a verb refuses its arguments for any reason but missing S3
@@ -347,9 +346,4 @@ def test_every_dataset_and_verb_returns_its_columns(
         assert not failed, f"{name} {verb} failed: {failed[0]['Error']}"
     columns = list(table.column_names)
     evidence(f"{name} {verb}: {table.size} rows; columns {columns}")
-    if verb == "poll" and columns != expected and sorted(columns) == sorted(expected):
-        pytest.xfail(
-            "a keyed poll() table puts its poll keys first, against columns()'s order; "
-            "the library fix that keeps the dataset's order is pending"
-        )
     assert columns == expected
