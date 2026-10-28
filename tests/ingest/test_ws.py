@@ -1109,8 +1109,9 @@ def test_a_rejected_row_nobody_receives_fails_nothing(
 
 def test_last_message_rows_are_throttled(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     result = harness.query(TRADES, ["AAPL"]).blink()
-    harness.subscribed("T.AAPL")
+    harness.wait(lambda h: any(s.message == "subscribed to: T.AAPL" for s in h.statuses))
     connection = harness.connection()
+    harness.on_loop(connection, lambda: None)  # the acknowledgement's row write runs first
     written: list[int] = []
     monkeypatch.setattr(connection, "_write_row", lambda: written.append(1))
     harness.send(trade("AAPL"))
