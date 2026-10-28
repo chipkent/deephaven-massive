@@ -231,7 +231,8 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
   interpreter shutdown after the JVM has run can segfault (exit code 139). On every platform,
   pytest's faulthandler plugin removes the JVM's signal handlers in its `pytest_unconfigure`,
   and the JVM's next deliberate SIGSEGV then kills the process silently. The block exits with
-  pytest's own status from the first `pytest_unconfigure`, before either can happen.
+  pytest's own status from the first `pytest_unconfigure`, before either can happen, unless an
+  exception that pytest has yet to report is in flight.
 - Get the context, conversion helpers, and fakes from fixtures (`dh_exec_ctx`, `dh_to_pylist`,
   `load_fixture`, `make_csv_gz`), never by importing `conftest.py`.
 - To delete rows from a keyed `input_table`, pass a static key table, never a live view derived

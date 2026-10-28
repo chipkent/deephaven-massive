@@ -95,10 +95,10 @@ def pytest_configure(config: pytest.Config) -> None:
 # pytest-cov has applied `fail_under` to the exit status), the first `pytest_unconfigure`
 # implementation, this one, flushes stdio and leaves through `os._exit` with pytest's own exit
 # status, so the JVM's handlers are never removed and the finalizers never run. If pytest
-# unconfigures without a session (`pytest --help`, or a usage error), the `atexit` handler does
-# the same at interpreter exit; `atexit` handlers run last-in, first-out, so this one,
-# registered after the server's, runs first. Do not remove either exit without reproducing
-# both crashes.
+# unconfigures without a session (`pytest --help`), or while an exception is leaving pytest
+# that pytest has yet to report, the `atexit` handler does the same at interpreter exit.
+# `atexit` handlers run last-in, first-out, so this one, registered after the server's, runs
+# first. Do not remove either exit without reproducing both crashes.
 
 _SESSIONS: list[pytest.Session] = []
 
@@ -117,14 +117,26 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     """Exit with the session's status before pytest's faulthandler removes the JVM's handlers.
 
     Runs before every other `pytest_unconfigure` implementation, so the remaining ones (the
-    faulthandler plugin's among them) and interpreter shutdown never run. Without a session it
-    returns, and the `atexit` handler exits later.
+    faulthandler plugin's among them) and interpreter shutdown never run.
+
+    It returns instead, and the `atexit` handler exits later, in two cases. Without a session
+    there is no status to exit with. While an exception is leaving pytest (a usage error such
+    as a missing test path, or an error in a `pytest_sessionfinish` hook), pytest reports it
+    only after unconfiguring, so exiting here would hide it. A usage error has already set the
+    session's status to 4; any other exception sets it to `INTERNAL_ERROR` if it is still
+    `OK`, so the later exit never reports success.
 
     Args:
         config: The pytest configuration (unused; required by the hook signature).
     """
-    if _SESSIONS:
-        _final_jvm_exit()
+    if not _SESSIONS:
+        return
+    if sys.exception() is not None:
+        session = _SESSIONS[-1]
+        if session.exitstatus == pytest.ExitCode.OK:
+            session.exitstatus = pytest.ExitCode.INTERNAL_ERROR
+        return
+    _final_jvm_exit()
 
 
 def _final_jvm_exit() -> None:
