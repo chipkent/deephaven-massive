@@ -810,8 +810,9 @@ request per cycle.
 every `stocks.filings.*` but the two taxonomies, and `partners.benzinga.news`;
 `PollMode.UPSERT` for `stocks.ipos`, whose records are revised in place as an offering moves
 through its statuses (keyed by `Symbol` and `IssuerName`, both required and fixed for the life
-of an offering, so a ticker two issuers used stays two rows); `PollMode.REPLACE` otherwise, the two filing taxonomies included (a
-taxonomy is a reference list revised in place, not a feed of new rows).
+of an offering, so a ticker two issuers used stays two rows); `PollMode.REPLACE` otherwise, the
+two filing taxonomies included (a taxonomy is a reference list revised in place, not a feed of
+new rows).
 
 - `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
   deleted, also when the cycle is empty.
@@ -847,8 +848,8 @@ taxonomy is a reference list revised in place, not a feed of new rows).
   is empty for common stock; the Form 3 and Form 4 exercise price and dates are set only for
   derivatives, and their `NatureOfOwnership` only for indirect ownership; a Form 4 holding
   record has no transaction columns, and Form 4 lets a filer report the value owned after a
-  transaction instead of `SharesOwnedFollowingTransaction`; no futures key is nullable, since no vendor description or
-  fixture leaves one empty). A null there is a value. The catalog gate requires at
+  transaction instead of `SharesOwnedFollowingTransaction`; no futures key is nullable, since
+  no vendor description or fixture leaves one empty). A null there is a value. The catalog gate requires at
   least one poll-key column outside that map, so no row is identified by nulls alone.
 - A null value in any other `poll_keys` column, or a NaN in a float one, fails the table in
   every mode, as a missing required key does: it would otherwise merge unrelated rows into one
@@ -2268,10 +2269,10 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
   (250 on the unified snapshot, the indices snapshot, and the stocks, forex, and crypto
-  snapshots), the transport splits the symbol
-  list into batches of at most that size, issues them in order, and concatenates the rows;
-  None sends every symbol in one request. A projected
-  `fetch()` (`indices.values`) batches the same way, so it is not one request per symbol.
+  snapshots), the transport splits the symbol list into batches of at most that size, issues
+  them in order, and concatenates the rows; None sends every symbol in one request. A
+  projected `fetch()` (`indices.values`) batches the same way, so it is not one request per
+  symbol.
 - **A path per symbol class.** `DatasetSpec.fetch_paths_by_class: Mapping[AssetClass, str]`
   (empty by default) names the fetch path that serves symbols of one class, for a dataset that
   spans classes whose vendor templates differ (the indicators:
@@ -3576,8 +3577,8 @@ per source in a
   Massive documents as present only "if available" or marks optional, such as the `ticker` of
   the stocks `filings.index`, the TMX corporate events, and the Benzinga `analyst_insights`,
   `ratings`, `bulls_bears_say`, `guidance`, and `earnings` (whose only documented
-  analyst-insights row has no `ticker`): a row without it keeps a null `Symbol` instead of failing the request
-  as a missing required key. Only a `symbol` key read from a REST path's rows may set it
+  analyst-insights row has no `ticker`): a row without it keeps a null `Symbol` instead of
+  failing the request as a missing required key. Only a `symbol` key read from a REST path's rows may set it
   False; flat files and streams filter and route rows by symbol, and the `time`, `fanout`,
   and `session` keys are always required. A dataset with an optional symbol key cannot put
   `Symbol` in its `poll_keys`, whatever its mode (`DatasetSpec` refuses it): a row without a

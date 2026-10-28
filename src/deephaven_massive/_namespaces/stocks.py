@@ -463,7 +463,8 @@ TEXT_8K: Final = _filing(
     "text_8k",
     _TEXT_8K,
     symbol_param="ticker.any_of",
-    # A joint 8-K of several co-registrants comes once under each filer's CIK.
+    # A joint 8-K of several co-registrants can come once under each filer's CIK, as the
+    # index lists it.
     poll_keys=("Cik", "AccessionNumber"),
     page_size=100,
     summary="The item text of 8-K current reports, one row per filing and filer.",
@@ -1165,8 +1166,8 @@ class _StockFilings(Namespace):
         """The item text of 8-K current reports, one row per filing and filer.
 
         Each row holds the text of the items a company reported on an 8-K (or an amendment), with
-        its ticker, CIK, form type, and filing date. A joint 8-K of several co-registrants has a
-        row under each filer's CIK. Served by REST (`/stocks/filings/8-K/vX/text`) through
+        its ticker, CIK, form type, and filing date. A joint 8-K of several co-registrants can have
+        a row under each filer's CIK. Served by REST (`/stocks/filings/8-K/vX/text`) through
         `fetch()` and `poll()`. By default `poll()` appends only the rows it has not seen before,
         telling rows apart by `Cik` and `AccessionNumber`, so every filer's row is kept. A
         filing whose company has no ticker keeps a null `Symbol`.
