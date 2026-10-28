@@ -270,7 +270,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     query = ref.news(
         symbols="AAPL",
-        start=date(2025, 6, 1),
+        start=datetime(2025, 6, 1, tzinfo=UTC),
         end=datetime(2025, 6, 2, 12, tzinfo=UTC),
         sort="published_utc",
         order=dm.Order.ASC,
@@ -279,7 +279,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
     assert query._spec is reference.NEWS
     assert query._request == Request(
         symbols=("AAPL",),
-        start=date(2025, 6, 1),
+        start=datetime(2025, 6, 1, tzinfo=UTC),
         end=datetime(2025, 6, 2, 12, tzinfo=UTC),
         params=(("order", dm.Order.ASC), ("sort", "published_utc")),
         limit=50,

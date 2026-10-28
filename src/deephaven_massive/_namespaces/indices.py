@@ -254,7 +254,9 @@ class _Indices(Namespace):
         `history()` reads the range aggregates endpoint
         (`/v2/aggs/ticker/{indicesTicker}/range/...`, one request series per index) or, for
         1-minute and 1-day bars, the `us_indices/minute_aggs_v1` and `us_indices/day_aggs_v1`
-        flat files. There is no `limit`; the library pages internally.
+        flat files. There is no `limit`; the library pages internally. `history()` returns
+        only the bars whose whole window lies inside the range and has ended, so the current
+        day's bar never appears.
 
         `dm.ALL` is accepted by the stream verbs and by `history()` from flat files (1-minute
         and 1-day bars). `history()` over REST and `fetch()` take one index per request, so

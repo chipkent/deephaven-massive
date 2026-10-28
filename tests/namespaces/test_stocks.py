@@ -527,7 +527,7 @@ def test_start_and_end_bound_the_date_axis(
     make = factory(massive_session, name)
     query = make(start="2024-01-01", end=date(2024, 3, 31))
     assert (query._request.start, query._request.end) == (date(2024, 1, 1), date(2024, 3, 31))
-    with pytest.raises(ValueError, match="before"):
+    with pytest.raises(ValueError, match="must not be after end"):
         make(start="2024-03-31", end="2024-01-01")
     with pytest.raises(ValueError, match="through start= and end="):
         make(filters={f"{axis[0]}_gte": "2024-01-01"})

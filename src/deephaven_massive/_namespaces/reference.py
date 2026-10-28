@@ -504,8 +504,9 @@ class _Reference(Namespace):
                 sequence; None for every article.
             start: The earliest publication: a date is its 00:00 in New York, a `datetime`
                 is used as is; None for no lower bound, which reads the whole archive.
-            end: The end of the range: a date includes that whole day, a `datetime` is
-                exclusive; None for no upper bound.
+            end: The end of the range, of the same kind as `start` (mixing a date with a
+                `datetime` raises `ValueError`): a date includes that whole day, a
+                `datetime` is exclusive; None for no upper bound.
             sort: The field to sort by (`"published_utc"`); None for the endpoint's default.
             order: The sort direction; None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The

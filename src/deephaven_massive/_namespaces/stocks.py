@@ -1789,9 +1789,11 @@ class _Stocks(Namespace):
         `us_stocks_sip/day_aggs_v1`); with `dm.ALL`, one-day REST history reads the grouped
         daily bars (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), one request per day.
 
-        `history()` has no `limit`: it pages internally. `dm.ALL` streams every ticker and
-        works with `history()` where a flat file or the grouped daily path serves it;
-        `fetch()` refuses it. Columns:
+        `history()` has no `limit`: it pages internally. It returns only the bars whose whole
+        window lies inside the range and has ended: a week runs Monday to Friday and a month
+        from its first to its last weekday, so the current day's, week's, or month's bar never
+        appears. `dm.ALL` streams every ticker and works with `history()` where a flat file or
+        the grouped daily path serves it; `fetch()` refuses it. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#bars,
         the web UI's column tooltips, or `columns()`.
 

@@ -242,8 +242,10 @@ class _Indicators(Namespace):
                 None sets no lower bound: every value back to the start of the series,
                 read page by page, so pass `start`, or `limit` with the default newest-first
                 order, to bound it.
-            end: The end of the range: a date includes that whole day in the same zone,
-                a `datetime` is exclusive; None for the latest.
+            end: The end of the range, of the same kind as `start` (a date with a date, a
+                `datetime` with a `datetime`; mixing them raises `ValueError`): a date
+                includes that whole day in the same zone, a `datetime` is exclusive; None
+                for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -309,8 +311,10 @@ class _Indicators(Namespace):
                 None sets no lower bound: every value back to the start of the series,
                 read page by page, so pass `start`, or `limit` with the default newest-first
                 order, to bound it.
-            end: The end of the range: a date includes that whole day in the same zone,
-                a `datetime` is exclusive; None for the latest.
+            end: The end of the range, of the same kind as `start` (a date with a date, a
+                `datetime` with a `datetime`; mixing them raises `ValueError`): a date
+                includes that whole day in the same zone, a `datetime` is exclusive; None
+                for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -376,8 +380,10 @@ class _Indicators(Namespace):
                 None sets no lower bound: every value back to the start of the series,
                 read page by page, so pass `start`, or `limit` with the default newest-first
                 order, to bound it.
-            end: The end of the range: a date includes that whole day in the same zone,
-                a `datetime` is exclusive; None for the latest.
+            end: The end of the range, of the same kind as `start` (a date with a date, a
+                `datetime` with a `datetime`; mixing them raises `ValueError`): a date
+                includes that whole day in the same zone, a `datetime` is exclusive; None
+                for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
@@ -448,8 +454,10 @@ class _Indicators(Namespace):
                 None sets no lower bound: every value back to the start of the series,
                 read page by page, so pass `start`, or `limit` with the default newest-first
                 order, to bound it.
-            end: The end of the range: a date includes that whole day in the same zone,
-                a `datetime` is exclusive; None for the latest.
+            end: The end of the range, of the same kind as `start` (a date with a date, a
+                `datetime` with a `datetime`; mixing them raises `ValueError`): a date
+                includes that whole day in the same zone, a `datetime` is exclusive; None
+                for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
             limit: The maximum total number of rows across pages; None for every row. The
