@@ -379,6 +379,8 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
             if p.get("base_currency_symbol") and p.get("currency_symbol")
         }
     )[:1000]
+    if len(topics) < 1000:
+        pytest.skip(f"only {len(topics)} crypto pairs listed; the frame would hold under 1,000")
     made = probe("crypto", _STATUSES)
     made.send("subscribe", topics)
     records = made.wait(lambda r: r.answered(topics), _WAIT)
@@ -416,6 +418,8 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
     ).rows
     tickers = [str(row["ticker"]) for row in contracts][:501]
     topics = [f"T.{t}" for t in tickers] + [f"Q.{t}" for t in tickers]
+    if len(topics) <= 1000:
+        pytest.skip(f"only {len(topics)} topics: the cap of 1,000 would not be exceeded")
     made = probe("options", _STATUSES)
     made.send("subscribe", topics)
     records = made.wait(lambda r: r.answered(topics), 30.0)

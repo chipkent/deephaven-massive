@@ -115,6 +115,10 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
     first = live_session.crypto.trades("X:BTCUSD").append_only()
     first_rows = wait_rows(live_session, first, time.monotonic() + _FIRST_WAIT)
     evidence(f"first session: {len(first_rows)} trades before the second connects")
+    if not first_rows:
+        for line in stream_report(live_session):
+            evidence(line)
+        pytest.skip("the first session received no trade, so it may hold no slot to compete for")
     second_session = dm.MassiveSession(live_config)
     try:
         second = second_session.crypto.trades("X:BTCUSD").append_only()

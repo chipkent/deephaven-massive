@@ -75,20 +75,23 @@ def _stream_evidence(
     wait_rows: WaitRows,
     report: Report,
     evidence: Evidence,
-) -> list[dict[str, Any]]:
+    table_rows: TableRows,
+) -> tuple[list[dict[str, Any]], str | None]:
     """Wait for a stream's first rows, record the diagnostics, then release the stream.
 
     The diagnostics are read before the release, which the session carries out on another
     thread, so they show the stream's acknowledgement and error as they were.
 
     Returns:
-        The rows received before the wait ended.
+        The rows received before the wait ended, and the error of a stream that failed (None
+        when none did).
     """
     rows = wait_rows(session, table, time.monotonic() + _STREAM_WAIT)
     for line in report(session):
         evidence(line)
+    failed = [r["Error"] for r in table_rows(session.streams()) if r["State"] == "FAILED"]
     session.release(table)
-    return rows
+    return rows, (str(failed[0]) if failed else None)
 
 
 @pytest.mark.needs("stocks:advanced")
@@ -101,6 +104,7 @@ def test_luld_frames_convert_to_a_current_instant(
     stream_report: Report,
     instant_text: Text,
     evidence: Evidence,
+    table_rows: TableRows,
 ) -> None:
     """Whether a WebSocket `LULD` frame's `t` converts to the current instant.
 
@@ -108,12 +112,20 @@ def test_luld_frames_convert_to_a_current_instant(
     nanoseconds and fails loudly (a failed stream) on a mismatch. Run this test in the first
     minutes after the 09:30 New York open, when bands are published for every symbol; later,
     one symbol's bands change only on a large move. Reading it: an instant within a day of now
-    confirms nanoseconds; a failed stream naming the bound means milliseconds.
+    confirms nanoseconds; a failed stream naming the bound means milliseconds (the test then
+    fails, quoting the error).
     """
     table = live_session.stocks.luld(_SYMBOL).append_only()
-    rows = _stream_evidence(
-        live_session, table, wait_rows=wait_rows, report=stream_report, evidence=evidence
+    rows, failure = _stream_evidence(
+        live_session,
+        table,
+        wait_rows=wait_rows,
+        report=stream_report,
+        evidence=evidence,
+        table_rows=table_rows,
     )
+    if failure is not None:
+        pytest.fail(f"the LULD stream failed (a unit mismatch fails its bound check): {failure}")
     now = time.time_ns()
     for row in rows[:3]:
         stamp = int(row["Timestamp"])

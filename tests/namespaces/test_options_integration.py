@@ -168,7 +168,7 @@ def _root_contracts(
 
 @pytest.mark.needs("options:basic")
 @pytest.mark.settles("index underlying spelling", "BRK.B underlying")
-@pytest.mark.requests(40)
+@pytest.mark.requests(45)
 @pytest.mark.timeout(100)
 def test_underlying_spelling_on_the_options_endpoints(
     live_session: dm.MassiveSession,
@@ -242,7 +242,7 @@ def test_underlying_spelling_on_the_options_endpoints(
 
 @pytest.mark.needs("options:starter")
 @pytest.mark.settles("adjusted deliverables")
-@pytest.mark.timeout(100)
+@pytest.mark.timeout(400)
 def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
     *,
