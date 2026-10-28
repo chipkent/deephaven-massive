@@ -710,6 +710,7 @@ def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
     assert started.wait(TIMEOUT)  # the writer is pulling; the marker is taken
     for _ in range(50):
         diagnostics.rate_limits_changed()  # one marker queued, the rest dropped
+    assert diagnostics._writer._queue.qsize() == 1  # the queue stays bounded
     go.set()
     assert diagnostics.barrier().wait(TIMEOUT)
     assert source.pulls == 2

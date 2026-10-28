@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -2189,3 +2189,55 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
         "per minute, so a cycle takes at least 36 s, longer than the 30 s interval; cycles run "
         "late"
     ) in caplog.messages
+
+
+def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
+    session: dm.MassiveSession,
+) -> None:
+    # The first call only fails because the second one's failure cancelled its wait.
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    stop = _massive.Cancel()
+
+    def run(call: rest.Call) -> NoReturn:
+        if call.symbol == "A":
+            assert stop.wait(10)
+            raise dm.MassiveError("cancelled")
+        raise dm.EntitlementError("not entitled")
+
+    calls = [rest.Call({}, {}, "A"), rest.Call({}, {}, "B")]
+    with ThreadPoolExecutor(2) as pool, pytest.raises(dm.EntitlementError):
+        reader._fan_out(run, calls, executor=pool, stop=stop)
+    assert stop.is_set()
+
+
+def test_a_released_poll_stops_waiting_for_a_slot(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FakeClock(manual=True)  # a waiting cycle can only stop through its poller's token
+    create = functools.partial(_massive.RequestGovernor, rate_limits.BUCKETS, clock=clock)
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        rest_basic_subscriptions={dm.Subscription.STOCKS},
+    )
+    m = dm.MassiveSession(config)
+    governor = governor_of(m)
+    for _ in range(5):
+        governor.done(governor.acquire("stocks", _massive.Cancel()), answered=True)
+    q = query(m, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    try:
+        table = q.poll(60)
+        assert clock.wait_for_sleepers(1) == [61.0]  # the first cycle waits for a slot
+        m.release(table)
+        assert clock.wait_for_sleepers(0) == []
+        deadline = time.monotonic() + 10
+        while next(s for s in governor.snapshot() if s.bucket == "stocks").waiting:
+            assert time.monotonic() < deadline, "the cycle still waits for a slot"
+            time.sleep(0.01)
+        assert fake_rest.requests == []
+    finally:
+        m.close()

@@ -560,3 +560,15 @@ def test_16_threads_never_start_more_than_five_requests_in_a_window() -> None:
     assert starts[-1] == 31 * 61.0  # and no slot is wasted
     state = _state(governor)
     assert (state.requests, state.in_flight, state.waiting) == (160, 0, 0)
+
+
+def test_a_counted_refusal_never_shortens_a_pause_a_stale_one_lengthened() -> None:
+    clock = FakeClock()
+    governor = _governor(clock)
+    slow = governor.acquire("stocks", Cancel())  # still in flight through what follows
+    _refuse(governor, governor.acquire("stocks", Cancel()))  # pause until 15
+    current = governor.acquire("stocks", Cancel())  # starts at 15, after the pause
+    _refuse(governor, slow, retry_after=100.0)  # stale: the pause grows to 115
+    _refuse(governor, current)  # the run's second refusal asks for 30 s, to 45: not shorter
+    _requests(governor, "stocks", 1)
+    assert clock.monotonic() == 115.0
