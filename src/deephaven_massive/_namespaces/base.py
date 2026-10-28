@@ -21,8 +21,9 @@ module does the work they share when a dataset method is called:
 
 Filter keys and value kinds are checked against the generated parameters of the dataset's REST
 paths (`Catalog.check_filters` in `_datasets/catalog.py`) synchronously at construction, so a
-bad filter fails before any verb runs. Everything here runs synchronously on the calling
-thread, makes no network call, and creates no table.
+bad filter fails before any verb runs, and the `Request` stores each value as the check parsed
+it (ISO-8601 text of a date parameter becomes a `date`), never the caller's text. Everything
+here runs synchronously on the calling thread, makes no network call, and creates no table.
 """
 
 from __future__ import annotations
@@ -312,7 +313,10 @@ def build_query(
         params: The dataset's other typed parameters by wire name; None values are dropped,
             but every key, set or not, is reserved from `filters` with its suffixed forms.
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
-            as underscores (`Catalog.check_filters`).
+            as underscores. `Catalog.check_filters` validates it and parses each value into
+            the form that is sent (ISO-8601 text of a date or timestamp parameter becomes a
+            `date` or an aware `datetime`, a bare `str` for a list parameter a one-item
+            tuple); the `Request` holds those parsed values.
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
             a positive `int`.
 
@@ -355,6 +359,7 @@ def build_query(
     last = None if end is None else parse_date_like(end, "end")
     if first is not None and last is not None:
         check_order(first, last)
+    given = () if filters is None else _filters(spec, filters, typed=params or {})
     request = Request(
         symbols=normalized,
         timespan=timespan,
@@ -364,8 +369,7 @@ def build_query(
         start=first,
         end=last,
         params=tuple(sorted((k, _value(k, v)) for k, v in (params or {}).items() if v is not None)),
-        filters=() if filters is None else _filters(spec, filters, typed=params or {}),
+        filters=core.catalog.check_filters(spec, dict(given)),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
-    core.catalog.check_filters(spec, dict(request.filters))
     return cls(core, spec, request)

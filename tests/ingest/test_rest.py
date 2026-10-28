@@ -179,6 +179,22 @@ FUTURES_BARS = DatasetSpec(
         )
     },
 )
+CONSTITUENTS_PATH = "/etf-global/v1/constituents"
+CONSTITUENTS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="partners.etf_constituents",
+    fetch_path=CONSTITUENTS_PATH,
+    symbol_param="composite_ticker",
+    keys={(R, CONSTITUENTS_PATH): SourceKeys(symbol=KeySpec("CompositeTicker"))},
+)
+NEWS_PATH = "/v2/reference/news"
+NEWS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="reference.news",
+    fetch_path=NEWS_PATH,
+    time_axis=("published_utc.gte", "published_utc.lt"),
+    keys={(R, NEWS_PATH): SourceKeys()},
+)
 MIXED = DatasetSpec(
     summary="A dataset for the tests.",
     name="stocks.mixed",
@@ -203,6 +219,8 @@ SPECS = (
     TRADES,
     BARS,
     FUTURES_BARS,
+    CONSTITUENTS,
+    NEWS,
 )
 
 AAPL_DIVIDEND = {
@@ -305,6 +323,64 @@ def test_fetch_sends_the_typed_parameters_axis_filters_and_page_size(
         ("AAPL", 0.25, date(2025, 2, 10)),
         ("AAPL", 0.25, date(2025, 2, 10)),
     ]
+
+
+def test_iso_text_in_a_date_filter_is_sent_as_its_date(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(CONSTITUENTS_PATH, Reply(envelope([])))
+    q = query(session, CONSTITUENTS, symbols="SPY", filters={"effective_date": "2025-09-18"})
+    assert q._request.filters == (("effective_date", date(2025, 9, 18)),)
+    assert isinstance(q, Query)
+    q.fetch()
+    ((_, sent_query),) = sent(fake_rest)
+    assert sent_query["effective_date"] == ["2025-09-18"]
+    assert sent_query["composite_ticker"] == ["SPY"]
+
+
+def test_every_filter_kind_reaches_the_wire_as_the_check_parsed_it(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(CONTRACTS_PATH, Reply(envelope([])))
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
+    fetch(
+        session,
+        CONTRACTS,
+        filters={
+            "underlying_ticker": "NVDA",
+            "contract_type": "put",
+            "expiration_date_lte": "2026-01-16",
+            "as_of": "2025-09-18T09:30:00-04:00",
+            "strike_price_gte": 100,
+            "strike_price_lt": 150.5,
+            "expired": False,
+        },
+    )
+    fetch(session, DIVIDENDS, filters={"frequency": 4, "distribution_type_any_of": "special"})
+    (_, contracts), (_, dividends) = sent(fake_rest)
+    assert {key: values for key, values in contracts.items() if key != "limit"} == {
+        "underlying_ticker": ["NVDA"],
+        "contract_type": ["put"],
+        "expiration_date.lte": ["2026-01-16"],
+        "as_of": ["2025-09-18T09:30:00-04:00"],
+        "strike_price.gte": ["100"],
+        "strike_price.lt": ["150.5"],
+        "expired": ["false"],
+    }
+    assert dividends["frequency"] == ["4"]
+    assert dividends["distribution_type.any_of"] == ["special"]  # bare text: a list of one
+
+
+def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(NEWS_PATH, Reply(envelope([])))
+    fetch(session, NEWS, start="2025-06-02", end=date(2025, 6, 2))
+    # `published_utc` is an instant field, so its date-typed filter gets the half-open
+    # instants of the whole day in New York (the zone of a dataset without a class).
+    ((_, sent_query),) = sent(fake_rest)
+    assert sent_query["published_utc.gte"] == ["2025-06-02T00:00:00-04:00"]
+    assert sent_query["published_utc.lt"] == ["2025-06-03T00:00:00-04:00"]
 
 
 def test_a_list_symbol_parameter_without_a_limit_takes_every_symbol_at_once(
@@ -857,9 +933,36 @@ def test_inclusive_millisecond_bounds_move_back_one_unit() -> None:
     assert out["timestamp.lte"] == datetime(2025, 3, 4, 4, 59, 59, 999000, tzinfo=UTC)
 
 
+def test_an_instant_field_behind_a_date_parameter_makes_an_instant_axis() -> None:
+    spec = axis_spec("published_utc.gte", "published_utc.lt", NEWS_PATH)
+    out = axis(spec, date(2025, 3, 3), date(2025, 3, 3))
+    assert out == {
+        "published_utc.gte": datetime(2025, 3, 3, 5, tzinfo=UTC),
+        "published_utc.lt": datetime(2025, 3, 4, 5, tzinfo=UTC),
+    }
+    assert all(type(value) is datetime for value in out.values())
+    # An instant bound is already exact.
+    instant = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
+    assert axis(spec, instant, None) == {"published_utc.gte": instant}
+    # Massive does not document the precision of the ISO-8601 text, so no inclusive bound.
+    inclusive = axis_spec("published_utc.gte", "published_utc.lte", NEWS_PATH)
+    with pytest.raises(ValueError, match=r"published_utc\.lte takes ISO-8601 instants"):
+        axis(inclusive, None, date(2025, 3, 3))
+
+
+def test_a_date_parameter_without_a_field_of_its_name_stays_whole_days() -> None:
+    # The options chain snapshot nests `expiration_date` under `details`.
+    path = "/v3/snapshot/options/{underlyingAsset}"
+    spec = axis_spec("expiration_date.gte", "expiration_date.lte", path)
+    assert axis(spec, date(2025, 3, 3), date(2025, 3, 4)) == {
+        "expiration_date.gte": date(2025, 3, 3),
+        "expiration_date.lte": date(2025, 3, 4),
+    }
+
+
 def test_a_nanosecond_inclusive_bound_is_refused() -> None:
     spec = axis_spec("timestamp.gte", "timestamp.lte")
-    with pytest.raises(ValueError, match=r"timestamp\.lte counts nanoseconds"):
+    with pytest.raises(ValueError, match=r"timestamp\.lte takes nanoseconds"):
         axis(spec, None, date(2025, 3, 3))
 
 
@@ -1204,7 +1307,7 @@ def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
     transport = cast("rest.RestEndpoints", session._core.rest_transport())
     watch = SymbolTable(new_table([string_col("Symbol", ["ESZ5"])]))
     request = Request(symbols=watch, end=date(2025, 3, 4))
-    with pytest.raises(ValueError, match=r"timestamp\.lte counts nanoseconds"):
+    with pytest.raises(ValueError, match=r"timestamp\.lte takes nanoseconds"):
         transport.poll(spec, request, interval=timedelta(seconds=60), mode=PollMode.REPLACE)
     assert fake_rest.requests == []
 

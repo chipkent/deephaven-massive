@@ -11,10 +11,12 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   the bar `multiplier` and `timespan`, and for `history()` from the window (the aggregates'
   `{from}/{to}` dates, the grouped-daily `{date}`). Query parameters are the typed parameters,
   the validated `filters` (each key mapped back to its dotted wire name), the time axis
-  (`DatasetSpec.time_axis`, encoded by its parameter's kind), the symbol parameter
-  (`DatasetSpec.symbol_param`, at most `DatasetSpec.symbols_per_request` symbols a request),
-  `adjusted`
-  (`Request.adjusted`), the futures `resolution`, and the page size (`DatasetSpec.page_size`).
+  (`DatasetSpec.time_axis`: whole days on a calendar-date axis, and on an instant axis,
+  whether its parameter is a timestamp or a date typed over an instant field such as
+  `published_utc`, the instants that start the bounds' days in the dataset's day zone), the
+  symbol parameter (`DatasetSpec.symbol_param`, at most `DatasetSpec.symbols_per_request`
+  symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, and the page
+  size (`DatasetSpec.page_size`).
   `Request.limit` is never sent: it caps the total rows, and the client stops paging there.
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. HTTP 404 for one symbol drops that symbol with
@@ -86,6 +88,7 @@ from deephaven_massive._massive import (
     ParamKind,
     Transport,
     WireError,
+    WireType,
     WireUnit,
     to_batch,
 )
@@ -142,6 +145,9 @@ _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {
 }
 """One step of each timestamp unit a `datetime` can express exactly; nanoseconds cannot be."""
 
+_INSTANT_TYPES: Final = frozenset({WireType.ISO_INSTANT, WireType.EPOCH})
+"""The wire types of a row field that holds an instant rather than a calendar date."""
+
 _RATE_LIMIT_ADVICE: Final = (
     "%s: Massive rate-limited this session's REST requests; Basic keys allow 5 requests per "
     "minute, and a fan-out poll() makes one request per symbol per cycle"
@@ -188,7 +194,10 @@ def _day_start(spec: DatasetSpec, day: date) -> datetime:
 def _instant_bound(
     spec: DatasetSpec, name: str, value: date, *, unit: WireUnit | None, upper: bool
 ) -> datetime:
-    """Return the instant a timestamp parameter of the time axis is sent.
+    """Return the instant a parameter of an instant time axis is sent.
+
+    An instant axis is a timestamp parameter, or a date parameter whose row field is an
+    instant (`_bounds_instants`), such as `published_utc`.
 
     A bound is a `date` (a whole day, inclusive at either end) or an aware `datetime` (the
     first instant included at the lower end, the first excluded at the upper end). A date
@@ -199,7 +208,8 @@ def _instant_bound(
     Args:
         spec: The dataset, for its day rules and messages.
         name: The parameter's wire name, such as `"timestamp.gte"`.
-        unit: The unit the parameter counts in.
+        unit: The unit a timestamp parameter counts in; None for a date parameter, which
+            takes the instant as ISO-8601 text.
         value: The bound.
         upper: True for the upper bound.
 
@@ -207,9 +217,10 @@ def _instant_bound(
         The instant to send.
 
     Raises:
-        ValueError: If a parameter in nanoseconds is a `.gt` or `.lte` bound, which a
-            `datetime` cannot move by one nanosecond exactly; such a dataset declares the
-            `.gte` and `.lt` pair instead.
+        ValueError: If a `.gt` or `.lte` bound has no step a `datetime` can take exactly: a
+            parameter in nanoseconds, or a date parameter that takes the instant as ISO-8601
+            text (`unit` None), whose precision Massive does not document. Such a dataset
+            declares the `.gte` and `.lt` pair instead.
     """
     if isinstance(value, datetime):
         instant = value
@@ -217,17 +228,38 @@ def _instant_bound(
         instant = _day_start(spec, value + _ONE_DAY if upper else value)
     if name.rpartition(".")[2] not in ("gt", "lte"):
         return instant
-    step = _UNIT_STEPS.get(cast("WireUnit", unit))
+    step = None if unit is None else _UNIT_STEPS.get(unit)
     if step is None:
+        sent = "ISO-8601 instants of no documented precision" if unit is None else "nanoseconds"
         raise ValueError(
-            f"{spec.name}: {name} counts nanoseconds, so it cannot bound a half-open range "
+            f"{spec.name}: {name} takes {sent}, so it cannot bound a half-open range "
             "exactly; declare the .gte and .lt pair"
         )
     return instant - step
 
 
+def _bounds_instants(rest_path: RestPath, name: str) -> bool:
+    """Tell whether a date parameter of the time axis bounds an instant field of the rows.
+
+    Massive types some instant filters as dates (`published_utc.gte` on the news paths); the
+    generated row field the parameter is named after says which: its wire key is the
+    parameter's base name, and an ISO-8601 or epoch instant field makes the axis an instant
+    axis. A field that is a calendar date (`ex_dividend_date`), or no field of that name,
+    keeps the axis whole days.
+
+    Args:
+        rest_path: The path, whose generated fields are read.
+        name: The parameter's wire name, such as `"published_utc.gte"`.
+
+    Returns:
+        True when the field the parameter filters holds instants.
+    """
+    base = name.partition(".")[0]
+    return any(f.wire_key == base and f.wire_type in _INSTANT_TYPES for f in rest_path.fields)
+
+
 def _date_bound(name: str, value: date, *, upper: bool) -> date:
-    """Return the value a date parameter of the time axis is sent.
+    """Return the value a date parameter of a calendar-date time axis is sent.
 
     A `date` bound is a whole day: the day itself, the day after for an exclusive upper
     `.lt`, the day before for an exclusive lower `.gt`. An aware `datetime` is sent as is, as
@@ -260,23 +292,26 @@ def _axis_query(
 ) -> dict[str, object]:
     """Return the time-axis parameters of a request, by wire name.
 
-    A timestamp parameter gets an instant (`_instant_bound`), a date parameter a date or an
-    instant as ISO text (`_date_bound`), and a parameter of any other kind the bound's
-    ISO-8601 text.
+    A timestamp parameter, and a date parameter whose row field is an instant
+    (`_bounds_instants`, such as `published_utc`), get an instant (`_instant_bound`): a date
+    bound becomes the start of its day in the dataset's day zone, an upper one the start of
+    the next day, so a date never leaves the day boundary to Massive. A date parameter of a
+    calendar-date field gets a whole-day date or an instant as ISO text (`_date_bound`), and
+    a parameter of any other kind the bound's ISO-8601 text.
 
     Args:
         spec: The dataset, whose `time_axis` names the lower and upper parameters.
         rest_path: The path; a name it does not take is left out.
         dates: The bounds as the caller gave them (a `date` or an aware `datetime`, or None
             for an open end), or for date-bounded futures the first and last sessions.
-        exact: For `history()`, the window's exact instants, which a timestamp parameter uses
+        exact: For `history()`, the window's exact instants, which an instant axis uses
             instead of `dates`; None to derive instants from `dates`.
 
     Returns:
         The parameters to send; empty when the dataset has no time axis.
 
-    A nanosecond parameter that is a `.gt` or `.lte` bound raises the `ValueError` of
-    `_instant_bound`.
+    A `.gt` or `.lte` bound of an instant axis in nanoseconds or ISO-8601 text raises the
+    `ValueError` of `_instant_bound`.
     """
     if spec.time_axis is None:
         return {}
@@ -289,7 +324,9 @@ def _axis_query(
         if found is None or value is None:
             continue
         kind, unit = found
-        if kind is ParamKind.TIMESTAMP:
+        if kind is ParamKind.TIMESTAMP or (
+            kind is ParamKind.DATE and _bounds_instants(rest_path, name)
+        ):
             bound = value if exact is None else exact[index]
             query[name] = _instant_bound(spec, name, bound, unit=unit, upper=upper)
         elif kind is ParamKind.DATE:

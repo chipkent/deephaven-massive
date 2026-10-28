@@ -212,7 +212,8 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
         "adjusted=False start=2025-01-02 params={'sort': 'timestamp'}>"
     )
     filtered = make(massive_session, NEWS_SPEC, filters={"date_gte": "2025-01-02"})
-    assert repr(filtered) == "<Query economy.inflation filters={'date_gte': '2025-01-02'}>"
+    # The filter is held as the date its text names, rendered like `start`.
+    assert repr(filtered) == "<Query economy.inflation filters={'date_gte': 2025-01-02}>"
 
 
 def test_class_hierarchy() -> None:

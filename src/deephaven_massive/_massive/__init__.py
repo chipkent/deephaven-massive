@@ -30,6 +30,9 @@ Interface:
       dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
+    - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`; the
+      client encodes every request with it, and the library's filter check calls it so a
+      value it accepts always encodes.
     - `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`: the client of one WebSocket
       endpoint, its connection states, the status objects and rejected rows it reports.
 
@@ -78,6 +81,7 @@ __all__ = [
     "WireUnit",
     "WsClient",
     "WsState",
+    "encode_value",
     "object_key",
     "provenance",
     "source",
@@ -115,6 +119,7 @@ _EXPORTS: dict[str, str] = {
     "WireUnit": "deephaven_massive._massive.spec.types",
     "object_key": "deephaven_massive._massive.flatfiles.layout",
     "to_batch": "deephaven_massive._massive.rest.batch",
+    "encode_value": "deephaven_massive._massive.rest.query",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
@@ -130,6 +135,7 @@ if TYPE_CHECKING:
     )
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
+    from deephaven_massive._massive.rest.query import encode_value
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec import provenance, source, sources
     from deephaven_massive._massive.spec.types import (

@@ -1382,6 +1382,7 @@ _WIRE_VOCABULARY = frozenset(
         "Transport",
         "WireType",
         "WireUnit",
+        "encode_value",
         "provenance",
         "source",
         "sources",

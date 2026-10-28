@@ -30,18 +30,19 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._datasets.dates import parse_date_like, require_aware
 from deephaven_massive._datasets.schema import dataset_schema, rename
 from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan
-from deephaven_massive._massive import ParamKind, Transport, WireType, sources
+from deephaven_massive._massive import ParamKind, Transport, WireType, encode_value, sources
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
+    from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._massive import RestPath, Source
 
@@ -543,34 +544,31 @@ def filter_key(name: str) -> str:
     return name.replace(".", "_")
 
 
-def _fits(kind: ParamKind, values: tuple[str, ...], value: object) -> bool:
-    """Tell whether a normalized `filters` value fits a parameter's kind.
+def _parsed(kind: ParamKind, key: str, value: ParamValue) -> ParamValue:
+    """Return a normalized `filters` value in the form the wire encoder takes for its kind.
+
+    The caller may write a date or an instant as text and a one-value list as a bare `str`;
+    the request must carry what is sent, never the text, so the value is parsed here, once,
+    and the parsed form is both checked and stored.
 
     Args:
         kind: The parameter's kind.
-        values: The parameter's accepted values, for an `ENUM`.
+        key: The filter's key, for messages.
         value: The value; sequences are already tuples.
 
     Returns:
-        True when the value is of a form the parameter takes: a `str` for `STRING`, an `int`
-        for `INTEGER`, an `int` or `float` for `NUMBER` (never a `bool` for either), a `bool`
-        for `BOOLEAN`, one of `values` for `ENUM`, a `date`, `datetime`, or text for `DATE`
-        and `TIMESTAMP` (`Catalog.check_filters` then parses the text), and a `str` or a tuple
-        of `str` for `LIST`.
+        For a `DATE` or `TIMESTAMP` parameter, text parsed into a `date` or an aware
+        `datetime`; for a `LIST` parameter, a bare `str` as a one-item tuple; any other value
+        unchanged.
+
+    Text that is not ISO-8601, or has a time without an offset, raises the `ValueError` of
+    `dates.parse_date_like`.
     """
-    number = isinstance(value, int | float) and not isinstance(value, bool)
-    checks = {
-        ParamKind.STRING: isinstance(value, str),
-        ParamKind.INTEGER: number and isinstance(value, int),
-        ParamKind.NUMBER: number,
-        ParamKind.BOOLEAN: isinstance(value, bool),
-        ParamKind.ENUM: isinstance(value, str) and str(value) in values,
-        ParamKind.DATE: isinstance(value, date | str),
-        ParamKind.TIMESTAMP: isinstance(value, date | str),
-        ParamKind.LIST: isinstance(value, str)
-        or (isinstance(value, tuple) and all(isinstance(item, str) for item in value)),
-    }
-    return checks[kind]
+    if isinstance(value, str) and kind in _TIME_KINDS:
+        return parse_date_like(value, key)
+    if isinstance(value, str) and kind is ParamKind.LIST:
+        return (value,)
+    return value
 
 
 class Catalog:
@@ -728,8 +726,10 @@ class Catalog:
         with self._lock:
             return self._schemas.setdefault(spec, schema)
 
-    def check_filters(self, spec: DatasetSpec, filters: Mapping[str, object]) -> None:
-        """Validate a `filters` mapping against the generated parameters of the dataset's paths.
+    def check_filters(
+        self, spec: DatasetSpec, filters: Mapping[str, ParamValue]
+    ) -> tuple[tuple[str, ParamValue], ...]:
+        """Validate a `filters` mapping and return the values the request carries and sends.
 
         Runs synchronously when the query is built. A key is a wire parameter's name with its
         dots written as underscores (`strike_price_gte` for `strike_price.gte`), for any query
@@ -738,21 +738,33 @@ class Catalog:
         `.all_of`), the whole family of the time axis (`param_family`: its base and every
         suffixed form), `limit`, `sort`, `order`, and `adjusted`.
 
+        Each value is first put in the form that is sent: ISO-8601 text of a date or timestamp
+        parameter becomes a `date` or an aware `datetime`, and a bare `str` for a list
+        parameter becomes a one-item tuple. The parsed value is then checked by the wire
+        package's own encoder (`encode_value`), the same function that writes it into the
+        request, so a filter that passes here cannot fail to encode later.
+
         Args:
             spec: The dataset.
             filters: The normalized filters by key; sequences are already tuples.
 
+        Returns:
+            The `(key, value)` pairs in the order given, each value in its parsed form; empty
+            when `filters` is.
+
         Raises:
             ValueError: If a key is not a filter of the dataset (the message lists the valid
-                keys), or a value is not of the parameter's kind or not one of an enum
-                parameter's values. A naive `datetime`, or text of a date or timestamp
-                parameter that is not ISO-8601 or has a time without an offset, raises the
-                `ValueError` of `dates.require_aware` or `dates.parse_date_like`.
+                keys), or a value cannot be sent as the parameter's kind: the wrong type, a
+                value outside an enum parameter's values, a non-finite number, an empty list,
+                or an instant finer than a timestamp parameter's unit (the message quotes the
+                encoder's). A naive `datetime`, or text of a date or timestamp parameter that
+                is not ISO-8601 or has a time without an offset, raises the `ValueError` of
+                `dates.require_aware` or `dates.parse_date_like`.
 
         An unknown REST path raises the `KeyError` of `source`.
         """
         if not filters:
-            return
+            return ()
         symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
         reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols}
         params = {
@@ -761,6 +773,7 @@ class Catalog:
             for param in self._rest(path).params
             if not param.in_path and param.name not in reserved
         }
+        checked: list[tuple[str, ParamValue]] = []
         for key, value in filters.items():
             if isinstance(value, datetime):
                 require_aware(key, value, value)
@@ -769,11 +782,13 @@ class Catalog:
                 raise ValueError(
                     f"{spec.name} has no filter {key!r}; valid filters: {sorted(params)}"
                 )
-            if not _fits(param.kind, param.values, value):
-                expected = list(param.values) if param.values else f"a {param.kind.value} value"
-                raise ValueError(f"{spec.name} filter {key!r} takes {expected}, not {value!r}")
-            if param.kind in _TIME_KINDS and isinstance(value, str):
-                parse_date_like(value, key)  # ISO-8601 text, with an offset if it has a time
+            parsed = _parsed(param.kind, key, value)
+            try:
+                encode_value(param, parsed)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{spec.name} filter {key!r}: {error}") from None
+            checked.append((key, parsed))
+        return tuple(checked)
 
     def _rest(self, path: str) -> RestPath:
         """Return the generated REST path of a template.

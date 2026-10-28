@@ -18,8 +18,8 @@ import pytest
 from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import AssetClass, Order, Timespan
-from deephaven_massive._massive import ParamKind, Source, Transport, sources
+from deephaven_massive._enums import AssetClass, ContractType, Timespan
+from deephaven_massive._massive import Source, Transport, sources
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -965,8 +965,9 @@ def test_coverage_finds_unlisted_used_and_stale_sources() -> None:
 # --- Filters ---------------------------------------------------------------------------------
 
 
-def check(spec: DatasetSpec, filters: Mapping[str, object]) -> None:
-    Catalog((spec,)).check_filters(spec, filters)
+def check(spec: DatasetSpec, filters: Mapping[str, object]) -> dict[str, object]:
+    # The values pass through as given: the check itself must refuse what does not fit.
+    return dict(Catalog((spec,)).check_filters(spec, cast("Mapping[str, Any]", filters)))
 
 
 def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
@@ -978,7 +979,7 @@ def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
             "distribution_type_any_of": ("recurring", "special"),
         },
     )
-    check(EXCHANGES, {})  # nothing to check, so no path is read
+    assert check(EXCHANGES, {}) == {}  # nothing to check, so no path is read
     with pytest.raises(ValueError, match=r"has no filter 'pay_date_lte'; valid filters: \["):
         check(DIVIDENDS, {"pay_date_lte": "2025-01-01"})
 
@@ -1037,9 +1038,11 @@ def test_the_symbol_parameter_reserves_only_its_equality_forms() -> None:
 
 
 def test_filter_values_must_fit_their_kind() -> None:
-    with pytest.raises(ValueError, match=r"filter 'frequency' takes a integer value, not '4'"):
+    with pytest.raises(
+        ValueError, match=r"^stocks.dividends filter 'frequency': .* takes integer values, not '4'"
+    ):
         check(DIVIDENDS, {"frequency": "4"})
-    with pytest.raises(ValueError, match=r"takes \['recurring', 'special', .*\], not 'x'"):
+    with pytest.raises(ValueError, match=r"takes one of \['recurring', 'special', .*\], not 'x'"):
         check(DIVIDENDS, {"distribution_type": "x"})
     # Without a time axis, the date parameter is an ordinary filter.
     unaxed = change(DIVIDENDS, time_axis=None)
@@ -1055,26 +1058,81 @@ def test_filter_values_must_fit_their_kind() -> None:
     check(unaxed, {"ex_dividend_date": "2025-01-02T09:30:00Z"})
 
 
+INDICATOR = DatasetSpec(
+    name="indicators.sma",
+    summary="A dataset for the tests.",
+    fetch_path="/v1/indicators/sma/{stockTicker}",
+)
+OPTION_CONTRACTS = change(CONTRACTS, symbol_param=None)
+
+
 @pytest.mark.parametrize(
-    ("kind", "good", "bad"),
+    ("spec", "key", "given", "kept"),
     [
-        (ParamKind.STRING, ["x"], [1, ("x",)]),
-        (ParamKind.INTEGER, [4], [True, 4.5, "4"]),
-        (ParamKind.NUMBER, [4, 4.5], [False, "4"]),
-        (ParamKind.BOOLEAN, [True], [1, "true"]),
-        (ParamKind.ENUM, ["asc", Order.DESC], ["up", 1]),
-        (ParamKind.DATE, [date(2025, 1, 2), datetime(2025, 1, 2, tzinfo=UTC), "2025"], [1]),
-        (ParamKind.TIMESTAMP, [date(2025, 1, 2), "2025-01-02"], [1.5]),
-        (ParamKind.LIST, ["a", ("a", "b")], [1, ["a"], ("a", 1)]),
+        (OPTION_CONTRACTS, "underlying_ticker", "NVDA", "NVDA"),
+        (DIVIDENDS, "frequency_gte", 4, 4),
+        (OPTION_CONTRACTS, "strike_price_gte", 4, 4),
+        (OPTION_CONTRACTS, "strike_price_gte", 4.5, 4.5),
+        (OPTION_CONTRACTS, "expired", True, True),
+        (OPTION_CONTRACTS, "contract_type", "call", "call"),
+        (OPTION_CONTRACTS, "contract_type", ContractType.PUT, ContractType.PUT),
+        # Text of a date parameter is stored as what it means, never as the text.
+        (OPTION_CONTRACTS, "expiration_date_lte", "2026-01-16", date(2026, 1, 16)),
+        (OPTION_CONTRACTS, "as_of", date(2025, 9, 18), date(2025, 9, 18)),
+        (
+            OPTION_CONTRACTS,
+            "as_of",
+            "2025-09-18T09:30:00-04:00",
+            datetime(2025, 9, 18, 13, 30, tzinfo=UTC),
+        ),
+        (INDICATOR, "timestamp_gte", "2025-01-02", date(2025, 1, 2)),
+        (
+            INDICATOR,
+            "timestamp_gte",
+            "2025-01-02T14:30:00Z",
+            datetime(2025, 1, 2, 14, 30, tzinfo=UTC),
+        ),
+        # A bare text for a list parameter is the list of that one value.
+        (DIVIDENDS, "distribution_type_any_of", "special", ("special",)),
+        (DIVIDENDS, "distribution_type_any_of", ("a", "b"), ("a", "b")),
     ],
 )
-def test_each_parameter_kind_takes_its_values(
-    kind: ParamKind, good: list[object], bad: list[object]
+def test_each_parameter_kind_keeps_the_value_it_sends(
+    *, spec: DatasetSpec, key: str, given: object, kept: object
 ) -> None:
-    for value in good:
-        assert catalog_module._fits(kind, ("asc", "desc"), value), value
-    for value in bad:
-        assert not catalog_module._fits(kind, ("asc", "desc"), value), value
+    (value,) = check(spec, {key: given}).values()
+    assert value == kept
+    assert type(value) is type(kept)
+
+
+@pytest.mark.parametrize(
+    ("spec", "key", "value", "message"),
+    [
+        (OPTION_CONTRACTS, "underlying_ticker", 1, "takes text, not 1"),
+        (DIVIDENDS, "frequency_gte", True, "takes integer values, not True"),
+        (DIVIDENDS, "frequency_gte", 4.5, "takes integer values, not 4.5"),
+        (OPTION_CONTRACTS, "strike_price_gte", False, "takes number values, not False"),
+        (OPTION_CONTRACTS, "strike_price_gte", float("nan"), "takes a finite number, not nan"),
+        (OPTION_CONTRACTS, "expired", 1, "takes a bool, not 1"),
+        (OPTION_CONTRACTS, "contract_type", "up", r"takes one of \['call', 'put'\], not 'up'"),
+        (OPTION_CONTRACTS, "as_of", 1, "takes a date or an aware datetime, not 1"),
+        (INDICATOR, "timestamp_gte", 1.5, "takes a date or an aware datetime, not 1.5"),
+        # Milliseconds cannot carry a microsecond instant; rounding would move the bound.
+        (
+            INDICATOR,
+            "timestamp_gte",
+            datetime(2025, 1, 2, 0, 0, 0, 1, tzinfo=UTC),
+            "takes whole ms since the epoch",
+        ),
+        (DIVIDENDS, "distribution_type_any_of", (), "takes at least one value"),
+        (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes a sequence of text"),
+    ],
+)
+def test_a_value_the_wire_cannot_send_is_refused_at_once(
+    *, spec: DatasetSpec, key: str, value: object, message: str
+) -> None:
+    with pytest.raises(ValueError, match=rf"^{spec.name} filter '{key}': .*{message}"):
+        check(spec, {key: value})
 
 
 def test_sources_of_a_catalog_can_be_given() -> None:

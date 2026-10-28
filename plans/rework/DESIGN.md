@@ -416,7 +416,8 @@ gone; the transports it builds hold the core itself, never the weak reference.
   `ssl`, `http`, `urllib`, `subprocess`, `_thread`, `multiprocessing`, `select`, or
   `selectors`, and read neither `threading.Thread` nor `threading.Timer`, by attribute, import,
   or literal `getattr` (`threading` itself stays allowed, for leaf locks);
-- `_massive.__all__` splits into vocabulary names (the three errors and the spec names) and
+- `_massive.__all__` splits into vocabulary names (the three errors, the spec names, and the
+  pure parameter encoder `encode_value`) and
   client names (`RestClient`, `Page`, `to_batch`, `WsClient`, `WsState`, `Status`,
   `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`,
   `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
@@ -1351,7 +1352,14 @@ so `date.any_of` is reserved too although `start` and `end` cannot express a lis
 (its base name and its `.gt`, `.gte`, `.lt`, `.lte`, `.any_of`, and `.all_of` forms, so
 `product_code_any_of` is rejected on a futures dataset that types `product_code`). An unknown
 key, a value of the wrong kind, or a value outside a parameter's enum raises `ValueError` naming
-the valid keys or values; a key reserved by a typed parameter names that parameter. The
+the valid keys or values; a key reserved by a typed parameter names that parameter. The check
+first puts each value in the form that is sent: ISO-8601 text of a `DATE` or `TIMESTAMP`
+parameter becomes a `date` or an aware `datetime` (`dates.parse_date_like`), and a bare `str`
+for a `LIST` parameter becomes a one-item tuple. It then runs the wire package's own encoder
+(`encode_value`) on that value, so everything the encoder refuses (a non-finite number, an
+empty list, an instant finer than a timestamp parameter's unit) fails here, at construction,
+with the encoder's message. `Request.filters` holds the parsed values, never the caller's
+text, so validation and encoding cannot disagree. The
 reservation is one shared check in the filter validation, fed the dataset's typed parameters,
 never a guard in a namespace module. Parameters the library always sets itself (the
 `type=options` of `options.snapshots`) are reserved the same way. When Massive adds a filter,
@@ -1373,7 +1381,12 @@ neither; one whose paths have `order` but no `sort` (the indicators) offers `ord
 `.lt` (`timestamp.gte`/`timestamp.lt`, `published_utc.gte`/`published_utc.lt`,
 `published.gte`/`published.lt`), and a calendar-date axis is whole days, `.gte` and `.lte`
 (`ex_dividend_date.gte`/`ex_dividend_date.lte`, `filing_date.gte`/`filing_date.lte`,
-`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Bars declare
+`session_end_date.gte`/`session_end_date.lte` on `futures.schedules`, and so on). Whether an
+axis is an instant axis follows from the generated row field its parameter filters (the field
+whose wire key is the parameter's base name), not from the parameter's kind: Massive types the
+`published_utc` and benzinga `published` filters as dates, but their fields are ISO-8601
+instants, so they are instant axes, and a date bound on them is sent as the instant of
+[section 12](#12-timestamp-units-and-day-boundaries), never as a bare date. Bars declare
 no `time_axis`: `history()` fills the range path's `{from}` and `{to}` segments instead
 ([section 13.4](#134-rest)). Passing any form of the same axis
 through `filters` (as `timestamp_gte`, `timestamp_lte`, or `timestamp`, for example) raises
@@ -1542,6 +1555,16 @@ the futures `SessionEndDate` are `LocalDate`.
 range is half-open: `[start, end)`. A `date` or `"YYYY-MM-DD"` `start` is that day's 00:00 in
 the class day zone. A `date` `end` is the next day's 00:00, so whole days are inclusive. A
 timezone-aware `datetime` is used as is.
+
+The same rule bounds the time axis of a `…T` dataset on an instant axis: a timestamp
+parameter, or a date-typed parameter over an instant field (`published_utc`, benzinga
+`published`). A date `start` is sent as that day's 00:00 in the day zone (New York for a
+dataset without an asset class) and a date `end` as the next day's 00:00, with `.gte` and
+`.lt`, so Massive never decides where a day starts. A date-typed parameter takes the instant as
+ISO-8601 text with its offset (`2025-06-02T00:00:00-04:00`); since Massive documents no
+precision for that text, such an axis cannot be declared with `.gt` or `.lte` (the request
+fails with `ValueError`). A calendar-date axis (`period_end`, `ex_dividend_date`) keeps
+whole-day date bounds with `.gte` and `.lte`.
 
 **Day zone per class.**
 
@@ -1919,6 +1942,10 @@ How a request is built from a `DatasetSpec` and a `Request`:
   turned into a calendar date by `calendar_day` in `_datasets/dates.py`: a date or
   `"YYYY-MM-DD"` as given, an aware `datetime` as the calendar day it falls on in the dataset's
   day zone ([section 12](#12-timestamp-units-and-day-boundaries)).
+- **Time axis.** `start` and `end` go to the `time_axis` pair by the rules of
+  [section 9](#9-filters) and [section 12](#12-timestamp-units-and-day-boundaries): instants
+  on an instant axis (decided by the generated row field the parameter filters, so a
+  date-typed `published_utc.gte` gets an instant), whole-day dates on a calendar-date axis.
 - **Bars ranges.** A bars spec declares no `time_axis`. `history()` fills the range path's
   `{from}` and `{to}` segments from its bounds, as epoch milliseconds or as `YYYY-MM-DD`
   according to the kind the generated path gives the parameter.
@@ -2398,12 +2425,14 @@ vendor/massive/      outside the package; Massive's published content, vendored 
   rest/  websocket/  flat-files/   (the pages of each area llms.txt links)
 ```
 
-**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 28
+**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 29
 names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
 websockets:
 
 - errors: `WireError`, `WireAuthError`, `WireEntitlementError`;
-- REST: `RestClient`, `Page`, `to_batch`;
+- REST: `RestClient`, `Page`, `to_batch`, and `encode_value` (one parameter value's wire
+  text by its `ParamKind`, which the library's filter check also runs, so a filter it accepts
+  always encodes);
 - WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
 - flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
 - spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
