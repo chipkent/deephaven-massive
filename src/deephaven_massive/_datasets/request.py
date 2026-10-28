@@ -29,8 +29,12 @@ if TYPE_CHECKING:
 
 __all__ = ["HostDecision", "ParamValue", "Request", "StreamKey"]
 
-ParamValue: TypeAlias = "str | int | float | bool | date | datetime | StrEnum | tuple[str, ...]"
-"""A normalized parameter or filter value, as a `Request` stores it (sequences become tuples)."""
+ParamValue: TypeAlias = (
+    "str | int | float | bool | date | datetime | StrEnum | tuple[str | date, ...]"
+)
+"""A normalized parameter or filter value (sequences become tuples). A sequence may hold dates
+for a list of dates (`date.any_of`); the filter check writes them as ISO-8601 text, so a
+`Request` stores lists of text."""
 
 StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols]"
 """The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
@@ -58,7 +62,9 @@ class Request:
         end: The upper bound of the dataset's time axis, or of `history()`.
         params: The dataset's other typed parameters, by wire parameter name, sorted by name.
         filters: The `filters` mapping, by key (a wire parameter name with its dots written as
-            underscores), sorted by name.
+            underscores), sorted by name. Each value is the one sent, as
+            `Catalog.check_filters` parsed it: ISO-8601 text of a date or timestamp parameter
+            is held as a `date` or an aware `datetime`, never as the text.
         limit: The cap on the total number of rows across pages, or None for every row. It is
             not a wire parameter: the page size is internal (`DatasetSpec.page_size`), and
             the REST transport stops paging once `limit` rows have arrived.

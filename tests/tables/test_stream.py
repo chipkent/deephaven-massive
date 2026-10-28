@@ -39,6 +39,7 @@ from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from typing import TypeAlias
 
     from deephaven.table import Table
 
@@ -46,6 +47,10 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._tables.core import SessionCore
 
+
+RowsWhen: TypeAlias = (
+    "Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]"
+)
 W = Transport.WS
 TIMEOUT = 15.0
 
@@ -302,6 +307,8 @@ def test_a_flush_publishes_each_channel_once_to_every_stream(
     massive_session: dm.MassiveSession,
     flusher: Flusher,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    rows_when: RowsWhen,
 ) -> None:
     core = massive_session._core
     aapl, aapl_blink = make_sink(core, ("AAPL",))
@@ -314,12 +321,17 @@ def test_a_flush_publishes_each_channel_once_to_every_stream(
     flusher.rows("T", [trade("AAPL"), trade("MSFT")])
     flusher.rows("Q", [trade("AAPL")])  # no stream ever read Q: dropped
     flusher.flush()
-    wait_for(lambda: shown[0].size == 1 and shown[1].size == 2)
+    rows_when(shown[0], lambda rows: len(rows) == 1)
+    rows_when(shown[1], lambda rows: len(rows) == 2)
     assert (aapl.rows_published, every.rows_published, idle.rows_published) == (1, 2, 0)
 
 
 def test_a_stream_routed_while_rows_drain_gets_them(
-    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rows_when: RowsWhen,
 ) -> None:
     # The routes are read after the rows are drained, so a stream routed meanwhile is served.
     core = massive_session._core
@@ -338,7 +350,7 @@ def test_a_stream_routed_while_rows_drain_gets_them(
 
     monkeypatch.setattr(routes_type, "buffers", routing_meanwhile)
     flusher.flush()
-    wait_for(lambda: shown.size == 1)
+    rows_when(shown, lambda rows: len(rows) == 1)
 
 
 def test_a_failure_fails_each_stream_once(
@@ -383,7 +395,11 @@ def test_a_failure_is_recorded_before_the_table_fails(
 
 
 def test_a_batch_that_cannot_be_converted_fails_only_its_readers(
-    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    rows_when: RowsWhen,
 ) -> None:
     # One channel's bad batch costs neither another channel its rows nor the flush its updates.
     core = massive_session._core
@@ -397,7 +413,7 @@ def test_a_batch_that_cannot_be_converted_fails_only_its_readers(
     flusher.flush()
     assert broken.failed
     assert not healthy.failed
-    wait_for(lambda: shown.size == 1)
+    rows_when(shown, lambda rows: len(rows) == 1)
     assert "test.trades: could not publish a T batch" in caplog.text
 
 

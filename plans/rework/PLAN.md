@@ -2149,9 +2149,9 @@ tests (`datasets/test_schema`, `tables/test_columns`, `datasets/test_catalog`, `
 - [ ] `dataset_schema` fills each `Column`'s description by rules 1–3 of DESIGN § 19.4,
       `supplied_by` in the order `REST`, `FLAT_FILES`, `WS`, and `wire_keys` before any
       projection.
-- [ ] `columns.describe(table, spec)`: cast `j_table` to `GridAttributes` through `jpy`, call
-      `withColumnDescriptions` with a `java.util.HashMap` of the non-empty descriptions, then
-      `withDescription("<dataset>: <summary>")`, cast back to `Table`, and wrap.
+- [ ] `columns.describe(table, spec, schema)`: on `j_table` (a `Table`, which extends
+      `GridAttributes`), call `withColumnDescriptions` with a `java.util.HashMap` of the
+      non-empty descriptions, then `withDescription("<dataset>: <summary>")`, and wrap.
 - [ ] Every verb calls `describe()` on the exact table it returns, after the shape is
       derived, on the caller thread inside the result scope; never under `registry_lock`, on
       the poller, flush, or reader threads, or in a listener.

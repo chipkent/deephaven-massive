@@ -20,8 +20,6 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table
-from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 from deephaven.update_graph import shared_lock
@@ -941,7 +939,8 @@ class RestRecorder:
         self, spec: DatasetSpec, request: Request, window: TimeRange | FuturesSessions
     ) -> Table:
         self.calls.append((spec, request, window))
-        return new_table([string_col("Symbol", ["from REST"])])
+        # A table in the dataset's schema, as the REST transport returns.
+        return dh_arrow.to_table(schema_of(spec).to_arrow([{"Symbol": "from REST"}]))
 
 
 def test_auto_delegates_few_symbols_to_rest(

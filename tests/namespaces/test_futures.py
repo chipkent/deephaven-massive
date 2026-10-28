@@ -211,7 +211,7 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
     assert request(q).symbols is None
     assert request(q).params == (("product_code", "ES"),)
     assert dict(request(q).filters) == {"active": True, "last_trade_date_gte": date(2026, 1, 1)}
-    with pytest.raises(ValueError, match="filter 'active' takes a boolean value"):
+    with pytest.raises(ValueError, match="filter 'active' takes a bool, not 'yes'"):
         massive_session.futures.contracts(filters={"active": "yes"})
     with pytest.raises(TypeError, match="sort must be a str"):
         massive_session.futures.contracts(sort=cast("str", 1))
@@ -574,7 +574,7 @@ def test_trades_rest_rows(
     serve("/futures/v1/trades/ESZ4", "trades.json")
     q = rest_session.futures.trades("ESZ4")
     first = rows(q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST))[0]
-    assert first == {
+    supplied = {
         "Symbol": "ESZ4",
         "Timestamp": 1734472799000509200,
         "SequenceNumber": 27317882,
@@ -583,9 +583,10 @@ def test_trades_rest_rows(
         "Size": 3,
         "SessionEndDate": date(2024, 12, 17),
         "Channel": 360,
-        "Correction": None,
-        "Exchange": None,
     }
+    assert {name: first[name] for name in supplied} == supplied
+    # Every other column of the trades kind comes from the flat files or another asset class.
+    assert all(value is None for name, value in first.items() if name not in supplied)
 
 
 def test_quotes_rest_rows(
