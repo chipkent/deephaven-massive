@@ -514,7 +514,7 @@ class _Crypto(Namespace):
         side = _require_enum(direction, Direction, "direction")
         return cast("Query", build_query(self._core, MOVERS, params={"direction": side}))
 
-    def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
+    def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
         Each row is one pair on one day: its open and close prices, and the first and last
@@ -523,7 +523,8 @@ class _Crypto(Namespace):
 
         Transports: REST, `/v1/open-close/crypto/{from}/{to}/{date}`, one request per pair.
         `fetch()` returns one row per pair and `poll(interval)` repeats the requests, keyed
-        by `Symbol`. There is no `limit`.
+        by `Symbol`. There is no `limit`. Crypto has no splits or other corporate actions,
+        so there is no `adjusted` choice and Massive's `adjusted` parameter is never sent.
 
         `dm.ALL` raises `ValueError`: the endpoint takes one pair per request. The daily bars
         of every pair are `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
@@ -544,8 +545,6 @@ class _Crypto(Namespace):
                 `poll()` cycle).
             date: The day, as `"YYYY-MM-DD"` or a `date`. A timezone-aware `datetime` (or ISO
                 text with a time and an offset) names the UTC day it falls in.
-            adjusted: Whether the prices are adjusted for splits, sent as the endpoint's
-                `adjusted` parameter; True by default, as Massive's own default.
 
         Returns:
             The query. No request is made until a verb is called.
@@ -563,7 +562,6 @@ class _Crypto(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
-                adjusted=adjusted,
                 params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

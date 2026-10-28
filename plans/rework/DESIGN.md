@@ -1162,7 +1162,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so REST, flat files, and the stream serve the same bars and the parameter is never sent) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
-| `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
+| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
 
 ### 8.7 `m.reference`
 
@@ -3884,8 +3884,9 @@ document already reflects them.
     picks a per-symbol detail path from
     the role paths, canonicalizes symbols read from rows, and drops error rows only from a
     projected `fetch()` ([section 13.4](#134-rest)). The § 8 rows gain `product_code` on every
-    futures dataset that takes it, `adjusted` on the options and crypto `daily_open_close`,
-    `filters` on `consensus_ratings`, `type=options` on `options.snapshots`, and the generated
+    futures dataset that takes it, `adjusted` on the options `daily_open_close` (the crypto
+    `bars` and `daily_open_close` take none: crypto has no corporate actions), `filters` on
+    `consensus_ratings`, `type=options` on `options.snapshots`, and the generated
     axis of `share_float` ([section 8](#8-namespace-tree)). The indicators take
     `adjusted: bool | None = None`: None sends nothing, an explicit value is sent where the
     chosen path declares `adjusted`, and raises `ValueError` on the crypto templates, which do

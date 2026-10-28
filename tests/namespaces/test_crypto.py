@@ -352,15 +352,15 @@ def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
     request = request_of(q)
     assert request.symbols == ("X:BTCUSD", "X:ETHUSD")
     assert request.params == (("date", date(2026, 1, 2)),)
-    assert request.adjusted is True
-    same = massive_session.crypto.daily_open_close("BTC-USD", date(2026, 1, 2), adjusted=False)
+    # Crypto has no corporate actions: no adjustment choice is stored or sent.
+    assert request.adjusted is None
+    same = massive_session.crypto.daily_open_close("BTC-USD", date(2026, 1, 2))
     assert request_of(same).params == (("date", date(2026, 1, 2)),)
-    assert request_of(same).adjusted is False
-    with pytest.raises(TypeError, match="adjusted must be a bool"):
+    with pytest.raises(TypeError, match="adjusted"):
         massive_session.crypto.daily_open_close(
             "BTC-USD",
             "2026-01-02",
-            adjusted=1,  # type: ignore[arg-type]  # not a bool
+            adjusted=False,  # type: ignore[call-arg]  # crypto open/close has none
         )
 
 
@@ -682,9 +682,9 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
 ) -> None:
     path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
     serve(fake_rest, path, load_fixture(OWNER, "open_close.json"))
-    q = rest_session.crypto.daily_open_close("BTC-USD", "2020-10-09", adjusted=False)
+    q = rest_session.crypto.daily_open_close("BTC-USD", "2020-10-09")
     [row] = rows(q.fetch())
-    assert sent(fake_rest) == [(path, {"adjusted": ["false"]})]
+    assert sent(fake_rest) == [(path, {})]
     # The body's `BTC-USD` is canonical in `Symbol`; the trades stay JSON text.
     assert (row["Symbol"], row["Day"], row["Open"], row["Close"], row["IsUtc"]) == (
         "X:BTCUSD",
