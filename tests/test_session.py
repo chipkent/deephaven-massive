@@ -556,7 +556,7 @@ def test_rate_limits_show_one_ready_row_per_subscription_and_other(
 ) -> None:
     assert massive_session._core.diagnostics.barrier().wait(30)
     rows = dh_to_pylist(massive_session.rate_limits())
-    assert sorted((r["Subscription"], r["State"], r["RequestsPerMinute"]) for r in rows) == [
+    assert sorted((r["Bucket"], r["State"], r["RequestsPerMinute"]) for r in rows) == [
         ("currencies", "READY", None),
         ("futures", "READY", None),
         ("indices", "READY", None),

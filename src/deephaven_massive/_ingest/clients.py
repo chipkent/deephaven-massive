@@ -91,7 +91,7 @@ class SessionClients:
         )
         core.on_close(self._lease.release)
         diagnostics.watch_rate_limits(
-            functools.partial(rate_limits.rate_limit_rows, self._lease.governor)
+            functools.partial(rate_limits.rate_limit_source, self._lease.governor)
         )
         # Created by the first flat-file read (`flat_files`), under the core's `registry_lock`.
         self._flat_files: FlatFileClient | None = None

@@ -8,10 +8,12 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
 - **streams**: one row per stream (a live subscription with its own publisher) and per `poll()`
   table. Keyed by `StreamId`.
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
-  for the datasets Massive assigns to none. Keyed by `Subscription`. Its rows are not queued:
+  for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
   snapshot from its source whenever it was told the state changed (`rate_limits_changed`),
   and a row can never be overtaken by an older one.
+  The writer also pulls again when the state changes with time alone (a pause ends, a slot
+  frees), at the moment the source names, through a timer that only queues the marker.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. One daemon writer thread per session applies every row: the
@@ -75,6 +77,7 @@ __all__ = [
     "DriftRegistry",
     "RateLimitBasis",
     "RateLimitRow",
+    "RateLimitSource",
     "RateLimitState",
     "StreamRow",
     "StreamState",
@@ -212,7 +215,7 @@ RATE_LIMITS: Final = Schema(
     tuple(
         Column(name, column_type)
         for name, column_type in (
-            ("Subscription", _S),
+            ("Bucket", _S),
             ("State", _S),
             ("RequestsPerMinute", _I),
             ("LimitSource", _S),
@@ -229,7 +232,7 @@ RATE_LIMITS: Final = Schema(
 )
 """The columns of `m.rate_limits()`."""
 
-RATE_LIMIT_KEYS: Final = ("Subscription",)
+RATE_LIMIT_KEYS: Final = ("Bucket",)
 """The key column of `m.rate_limits()`."""
 
 
@@ -391,8 +394,8 @@ class RateLimitRow:
     rows, since Massive counts the requests of all of them together.
 
     Attributes:
-        subscription: The bucket: a `dm.Subscription` value, or `other` for the datasets
-            Massive assigns to no subscription, which are never paced.
+        bucket: The bucket: a `dm.Subscription` value, or `other` for the datasets Massive
+            assigns to no subscription, which are never paced.
         state: What a new request meets now.
         requests_per_minute: The pace, 5 for a Basic subscription; null while unpaced.
         limit_source: Why it is paced; null while unpaced.
@@ -407,7 +410,7 @@ class RateLimitRow:
         updated_at: When the row was written.
     """
 
-    subscription: str
+    bucket: str
     state: RateLimitState
     requests_per_minute: int | None = None
     limit_source: RateLimitBasis | None = None
@@ -599,6 +602,9 @@ class DriftRegistry:
             self._owners.pop(owner, None)
 
 
+RateLimitSource: TypeAlias = "Callable[[], tuple[Sequence[RateLimitRow], float | None]]"
+"""Returns the `m.rate_limits()` rows and the seconds until they change with time alone."""
+
 _RATE_LIMITS_CHANGED: Final = object()
 """The queue item that asks the writer to pull fresh `m.rate_limits()` rows."""
 
@@ -630,6 +636,7 @@ class Diagnostics:
         "_rate_limits",
         "_rate_pending",
         "_rate_source",
+        "_rate_timer",
         "_release_lock",
         "_released",
         "_scope",
@@ -650,8 +657,10 @@ class Diagnostics:
         self._release_lock = threading.Lock()
         self._released = False
         # Set once by `watch_rate_limits`; read by the writer. Guarded by `_release_lock`.
-        self._rate_source: Callable[[], Sequence[RateLimitRow]] | None = None
+        self._rate_source: RateLimitSource | None = None
         self._rate_pending = False
+        # The timer that queues the next time-driven pull; only the writer replaces it.
+        self._rate_timer: threading.Timer | None = None
         self._scope = new_scope()
         try:
             with self._scope.open():
@@ -703,12 +712,14 @@ class Diagnostics:
             if not self._released:
                 self._writer.put(row)
 
-    def watch_rate_limits(self, source: Callable[[], Sequence[RateLimitRow]]) -> None:
+    def watch_rate_limits(self, source: RateLimitSource) -> None:
         """Name where the `m.rate_limits()` rows come from, and pull them once.
 
         Args:
-            source: Returns the current row of every bucket. The writer calls it, on its own
-                thread and without any lock of this object; it must not block or call
+            source: Returns the current row of every bucket and the seconds until they change
+                with time alone (None when they do not). The writer calls it, on its own
+                thread and without any lock of this object, and pulls again at that moment
+                through a daemon timer that only queues the marker; it must not block or call
                 Deephaven.
 
         Raises:
@@ -755,8 +766,10 @@ class Diagnostics:
     def stop(self) -> None:
         """Ask the writer to apply the queued rows, release the tables, and exit; no wait.
 
-        Takes no lock, so the session's finalizer can call it from garbage collection.
+        Takes no lock, so the session's finalizer can call it from garbage collection. A
+        pending rate-limit timer is cancelled.
         """
+        self._cancel_rate_timer()
         self._writer.stop()
 
     def release(self) -> None:
@@ -766,6 +779,7 @@ class Diagnostics:
         """
         with self._release_lock:
             self._released = True
+        self._cancel_rate_timer()
         self._writer.stop()
         self._writer.thread.join()
 
@@ -803,7 +817,9 @@ class Diagnostics:
                 barrier.set()
 
     def _pull_rate_limits(self) -> list[RateLimitRow]:
-        """Take the pending marker and return the rate-limit rows from their source.
+        """Take the pending marker, pull the rate-limit rows, and time the next pull.
+
+        Runs on the writer thread, the only one that replaces the timer.
 
         Returns:
             The source's rows. A marker is queued only once the source is set, and the source
@@ -811,8 +827,21 @@ class Diagnostics:
         """
         with self._release_lock:
             self._rate_pending = False
-            source = cast("Callable[[], Sequence[RateLimitRow]]", self._rate_source)
-        return list(source())
+            source = cast("RateLimitSource", self._rate_source)
+        rows, change = source()
+        self._cancel_rate_timer()
+        if change is not None:
+            timer = threading.Timer(change, self.rate_limits_changed)
+            timer.daemon = True
+            self._rate_timer = timer
+            timer.start()
+        return list(rows)
+
+    def _cancel_rate_timer(self) -> None:
+        """Cancel the pending time-driven pull, if any; safe without a lock (a no-op twice)."""
+        timer = self._rate_timer
+        if timer is not None:
+            timer.cancel()
 
     @staticmethod
     def _add(

@@ -177,9 +177,11 @@ class _Retryable:
     error: WireError
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _Job:
     """What every page and attempt of one `get` or `pages` call shares.
+
+    Compared by identity: a call without a cancellation token is a governor lane of its own.
 
     Attributes:
         rest_path: The path, for decoding.
@@ -499,7 +501,26 @@ class RestClient:
         verification, a proxy that refused its credentials (HTTP 407), or a bucket Massive
         kept refusing for longer than the governor waits (status 429).
         """
-        permit = self._permit(request, job.bucket, stop)
+        permit = self._permit(request, job, stop)
+        try:
+            return self._send(job, request, permit)
+        finally:  # whatever escaped, the permit is reported; a report already made stands
+            self._governor.done(permit, answered=False)
+
+    def _send(self, job: _Job, request: Request, permit: Permit) -> Page | _Retryable | object:
+        """Send an admitted attempt and report its end to the governor.
+
+        Args:
+            job: The call's path, bucket, and cancellation.
+            request: The request.
+            permit: The attempt's permit: released when the request never left (the
+                connection could not be made), refused for a 429, and done otherwise.
+
+        Returns:
+            What `_attempt` returns.
+
+        A failure that is not retryable raises `WireError`, as `_attempt` describes.
+        """
         started = self._clock.monotonic()
         try:
             response = self._pool.request(
@@ -509,11 +530,9 @@ class RestClient:
                 redirect=False,
             )
         except urllib3.exceptions.HTTPError as error:
-            self._governor.done(permit, answered=False)
+            if isinstance(error, urllib3.exceptions.ConnectTimeoutError):
+                self._governor.release(permit)  # no connection, so nothing reached Massive
             return self._unanswered(request, error)
-        except BaseException:
-            self._governor.done(permit, answered=False)
-            raise
         elapsed = self._clock.monotonic() - started
         if response.status == HTTPStatus.TOO_MANY_REQUESTS:
             self._refused(permit, http_error(response.status, response.data, request), response)
@@ -541,12 +560,15 @@ class RestClient:
             return _Retryable(failure)
         raise failure
 
-    def _permit(self, request: Request, bucket: str, stop: Cancel) -> Permit:
-        """Wait for the governor to admit an attempt.
+    def _permit(self, request: Request, job: _Job, stop: Cancel) -> Permit:
+        """Wait for the governor to admit an attempt, in the call's lane.
+
+        The lane is the caller's cancellation token, which a read shares among its calls, or
+        the call itself when it has none, so the governor takes the bucket's lanes in turn.
 
         Args:
             request: The request, for messages.
-            bucket: The governor's bucket.
+            job: The call: its bucket, and its lane.
             stop: Set when the client closes or the caller cancels.
 
         Returns:
@@ -554,13 +576,14 @@ class RestClient:
 
         Raises:
             WireError: If `stop` is set before or during the wait, or just as the attempt was
-                admitted (its permit is returned unused): "the REST client is closed" when the
+                admitted (its permit is released unused): "the REST client is closed" when the
                 client closed, "cancelled" otherwise. With status 429 when the bucket's pause
                 outlasts the governor's patience, quoting the latest refusal.
         """
         if not stop.is_set():
             try:
-                permit = self._governor.acquire(bucket, stop)
+                lane = job if job.cancel is None else job.cancel
+                permit = self._governor.acquire(job.bucket, stop, lane=lane)
             except WireError as error:
                 if error.status is None:  # the wait was cancelled
                     raise self._stopped(request) from None
@@ -573,7 +596,7 @@ class RestClient:
                 ) from None
             if not stop.is_set():
                 return permit
-            self._governor.done(permit, answered=False)
+            self._governor.release(permit)
         raise self._stopped(request)
 
     def _stopped(self, request: Request) -> WireError:
@@ -639,14 +662,36 @@ class RestClient:
             failure: The 429's error.
             response: The response, for its headers.
 
-        Raises:
-            WireError: With status 429, when Massive has refused the bucket for longer than
-                the governor waits; it quotes the latest refusal and names this request.
+        The governor hears of the refusal even when the hook or the log raises (an interrupt
+        while the WARNING is written), so the bucket pauses and the permit is reported. When
+        the bucket gives up on its run of refusals, the `WireError` of `_pause` is raised:
+        status 429, quoting the latest refusal and naming this request.
         """
-        _log.info("%s; pausing %s requests", failure, permit.bucket)
         basic = is_basic_refusal(failure.message)
-        if self._on_refused is not None:
-            self._on_refused(permit.bucket, failure, basic=basic)
+        try:
+            _log.info("%s; pausing %s requests", failure, permit.bucket)
+            if self._on_refused is not None:
+                self._on_refused(permit.bucket, failure, basic=basic)
+        finally:
+            give_up = self._pause(permit, failure, response)
+        if give_up is not None:
+            _log.error("%s", give_up)
+            raise give_up
+
+    def _pause(
+        self, permit: Permit, failure: WireError, response: BaseHTTPResponse
+    ) -> WireError | None:
+        """Report a 429 to the governor, which pauses the bucket.
+
+        Args:
+            permit: The refused attempt's permit.
+            failure: The 429's error.
+            response: The response, for its `Date` and `Retry-After` headers.
+
+        Returns:
+            None, or the error to raise when the bucket gives up: status 429, this request's
+            host and path, the refusal's request id, and the governor's message.
+        """
         now = _http_time(response.headers.get("Date"))
         asked = retry_after_seconds(
             response.headers.get("Retry-After"), self._clock.time() if now is None else now
@@ -656,14 +701,16 @@ class RestClient:
                 permit, retry_after=asked, message=failure.message, request_id=failure.request_id
             )
         except WireError as error:
-            _log.error("%s", error)
-            raise WireError(
+            given_up = WireError(
                 error.message,
                 status=error.status,
                 host=self._host,
                 path=failure.path,
                 request_id=error.request_id,
-            ) from failure
+            )
+            given_up.__cause__ = failure
+            return given_up
+        return None
 
 
 def _http_time(value: str | None) -> float | None:

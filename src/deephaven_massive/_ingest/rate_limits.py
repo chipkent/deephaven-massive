@@ -8,7 +8,9 @@ admits; this module decides which requests share one, and what the user is told:
 - **Sharing.** `GOVERNORS`, the process's `GovernorRegistry`, keeps one governor per (API key,
   REST origin). Each session takes a `GovernorLease` at construction and releases it when it
   closes or is collected, so the sessions of a process that use one key share its counters.
-  The registry keys entries by the key's SHA-256 digest, never the key itself. The governor
+  The registry keys entries by the key's SHA-256 digest, never the key itself, and remembers
+  the subscriptions a governor learned are Basic for the life of the process, so a governor
+  created again for the same key and origin starts paced. The governor
   paces every subscription that any live session declares Basic
   (`MassiveConfig.rest_basic_subscriptions`: the stricter wins), and logs one WARNING when two
   sessions declare different non-empty sets. An entry outlives its last lease until its
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BUCKETS",
     "GOVERNORS",
+    "LABELS",
     "OTHER",
     "GovernorLease",
     "GovernorRegistry",
@@ -66,6 +69,7 @@ __all__ = [
     "announce",
     "bucket_of",
     "rate_limit_rows",
+    "rate_limit_source",
 ]
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,10 @@ economy, partner data, the unified snapshot); it is never paced."""
 
 BUCKETS: Final = (*(subscription.value for subscription in Subscription), OTHER)
 """Every bucket of a governor: one per subscription, then `OTHER`."""
+
+LABELS: Final = {OTHER: "requests outside Massive's subscriptions"}
+"""How the governor's messages name the requests of `OTHER`; a subscription's bucket is
+`"<subscription> requests"`."""
 
 
 _MINUTE: Final = 60.0
@@ -218,18 +226,20 @@ class GovernorRegistry:
             two.release()
     """
 
-    __slots__ = ("_create", "_entries", "_holders", "_lock")
+    __slots__ = ("_create", "_entries", "_holders", "_learned", "_lock")
 
     def __init__(self, create: Callable[[], RequestGovernor] | None = None) -> None:
         """Start with no governor.
 
         Args:
-            create: Makes each new governor, with the buckets `BUCKETS`; None for one on the
-                real clock. Tests pass one whose governors wait on a fake clock.
+            create: Makes each new governor, with the buckets `BUCKETS` and the `LABELS`; None
+                for one on the real clock. Tests pass one whose governors wait on a fake clock.
         """
-        self._create = create or functools.partial(_massive.RequestGovernor, BUCKETS)
+        self._create = create or functools.partial(_massive.RequestGovernor, BUCKETS, labels=LABELS)
         self._lock = threading.Lock()
         self._entries: dict[tuple[str, tuple[str, str, int]], _Entry] = {}
+        # The buckets learned Basic by a pruned governor, by key: kept for the process's life.
+        self._learned: dict[tuple[str, tuple[str, str, int]], frozenset[str]] = {}
         self._holders = itertools.count(1)
 
     def __len__(self) -> int:
@@ -252,7 +262,8 @@ class GovernorRegistry:
     ) -> GovernorLease:
         """Take a hold on the governor of an API key and REST origin, creating it if needed.
 
-        Idle entries without a lease are dropped first. The governor then paces the union of
+        Idle entries without a lease are dropped first; a new governor starts with what an
+        earlier one of the same key and origin learned. The governor then paces the union of
         every holder's Basic subscriptions. When this session and another holder each declare
         a non-empty set and the sets differ, one WARNING names both sessions and the union.
 
@@ -275,6 +286,8 @@ class GovernorRegistry:
             entry = self._entries.get(key)
             if entry is None:
                 entry = self._entries[key] = _Entry(self._create())
+                if key in self._learned:
+                    entry.governor.learn(self._learned[key])
             conflict = next(
                 (h for h in entry.holders.values() if h.basic and mine and h.basic != mine),
                 None,
@@ -312,9 +325,15 @@ class GovernorRegistry:
             entry.declare()
 
     def _prune(self) -> None:
-        """Drop the entries that have no holder and an idle governor; the lock is held."""
+        """Drop the entries that have no holder and an idle governor; the lock is held.
+
+        What a dropped governor learned is kept for its key.
+        """
         for key, entry in list(self._entries.items()):
             if not entry.holders and entry.governor.idle():
+                learned = frozenset(s.bucket for s in entry.governor.snapshot() if s.learned)
+                if learned:
+                    self._learned[key] = learned
                 del self._entries[key]
 
 
@@ -374,7 +393,9 @@ class RateLimitWarnings:
                 return
             self._warned.add(bucket)
         rate = _massive.RequestGovernor.BASIC_REQUESTS_PER_MINUTE
-        what = "a request outside Massive's subscriptions" if bucket == OTHER else bucket
+        what = f"{'an' if bucket[0] in 'aeiou' else 'a'} {bucket} request"
+        if bucket == OTHER:
+            what = "a request outside Massive's subscriptions"
         if bucket in self._basic:
             advice = (
                 f"its requests are already paced at {rate} per minute, so other sessions, "
@@ -417,7 +438,7 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
             status = RateLimitState.REFUSED
         elif state.paused_until is not None:
             status = RateLimitState.PAUSED
-        elif state.limit is not None and state.waiting:
+        elif state.limit is not None and (state.waiting or state.recent >= state.limit):
             status = RateLimitState.PACED
         else:
             status = RateLimitState.READY
@@ -431,7 +452,7 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
         until = None if state.paused_until is None else round(state.paused_until * 1e9)
         rows.append(
             RateLimitRow(
-                subscription=state.bucket,
+                bucket=state.bucket,
                 state=status,
                 requests_per_minute=state.limit,
                 limit_source=basis,
@@ -448,6 +469,22 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
     return rows
 
 
+def rate_limit_source(governor: RequestGovernor) -> tuple[list[RateLimitRow], float | None]:
+    """Return the rows of `m.rate_limits()` and when they next change with time alone.
+
+    The session's diagnostics writer calls it (`Diagnostics.watch_rate_limits`) whenever the
+    governor signals a change, and again when the time it returns has passed, so a pause that
+    ends or a slot that frees with no request around still shows.
+
+    Args:
+        governor: The session's governor.
+
+    Returns:
+        `rate_limit_rows(governor)` and `governor.next_change()`.
+    """
+    return rate_limit_rows(governor), governor.next_change()
+
+
 def announce(
     governor: RequestGovernor, read: str, buckets: Iterable[str], *, shape: str | None = None
 ) -> None:
@@ -457,12 +494,12 @@ def announce(
 
     - a paced bucket whose requests cannot all start within a minute gets the least time they
       take (`RequestGovernor.estimate`), such as "stocks.bars history: 250 requests; paced at
-      5 requests a minute (stocks), that takes at least 49 min";
+      5 requests a minute (stocks); at that pace they take at least 49 min";
     - an unpaced subscription's bucket of a download that makes one request per day or per
       session (`shape`) and more than 5 requests gets the time it would take were the
       subscription on the Basic tier, which the library learns only at Massive's first refusal
       unless it is declared: "stocks.bars history: 11 requests, one per day; if the stocks
-      subscription is on the Basic tier (5 requests a minute), that takes at least 2 min".
+      subscription is on the Basic tier (5 requests a minute), they take at least 2 min".
 
     Both are lower bounds: pages beyond the first, slow responses, and other sessions'
     requests only add time.
@@ -481,7 +518,8 @@ def announce(
         if seconds is not None:
             if seconds >= _MINUTE:
                 logger.info(
-                    "%s: %s; paced at %d requests a minute (%s), that takes at least %d min",
+                    "%s: %s; paced at %d requests a minute (%s); at that pace they take at "
+                    "least %d min",
                     read,
                     what,
                     rate,
@@ -491,7 +529,7 @@ def announce(
         elif shape is not None and bucket != OTHER and count > rate:
             logger.info(
                 "%s: %s; if the %s subscription is on the Basic tier (%d requests a minute), "
-                "that takes at least %d min",
+                "they take at least %d min",
                 read,
                 what,
                 bucket,
@@ -523,6 +561,9 @@ class PaceCheck:
     def check(self, governor: RequestGovernor, requests: Mapping[str, int]) -> None:
         """Log one WARNING the first time a cycle's paced requests outlast the interval.
 
+        A paced bucket starts at most its limit of requests per window of 61 s (the minute
+        plus the governor's margin), so `count` requests take `count * 61 / limit` seconds.
+
         Args:
             governor: The session's governor.
             requests: The cycle's planned requests per bucket.
@@ -532,7 +573,8 @@ class PaceCheck:
         limits = {state.bucket: state.limit for state in governor.snapshot()}
         for bucket, count in requests.items():
             limit = limits[bucket]
-            if limit is None or count * _MINUTE / limit <= self._interval:
+            needs = count * _massive.RequestGovernor.RATE_WINDOW / limit if limit else 0.0
+            if needs <= self._interval:
                 continue
             self._warned = True
             logger.warning(
@@ -542,7 +584,7 @@ class PaceCheck:
                 count,
                 bucket,
                 limit,
-                count * _MINUTE / limit,
+                needs,
                 self._interval,
             )
             return

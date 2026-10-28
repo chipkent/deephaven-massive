@@ -209,7 +209,18 @@ typeCheckingMode = "standard"
 [tool.pytest]
 strict = true
 filterwarnings = ["error"]
-addopts = ["-ra", "--import-mode=importlib"]
+# `-m "not integration"` keeps the live tests out of every default run, CI's included; a later
+# `-m integration` on the command line replaces it, so `uv run pytest -m integration` runs only
+# them (each also skips itself without `MASSIVE_API_KEY`).
+addopts = ["-ra", "--import-mode=importlib", "-m", "not integration"]
+markers = [
+    "integration: a live test against Massive (tests/**/test_*_integration.py); deselected by default, run with -m integration and MASSIVE_API_KEY set",
+    "integration_limits: deliberately exceeds Massive's subscription and connection limits; also marked integration, and run only with -m integration_limits",
+    "integration_smoke: calls every dataset and verb once and checks its columns, unattended; also marked integration, and run only with -m integration_smoke",
+    "needs(*plans): the plans a live test needs, each <class>:<plan>, s3, or some:basic; it skips unless MASSIVE_LIVE_PLANS declares them",
+    "settles(*items): the open verification items a live test settles, for the run's summary",
+    "requests(count): the REST requests a live test makes, which scale its timeout when its class is on Basic",
+]
 testpaths = ["tests"]
 # Puts the repository root on sys.path, which --import-mode=importlib does not do itself, so
 # test code imports helpers as `tests._fakes…` (`tests` is an implicit namespace package, as

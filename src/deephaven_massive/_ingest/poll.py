@@ -678,7 +678,9 @@ def _build(
     Returns:
         The result and its publisher (`build_table`), and the result scope. The result is the
         shape `build_table` derives, described last (`describe`), so it carries the dataset's
-        column descriptions in every mode; the poller writes only through the publisher.
+        column descriptions and lists its columns in schema order in every mode, also after
+        the `last_by` of `UPSERT` and `REPLACE` put the poll keys first; the poller writes
+        only through the publisher.
     """
     built: list[TablePublisher] = []
     schema = core.catalog.dataset_schema(spec)

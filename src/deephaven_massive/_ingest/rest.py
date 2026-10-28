@@ -29,8 +29,10 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. HTTP 404 for one symbol drops that symbol with
   one WARNING; any other error fails the call, and every request of the read still waiting
-  for the rate governor stops at once (each read has a `Cancel` token of its own, set when
-  it ends, and a `poll()` cycle's token follows its poller's).
+  for the rate governor stops at once (each read has a `Cancel` token of its own, set when a
+  fan-out ends, and a `poll()` cycle's token follows its poller's). The token is also the
+  read's lane in the governor: the reads, poll cycles, and host decisions waiting on a bucket
+  take turns, whatever their number of threads.
 - **Rate limits.** Each request is charged to its Massive subscription (`DatasetSpec`'s class,
   or for a dataset with a path per symbol class the class of the request's symbols; datasets
   of no class go to the unpaced `other` bucket), and the session's client asks the shared
@@ -997,11 +999,12 @@ class RestReader:
 
         One call runs on this thread; several run on `executor`, or on a pool of
         `min(max_concurrency, calls)` threads made for this read. Every request of the read
-        listens to a `Cancel` token of the read's own (following `cancel`), set when the read
-        ends. So if a call fails, or this thread is interrupted, the calls not yet started are
-        cancelled, the running ones stop waiting for the rate governor at once, the read waits
-        for the requests already on the wire, and the failure of the earliest call that failed
-        on its own is raised.
+        listens to a `Cancel` token of the read's own (following `cancel`), which is also the
+        read's lane in the rate governor, so a read takes its turn with the others whatever
+        its number of threads. A fan-out sets the token when it ends. So if a call fails, or
+        this thread is interrupted, the calls not yet started are cancelled, the running ones
+        stop waiting for the rate governor at once, the read waits for the requests already on
+        the wire, and the failure of the earliest call that failed on its own is raised.
 
         Args:
             spec: The dataset.
@@ -1036,13 +1039,10 @@ class RestReader:
                 spec=spec,
                 stop=stop,
             )
-            try:
-                if len(calls) <= 1:
-                    outcomes = [run(call) for call in calls]
-                else:
-                    outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
-            finally:
-                stop.set()  # the read is over: nothing of it waits any longer
+            if len(calls) <= 1:
+                outcomes = [run(call) for call in calls]
+            else:
+                outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
         return table, sum(outcome.requests for outcome in outcomes)
@@ -1205,7 +1205,9 @@ class RestReader:
             return MassiveError(f"{self.state.label} is closed")
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
             return MassiveError(
-                f"rate limited: {error.message}", status=429, request_id=error.request_id
+                f"rate limited: {error.message}; m.rate_limits() shows when requests resume",
+                status=429,
+                request_id=error.request_id,
             )
         return from_wire(error)
 

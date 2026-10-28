@@ -22,13 +22,14 @@ from deephaven_massive._massive.net.errors import (
 )
 from deephaven_massive._massive.rest import client as client_module
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.rest.governor import RequestGovernor
+from deephaven_massive._massive.rest.governor import Permit, RequestGovernor
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
+from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Hashable, Iterator
 
     from deephaven_massive._massive.rest.response import Page
 
@@ -426,10 +427,14 @@ def test_a_refused_connection_is_retried_then_fails(no_proxy_env: pytest.MonkeyP
     server.start()
     url = server.url
     server.close()
-    rest = RestClient(_KEY, base_url=url, max_concurrency=1, governor=_governor(clock))
+    governor = _governor(clock)
+    rest = RestClient(_KEY, base_url=url, max_concurrency=1, governor=governor)
     with pytest.raises(WireError, match="failed: "):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert len(clock.waits) == 3
+    # No connection was made, so no attempt reached Massive: none holds a slot.
+    state = governor.snapshot()[0]
+    assert (state.requests, state.in_flight, state.recent) == (4, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -550,9 +555,10 @@ def test_a_lasting_refusal_gives_up_with_status_429_naming_the_request(
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert str(caught.value) == (
-        "Massive refused stocks requests with HTTP 429, and resuming would take until 601 s "
-        "after the first refusal, more than the 600 s the library waits (latest refusal: "
-        "HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1 (request_id r): quota)"
+        "Massive has refused stocks requests with HTTP 429 for 0 s and asks to wait 601 s "
+        "more, past the 600 s the library waits from the first refusal; they fail at once "
+        "until the pause ends (latest refusal: HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1 "
+        "(request_id r): quota)"
     )
     assert (caught.value.status, caught.value.request_id) == (429, "r")
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
@@ -1022,7 +1028,7 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
         rest.get(_TRADES, _AAPL, {}, bucket="stocks", cancel=cancel)
     assert fake_rest.requests == []
     state = governor.snapshot()[0]
-    assert (state.requests, state.in_flight, state.recent) == (1, 0, 1)
+    assert (state.requests, state.in_flight, state.recent) == (1, 0, 0)  # unsent: no slot
     rest.close()
 
 
@@ -1088,3 +1094,75 @@ def test_a_paged_next_url_key_never_reaches_a_log(
     list(client.pages(_TRADES, _AAPL, {}, bucket="stocks"))
     assert caplog.records
     assert not any(_KEY in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Retry-After": "0"},
+        {"Date": "Fri, 15 Jan 2027 08:00:00 GMT", "Retry-After": "Fri, 15 Jan 2027 08:00:00 GMT"},
+    ],
+)
+def test_a_retry_after_of_now_pauses_on_the_schedule_and_gives_up_in_time(
+    *, client: RestClient, fake_rest: FakeRestServer, clock: FakeClock, headers: dict[str, str]
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers))
+    with pytest.raises(WireError) as caught:
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    # Never a resend at once: 15, 30, then 60 s, until the run would pass ten minutes.
+    assert caught.value.status == 429
+    assert clock.waits[:3] == [15.0, 30.0, 60.0]
+    assert len(fake_rest.requests) == 12
+
+
+def test_a_hook_that_raises_still_pauses_the_bucket_and_reports_the_attempt(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    governor = _governor(clock)
+
+    def interrupted(bucket: str, error: WireError, *, basic: bool) -> None:
+        raise KeyboardInterrupt
+
+    rest = RestClient(
+        _KEY, base_url=fake_rest.url, max_concurrency=1, governor=governor, on_refused=interrupted
+    )
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers={"Retry-After": "9"}))
+    with pytest.raises(KeyboardInterrupt):
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    state = governor.snapshot()[0]
+    assert (state.in_flight, state.refusals) == (0, 1)
+    assert state.paused_until == pytest.approx(clock.time() + 9.0)
+    rest.close()
+
+
+class _RecordingGovernor(RequestGovernor):
+    """A governor that records the lane of every request it is asked to admit."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(("stocks", "options"), clock=clock)
+        self.lanes: list[object] = []
+
+    @override
+    def acquire(self, bucket: str, cancel: Cancel, *, lane: Hashable | None = None) -> Permit:
+        self.lanes.append(lane)
+        return super().acquire(bucket, cancel, lane=lane)
+
+
+def test_a_call_without_a_token_is_a_lane_of_its_own_and_a_token_shares_one(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    governor = _RecordingGovernor(clock)
+    rest = _client(fake_rest, governor=governor)
+    fake_rest.reply("/v3/trades/AAPL", _ok())
+    shared = Cancel()
+    rest.get(_TRADES, _AAPL, {}, bucket="stocks", cancel=shared)
+    rest.get(_TRADES, _AAPL, {}, bucket="stocks", cancel=shared)
+    rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    first, second, third, fourth = governor.lanes
+    assert first is shared
+    assert second is shared
+    assert third is not None
+    assert third is not shared
+    assert third is not fourth
+    rest.close()

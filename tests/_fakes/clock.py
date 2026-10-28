@@ -118,6 +118,25 @@ class FakeClock:
                     raise AssertionError(f"{len(deadlines)} sleepers, expected {count}")
                 self._changed.wait(_POLL)
 
+    def wait_for_deadlines(self, deadlines: list[float]) -> None:
+        """Wait until the sleepers' deadlines are exactly `deadlines`, without moving time.
+
+        A woken thread leaves its old deadline and sleeps on a new one; this sees the new one
+        or fails, so a wakeup that never comes is an assertion within 10 s, never a hang.
+
+        Args:
+            deadlines: The expected deadlines, sorted.
+
+        Raises:
+            AssertionError: If the sleepers do not reach them within 10 s of real time.
+        """
+        give_up = time.monotonic() + _WAIT
+        with self._changed:
+            while self._asleep() != deadlines:
+                if time.monotonic() > give_up:
+                    raise AssertionError(f"deadlines {self._asleep()}, expected {deadlines}")
+                self._changed.wait(_POLL)
+
     def sleeping(self) -> list[float]:
         """Return the deadlines of the threads blocked in a manual wait right now, sorted.
 

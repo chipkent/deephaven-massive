@@ -356,13 +356,22 @@ with `_`. Examples:
 test code imports helpers as `tests._fakes…`. So `tests/massive/` can never shadow a top-level
 `massive` package.
 
-Integration tests end in `_integration`. They are skipped unless `MASSIVE_API_KEY` is set and
-run only in the later live-testing planned PR. The exceptions to the mirror rule, and no
+Integration tests end in `_integration` and carry the `integration` marker, which `addopts`
+deselects in every default run (CI's included); `uv run pytest -m integration` runs them, and
+each skips unless `MASSIVE_API_KEY` is set (and always under CI).
+[`docs/live-tests.md`](../../docs/live-tests.md) is the runbook for them. The live tests that deliberately exceed Massive's subscription and connection
+limits also carry `integration_limits`, and the smoke tier (every dataset and verb once,
+checked automatically) carries `integration_smoke`: `-m integration` deselects both, and only
+`-m integration_limits` or `-m integration_smoke` runs them. `MASSIVE_LIVE_PLANS` declares the
+key's plans, and each test's `needs` marker skips it when they fall short. The exceptions to the mirror rule, and no
 others:
 
 - `tests/conftest.py`: starts the embedded JVM in `pytest_configure`, before collection, and
   provides fixtures: thin fixtures that build the fakes from `tests/_fakes/`, plus the
-  table-to-Python and fixture-loading helpers. Test modules never import from it.
+  table-to-Python and fixture-loading helpers. Test modules never import from it. An autouse
+  fixture gives every unit test a registry of REST rate governors of its own on a fake clock,
+  so no test inherits another's pauses or learned limits and none sleeps for them; the live
+  tests share one real-clock registry for the run instead.
 - `tests/test_layout.py`: walks `src/deephaven_massive/**/*.py` and asserts every module has its
   mirrored test file and that every test file maps to a module or is one of these exceptions.
   It also holds the import-boundary and layer tests of `_massive`
@@ -1001,9 +1010,13 @@ set regardless, for every API client to read. The Python package has no wrapper 
 direct `jpy` import (`jpy` is not a declared dependency) is needed: it calls
 `withColumnDescriptions` with a `java.util.HashMap` (`deephaven.jcompat.j_hashmap`) of every
 column whose description is not empty, then `withDescription`, and wraps the outcome in a new
-`deephaven.table.Table`, whose constructor casts it back to `Table`.
-`withColumnDescriptions` checks that every named column exists, so a schema that disagrees
-with the table fails at once; `Table.with_attributes` skips that check and is not used. The
+`deephaven.table.Table`, whose constructor casts it back to `Table`. Before the attributes,
+it puts the table's columns in schema order with `moveColumnsUp(*schema.column_names)`, a view
+that copies no data and keeps the table's attributes (the blink attribute included): a
+`last_by`, the shape of `last_by()` and of an `UPSERT` or `REPLACE` `poll()`, puts its key
+columns first, and `columns()` promises every verb the schema's order. The reordering checks
+that every schema column exists and `withColumnDescriptions` that every named column does, so a
+schema that disagrees with the table fails at once; `Table.with_attributes` skips that check and is not used. The
 table description is `"<dataset>: <summary>"` (`"stocks.trades: Trades of US-listed stocks,
 tick by tick."`), where `<summary>` is the one-sentence `DatasetSpec.summary`. The summary is
 a required field of every spec; `DatasetSpec.__post_init__` raises `ValueError`, naming the
@@ -2225,26 +2238,39 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   `rest_basic_subscriptions` (the stricter wins), or once it is learned; two sessions that
   each declare a non-empty, different set log one WARNING naming both and the union. A
   governor without a lease is kept until it holds no slot and no pause, so a session created
-  again soon after does not start with an empty window.
+  again soon after does not start with an empty window; what it learned is kept for its key
+  and origin for the life of the process, so a governor created again starts paced.
 - **Pacing.** A paced bucket lets a request start only while fewer than 5 slots are held; a
   slot is held by a request in flight, and by a finished one until 61 s (the minute plus one
-  second of margin) after its response arrived. Requests of a bucket start first in, first
-  out. Waiting for a slot never times out: a 250-request history at 5 per minute takes about
+  second of margin) after its response arrived. A request that never left (the connection
+  could not be made, or its read was cancelled just as it was admitted) frees its slot at
+  once. Waiting for a slot never times out: a 250-request history at 5 per minute takes about
   50 minutes, and the caller's interrupt, a failed sibling call of a fan-out, a stopped poller,
-  or `close()` ends the wait (each read has a `Cancel` token of its own, set when the read
+  or `close()` ends the wait (each read has a `Cancel` token of its own, set when a fan-out
   ends, following its poller's).
+- **Lanes.** The requests waiting on a bucket wait in lanes: one per read (a `fetch()`, a
+  `history()`, one `poll()` cycle), one per host decision, and one per call that names none.
+  Within a lane they start first in, first out; the lanes take turns, round-robin, so the next
+  slot goes to the next lane, whatever its number of threads. A host decision or a `poll()`
+  cycle behind two long histories of eight workers each waits for one request of each, not
+  sixteen.
 - **Pauses.** A 429 pauses its bucket for every session sharing it: for its `Retry-After`
-  (seconds, or an HTTP date measured against the response's own `Date`); without one, a paced
-  bucket for one whole window (61 s), and an unpaced one 15, 30, then 60 s by the refusals of
-  the run. A pause only grows. Only the first 429 to requests started after the latest pause
-  counts toward the run (a burst in flight is one refusal), and the run ends with the first
-  answer other than 429 to such a request. A 429 is never counted as a retry. When resuming
-  would take more than 10 minutes (`RATE_LIMIT_PATIENCE`) from the run's first refusal (a long
-  `Retry-After`, or refusals that go on), the refused request and every request of the bucket,
-  waiting or new, fail with status 429 until that pause has passed; the pause is still set,
-  so the bucket's other requests do not each collect a 429.
+  (seconds, or an HTTP date measured against the response's own `Date`); without one, or with
+  one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
+  30, then 60 s by the refusals of the run, so a request is never sent again at once. A pause
+  only grows. Only the first 429 to requests started after the latest pause counts toward the
+  run (a burst in flight is one refusal); a 429 to an earlier request that lengthens the pause
+  starts a run if none is going. The run ends with the first answer other than 429 to a request
+  started after the latest pause. A 429 is never counted as a retry.
+- **Giving up.** Once a run has lasted 10 minutes (`RATE_LIMIT_PATIENCE`), or its pause would
+  end later than 10 minutes after its first refusal (a long `Retry-After`), the bucket gives
+  up: the refused request and every request of the bucket, waiting or new, fail with status
+  429 (`MassiveError("rate limited: ...")`, which names `m.rate_limits()` for when requests
+  resume) until that pause has passed; the pause is still set, so the bucket's other requests
+  do not each collect a 429. The first request after it starts a new run.
 - **Learning.** A 429 whose message names the per-minute maximum makes its bucket learned
-  Basic, paced from then on for the governor's life; any other 429 only pauses.
+  Basic, paced from then on, for the life of the process for that key and origin; any other
+  429 only pauses.
 - **Warnings and notices.** The first 429 of each bucket in a session logs one WARNING, naming
   the session and the refusal (status, path, `request_id`, Massive's message) and saying what
   it means: for a declared subscription, that other sessions, processes, or keys of the account
@@ -2254,12 +2280,14 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   subscription that keeps getting 429s should give Massive's support the request id. A
   static read logs one INFO line per bucket before its first request when its paced requests
   cannot all start within a minute ("stocks.trades fetch: 250 requests; paced at 5 requests a
-  minute (stocks), that takes at least 49 min", a lower bound from the governor's state), and
+  minute (stocks); at that pace they take at least 49 min", a lower bound from the governor's
+  state), and
   a grouped-daily or per-session download of more than five requests of an unpaced
   subscription names what the Basic tier would cost ([section 12](#12-timestamp-units-and-day-boundaries)).
-  A `poll()` whose cycle makes more paced requests than its interval allows logs one WARNING
-  for the table ("each cycle makes 3 stocks requests, but they are paced at 5 per minute, so a
-  cycle takes at least 36 s, longer than the 30 s interval; cycles run late").
+  A `poll()` whose cycle makes more paced requests than its interval allows (each request
+  holding its slot 61 s) logs one WARNING for the table ("each cycle makes 3 stocks requests,
+  but they are paced at 5 per minute, so a cycle takes at least 37 s, longer than the 30 s
+  interval; cycles run late").
 - **Diagnostics.** `m.rate_limits()` shows every bucket ([section 17](#17-diagnostics)).
 
 How a request is built from a `DatasetSpec` and a `Request`:
@@ -2619,15 +2647,17 @@ caller kept alive in a liveness scope of their own.
 | `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra) and `transport:field-` (missing), sorted, truncated at 200 characters |
 
 **`m.rate_limits()`**: one row per REST rate-limit bucket ([section 13.4](#134-rest)), keyed by
-`Subscription`. The bucket's state lives in a governor that sessions of the same API key share,
-so the writer pulls a fresh snapshot (`_ingest/rate_limits.rate_limit_rows`) whenever the
+`Bucket`. The bucket's state lives in a governor that sessions of the same API key share, so
+the writer pulls a fresh snapshot (`_ingest/rate_limits.rate_limit_source`) whenever the
 governor signals a change, at most once per batch, instead of applying queued rows; a row can
-never be overtaken by an older one, and every sharing session shows the same rows.
+never be overtaken by an older one, and every sharing session shows the same rows. The state
+also changes with time alone (a pause ends, a slot frees), so each pull names when the rows
+next change and a daemon timer, which only queues the pull, reads them again then.
 
 | Column | Meaning |
 |---|---|
-| `Subscription` | key: `stocks`, `options`, `indices`, `currencies`, `futures`, or `other` (datasets Massive assigns to no subscription; never paced) |
-| `State` | `READY` (a request starts at once), `PACED` (requests wait for a slot), `PAUSED` (a 429's pause is active), `REFUSED` (Massive refused the bucket for longer than the library waits; requests fail until `PausedUntil`) |
+| `Bucket` | key: a `Subscription` value (`stocks`, `options`, `indices`, `currencies`, `futures`), or `other` for the datasets Massive assigns to no subscription (never paced) |
+| `State` | `READY` (a request starts at once), `PACED` (a request would wait for a slot: some wait, or every slot is held), `PAUSED` (a 429's pause is active), `REFUSED` (the bucket has given up on a run of refusals; requests fail until `PausedUntil`) |
 | `RequestsPerMinute` | 5 while paced; null while unpaced |
 | `LimitSource` | `DECLARED` (`rest_basic_subscriptions` of a sharing session) or `LEARNED` (Massive's refusal named the per-minute maximum); null while unpaced |
 | `InFlight`, `Waiting`, `RecentRequests` | counts: requests on the wire; waiting for a slot or a pause; holding a slot (in flight, or answered within 61 s) |
@@ -2663,6 +2693,7 @@ without the GIL.
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls, waiting in the governor for a slot or a pause (ended by its stop token); `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
+| REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed | anything else |
@@ -2946,8 +2977,9 @@ RestClient(api_key, *, base_url, max_concurrency, governor, on_refused=None)
 client.get(rest_path, path_params, query_params, *, bucket, cancel=None) -> Page   # one request
 client.pages(rest_path, path_params, query_params, *, bucket, cancel=None, limit=None)
     -> Iterator[Page]                                                # follows next_url
-RequestGovernor(buckets, *, clock=SYSTEM_CLOCK)   # declare, acquire, done, refused, snapshot,
-                                                  # estimate, idle, subscribe, unsubscribe
+RequestGovernor(buckets, *, clock=SYSTEM_CLOCK, labels=None)
+    # declare, learn, acquire(bucket, cancel, *, lane), done, release, refused, snapshot,
+    # next_change, estimate, idle, subscribe, unsubscribe
 Cancel(*parents)                                  # a threading.Event set once, following parents
 Page(status: str, request_id: str | None, rows: list[dict], body: dict | list,
      drift: DriftReport)          # drift.statuses only; repr omits rows and body
@@ -3012,18 +3044,23 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   when the event is set; the client uses its governor's), so tests never sleep. A `next_url`
   that repeats the target just fetched raises `WireError` rather than paging forever.
 - **The governor.** Every attempt, every page included, first takes a permit of its `bucket`
-  from the `RequestGovernor` (`rest/governor.py`) and reports how it ended: answered, not
-  answered (a connection failure, or an interrupt on the wire), or refused with HTTP 429. The
-  governor's rules are those of [section 13.4](#134-rest): per bucket, first in, first out; a
+  from the `RequestGovernor` (`rest/governor.py`), in its lane (the caller's `cancel` token,
+  or the call itself when it has none), and reports how it ended, exactly once, in a `finally`
+  so no interruption can lose a permit: answered, not answered (a failure on the wire), never
+  sent (released: no connection was made), or refused with HTTP 429; the governor ignores any
+  report after the first. The refusal hook runs before the governor hears of a 429, and the
+  governor hears of it even when the hook raises. The governor's rules are those of
+  [section 13.4](#134-rest): per bucket, lanes in turn and first in, first out within a lane; a
   paced bucket (declared, or learned from a 429 whose message names the per-minute maximum)
   admits a request only while fewer than 5 slots are held, a slot lasting from the request's
   start until 61 s after its response; a 429 pauses the bucket (its `Retry-After` in either
   form, an HTTP date measured against the response's own `Date` header, else a whole window
-  when paced, else 15, 30, then 60 s by the run's refusals), the burst of 429s in flight when
-  the pause began counting once; a 429 is not a retry, and the attempt is made again once the
-  governor allows it; when resuming would take more than `RATE_LIMIT_PATIENCE` (600 s) from
-  the run's first refusal, the refused request and every request of the bucket raise
-  `WireError(status=429)`, quoting the latest refusal, until that pause has passed. A bucket
+  when paced, else 15, 30, then 60 s by the run's refusals; a `Retry-After` of zero counts as
+  none), the burst of 429s in flight when the pause began counting once; a 429 is not a retry,
+  and the attempt is made again once the governor allows it; once the run has lasted
+  `RATE_LIMIT_PATIENCE` (600 s), or its pause would end later than that after its first
+  refusal, the refused request and every request of the bucket raise `WireError(status=429)`,
+  quoting the latest refusal, until that pause has passed. A bucket
   the governor was not built with raises `ValueError`. Before the governor pauses the bucket,
   the client calls its `on_refused(bucket, error, *, basic)` hook (the library's first-429
   WARNING).
@@ -4250,9 +4287,10 @@ document already reflects them.
 29. **`refresh/` is not shipped** (2026-10-26). The wheel excludes all of `refresh/`, the
     snapshot included; `spec/*.json` ship ([section 19](#19-wire-clients-and-the-spec-snapshot)).
 30. **Wire behaviour settled in review** (2026-10-26; the REST 429 half revised 2026-10-28 by
-    decision 53). A REST 429 pauses its subscription's requests: without `Retry-After` for 15,
-    30, then 60 s, and with one for as long as it asks, up to 10 minutes from the run's first
-    refusal; a TLS certificate failure is never
+    decision 56). A REST 429 pauses its subscription's requests: without a usable
+    `Retry-After`, for a whole 61 s window when the subscription is paced and for 15, 30, then
+    60 s when it is not; with one, for as long as it asks; and for at most 10 minutes from the
+    run's first refusal; a TLS certificate failure is never
     retried; a 429 at the WebSocket upgrade is retried; wildcard transitions make before they
     break, accepting a brief duplicate rather than a gap
     ([section 13.3](#133-connection-and-subscription-protocol),
@@ -4285,7 +4323,7 @@ document already reflects them.
 39. **S3 follows the shared network rules:** the `net` CA bundle and proxy, botocore retries off
     in favour of the shared schedule, TLS never retried ([section 19.3](#193-the-flat-file-client)).
 40. **REST rate limits and host resolution are shared.** One `RequestGovernor` per API key and
-    REST origin, shared by the process's sessions (decision 53), and single-flight host
+    REST origin, shared by the process's sessions (decision 56), and single-flight host
     resolution through one future per (class, family)
     ([section 13.2](#132-host-decision), [section 19.1](#191-the-rest-client)).
 41. **Test layout:** every path component drops one leading underscore, `__init__.py` maps to
@@ -4395,7 +4433,7 @@ document already reflects them.
     so no column of a dataset is left blank for want of text Massive already wrote
     ([section 19.4](#194-generated-schemas)).
 
-53. **A REST rate governor per subscription** (2026-10-28). Massive limits REST requests per
+56. **A REST rate governor per subscription** (2026-10-28). Massive limits REST requests per
     subscription (Basic: 5 per minute; paid: none), shared by every key of the account, so the
     library keeps one `RequestGovernor` per (API key digest, REST origin) in the process,
     shared by its sessions, with one bucket per `dm.Subscription` and an unpaced `other` bucket
@@ -4403,23 +4441,29 @@ document already reflects them.
     the new `dm.Subscription` enum, default empty) paces a subscription from its first request;
     the 5 per minute is one wire constant; validation names `Subscription.CURRENCIES` for forex
     and crypto. A 429 whose message names the per-minute maximum makes the subscription
-    learned Basic; any other 429 only pauses. A 429 pauses and resumes even when nothing is
-    declared, honours `Retry-After` up to 10 minutes, and gives up after a fixed 10 minutes
-    from the run's first refusal (`RATE_LIMIT_PATIENCE`, not configurable); pacing waits never
-    give up. Requests start first in first out per bucket, end their waits on `Cancel` tokens
-    (client close, a read's end, a poller's stop), and the stricter declaration of the sharing
-    sessions wins. One WARNING per session and subscription at the first 429, one INFO line for
-    a long static read, one WARNING for a `poll()` whose cycles outlast their interval, and a
-    new `m.rate_limits()` diagnostics table, one row per bucket. There is no plan enum and no
+    learned Basic, remembered for the key and origin for the life of the process; any other 429
+    only pauses. A 429 pauses and resumes even when nothing is declared, honours `Retry-After`
+    up to 10 minutes (one of zero or in the past falls back to the 15, 30, 60 s schedule), and
+    gives up at a fixed 10 minutes of refusals (`RATE_LIMIT_PATIENCE`, not configurable); a
+    stale refusal that lengthens the pause starts a run; pacing waits never give up. Waiting
+    requests take round-robin turns by lane (a read, a poll cycle, a host decision) and start
+    first in, first out within a lane; they end their waits on `Cancel` tokens (client close, a
+    read's end, a poller's stop); the stricter declaration of the sharing sessions wins. One
+    WARNING per session and subscription at the first 429, one INFO line for a long static
+    read, one WARNING for a `poll()` whose cycles outlast their interval, and a new
+    `m.rate_limits()` diagnostics table, one row per bucket. There is no plan enum and no
     user-created governor object: a key holds up to five tiers, and the only REST fact a tier
-    carries is its limit ([section 13.4](#134-rest), [section 17](#17-diagnostics),
-    [section 19.1](#191-the-rest-client)).
+    carries is its limit. Live tests share one real-clock governor per key for the run, with
+    the classes `MASSIVE_LIVE_PLANS` leaves on Basic declared ([section 13.4](#134-rest),
+    [section 17](#17-diagnostics), [section 19.1](#191-the-rest-client)).
 
 ## 23. Open verification items
 
 Each item is handled conservatively now, covered by a fixture test in its unit-test module, and
-retired by a live integration test (`*_integration.py`, skipped without `MASSIVE_API_KEY`) in the
-later live-testing planned PR. Each item that a live test refutes becomes an owner decision
+retired by a live integration test (`*_integration.py`, marked `integration`, skipped without
+`MASSIVE_API_KEY`); [`docs/live-tests.md`](../../docs/live-tests.md) says how to run them, each
+test's docstring what its evidence means, and the comment on issue #26 what each outcome
+changes. Each item that a live test refutes becomes an owner decision
 before 1.0. Items 17 and 18 concern Deephaven, not Massive: the work that adds column
 descriptions settles them in the embedded test JVM and the web UI, and they need no live test.
 
@@ -4427,24 +4471,24 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 |---|---|---|---|---|
 | 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source. `AUTO` picks the source as for every dataset, so the check alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time raise | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
-| 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_stocks_integration.py` (Business key): one FMV frame converts to a current `Instant` |
+| 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
 | 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_hosts.py`: both replies | `tests/ingest/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
 | 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
 | 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_hosts.py`: with and without the fields | `tests/ingest/test_hosts_integration.py`: record which fields the live payload carries |
 | 8 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
-| 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/ingest/test_ws_integration.py`: record whether an acknowledgement arrives |
-| 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/ingest/test_ws_integration.py`: a 1,000-topic frame is acknowledged |
-| 11 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/ingest/test_ws_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
+| 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |
+| 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/massive/ws/test_client_integration.py`: a 1,000-topic frame is acknowledged |
+| 11 | Options cap counted in contracts or topics | Topics (the stricter count) | `tests/ingest/test_ws.py`: `T.X` plus `Q.X` counts as two | `tests/massive/ws/test_client_integration.py` (Options Advanced): 501 contracts on `T` and `Q` |
 | 12 | Exact `max_connections` status text and timing | Any status `max_connections`, in the auth reply or after it, shows `WAITING_SLOT` | `tests/ingest/test_ws.py`: both placements | `tests/ingest/test_ws_integration.py`: two sessions with one individual key |
 | 13 | `orjson` free-threaded wheels | Optional extra; standard-library codec by default | `tests/massive/net/test_codec.py`: codec selection with and without `orjson` importable | CI: the 3.14 job installs the extra (`--extra orjson`) and runs the suite with it; the 3.14t job does not, because `orjson` publishes no cp314t wheel |
 | 14 | Flat-file publish time (documented "approximately 11:00 AM ET") | `flat_file_publish_cutoff` defaults to 11:30 ET | `tests/datasets/test_history_source.py`: AUTO before and after the cutoff | `tests/ingest/test_flatfiles_integration.py`: yesterday's key exists after the cutoff |
-| 15 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/ingest/test_ws_integration.py`: subscribe both on a test key and record whether duplicates arrive |
+| 15 | Whether the server delivers an event twice when a wildcard and an explicit topic of the same channel are both subscribed (`T.*` plus `T.AAPL`) | While a channel's acknowledged wildcard is desired, its explicit topics are off the wire; transitions make before they break, accepting a brief duplicate ([section 13.3](#133-connection-and-subscription-protocol)) | `tests/ingest/test_ws.py`: adding, refusing, and removing a wildcard over explicit topics sends the expected frames in the expected order | `tests/massive/ws/test_client_integration.py`: subscribe both on a test key and record whether duplicates arrive |
 | 16 | A missing flat-file key answers HTTP 404, not 403 `AccessDenied` (S3 answers 403 for a missing key when the credentials lack `ListBucket`, which would turn weekends into `EntitlementError`) | A 404 is a missing file; a 403 is an entitlement failure (section 16) | `tests/massive/flatfiles/test_client.py`: 404 and 403 replies | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): request a weekend key and record the status |
 | 17 | Retired: `poll()` results are no longer keyed `input_table`s but shapes of a publisher's blink table ([section 14](#14-publishers-fan-out-and-failure-semantics)), so no input-table attribute is involved | | | |
 | 18 | Whether the Deephaven web UI shows a table's `TableDescription` | Set on every result anyway; it costs nothing and every API client can read it | `tests/tables/test_columns.py`: every result shape carries `TableDescription` | None: the implementer opens one result in the web UI of a local server and records in the pull request whether the description appears |
-| 19 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/namespaces/test_forex_integration.py`: one `C` frame; record the form of `x` |
-| 20 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/namespaces/test_crypto_integration.py`: one `XT` frame; record the form of `i` |
+| 19 | Form of WebSocket forex `C` `x`: declared an integer, sampled as the text `"44"` | `quoted-integer` reads an integer or decimal-digit text; anything else fails the row loudly | `tests/massive/spec/test_convert.py`: both forms convert, `"4.8"` and `48.5` fail | `tests/massive/ws/test_client_integration.py`: one raw `C` frame; record the form of `x` |
+| 20 | Form of WebSocket crypto `XT` `i`: declared and sampled as an integer, while REST and the flat file send text | `text-or-integer-id` keeps either form as text | `tests/massive/spec/test_convert.py`: both forms convert | `tests/massive/ws/test_client_integration.py`: one raw `XT` frame; record the form of `i` |
 | 21 | Unit of WebSocket `LULD` `t` (documented ms, sample of 19 digits) | Registered as ns (unverified); the overflow check and the [1990, 2100] bound fail loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/namespaces/test_stocks_integration.py`: one `LULD` frame converts to a current `Instant` |
 | 22 | Unit of flat-file `us_indices/values_v1` `timestamp` (documented ms, example rows of 19 digits) | Registered as ns (unverified); the bound fails loudly on a mismatch | `tests/massive/refresh/test_overrides.py`: the unit is ns and unverified | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one values file's first row converts to its day |
 | 23 | Where the futures snapshot carries a contract's ticker: the OpenAPI schema nests it as `details.ticker`, which the generator names `DetailsTicker` | `futures.snapshots` declares `DetailsTicker` as its `symbol` key; a row without it is a missing required key and fails loudly ([section 19.5](#195-runtime-drift)) | `tests/namespaces/test_futures.py`: a spec-shaped fixture fills `Symbol` from `details.ticker` | `tests/namespaces/test_futures_integration.py`: one `snapshots` request for a current contract; record where the ticker appears and that `Symbol` is filled |
@@ -4453,7 +4497,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 26 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
 | 27 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
 | 28 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
-| 29 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on `SessionEndDate`; bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |
+| 29 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on `SessionEndDate`; bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: minute bars of ES around the 2026-01-20 session, and `YEAR` candles from a year start and from mid-year; record the first bar's time and whether the candles arrive |
 | 30 | Whether `/v3/reference/tickers` returns one row per ticker with `active=false`, when delisted listings may reuse a ticker | `reference.tickers` polls keyed by `Symbol`; were several rows to share a ticker, a `poll()` table would keep one of them while `fetch()` shows all | `tests/namespaces/test_reference.py`: the vendor sample decodes with one row per ticker | `tests/namespaces/test_reference_integration.py`: one `tickers(active=False)` request over a letter range; record any ticker on several rows |
 | 31 | Whether `(asset_class, id)` identifies one row of `/v3/reference/exchanges` | `reference.exchanges` polls keyed by `AssetClass` and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `exchanges()` request; record any repeated key |
 | 32 | Whether `(asset_class, type, id)` identifies one row of `/v3/reference/conditions` | `reference.conditions` polls keyed by `AssetClass`, `Type`, and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `conditions()` request; record any repeated key |
@@ -4465,6 +4509,6 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
 | 39 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
 | 40 | Which session a futures bar of several sessions or longer is labelled with (`SessionEndDate` of its first or last session), and how such bars are aligned | Futures bars of a session or longer with `multiplier` above 1 named by dates raise `ValueError` ("pass datetimes, or multiplier=1"); named by datetimes, they are kept by their own window | `tests/datasets/test_history_source.py`, `tests/namespaces/test_futures.py`: the refusal for 2-session, 2-week, and 2-month bars | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `Timestamp` and `SessionEndDate` |
-| 41 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/ingest/test_rest_integration.py` (Basic key): six requests within a minute; record the 429's body and headers |
-| 42 | Whether the datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count against a subscription's limit, and which | They go to the unpaced `other` bucket; a 429 there pauses it as any unpaced bucket | `tests/ingest/test_rest.py`: such a request is charged to `other` | `tests/ingest/test_rest_integration.py` (Basic key): five stocks requests, then one reference request; record whether it is refused |
-| 43 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/ingest/test_rest_integration.py` (Basic key): requests at measured intervals; record when the first 429 comes and when requests succeed again |
+| 48 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/ingest/test_rest_integration.py` (Basic key): six requests within a minute; record the 429's body and headers |
+| 49 | Whether the datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count against a subscription's limit, and which | They go to the unpaced `other` bucket; a 429 there pauses it as any unpaced bucket | `tests/ingest/test_rest.py`: such a request is charged to `other` | `tests/ingest/test_rest_integration.py` (Basic key): five stocks requests, then one reference request; record whether it is refused |
+| 50 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/ingest/test_rest_integration.py` (Basic key): requests at measured intervals; record when the first 429 comes and when requests succeed again |

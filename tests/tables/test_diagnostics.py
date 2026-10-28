@@ -4,6 +4,7 @@ import contextlib
 import dataclasses
 import logging
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
@@ -110,7 +111,7 @@ def test_column_sets() -> None:
         "CLOSED",
     ]
     assert RATE_LIMITS.column_names == (
-        "Subscription",
+        "Bucket",
         "State",
         "RequestsPerMinute",
         "LimitSource",
@@ -639,15 +640,16 @@ class _RateSource:
     def __init__(self) -> None:
         self.pulls = 0
         self.rows: list[RateLimitRow] = []
+        self.change: float | None = None
 
-    def __call__(self) -> list[RateLimitRow]:
+    def __call__(self) -> tuple[list[RateLimitRow], float | None]:
         self.pulls += 1
-        return list(self.rows)
+        return list(self.rows), self.change
 
 
-def _rate_row(subscription: str, state: RateLimitState, **changes: object) -> RateLimitRow:
+def _rate_row(bucket: str, state: RateLimitState, **changes: object) -> RateLimitRow:
     return dataclasses.replace(
-        RateLimitRow(subscription=subscription, state=state, updated_at=1),
+        RateLimitRow(bucket=bucket, state=state, updated_at=1),
         **cast("dict[str, Any]", changes),
     )
 
@@ -679,7 +681,7 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
     ]
     diagnostics.rate_limits_changed()
     assert diagnostics.barrier().wait(TIMEOUT)
-    rows = {r["Subscription"]: r for r in dh_to_pylist(diagnostics.rate_limits)}
+    rows = {r["Bucket"]: r for r in dh_to_pylist(diagnostics.rate_limits)}
     assert set(rows) == {"stocks", "other"}
     stocks = rows["stocks"]
     assert (stocks["State"], stocks["RequestsPerMinute"], stocks["LimitSource"]) == (
@@ -701,7 +703,7 @@ def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
     source = _RateSource()
     started, go = threading.Event(), threading.Event()
 
-    def slow() -> list[RateLimitRow]:
+    def slow() -> tuple[list[RateLimitRow], float | None]:
         started.set()
         go.wait(TIMEOUT)
         return source()
@@ -715,3 +717,30 @@ def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
     assert diagnostics.barrier().wait(TIMEOUT)
     assert source.pulls == 2
     diagnostics.release()
+
+
+def test_rate_limit_rows_are_pulled_again_when_time_alone_changes_them(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RateSource()
+    source.rows = [_rate_row("stocks", RateLimitState.PAUSED)]
+    source.change = 0.05  # the pause ends in 50 ms
+    diagnostics.watch_rate_limits(source)
+    assert diagnostics.barrier().wait(TIMEOUT)
+    source.rows = [_rate_row("stocks", RateLimitState.READY)]
+    source.change = None
+    deadline = time.monotonic() + TIMEOUT
+    while source.pulls < 2:  # the timer queued a pull with no change from the governor
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert [r["State"] for r in dh_to_pylist(diagnostics.rate_limits)] == ["READY"]
+    source.change = 30.0
+    diagnostics.rate_limits_changed()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    timer = diagnostics._rate_timer
+    assert timer is not None
+    diagnostics.release()  # cancels the pending pull
+    assert not timer.is_alive() or timer.finished.is_set()
+    diagnostics.stop()  # nothing left to cancel or stop: harmless

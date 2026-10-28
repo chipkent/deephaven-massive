@@ -5,8 +5,9 @@ import functools
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, NoReturn, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -991,16 +992,20 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     # Massive asks for a pause beyond the ten minutes the library waits: it gives up at once.
     refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
+    given_up = (
+        r"^rate limited: Massive has refused stocks requests .*; "
+        r"m\.rate_limits\(\) shows when requests resume$"
+    )
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
-            with pytest.raises(dm.MassiveError, match=r"^rate limited: Massive refused stocks"):
+            with pytest.raises(dm.MassiveError, match=given_up):
                 fetch(session, DIVIDENDS, symbols=["AAPL"])
     # The second call failed without a request: the bucket's pause still stands.
     assert len(sent(fake_rest)) == 1
     warnings = [r.getMessage() for r in caplog.records if "with HTTP 429 (" in r.getMessage()]
     assert len(warnings) == 1
     assert warnings[0].startswith(
-        f"{session._core.label}: Massive refused stocks with HTTP 429 (HTTP 429 from GET "
+        f"{session._core.label}: Massive refused a stocks request with HTTP 429 (HTTP 429 from GET "
     )
     assert warnings[0].endswith("send the request id to Massive's support")
     assert "test-key" not in caplog.text
@@ -1204,7 +1209,7 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
     assert (
         "futures.trades history: 6 requests, one per session and symbol, more where a session "
         "spans several pages; if the futures subscription is on the Basic tier (5 requests a "
-        "minute), that takes at least 1 min"
+        "minute), they take at least 1 min"
     ) in caplog.messages
 
 
@@ -1932,7 +1937,7 @@ def test_a_long_grouped_daily_download_is_announced(
     assert all(date.fromisoformat(day).weekday() < 5 for day in days)
     assert (
         "stocks.bars history: 11 requests, one per day; if the stocks subscription is on the "
-        "Basic tier (5 requests a minute), that takes at least 2 min"
+        "Basic tier (5 requests a minute), they take at least 2 min"
     ) in caplog.text
 
 
@@ -2096,7 +2101,7 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
         assert rest_clock.waits == [61.0]
         assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text
         assert m._core.diagnostics.barrier().wait(30)
-        stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Subscription"] == "stocks")
+        stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Bucket"] == "stocks")
         assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (5, "LEARNED")
         assert (stocks["Requests"], stocks["Refusals"]) == (2, 1)
     finally:
@@ -2122,8 +2127,8 @@ def test_a_paced_fetch_announces_how_long_it_takes(
     finally:
         m.close()
     assert (
-        "crypto.last fetch: 6 requests; paced at 5 requests a minute (currencies), that takes "
-        "at least 1 min"
+        "crypto.last fetch: 6 requests; paced at 5 requests a minute (currencies); at that pace "
+        "they take at least 1 min"
     ) in caplog.messages
 
 
@@ -2186,7 +2191,7 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
         m.close()
     assert (
         "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
-        "per minute, so a cycle takes at least 36 s, longer than the 30 s interval; cycles run "
+        "per minute, so a cycle takes at least 37 s, longer than the 30 s interval; cycles run "
         "late"
     ) in caplog.messages
 
@@ -2241,3 +2246,56 @@ def test_a_released_poll_stops_waiting_for_a_slot(
         assert fake_rest.requests == []
     finally:
         m.close()
+
+
+def _slow_msft_pages(fake_rest: FakeRestServer, pages: int) -> str:
+    """Script `pages` one-row pages of MSFT trades, each answered after 0.2 s of real time.
+
+    Returns:
+        The MSFT path.
+    """
+    msft = TRADES_PATH.format(stockTicker="MSFT")
+    start = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC))
+    row = {"sip_timestamp": start + 1, "price": 1.0, "size": 1}
+    fake_rest.reply(msft, Reply(envelope([row], next_url=f"{fake_rest.url}{msft}?cursor=1")))
+    for index in range(1, pages):
+        following = None if index == pages - 1 else f"{fake_rest.url}{msft}?cursor={index + 1}"
+        fake_rest.reply(f"{msft}?cursor={index}", Reply(envelope([row], next_url=following)))
+
+    def slow(received: Received) -> None:
+        if "MSFT" in received.target:
+            time.sleep(0.2)
+
+    fake_rest.on_request(slow)
+    return msft
+
+
+def test_a_failed_symbol_stops_the_others_paging_after_at_most_one_more_page(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"{}", status=401))
+    _slow_msft_pages(fake_rest, 15)
+    with pytest.raises(dm.AuthenticationError):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
+    # The read's token is checked before every page: MSFT finishes the page on the wire, if
+    # any, and asks for no other.
+    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) <= 2
+
+
+def test_an_interrupted_fan_out_stops_its_running_calls(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _slow_msft_pages(fake_rest, 15)
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope([])))
+    waited = futures_wait
+
+    def interrupted(futures: Sequence[Future[object]], return_when: str = ALL_COMPLETED) -> object:
+        if return_when == FIRST_EXCEPTION:
+            time.sleep(0.3)  # the calls are paging
+            raise KeyboardInterrupt
+        return waited(futures, return_when=return_when)
+
+    monkeypatch.setattr(rest, "wait", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
+    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) <= 3
