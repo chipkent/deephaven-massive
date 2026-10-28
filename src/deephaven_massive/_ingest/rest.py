@@ -523,8 +523,8 @@ def _base(
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if spec.page_size is not None and "limit" in params:
         # A page size, as the list paths read `limit`. The aggregates' range path reads its
-        # `limit` as the number of base aggregates queried instead, so no dataset declares
-        # `page_size` on it.
+        # `limit` as the number of base aggregates queried instead (at most 50,000); its
+        # datasets set that maximum, and bars take no `limit` argument, so no cap shrinks it.
         cap = request.limit
         query["limit"] = spec.page_size if cap is None else min(cap, spec.page_size)
     path.update(fixed)
