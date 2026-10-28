@@ -199,7 +199,7 @@ def test_snapshots_take_symbols_or_all(massive_session: dm.MassiveSession) -> No
 
 
 def test_snapshot_symbols_are_set_only_through_symbols(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="has no filter 'ticker_any_of'"):
+    with pytest.raises(ValueError, match="ticker_any_of is set through symbols=, not filters"):
         massive_session.futures.snapshots("ESZ5", filters={"ticker_any_of": ["NQZ5"]})
 
 
@@ -504,8 +504,9 @@ def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
     ]
 
 
-def chicago_midnight(day: date) -> int:
-    return int(datetime.combine(day, time(), CHICAGO).timestamp()) * NS
+def chicago_open(day: date) -> int:
+    # 17:00 America/Chicago on `day`: the open of the session that ends the next trading day.
+    return int(datetime.combine(day, time(17), CHICAGO).timestamp()) * NS
 
 
 @pytest.fixture
@@ -544,20 +545,22 @@ def test_tick_history_over_rest_covers_whole_chicago_sessions(
     symbol = path.rsplit("/", 1)[1]
     factory = getattr(rest_session.futures, dataset)
     out = rows(factory(symbol).history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST))
-    # The session of 2024-12-17, widened by a Chicago day on each side; the rows are then
-    # kept by their SessionEndDate.
+    # The session of 2024-12-17 opens at 17:00 CT on 12-16; the window starts four days
+    # earlier, so trading a holiday folds into the session is covered, and ends exactly at
+    # the session's close. The rows are then kept by their SessionEndDate, oldest first.
     assert sent(fake_rest) == [
         (
             path,
             {
                 "limit": ["50000"],
-                "timestamp.gte": [str(chicago_midnight(date(2024, 12, 16)))],
-                "timestamp.lt": [str(chicago_midnight(date(2024, 12, 19)))],
+                "timestamp.gte": [str(chicago_open(date(2024, 12, 12)))],
+                "timestamp.lt": [str(chicago_open(date(2024, 12, 17)))],
+                "sort": ["timestamp.asc"],
             },
         )
     ]
     payload = json.loads(load_fixture(OWNER, fixture))["results"]
-    # The fixture's last row belongs to the next session, which the request window covers.
+    # The fixture's last row belongs to the next session; its SessionEndDate drops it.
     assert payload[-1]["session_end_date"] == "2024-12-18"
     assert [(r["Symbol"], r["Timestamp"], r["SequenceNumber"]) for r in out] == [
         (symbol, p["timestamp"], p["sequence_number"])
@@ -619,8 +622,9 @@ def test_session_bars_over_rest(
             {
                 "resolution": ["1session"],
                 "limit": ["50000"],
-                "window_start.gte": [str(chicago_midnight(date(2025, 2, 3)))],
-                "window_start.lt": [str(chicago_midnight(date(2025, 2, 7)))],
+                "window_start.gte": [str(chicago_open(date(2025, 1, 30)))],
+                "window_start.lt": [str(chicago_open(date(2025, 2, 5)))],
+                "sort": ["window_start.asc"],
             },
         )
     ]
@@ -702,7 +706,7 @@ def test_contracts_over_rest(
     assert sent(fake_rest) == [
         (
             "/futures/v1/contracts",
-            {"product_code": ["ES"], "active": ["true"], "limit": ["1000"]},
+            {"product_code": ["ES"], "active": ["true"], "limit": ["5"]},
         )
     ]
     assert [(r["Ticker"], r["ProductCode"], r["Active"], r["LastTradeDate"]) for r in out] == [
