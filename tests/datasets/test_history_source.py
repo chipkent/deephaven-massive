@@ -648,3 +648,12 @@ def test_crypto_day_bars_refuse_unready_flat_files_rather_than_switch() -> None:
             config=config(),
             now=NOW,
         )
+
+
+def test_forex_day_bars_still_switch_at_the_threshold() -> None:
+    # Only crypto 1-day bars keep a fixed source; forex 1-day bars follow the symbol count.
+    one = request(("C:EURUSD",), timespan=Timespan.DAY)
+    assert choose(FOREX_BARS, one) is HistorySource.REST
+    assert choose(FOREX_BARS, request(many(60), timespan=Timespan.DAY)) is (
+        HistorySource.FLAT_FILES
+    )

@@ -112,6 +112,9 @@ def _now() -> datetime:
 class HistoryWindow:
     """What one `history()` call reads and keeps; built by `history_window`.
 
+    Made once per call on the caller thread and handed to the transport that serves it;
+    frozen, so the transport's reader threads may share it.
+
     Attributes:
         span: The bounds by kind: the whole days (for futures, sessions) of two dates, or the
             exact instants of two datetimes.

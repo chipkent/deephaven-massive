@@ -1928,3 +1928,16 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         adjusted=True,
     )
     assert [(r["Symbol"], r["Timestamp"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
+
+
+def test_a_history_by_instants_is_not_announced_however_many_symbols(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Only one-request-per-day downloads are announced; six symbols of one day are not.
+    tickers = ["A", "B", "C", "D", "E", "F"]
+    for ticker in tickers:
+        fake_rest.reply(TRADES_PATH.format(stockTicker=ticker), Reply(envelope([])))
+    with caplog.at_level(logging.INFO, LOGGER):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=tickers)
+    assert len(sent(fake_rest)) == 6
+    assert "one per day or session" not in caplog.text

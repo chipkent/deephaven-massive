@@ -269,6 +269,8 @@ def _midnight(day: date, zone: tzinfo) -> datetime:
 class TimeRange:
     """A half-open interval of instants, `[start, end)`, in UTC; empty when `end <= start`.
 
+    Frozen and hashable, so it is safe to share between threads.
+
     Attributes:
         start: The first instant included.
         end: The first instant excluded.
@@ -315,7 +317,8 @@ class TimeRange:
 class DaySpan:
     """Whole days, or whole futures sessions, from `first` to `last`, both inclusive.
 
-    Empty when `last` is before `first`.
+    Empty when `last` is before `first`. Made by `bounds` and the bar rules; frozen and hashable,
+    so it is safe to share between threads.
 
     Attributes:
         first: The first day (for futures, the first `session_end_date`) included.
@@ -556,14 +559,13 @@ class _Periods:
             day: The day.
 
         Returns:
-            The period's first day.
+            The period's first day: for a week, the Monday on or before the day. (The Saturday
+            and Sunday before a Monday-to-Friday week still belong to it, through
+            `membership`, when bar starts are kept.)
         """
         span = self.timespan
         if span is Timespan.WEEK:
-            weekday = day.weekday()
-            if self.asset_class is AssetClass.CRYPTO or weekday < _SATURDAY:
-                return day - timedelta(days=weekday)
-            return day + timedelta(days=_DAYS_A_WEEK - weekday)
+            return day - timedelta(days=day.weekday())
         if span in _PERIOD_MONTHS:
             size = _PERIOD_MONTHS[span]
             return date(day.year, (day.month - 1) // size * size + 1, 1)
