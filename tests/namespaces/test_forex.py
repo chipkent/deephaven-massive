@@ -669,6 +669,7 @@ class Socket:
             core,
             resolve_host=self.resolve,
             record_verdict=lambda *_: None,
+            crypto_pair=unexpected_lookup,
             client_factory=self.client,
         )
         cast("Any", core._ports)._streams = self.connections
@@ -1052,3 +1053,8 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     }
     for name, keys in revised.items():
         assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)
+
+
+def unexpected_lookup(symbol: str) -> tuple[str, str]:
+    # These streams use no crypto pair that needs Massive's reference data.
+    raise AssertionError(f"unexpected crypto pair lookup of {symbol}")

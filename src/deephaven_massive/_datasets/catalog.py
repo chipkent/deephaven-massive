@@ -304,7 +304,8 @@ class DatasetSpec:
             tickers rather than Massive's US-market ones (the TMX corporate events, a global
             calendar): `symbols=`, the rows of a symbol table, and the rows' symbols are then
             taken exactly as Massive writes them (`symbols.is_canonical`), not through the
-            asset class's grammar.
+            asset class's grammar. Only a REST dataset may set it: a stream's topics and a
+            flat file's filter follow the class's spellings.
     """
 
     name: str
@@ -350,7 +351,8 @@ class DatasetSpec:
                 column with `revision_keys`; `nullable_poll_keys` names a column that is no
                 poll key, or gives an empty reason; a flat-file prefix does not
                 declare its `symbol` and `time` keys from its own columns (and, for futures,
-                its `session` key, against which every futures file is checked); or the
+                its `session` key, against which every futures file is checked); a dataset
+                that keeps its symbols as written has channels or flat-file prefixes; or the
                 transports match no query class (see the class docstring and `_check_verbs`).
         """
         namespace, _, dataset = self.name.partition(".")
@@ -367,6 +369,9 @@ class DatasetSpec:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
         if self.kind is not None and self.asset_class is None:
             raise ValueError(f"{self.name}: a dataset in a kind needs a class (its group)")
+        if self.symbols_as_written and (self.channels or self.flat_file_prefixes):
+            # A stream subscribes and a flat file filters by the class's spellings.
+            raise ValueError(f"{self.name}: symbols kept as written are for REST datasets only")
         self._check_keys()
         self._check_poll_keys()
         self._check_flat_files()

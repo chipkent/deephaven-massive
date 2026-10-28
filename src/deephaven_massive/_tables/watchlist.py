@@ -37,7 +37,6 @@ from deephaven_massive._datasets.symbols import (
     canonical_symbol,
     check_symbol,
     is_canonical,
-    topic_problem,
 )
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
 from deephaven_massive._errors import BoundedWarnings
@@ -97,19 +96,6 @@ def invalid_row_message(
     return f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
 
 
-def _stream_message(symbol: str, problem: str) -> str:
-    """Say that a symbol table's row cannot be streamed.
-
-    Args:
-        symbol: The row's symbol, canonical.
-        problem: Why its topic cannot be built (`topic_problem`).
-
-    Returns:
-        The message a stream fails with.
-    """
-    return f"a symbol table holds {symbol!r}: {problem}"
-
-
 _FAILED_TABLE: Final = (
     "the symbol table failed, so the result can no longer follow it: {cause}. A table made by "
     "dm.canonicalize_symbols fails on a row it cannot convert unless "
@@ -118,7 +104,7 @@ _FAILED_TABLE: Final = (
 """The message of a result whose symbol table failed upstream, formatted with the cause."""
 
 
-def read_symbols(spec: DatasetSpec, table: Table, *, for_stream: bool = False) -> tuple[str, ...]:
+def read_symbols(spec: DatasetSpec, table: Table) -> tuple[str, ...]:
     """Read a symbol table's current rows once, refusing any that is not canonical.
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
@@ -128,8 +114,6 @@ def read_symbols(spec: DatasetSpec, table: Table, *, for_stream: bool = False) -
     Args:
         spec: The dataset, whose class and `symbols_as_written` decide the grammar.
         table: The user's table with a `Symbol` column.
-        for_stream: True for a stream verb, whose symbols must also build a WebSocket topic
-            (`topic_problem`).
 
     Returns:
         The table's symbols, sorted and de-duplicated; empty for a table of no or only null
@@ -138,8 +122,7 @@ def read_symbols(spec: DatasetSpec, table: Table, *, for_stream: bool = False) -
     Raises:
         ValueError: If the table has failed (a `canonicalize_symbols` table under
             `OnError.RAISE` that met a bad row), or a row is not Massive's exact ticker of the
-            class (`invalid_row_message`, for the first such row in sorted order), or, for a
-            stream, a row's topic cannot be built.
+            class (`invalid_row_message`, for the first such row in sorted order).
     """
     if table.j_table.isFailed():
         raise ValueError(_FAILED_TABLE.format(cause="it is failed"))
@@ -148,9 +131,6 @@ def read_symbols(spec: DatasetSpec, table: Table, *, for_stream: bool = False) -
     for symbol in found:
         if not is_canonical(spec.asset_class, symbol, as_written=written):
             raise ValueError(invalid_row_message(spec.asset_class, symbol, as_written=written))
-        problem = topic_problem(spec.asset_class, symbol) if for_stream else None
-        if problem is not None:
-            raise ValueError(_stream_message(symbol, problem))
     return tuple(found)
 
 
@@ -164,17 +144,16 @@ class SymbolWatch:
     `start()` replays the table's current rows as one change of added symbols; every later
     change of the table is reported from the update-graph thread that delivers it.
 
-    `on_change(added, removed)` receives two disjoint frozensets of symbols: those the table
-    now holds and did not before, and those it no longer holds. It is never called with both
-    empty. A row whose symbol is not Massive's exact ticker of the class, or whose WebSocket
-    topic cannot be built (`topic_problem`), is never counted: `on_invalid(message)` receives
-    the reason each time such a row arrives, and its owner fails the stream. When the watched
-    table itself fails (a `canonicalize_symbols` table under `OnError.RAISE` that met a bad
-    row), `on_invalid` receives that too, so the stream never follows a frozen table. Both
-    callbacks run on the replaying caller thread or an
-    update-graph thread, with the update-graph lock held: they must not block, wait on a
-    library thread, or make a table operation, and an exception one raises is logged at ERROR
-    by the listener's error callback.
+    `on_change(added, removed)` receives two disjoint frozensets of symbols: those the table now
+    holds and did not before, and those it no longer holds. It is never called with both empty. A
+    row whose symbol is not Massive's exact ticker of the class is never counted (the transport
+    looks up a crypto pair's split before it subscribes): `on_invalid(message)` receives the reason
+    each time such a row arrives, and its owner fails the stream. When the watched table itself
+    fails (a `canonicalize_symbols` table under `OnError.RAISE` that met a bad row), `on_invalid`
+    receives that too, so the stream never follows a frozen table. Both callbacks run on the
+    replaying caller thread or an update-graph thread, with the update-graph lock held: they must
+    not block, wait on a library thread, or make a table operation, and an exception one raises is
+    logged at ERROR by the listener's error callback.
 
     `keep_alive_with(table)` ties the view and the listener to another table's liveness, so
     they live exactly as long as that table: the transport passes the stream's blink table,
@@ -324,8 +303,8 @@ class _SymbolCounter(TableListener):
     def _count(self, columns: Mapping[str, Iterable[object]], step: int) -> None:
         """Add `step` to the count of each canonical symbol, forgetting counts that reach zero.
 
-        A symbol that is not canonical, or cannot be streamed, is never counted: one that
-        arrives is reported to `on_invalid`, and one that leaves is ignored.
+        A symbol that is not canonical is never counted: one that arrives is reported to
+        `on_invalid`, and one that leaves is ignored.
 
         Args:
             columns: The `Symbol` values of some rows, as `TableUpdate` returns them: NumPy
@@ -334,14 +313,9 @@ class _SymbolCounter(TableListener):
         """
         for value in columns.get(_SYMBOL, ()):
             symbol = str(value)  # a plain str, not NumPy's subclass, leaves the listener
-            message = None
             if not is_canonical(self._asset_class, symbol):
-                message = invalid_row_message(self._asset_class, symbol)
-            elif (problem := topic_problem(self._asset_class, symbol)) is not None:
-                message = _stream_message(symbol, problem)
-            if message is not None:
                 if step > 0:
-                    self._on_invalid(message)
+                    self._on_invalid(invalid_row_message(self._asset_class, symbol))
                 continue
             count = self._counts[symbol] + step
             if count > 0:
@@ -441,10 +415,12 @@ def canonicalize_symbols(
     def refuse(value: str, reason: str) -> None:
         warnings.warn(value, "canonicalize_symbols: %s; its rows get a null %s", reason, column)
 
-    # The current rows are converted in Python first, one consistent snapshot of their distinct
-    # values, so a bad one raises a clean ValueError here, static table or refreshing.
-    rows = table.select_distinct([column]).iter_tuple(cols=column)
-    refused = _refused((row[0] for row in rows if row[0] is not None), convert)
+    # The current rows are converted in Python first, over one consistent snapshot of their
+    # values (iter_tuple holds the shared lock), so a bad one raises a clean ValueError here,
+    # static table or refreshing. They are de-duplicated here, not by a select_distinct, which
+    # on a refreshing table would leave a hidden aggregation ticking for the caller's scope.
+    values = {row[0] for row in table.iter_tuple(cols=column) if row[0] is not None}
+    refused = _refused(values, convert)
     if refused and mode is OnError.RAISE:
         shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
         raise ValueError(

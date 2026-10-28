@@ -272,17 +272,6 @@ def test_trades_take_massive_tickers_only(massive_session: dm.MassiveSession) ->
             massive_session.crypto.trades(spelling)
 
 
-def test_a_pair_with_an_unknown_quote_is_taken_but_cannot_be_streamed(
-    massive_session: dm.MassiveSession,
-) -> None:
-    # Any X: ticker is Massive's; only a stream needs the pair split for its topic.
-    q = massive_session.crypto.trades("X:BTCDAI")
-    assert request_of(q).symbols == ("X:BTCDAI",)
-    for verb in (q.blink, q.append_only, q.last_by):
-        with pytest.raises(ValueError, match=r"^'X:BTCDAI' cannot be streamed: its WebSocket"):
-            verb()
-
-
 @pytest.mark.parametrize("method", ["trades", "quotes", "fmv", "snapshots"])
 def test_the_streams_and_snapshots_accept_all(
     massive_session: dm.MassiveSession, method: str
@@ -779,6 +768,7 @@ class WsSession:
             core,
             resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "a test"),
             record_verdict=lambda *_: None,
+            crypto_pair=unexpected_lookup,
             client_factory=self.client,
         )
         cast("Any", core._ports)._streams = connections
@@ -1011,9 +1001,33 @@ def test_a_flat_file_that_dashes_its_pairs_is_read(
         return [(r["Symbol"], r["Price"]) for r in rows(table)]
 
     assert symbols("X:BTCUSD") == [("X:BTCUSD", 27142.85)]
-    assert symbols("X:BTCDAI") == [("X:BTCDAI", 27140.12)]  # a quote the library does not know
+    assert symbols("X:BTCPYUSD") == [("X:BTCPYUSD", 27140.12)]  # the quote is not split off
     assert symbols(dm.ALL) == [
         ("X:BTCUSD", 27142.85),
         ("X:ETHUSD", 1772.6),
-        ("X:BTCDAI", 27140.12),
+        ("X:BTCPYUSD", 27140.12),
+    ]
+
+
+def unexpected_lookup(symbol: str) -> tuple[str, str]:
+    # These streams use no crypto pair that needs Massive's reference data.
+    raise AssertionError(f"unexpected crypto pair lookup of {symbol}")
+
+
+def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Any X: ticker is Massive's; only a stream needs the pair split for its topic, and no
+    # listed quote ends this one, so the stream asks Massive's reference data and is refused.
+    fake_rest.reply("/v3/reference/tickers", Reply({"status": "OK", "results": []}))
+    q = rest_session.crypto.trades("X:BTCXYZ")
+    assert request_of(q).symbols == ("X:BTCXYZ",)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^cannot stream 'X:BTCXYZ': 'X:BTCXYZ' cannot be split into its two currencies: "
+        r"Massive's reference data does not list it$",
+    ):
+        q.blink()
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", {"ticker": ["X:BTCXYZ"], "market": ["crypto"]})
     ]

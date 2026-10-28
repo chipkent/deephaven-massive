@@ -765,3 +765,29 @@ def test_an_event_without_a_ticker_has_a_null_symbol(
         {"Symbol": "ROL", "Isin": "US7757111049", "TmxRecordId": "A1"},
         {"Symbol": None, "Isin": "CA0000000001", "TmxRecordId": "B2"},
     ]
+
+
+def test_tmx_rows_keep_global_tickers_as_written(
+    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default FAIL, a ticker outside the US stock grammar would fail the request; the
+    # global calendar keeps it as Massive writes it.
+    def event(ticker: str, record: str, venue: str) -> dict[str, object]:
+        return {
+            "company_name": "A company",
+            "date": "2025-07-23",
+            "name": "Q2 2025 Earnings Announcement",
+            "status": "confirmed",
+            "ticker": ticker,
+            "tmx_company_id": "2208",
+            "tmx_record_id": record,
+            "trading_venue": venue,
+            "type": "earnings_announcement_date",
+        }
+
+    rows_ = [event("ERIC B", "R1", "XSTO"), event("7203", "R2", "XTKS")]
+    fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows_)))
+    table = rest_session.partners.tmx.corporate_events(symbols=["ERIC B", "7203"]).fetch()
+    assert sorted(row[0] for row in table.iter_tuple(cols="Symbol")) == ["7203", "ERIC B"]
+    ((_, query),) = sent(fake_rest)
+    assert query["ticker.any_of"] == ["7203,ERIC B"]

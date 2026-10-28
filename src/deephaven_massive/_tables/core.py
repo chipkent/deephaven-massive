@@ -208,6 +208,24 @@ class RestTransport(Protocol):
         """
         ...
 
+    def crypto_pair(self, symbol: str) -> tuple[str, str]:
+        """Return a crypto ticker's base and quote, looking them up in Massive if needed.
+
+        Called by the WebSocket transport for a ticker the quote list cannot split, before a
+        stream starts or on its lookup worker. It blocks for one request to Massive's reference
+        data until a lookup of the ticker succeeds; the answer is then kept for the session.
+
+        Args:
+            symbol: A canonical crypto ticker.
+
+        Returns:
+            `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`.
+
+        A failed request, or a ticker Massive does not list, raises a `MassiveError` naming
+        the ticker.
+        """
+        ...
+
     def record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
     ) -> None:

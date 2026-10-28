@@ -712,6 +712,7 @@ def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]
         session._core,
         resolve_host=lambda *_: SOCKET,
         record_verdict=lambda *_: None,
+        crypto_pair=unexpected_lookup,
         client_factory=client,
     )
     clients: Any = session._core._ports
@@ -889,3 +890,8 @@ def test_only_the_snapshots_revise_on_their_update_time() -> None:
     revised = {spec.name: spec.revision_keys for spec in indices.DATASETS if spec.revision_keys}
     assert revised == {"indices.snapshots": ("LastUpdated",)}
     assert "LastUpdated" in CATALOG.dataset_schema(indices.SNAPSHOTS).column_names
+
+
+def unexpected_lookup(symbol: str) -> tuple[str, str]:
+    # These streams use no crypto pair that needs Massive's reference data.
+    raise AssertionError(f"unexpected crypto pair lookup of {symbol}")

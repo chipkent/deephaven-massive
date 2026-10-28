@@ -885,6 +885,7 @@ def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]
         m._core,
         resolve_host=lambda *_: REALTIME,
         record_verdict=lambda *_: None,
+        crypto_pair=unexpected_lookup,
         client_factory=client,
     )
     cast("Any", m._core._ports)._streams = connections
@@ -1068,10 +1069,12 @@ def test_a_file_of_spreads_reads_every_ticker_as_written(
 
 
 def test_futures_datasets_take_contracts_and_spreads(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6"])
-    assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6")
-    with pytest.raises(ValueError, match="is not a Massive futures ticker: a contract is"):
-        massive_session.futures.trades("esz5")
+    # Any ticker as Massive writes it, so a combo form seen on a row can be passed back.
+    q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6", "ZZ:NEW COMBO Z6"])
+    assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6", "ZZ:NEW COMBO Z6")
+    for bad in (" ESZ5", "X:ESZ5", ""):
+        with pytest.raises(ValueError, match="ticker"):
+            massive_session.futures.trades(bad)
 
 
 def test_bars_of_several_sessions_by_date_are_refused(
@@ -1117,3 +1120,8 @@ def test_no_futures_poll_key_is_nullable() -> None:
     # No vendor description says a key column of these datasets is left empty, and no fixture
     # leaves one empty: a null there fails the table.
     assert all(not spec.nullable_poll_keys for spec in futures.DATASETS)
+
+
+def unexpected_lookup(symbol: str) -> tuple[str, str]:
+    # These streams use no crypto pair that needs Massive's reference data.
+    raise AssertionError(f"unexpected crypto pair lookup of {symbol}")

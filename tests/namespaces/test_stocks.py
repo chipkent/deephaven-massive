@@ -1140,6 +1140,7 @@ def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]
         m._core,
         resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "test"),
         record_verdict=lambda *_: None,
+        crypto_pair=unexpected_lookup,
         client_factory=client,
     )
     cast("Any", m._core._ports)._streams = connections
@@ -1563,3 +1564,8 @@ def test_every_other_symbol_key_is_required(name: str) -> None:
     spec = spec_of(name)
     symbols = [keys.symbol for keys in spec.keys.values() if keys.symbol is not None]
     assert all(key.required for key in symbols)
+
+
+def unexpected_lookup(symbol: str) -> tuple[str, str]:
+    # These streams use no crypto pair that needs Massive's reference data.
+    raise AssertionError(f"unexpected crypto pair lookup of {symbol}")

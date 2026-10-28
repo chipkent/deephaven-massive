@@ -596,6 +596,80 @@ def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
     assert [(r["Symbol"], r["Open"]) for r in out] == [("X:BTCUSD", 90000.5)]
 
 
+def _ticker(symbol: str, base: str, quote: str) -> dict[str, object]:
+    # One row of /v3/reference/tickers for a crypto pair.
+    return {
+        "ticker": symbol,
+        "market": "crypto",
+        "base_currency_symbol": base,
+        "currency_symbol": quote,
+    }
+
+
+def test_an_ambiguous_crypto_pair_takes_its_split_from_massive_once(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # X:DOTUSD ends in USD and in TUSD: the reference data says where it splits, never a guess.
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    body = {"symbol": "DOT-USD", "isUTC": True, "day": "2025-03-03T00:00:00Z", "open": 4.5}
+    fake_rest.reply("/v1/open-close/crypto/DOT/USD/2025-03-03", Reply(body), Reply(body))
+    for _ in range(2):
+        out = fetch(
+            session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
+        )
+        assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", {"ticker": ["X:DOTUSD"], "market": ["crypto"]}),
+        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),
+        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),  # the split is cached
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([], "Massive's reference data does not list it"),
+        (
+            [_ticker("X:DOTUSD", "DOT", "USDT")],
+            "Massive's reference data gives the currencies 'DOT' and 'USDT', which do not",
+        ),
+        (
+            # Another ticker's row comes first and its currencies join to X:DOTUSD as well.
+            [_ticker("X:OTHER", "DOT", "USD"), _ticker("X:DOTUSD", "DO", "TUSD")],
+            None,
+        ),
+    ],
+)
+def test_a_crypto_pair_lookup_never_guesses(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    rows: list[dict[str, object]],
+    message: str | None,
+) -> None:
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)))
+    reader = cast("Any", session._core.rest_transport())._reader()
+    if message is None:  # the row of the ticker itself decides
+        assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
+        return
+    with pytest.raises(dm.MassiveError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
+        reader.crypto_pair("X:DOTUSD")
+
+
+def test_a_failed_crypto_pair_lookup_keeps_its_public_error(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v3/reference/tickers", Reply({"status": "ERROR"}, status=403))
+    reader = cast("Any", session._core.rest_transport())._reader()
+    with pytest.raises(
+        dm.EntitlementError, match=r"^'X:DOTUSD' cannot be split into its two currencies: looking"
+    ) as raised:
+        reader.crypto_pair("X:DOTUSD")
+    assert raised.value.status == 403
+    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")  # the quote list: no request
+    assert len(sent(fake_rest)) == 1
+
+
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

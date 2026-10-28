@@ -86,6 +86,13 @@ FOREX_FMV = DatasetSpec(
     family=ChannelFamily.FMV,
     keys={(W, "forex/FMV"): SourceKeys(KeySpec("Ticker"))},
 )
+CRYPTO = DatasetSpec(
+    name="test.crypto",
+    summary="A test dataset.",
+    asset_class=AssetClass.CRYPTO,
+    channels={None: "XT"},
+    keys={(W, "crypto/XT"): SourceKeys(KeySpec("Pair"), KeySpec("ParticipantTimestamp"))},
+)
 OPTIONS = DatasetSpec(
     name="test.options",
     summary="A test dataset.",
@@ -172,6 +179,9 @@ class Harness:
         self.server = server
         self.backoff = backoff
         self.decisions: list[tuple[AssetClass, ChannelFamily]] = []
+        # What Massive's reference data says of each crypto ticker, and every lookup made.
+        self.pair_answers: dict[str, tuple[str, str]] = {}
+        self.lookups: list[str] = []
         self.verdicts: list[tuple[AssetClass, ChannelFamily, HostDecision]] = []
         self._decide = decide or (lambda *_: REALTIME)
         self.cond = threading.Condition()
@@ -193,6 +203,7 @@ class Harness:
             self.session._core,
             resolve_host=self.resolve,
             record_verdict=self.record_verdict,
+            crypto_pair=self.crypto_pair,
             client_factory=self.factory,
         )
         clients._streams = self.connections
@@ -205,6 +216,17 @@ class Harness:
             if (verdict_class, verdict_family) == (asset_class, family):
                 return decision
         return self._decide(asset_class, family)
+
+    def crypto_pair(self, symbol: str) -> tuple[str, str]:
+        # The REST transport's lookup of a crypto ticker's currencies.
+        with self.cond:
+            self.lookups.append(symbol)
+        if symbol not in self.pair_answers:
+            raise dm.MassiveError(
+                f"{symbol!r} cannot be split into its two currencies: Massive's reference data "
+                "does not list it"
+            )
+        return self.pair_answers[symbol]
 
     def record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
@@ -1716,3 +1738,61 @@ def test_a_topic_reconnects_once_per_session(harness: Harness) -> None:
     assert harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert not harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert harness.connections.first_no_ack("/options", "T.AAPL")
+
+
+AMBIGUOUS = {
+    "X:DOTUSD": ("DOT", "USD"),  # DOT-USD or DO-TUSD
+    "X:SHIBUSD": ("SHIB", "USD"),  # SHIB-USD or SHI-BUSD
+    "X:USDTUSD": ("USDT", "USD"),  # USDT-USD or USD-TUSD
+    "X:BTCPYUSD": ("BTC", "PYUSD"),  # BTC-PYUSD or BTCPY-USD
+}
+
+
+def test_an_ambiguous_crypto_pair_subscribes_the_topic_massive_gives(harness: Harness) -> None:
+    # The quote list cannot split these, so Massive's reference data does, once per ticker.
+    harness.pair_answers.update(AMBIGUOUS)
+    result = harness.query(CRYPTO, [*AMBIGUOUS, "X:BTCUSD"]).blink()
+    harness.subscribed("XT.DOT-USD", "XT.SHIB-USD", "XT.USDT-USD", "XT.BTC-PYUSD", "XT.BTC-USD")
+    assert sorted(harness.lookups) == sorted(AMBIGUOUS)  # X:BTCUSD needs no lookup
+    again = harness.query(CRYPTO, ["X:DOTUSD"]).append_only()  # another stream: cached
+    assert sorted(harness.lookups) == sorted(AMBIGUOUS)
+    for table in (result, again):
+        harness.session.release(table)
+
+
+def test_a_failed_crypto_pair_lookup_refuses_the_stream(harness: Harness) -> None:
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^cannot stream 'X:DOTUSD': 'X:DOTUSD' cannot be split into its two currencies: "
+        r"Massive's reference data does not list it$",
+    ):
+        harness.query(CRYPTO, ["X:DOTUSD"]).blink()
+    assert harness.urls == []  # no connection opened, so no topic guessed
+
+
+def test_a_watchlist_row_of_an_ambiguous_pair_is_looked_up_off_the_update_graph(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    harness.pair_answers["X:DOTUSD"] = ("DOT", "USD")
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["X:SHIBUSD"])]))
+    harness.pair_answers["X:SHIBUSD"] = ("SHIB", "USD")
+    result = harness.query(CRYPTO, watchlist).append_only()
+    harness.subscribed("XT.SHIB-USD")  # the current row, looked up before the stream started
+    watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    harness.subscribed("XT.DOT-USD")  # a later row, looked up on the lookup worker
+    watchlist.add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))  # Massive does not list it
+    wait_for(lambda: failed_after_flush(harness, result))
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert row["Error"].startswith("cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot be split")
+    assert "XT.DO-TUSD" not in {json.loads(f)["params"] for f in harness.server.frames()}
+
+
+def test_a_lookup_that_finishes_after_its_stream_ended_changes_nothing(harness: Harness) -> None:
+    # A watchlist change waits on the lookup worker; if the stream has gone by the time the
+    # answer arrives, the answer is kept for the session and nothing is posted or failed.
+    harness.pair_answers["X:DOTUSD"] = ("DOT", "USD")
+    harness.connections._change_pairs(999, frozenset({"X:DOTUSD"}), frozenset())
+    assert harness.lookups == ["X:DOTUSD"]
+    assert harness.connections.pairs() == {"X:DOTUSD": ("DOT", "USD")}
+    assert harness.urls == []  # no connection was opened for it

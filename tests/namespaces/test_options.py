@@ -910,6 +910,7 @@ class Streams:
             self.session._core,
             resolve_host=self.resolve,
             record_verdict=lambda *_: None,
+            crypto_pair=unexpected_lookup,
             client_factory=self.factory,
         )
         cast("Any", self.session._core._ports)._streams = self.connections
@@ -1186,3 +1187,8 @@ def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
     for name in ("LastTradePrice", "LastTradeExchange"):
         assert snapshots[name].description == chain[name].description
     assert "AAPL" not in snapshots["LastTradeId"].description
+
+
+def unexpected_lookup(symbol: str) -> tuple[str, str]:
+    # These streams use no crypto pair that needs Massive's reference data.
+    raise AssertionError(f"unexpected crypto pair lookup of {symbol}")

@@ -23,6 +23,7 @@ from deephaven_massive._datasets.symbols import (
     check_symbol,
     is_canonical,
     is_forex_currency,
+    listed_pair,
     normalize,
     option_roots,
     symbol_class,
@@ -71,6 +72,8 @@ CANONICAL = [
     (FUT, "CL:BF Q6-U6-V6"),
     (FUT, "CL:BZ U6-V6"),
     (FUT, "6A:XF:AUDUSD:Q6"),
+    (FUT, "esz5"),  # a dataset takes any ticker as written; only the converters check forms
+    (FUT, "BOB 2-1 U6"),
     (IDX, "I:SPX"),
     (IDX, "I:AAVE10RP"),
     (IDX, "I:APy"),
@@ -78,7 +81,8 @@ CANONICAL = [
     (FX, "C:EURUSD"),
     (CRY, "X:BTCUSD"),
     (CRY, "X:1INCHUSDT"),
-    (CRY, "X:BTCDAI"),  # a quote the library does not know: canonical, though not streamable
+    (CRY, "X:BTCXYZ"),  # a quote the library does not know: canonical, though not streamable
+    (CRY, "X:BTCPYUSD"),  # ends in PYUSD and in USD: canonical, though not streamable
 ]
 
 NOT_CANONICAL = [
@@ -102,10 +106,6 @@ NOT_CANONICAL = [
     (OPT, "O:AAPL250229C00150000"),  # 2025 is no leap year
     (OPT, "O:AAPL250117X00150000"),
     (FUT, ""),
-    (FUT, "esz5"),  # nothing is re-cased
-    (FUT, "1234"),
-    (FUT, "ES-Z5"),
-    (FUT, "BOB 2-1 U6"),
     (FUT, " ESZ5"),
     (FUT, "ESZ5\n"),
     (FUT, "X:ESZ5"),
@@ -175,6 +175,7 @@ CONVERSIONS = [
     (dm.canonical_symbol_crypto, "doge-usdt", "X:DOGEUSDT"),
     (dm.canonical_symbol_crypto, "1INCH-USD", "X:1INCHUSD"),
     (dm.canonical_symbol_crypto, "BTC-DAI", "X:BTCDAI"),
+    (dm.canonical_symbol_crypto, "BTC-PYUSD", "X:BTCPYUSD"),
     (dm.canonical_symbol_future, "ESZ5", "ESZ5"),
     (dm.canonical_symbol_future_spread, "10YN6-10YQ6", "10YN6-10YQ6"),
     (dm.canonical_symbol_future_spread, "TEX 07-05 U6", "TEX 07-05 U6"),
@@ -568,10 +569,18 @@ def test_crypto_quotes_cover_the_vendored_tickers(
     text = load_fixture("datasets/symbols", "crypto_tickers.csv").decode()
     rows = list(csv.DictReader(io.StringIO(text)))
     assert len(rows) > 20
+    ambiguous = set()
     for row in rows:
-        assert is_canonical(CRY, row["ticker"])
-        assert ws_symbol(CRY, row["ticker"]) == row["websocket"]
-        assert canonical_from_wire(CRY, row["websocket"]) == row["ticker"]
+        ticker, websocket = row["ticker"], row["websocket"]
+        assert is_canonical(CRY, ticker)
+        split = cast("tuple[str, str]", tuple(websocket.split("-")))
+        if listed_pair(ticker) is None:  # two listed quotes end it: Massive's data splits it
+            ambiguous.add(ticker)
+        else:
+            assert listed_pair(ticker) == split
+        assert ws_symbol(CRY, ticker, {ticker: split}) == websocket
+        assert canonical_from_wire(CRY, websocket) == ticker
+    assert ambiguous == {"X:DOTUSD", "X:SHIBUSD", "X:USDTUSD"}
     quotes = {row["websocket"].split("-")[1] for row in rows}
     assert quotes <= set(CRYPTO_QUOTES)
     assert list(CRYPTO_QUOTES) == sorted(CRYPTO_QUOTES, key=len, reverse=True)
@@ -713,20 +722,38 @@ def test_wire_symbols_log_nothing_under_fail(caplog: pytest.LogCaptureFixture) -
     assert caplog.records == []
 
 
-def test_a_crypto_ticker_streams_only_when_its_quote_is_known() -> None:
+def test_the_quote_list_splits_a_crypto_ticker_only_without_a_guess() -> None:
+    assert listed_pair("X:BTCUSD") == ("BTC", "USD")
+    assert listed_pair("X:BTCDAI") == ("BTC", "DAI")  # DAI is a listed quote
+    assert ws_symbol(CRY, "X:ETHUSDE") == "ETH-USDE"
     assert topic_problem(CRY, "X:BTCUSD") is None
-    assert topic_problem(None, "X:BTCUSD") is None
     assert topic_problem(STK, "AAPL") is None
-    problem = topic_problem(None, "X:BTCDAI")
-    assert problem is not None
-    assert problem.startswith("'X:BTCDAI' cannot be streamed: its WebSocket topic needs")
-    assert "fetch(), poll(), and history() still serve it" in problem
-    with pytest.raises(ValueError, match=r"^'X:BTCDAI' cannot be streamed"):
-        ws_symbol(CRY, "X:BTCDAI")
-    spellings = wire_spellings(CRY, "X:BTCDAI")
-    assert spellings[:2] == ("X:BTCDAI", "BTCDAI")
-    assert {"X:BTC-DAI", "BTC/DAI", "X:BT-CDAI"} <= set(spellings)
-    assert all(canonical_from_wire(CRY, s) == "X:BTCDAI" for s in spellings)
+    assert topic_problem(None, "X:BTCXYZ") == (
+        "'X:BTCXYZ' cannot be split into its two currencies by the quote list: its quote "
+        f"currency is none of {', '.join(CRYPTO_QUOTES)}"
+    )
+    # Two quotes end these, so the quote list gives no split and the transport asks Massive.
+    for symbol, candidates in (
+        ("X:BTCPYUSD", "BTC-PYUSD or BTCPY-USD"),
+        ("X:DOTUSD", "DO-TUSD or DOT-USD"),
+        ("X:SHIBUSD", "SHI-BUSD or SHIB-USD"),
+        ("X:USDTUSD", "USD-TUSD or USDT-USD"),
+    ):
+        assert listed_pair(symbol) is None
+        problem = topic_problem(CRY, symbol)
+        assert problem is not None
+        assert problem.endswith(f"its pair splits ambiguously ({candidates})")
+        with pytest.raises(ValueError, match=rf"^'{symbol}' cannot be split"):
+            ws_symbol(CRY, symbol)
+    # Given Massive's split, the topic follows it.
+    assert ws_symbol(CRY, "X:BTCPYUSD", {"X:BTCPYUSD": ("BTC", "PYUSD")}) == "BTC-PYUSD"
+    assert ws_symbol(CRY, "X:DOTUSD", {"X:DOTUSD": ("DOT", "USD")}) == "DOT-USD"
+    # A file may split a pair anywhere: every cut is looked for, and each reads back.
+    for symbol in ("X:BTCXYZ", "X:BTCPYUSD", "X:BTCUSD"):
+        spellings = wire_spellings(CRY, symbol)
+        assert spellings[:2] == (symbol, symbol[2:])
+        assert all(canonical_from_wire(CRY, s) == symbol for s in spellings)
+    assert {"X:BTC-PYUSD", "BTC/PYUSD", "X:BTCPY-USD"} <= set(wire_spellings(CRY, "X:BTCPYUSD"))
 
 
 def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
@@ -786,3 +813,10 @@ def test_a_converter_called_through_the_module_needs_a_cast(dh_exec_ctx: object)
     assert types[plain] != dtypes.string  # an Object column
     assert types[cast_] == dtypes.string
     assert [row[0] for row in cast_.iter_tuple(cols="S")] == ["C:EURUSD"]
+
+
+def test_the_spread_converter_names_surrounding_whitespace() -> None:
+    with pytest.raises(
+        ValueError, match=r"^' GCQ6-GCZ6 ' has surrounding whitespace; write 'GCQ6-GCZ6'$"
+    ):
+        dm.canonical_symbol_future_spread(" GCQ6-GCZ6 ")

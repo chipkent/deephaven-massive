@@ -251,6 +251,17 @@ def test_spec_validation() -> None:
             change(EXCHANGES, name=name)
     with pytest.raises(ValueError, match=r"test\.x: a WebSocket dataset .* needs a class"):
         DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={None: "T"})
+    for transports in ({"channels": {None: "T"}}, {"flat_file_prefixes": {None: "us/x"}}):
+        with pytest.raises(
+            ValueError, match=r"^test\.x: symbols kept as written are for REST datasets only$"
+        ):
+            DatasetSpec(
+                name="test.x",
+                summary="A dataset for the tests.",
+                asset_class=AssetClass.STOCKS,
+                symbols_as_written=True,
+                **cast("dict[str, Any]", transports),
+            )
     with pytest.raises(ValueError, match=r"test\.x: a dataset in a kind needs a class"):
         DatasetSpec(
             name="test.x",

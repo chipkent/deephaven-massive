@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import threading
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import dtypes, input_table, new_table, time_table
@@ -63,13 +64,6 @@ def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
     assert read_symbols(partners.TMX_CORPORATE_EVENTS, table) == ("7203", "ERIC B")
     with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
         read_symbols(partners.TMX_CORPORATE_EVENTS, new_table([string_col("Symbol", [" x"])]))
-
-
-def test_read_symbols_for_a_stream_refuses_a_pair_it_cannot_stream(dh_exec_ctx: object) -> None:
-    table = new_table([string_col("Symbol", ["X:BTCUSD", "X:BTCDAI"])])
-    assert read_symbols(CRYPTO, table) == ("X:BTCDAI", "X:BTCUSD")  # fetch and history serve it
-    with pytest.raises(ValueError, match=r"^a symbol table holds 'X:BTCDAI': 'X:BTCDAI' cannot"):
-        read_symbols(CRYPTO, table, for_stream=True)
 
 
 def test_read_symbols_refuses_a_failed_table(dh_exec_ctx: object) -> None:
@@ -192,17 +186,6 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(dh_exec_ctx: obje
     wait_for(lambda: len(refused) == 1)
     assert refused[0].startswith("the symbol table failed, so the result can no longer follow")
     scope.release()
-
-
-def test_the_counter_refuses_a_pair_it_cannot_stream() -> None:
-    seen: list[Change] = []
-    refused: list[str] = []
-    counter = _SymbolCounter(AssetClass.CRYPTO, lambda a, r: seen.append((a, r)), refused.append)
-    update = _Update(added=["X:BTCDAI", "X:BTCUSD"])
-    counter.on_update(cast("TableUpdate", update), is_replay=False)
-    assert seen == [(frozenset({"X:BTCUSD"}), frozenset())]
-    assert len(refused) == 1
-    assert refused[0].startswith("a symbol table holds 'X:BTCDAI': 'X:BTCDAI' cannot be streamed")
 
 
 def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
@@ -396,3 +379,34 @@ def test_the_row_converter_raises_or_nulls() -> None:
     assert lenient("no pe!") is None
     assert lenient("GBP-USD") == "C:GBPUSD"
     assert [value for value, _ in refused] == ["no pe!"]
+
+
+def _listeners(table: Table) -> int:
+    # The number of child listeners a Deephaven table holds (a private engine field, read by
+    # reflection through jpy, which ships no type stubs).
+    jpy = cast("Any", importlib.import_module("jpy"))
+    base = jpy.get_type("io.deephaven.engine.table.impl.BaseTable")
+    field = base.jclass.getDeclaredField("childListenerReferences")
+    field.setAccessible(True)
+    references = field.get(table.j_table)
+    manager = jpy.get_type("io.deephaven.util.datastructures.SimpleReferenceManager")
+    held = jpy.cast(references, manager)
+    if held is not None:
+        return int(held.size())
+    # One child is held directly as its reference rather than in a manager.
+    return 0 if references is None else 1
+
+
+def test_canonicalizing_a_refreshing_table_leaves_no_hidden_table(dh_exec_ctx: object) -> None:
+    # The pre-check reads the rows without a derived table, so the source's only child is the
+    # result's own formula, and none is left once the scope is released.
+    source = input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["EUR/USD", "EUR/USD"])]))
+    assert _listeners(source) == 0
+    scope = new_scope()
+    with scope.open():
+        result = dm.canonicalize_symbols(source, AssetClass.FOREX)
+    assert _listeners(source) == 1
+    assert values(result) == ["C:EURUSD", "C:EURUSD"]
+    scope.release()
+    assert _listeners(source) == 0

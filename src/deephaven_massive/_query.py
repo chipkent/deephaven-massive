@@ -394,10 +394,9 @@ class StreamQuery(QueryBase):
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
-        fails the call before any stream starts; so does a row whose WebSocket topic cannot be
-        built (a crypto pair whose quote is not one the library knows, `topic_problem`). A
-        static symbol whose topic cannot be built raises the same `ValueError` when the stream
-        builds its topics (`ws_symbol`), before any connection is made.
+        fails the call before any stream starts. A crypto pair the quote list cannot split
+        takes its split from Massive's reference data when the stream starts (looked up once
+        per session); a failed lookup raises `MassiveError`, before any topic is subscribed.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -413,7 +412,7 @@ class StreamQuery(QueryBase):
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             with entered(self._core.exec_ctx):
-                read_symbols(spec, symbols.table, for_stream=True)
+                read_symbols(spec, symbols.table)
         schema = self._core.dataset_schema(spec)
         return self._core.stream_result(
             spec,

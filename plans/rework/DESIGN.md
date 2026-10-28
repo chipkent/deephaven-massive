@@ -1574,12 +1574,24 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   expiry is a real date; a single futures contract is upper-case letters and digits with at
   least one letter (`ESZ5`, `6CH5`, `0NGH39`; a year is never rewritten, and `ESZ25` is not
   `ESZ5`); a futures spread is one of the spellings Massive's samples show, exactly as
-  written (below); an index is `I:` and letters and digits, as Massive's WebSocket pattern
+  written (below); a futures dataset takes any ticker as Massive writes it (not empty, no
+  surrounding whitespace, no control character, no class prefix), so a combo form not yet
+  listed can be passed back as `symbols`, while the two converters check their own grammar; an index is `I:` and letters and digits, as Massive's WebSocket pattern
   `^(I:[a-zA-Z0-9]+)$` writes it, with dotted parts allowed; a forex pair is `C:` and two
   three-letter ISO 4217 codes; a crypto pair is `X:` and the two codes joined, whatever the
-  quote. A crypto ticker streams only when its quote is one of `CRYPTO_QUOTES`, so the
-  WebSocket form (`BTC-USD`) can be built; a stream verb refuses any other with `ValueError`
-  (`topic_problem`), while `fetch()`, `poll()`, and `history()` serve it. Every grammar is
+  quote. A stream needs the WebSocket form (`BTC-USD`), so it splits the pair without a
+  guess: where exactly one quote of `CRYPTO_QUOTES` ends the ticker, that quote splits it;
+  where none does (`X:BTCXYZ`) or several do (`X:DOTUSD`: `DOT-USD` or `DO-TUSD`), the
+  stream looks the ticker up in Massive's reference data (`/v3/reference/tickers`, its
+  `base_currency_symbol` and `currency_symbol`) when it starts or when a symbol table adds the
+  ticker, through the session's REST client, and keeps the answer for the life of the
+  session. A failed lookup, or a ticker Massive does not list, refuses the stream with the
+  lookup's `MassiveError` (or a `ValueError` naming the ticker); it never falls back to a
+  guess. `fetch()`, `poll()`, and `history()` need no split, except the crypto last-trade
+  endpoint, whose path holds both codes and takes the same split. The list holds the
+  stablecoin quotes (`TUSD`, `PYUSD`, `FDUSD`, `BUSD`, `USDE`, `EURC`, `DAI`) so such a clash
+  is seen and resolved rather than mis-split, and a flat-file filter looks for a crypto pair
+  split at every point. Every grammar is
   matched against the whole text, so a trailing newline never passes. A dataset that spans classes
   (indicators, reference data, the unified `m.snapshots()`) declares no class: the prefix
   selects the grammar (`O:`, `I:`, `C:`, `X:`), and a symbol without one is a stock.
@@ -1591,15 +1603,15 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `minute-aggregates/cbot.md`, `session-aggregates/cbot.md`), a NYMEX strategy of one or two
   products over months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`;
   `minute-aggregates/nymex.md`, `session-aggregates/nymex.md`), and a CME currency cross
-  (`6A:XF:AUDUSD:Q6`; `session-aggregates/cme.md`). Every futures dataset takes both single
-  contracts and spreads as `symbols`; a futures row keeps whatever ticker Massive writes,
-  a form not yet listed included. No function builds a spread ticker from its legs: Massive's
+  (`6A:XF:AUDUSD:Q6`; `session-aggregates/cme.md`). Every futures dataset takes any ticker as
+  Massive writes it as `symbols` and keeps any on its rows, so input equals output; only the
+  converters check the grammar of a contract or a spread. No function builds a spread ticker from its legs: Massive's
   grammar is unverified, so a builder waits for a live check
   ([section 23](#23-open-verification-items)).
 - **The converters** are the public way to another spelling. `dm.canonical_symbol(text,
   asset_class, *, convention=None)` takes a required `AssetClass`: the class is never guessed,
-  so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes a
-  contract or a spread. One function per class
+  so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes any
+  ticker as Massive writes it. One function per class
   (`canonical_symbol_stock`, `_option`, `_future`, `_index`, `_forex`, `_crypto`), the spread
   function `canonical_symbol_future_spread`, and one per
   stock convention (`canonical_symbol_stock_yahoo`, `_nasdaq`, `_cms`) take only the text, for
@@ -4455,9 +4467,11 @@ document already reflects them.
     and no derived flag; no security identifiers are added, since Massive has no universal one
     ([section 10](#10-symbols-and-all)). After review: futures spreads are Massive's tickers as
     written, with their own converter `canonical_symbol_future_spread` and no builder from legs;
-    a dataset of global third-party tickers (TMX) keeps them as written; under a convention
-    only that convention's grammar applies; any `X:` ticker is canonical and only a stream
-    refuses one it cannot split; a failed symbol table fails the result; an unreadable
+    a futures dataset takes any ticker as written; a dataset of global third-party tickers
+    (TMX) keeps them as written; under a convention only that convention's grammar applies;
+    any `X:` ticker is canonical, and a stream splits it by the quote list or, where that list
+    gives no single split, by Massive's reference data, kept per session, refusing a ticker
+    Massive does not list rather than guessing; a failed symbol table fails the result; an unreadable
     WebSocket spelling fails every stream of the channel.
 
 ## 23. Open verification items
@@ -4516,4 +4530,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 44 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
 | 45 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 46 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
 | 46 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
-| 47 | Which crypto quote currencies Massive's pairs use beyond `CRYPTO_QUOTES` | Any `X:` ticker is canonical; a stream refuses a pair whose quote it cannot split, and `fetch()`, `poll()`, and `history()` serve it | `tests/datasets/test_symbols.py`, `tests/namespaces/test_crypto.py`: `X:BTCDAI` is taken, and a stream verb refuses it | `tests/namespaces/test_crypto_integration.py`: `reference.tickers(market=dm.Market.CRYPTO)`; record every quote outside the list and widen it |
+| 47 | Which crypto quote currencies Massive's pairs use beyond `CRYPTO_QUOTES` | Any `X:` ticker is canonical; a stream splits a pair no single listed quote ends by Massive's reference data, cached per session, and refuses one Massive does not list; `fetch()`, `poll()`, and `history()` serve it | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_crypto.py`: `X:DOTUSD`, `X:SHIBUSD`, `X:USDTUSD`, and `X:BTCPYUSD` subscribe their own topics, and `X:BTCXYZ` unlisted is refused | `tests/namespaces/test_crypto_integration.py`: `reference.tickers(market=dm.Market.CRYPTO)`; record every quote outside the list and widen it |
