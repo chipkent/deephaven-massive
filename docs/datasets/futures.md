@@ -175,7 +175,7 @@ Futures contracts: the specification of every listed contract.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Active` | boolean | Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date >= last_trade_date) and false otherwise. | REST | `active` |
+| `Active` | boolean | Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date <= last_trade_date) and false otherwise. | REST | `active` |
 | `Date` | LocalDate | A date string in the format YYYY-MM-DD. This parameter will return point-in-time information about contracts for the specified day. | REST | `date` |
 | `DaysToMaturity` | long | The number of calendar days between the 'date' and the contract's final settlement date. | REST | `days_to_maturity` |
 | `FirstTradeDate` | LocalDate | The first day on which the contract was tradeable. | REST | `first_trade_date` |
@@ -210,7 +210,7 @@ Futures products: the specification of every product, the family of its contract
 | `AssetClass` | String | The asset class to which the product belongs. | REST | `asset_class` |
 | `AssetSubClass` | String | The asset sub-class to which the product belongs. | REST | `asset_sub_class` |
 | `ClearingSymbol` | String | The clearing symbol assigned to this product by the exchange's clearing house. | REST | `clearing_symbol` |
-| `ClearingVenue` | String | The trading venue (MIC) for the clearing house that clears this product's contracts. | REST | `clearing_venue` |
+| `ClearingVenue` | String | The exchange identifier for the clearing house that clears this product's contracts. | REST | `clearing_venue` |
 | `Date` | LocalDate | A date string in the format YYYY-MM-DD. This parameter will return point-in-time information about products for the specified day. | REST | `date` |
 | `LastUpdated` | LocalDate | The date and time at which this product was last updated. | REST | `last_updated` |
 | `Name` | String | The full name of the product. | REST | `name` |
@@ -221,7 +221,7 @@ Futures products: the specification of every product, the family of its contract
 | `SettlementCurrencyCode` | String | The currency in which this product settles. | REST | `settlement_currency_code` |
 | `SettlementMethod` | String | The method of settlement for this product (Financially Settled or Deliverable). | REST | `settlement_method` |
 | `SettlementType` | String | The type of settlement for this product. | REST | `settlement_type` |
-| `StrategyType` | String | The strategy type for combo products (e.g. spread, strip, pack). Null for single products. | REST | `strategy_type` |
+| `StrategyType` | String | The strategy type for combo products (e.g. calendar, butterfly, strip). Null for single products. | REST | `strategy_type` |
 | `SubSector` | String | The sub-sector to which the product belongs. | REST | `sub_sector` |
 | `TradeCurrencyCode` | String | The currency in which this product's contracts trade. | REST | `trade_currency_code` |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this product's contracts trade. | REST | `trading_venue` |
