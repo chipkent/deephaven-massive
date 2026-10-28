@@ -11,7 +11,7 @@ import itertools
 import json
 import string
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -25,15 +25,14 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
 
 import deephaven_massive as dm
-from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import HostDecision, Request
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._ingest import poll, ws
-from deephaven_massive._massive import RestPath, Source, Status, Transport, source, to_batch
+from deephaven_massive._enums import AssetClass, ChannelFamily
+from deephaven_massive._ingest import poll
+from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import forex
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import (
@@ -49,7 +48,7 @@ from deephaven_massive._session import CATALOG
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply
 from tests._fakes.s3 import FakeS3
-from tests._fakes.ws import FakeMassiveServer
+from tests._fakes.ws_session import WsSession
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 NS = 10**9
@@ -644,89 +643,7 @@ def test_conversion_sends_the_pair_amount_and_precision(
 
 # --- WebSocket, end to end --------------------------------------------------------------------
 
-REALTIME = HostDecision("socket.test", Recency.REALTIME, "a test host")
 WAIT = 15.0
-
-
-class Socket:
-    """A session whose WebSocket connections reach the fake server, counting decoded frames."""
-
-    def __init__(self, server: FakeMassiveServer) -> None:
-        self.server = server
-        self.frames = 0
-        self.hosts: list[tuple[AssetClass, ChannelFamily]] = []
-        self.cond = threading.Condition()
-        self.session = dm.MassiveSession(
-            dm.MassiveConfig(api_key="test-key", flush_interval=3600.0)
-        )
-        core = self.session._core
-        self.connections = ws.WsConnections(
-            core,
-            resolve_host=self.resolve,
-            record_verdict=lambda *_: None,
-            client_factory=self.client,
-        )
-        cast("Any", core._ports)._streams = self.connections
-        core.on_close(self.connections.close)
-
-    def resolve(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
-        self.hosts.append((asset_class, family))
-        return REALTIME
-
-    def client(
-        self,
-        url: str,
-        *,
-        sources: Sequence[Source],
-        on_open: Callable[[int], None],
-        on_status: Callable[[int, Status], None],
-        on_data: Callable[..., None],
-        on_state: Callable[..., None],
-    ) -> _massive.WsClient:
-        def data(*event: object) -> None:
-            on_data(*event)
-            with self.cond:
-                self.frames += 1
-                self.cond.notify_all()
-
-        return _massive.WsClient(
-            self.server.url("/" + url.split("/", 3)[3]),
-            api_key="test-key",
-            sources=sources,
-            on_open=on_open,
-            on_status=on_status,
-            on_data=data,
-            on_state=on_state,
-            reconnect_backoff=0.05,
-            max_reconnect_backoff=0.1,
-        )
-
-    def subscribed(self, topic: str) -> None:
-        def named(server: FakeMassiveServer) -> bool:
-            frames = [json.loads(f) for c in server.connections for f in c.frames]
-            return any(f["action"] == "subscribe" and topic in f["params"] for f in frames)
-
-        self.server.wait_for(named)
-
-    def send(self, frame: dict[str, object]) -> None:
-        with self.cond:
-            before = self.frames
-        self.server.send(json.dumps([frame]))
-        with self.cond:
-            assert self.cond.wait_for(lambda: self.frames > before, WAIT)
-        with self.session._core.registry_lock:
-            connections = list(self.connections._connections.values())
-        for connection in connections:
-            connection.flusher.flush()
-
-
-@pytest.fixture
-def socket(fake_ws_server: FakeMassiveServer) -> Iterator[Socket]:
-    harness = Socket(fake_ws_server)
-    yield harness
-    harness.session.close()
-
-
 RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
 
 
@@ -740,11 +657,11 @@ def at_ms(millis: int) -> datetime:
     return EPOCH + timedelta(milliseconds=millis)
 
 
-def test_a_quote_frame_lands_in_blink(socket: Socket, rows_when: RowsWhen) -> None:
-    table = kept(socket.session.forex.quotes("C:EURUSD").blink())
-    socket.subscribed("C.EUR-USD")
-    assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.TICK)]
-    socket.send(
+def test_a_quote_frame_lands_in_blink(ws_session: WsSession, rows_when: RowsWhen) -> None:
+    table = kept(ws_session.session.forex.quotes("C:EURUSD").blink())
+    ws_session.subscribed("C.EUR-USD")
+    assert ws_session.decisions == [(AssetClass.FOREX, ChannelFamily.TICK)]
+    ws_session.publish(
         {"ev": "C", "p": "EUR-USD", "x": 44, "a": 1.0832, "b": 1.0831, "t": 1_700_000_000_123}
     )
     columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "Exchange")
@@ -760,13 +677,13 @@ def test_a_quote_frame_lands_in_blink(socket: Socket, rows_when: RowsWhen) -> No
 
 @pytest.mark.parametrize("case", [(dm.Timespan.MINUTE, "CA"), (dm.Timespan.SECOND, "CAS")])
 def test_a_bar_frame_lands_in_blink(
-    socket: Socket, rows_when: RowsWhen, case: tuple[dm.Timespan, str]
+    ws_session: WsSession, rows_when: RowsWhen, case: tuple[dm.Timespan, str]
 ) -> None:
     timespan, channel = case
-    query = socket.session.forex.bars("EUR/USD", timespan)
+    query = ws_session.session.forex.bars("EUR/USD", timespan)
     assert isinstance(query, StreamHistoryQuery)
     table = kept(query.blink())
-    socket.subscribed(f"{channel}.EUR-USD")
+    ws_session.subscribed(f"{channel}.EUR-USD")
     frame = {
         "ev": channel,
         "pair": "EUR-USD",
@@ -778,7 +695,7 @@ def test_a_bar_frame_lands_in_blink(
         "s": 1_700_000_040_000,
         "e": 1_700_000_100_000,
     }
-    socket.send(frame)
+    ws_session.publish(frame)
     columns = ("Symbol", "Timestamp", "Open", "Close", "Volume", "EndTimestamp")
     (row,) = rows_when(table, bool)
     assert tuple(row[c] for c in columns) == (
@@ -791,12 +708,12 @@ def test_a_bar_frame_lands_in_blink(
     )
 
 
-def test_a_fair_value_frame_lands_in_blink(socket: Socket, rows_when: RowsWhen) -> None:
-    table = kept(socket.session.forex.fmv("EUR/USD").blink())
-    socket.subscribed("FMV.EUR-USD")
+def test_a_fair_value_frame_lands_in_blink(ws_session: WsSession, rows_when: RowsWhen) -> None:
+    table = kept(ws_session.session.forex.fmv("EUR/USD").blink())
+    ws_session.subscribed("FMV.EUR-USD")
     # Fair value is served by the FMV family's host, not the tick host.
-    assert socket.hosts == [(AssetClass.FOREX, ChannelFamily.FMV)]
-    socket.send({"ev": "FMV", "fmv": 1.0631, "sym": "C:EURUSD", "t": 1_678_220_098_130})
+    assert ws_session.decisions == [(AssetClass.FOREX, ChannelFamily.FMV)]
+    ws_session.publish({"ev": "FMV", "fmv": 1.0631, "sym": "C:EURUSD", "t": 1_678_220_098_130})
     (row,) = rows_when(table, bool)
     assert (row["Symbol"], row["Timestamp"], row["Fmv"]) == (
         "C:EURUSD",

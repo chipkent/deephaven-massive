@@ -15,7 +15,7 @@ and keeps only the requested symbols.
 import inspect
 import json
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -31,17 +31,13 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import NEW_YORK
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import ChannelFamily, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._enums import ChannelFamily
 from deephaven_massive._massive import (
     RestClient,
     RestPath,
-    Source,
     Transport,
     WireType,
-    WsClient,
     source,
     to_batch,
 )
@@ -59,7 +55,7 @@ from deephaven_massive._query import (
 from deephaven_massive._session import CATALOG
 from tests._fakes.rest import FakeRestServer, Reply
 from tests._fakes.s3 import FakeS3
-from tests._fakes.ws import FakeMassiveServer
+from tests._fakes.ws_session import WsSession
 
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
@@ -1100,7 +1096,7 @@ def test_ipos_send_their_own_order_without_sort(
 
 
 def _rows_when(table: Table, count: int) -> list[dict[str, Any]]:
-    # Bounded wait for the flush thread and an update-graph cycle to apply a frame. It waits on
+    # Bounded wait for an update-graph cycle to apply a published frame. It waits on
     # a consistent snapshot of the rows, never on `size`: `size` can show a row that the cycle
     # in progress is still adding, before a snapshot taken in that cycle contains it.
     pace = threading.Event()  # never set; only paces the loop
@@ -1112,44 +1108,6 @@ def _rows_when(table: Table, count: int) -> list[dict[str, Any]]:
     rows = table_rows(table)
     assert len(rows) == count
     return rows
-
-
-@pytest.fixture
-def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]:
-    # A session whose WebSocket connections reach the fake server instead of Massive.
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", flush_interval=0.01))
-
-    def client(
-        url: str,
-        *,
-        sources: Sequence[Source],
-        on_open: Callable[..., None],
-        on_status: Callable[..., None],
-        on_data: Callable[..., None],
-        on_state: Callable[..., None],
-    ) -> WsClient:
-        return WsClient(
-            fake_ws_server.url("/" + url.split("/", 3)[3]),
-            api_key="test-key",
-            sources=sources,
-            on_open=on_open,
-            on_status=on_status,
-            on_data=on_data,
-            on_state=on_state,
-            reconnect_backoff=0.05,
-            max_reconnect_backoff=0.1,
-        )
-
-    connections = ws.WsConnections(
-        m._core,
-        resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "test"),
-        record_verdict=lambda *_: None,
-        client_factory=client,
-    )
-    cast("Any", m._core._ports)._streams = connections
-    m._core.on_close(connections.close)
-    yield m
-    m.close()
 
 
 # Each streamed channel: the dataset, its call, the topic it subscribes, the vendor's documented
@@ -1306,23 +1264,17 @@ STREAM_CASES: list[
 @pytest.mark.parametrize("case", STREAM_CASES, ids=[c[0] for c in STREAM_CASES])
 def test_a_frame_lands_in_blink(
     *,
-    ws_session: dm.MassiveSession,
-    fake_ws_server: FakeMassiveServer,
+    ws_session: WsSession,
     case: tuple[str, Callable[[Any], StreamQuery], str, dict[str, object], dict[str, object]],
 ) -> None:
     _, make, topic, frame, expected = case
-    result = make(ws_session.stocks).blink()
+    result = make(ws_session.session.stocks).blink()
     seen = blink_to_append_only(result)
-    fake_ws_server.wait_for(
-        lambda s: any(
-            json.loads(f)["action"] == "subscribe" and topic in json.loads(f)["params"].split(",")
-            for f in (s.connections[-1].frames if s.connections else [])
-        )
-    )
-    fake_ws_server.send(json.dumps([frame]))
+    ws_session.subscribed(topic)
+    ws_session.publish(frame)
     (row,) = _rows_when(seen, 1)
     assert {k: row[k] for k in expected} == expected
-    ws_session.release(result)
+    ws_session.session.release(result)
 
 
 # --- End to end: flat files ----------------------------------------------------------------------
