@@ -91,6 +91,7 @@ class KeySpec:
             KeySpec("SipTimestamp")  # the source's own SipTimestamp column
             KeySpec("stocksTicker", from_request=True)  # the symbol is a path parameter
             KeySpec("FilerCik", instrument=False)  # a fan-out key that is no instrument
+            KeySpec("Ticker", required=False)  # a ticker Massive sends only "if available"
 
     Attributes:
         column: The source's generated column that holds the key, after the projection of the
@@ -108,11 +109,19 @@ class KeySpec:
             about); False keeps its generated column (a filer CIK stays `FilerCik`). Only a
             `fanout` key may set it False, and such a key comes from the source's rows, never
             from the request (`DatasetSpec` rejects both, when it is created).
+        required: Whether every row must carry the key. True, the default, makes a row
+            without it a loud failure (`RowDataError`), never a null key. False lets such a
+            row through with a null key column; it is for a symbol Massive documents as
+            present only "if available", such as a filing's `ticker`. Only a `symbol` key read
+            from a REST path's rows may set it False: a flat file and a stream filter and
+            route rows by their symbol, and the `time`, `fanout`, and `session` keys are
+            always required (`DatasetSpec` rejects the rest, when it is created).
     """
 
     column: str
     from_request: bool = False
     instrument: bool = True
+    required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +277,11 @@ class DatasetSpec:
             parameter (`ticker.any_of`), such as 250 for the unified snapshot; a longer list is
             split over several requests. None sends every symbol in one request.
         page_size: The REST page size requested; `limit` is a separate total-row cap.
+        fixed_params: Query parameters the library sets itself on every REST request, by wire
+            name, such as the options snapshot's `{"type": "options"}`; they have no argument
+            of their own. Every REST path of the dataset must take each one (the catalog's
+            `wire parameters` gate), so a request never carries a parameter its path lacks.
+            Each is reserved, with its whole family, from `filters`.
     """
 
     name: str
@@ -292,6 +306,7 @@ class DatasetSpec:
     fetch_paths_by_class: Mapping[AssetClass, str] = field(default_factory=dict)
     symbols_per_request: int | None = None
     page_size: int | None = None
+    fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Check the spec's internal consistency; nothing here reads the generated files.
@@ -303,7 +318,9 @@ class DatasetSpec:
                 kind has no `asset_class`; `keys` names a source the dataset does not use,
                 fills a `time` or `session` key from the request, marks a key other than
                 `fanout` as no instrument, or fills a non-instrument fan-out key from the
-                request; a flat-file prefix does not
+                request, or makes a key optional other than a `symbol` key read from a REST
+                path's rows; a keyed (`REPLACE` or `UPSERT`) `poll()` keys on the `Symbol` of an
+                optional symbol key; a flat-file prefix does not
                 declare its `symbol` and `time` keys from its own columns (and, for futures,
                 its `session` key, against which every futures file is checked); or the
                 transports match no query class (see the class docstring and `_check_verbs`).
@@ -430,8 +447,12 @@ class DatasetSpec:
         Raises:
             ValueError: If `keys` names a source the dataset does not read; a `time` or
                 `session` key is filled from the request; or a key other than `fanout` is
-                marked as no instrument, or a fan-out key that is no instrument is filled from
-                the request (it would have no column to keep). The message names the dataset.
+                marked as no instrument, a fan-out key that is no instrument is filled from
+                the request (it would have no column to keep), or a key other than a `symbol`
+                key read from a REST path's rows is optional (`KeySpec.required` False), or a
+                keyed (`REPLACE` or `UPSERT`) `poll()` keys on the `Symbol` of an optional
+                symbol key, where every row without a symbol would share the null key. The
+                message names the dataset.
         """
         unused = sorted(f"{t.value} {k}" for t, k in set(self.keys) - set(self.sources))
         if unused:
@@ -450,6 +471,23 @@ class DatasetSpec:
                         f"{where}: a fanout key that is no instrument keeps a column of the "
                         "rows, so it cannot come from the request"
                     )
+                optional_ok = (
+                    role == "symbol" and transport is Transport.REST and not spec.from_request
+                )
+                if not spec.required and not optional_ok:
+                    raise ValueError(
+                        f"{where}: only a symbol key read from a REST path's rows can be optional"
+                    )
+        optional = any(
+            declared.symbol is not None and not declared.symbol.required
+            for declared in self.keys.values()
+        )
+        keyed = self.poll_mode in (PollMode.REPLACE, PollMode.UPSERT)
+        if optional and keyed and "Symbol" in self.poll_keys:
+            raise ValueError(
+                f"{self.name}: a keyed poll() cannot key on Symbol when the symbol is optional: "
+                "every row without one would share the null key; declare other poll_keys"
+            )
 
     def _check_flat_files(self) -> None:
         """Check that every flat-file prefix can be filtered and checked.
@@ -871,7 +909,9 @@ class Catalog:
         parameter of any of the dataset's REST paths, except the ones the library sets itself:
         the equality forms of the symbol parameter (`symbol_family`: its base, `.any_of`, and
         `.all_of`), the whole family of the time axis (`param_family`: its base and every
-        suffixed form), `limit`, `sort`, `order`, and `adjusted`.
+        suffixed form), the whole family of each of the dataset's `fixed_params`, `limit`,
+        `sort`, `order`, and `adjusted`. None of these is accepted or named among the valid
+        keys.
 
         Every path that declares the key checks it, and all of them must read it alike, since
         any of them may send it. Each value is first put in the form that is sent
@@ -916,8 +956,9 @@ class Catalog:
         if not filters:
             return ()
         symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
+        fixed = (form for name in spec.fixed_params for form in param_family(name))
         families = (form for name in typed for form in param_family(name))
-        reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols, *families}
+        reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols, *families, *fixed}
         # Every path that declares a filter, with the parameter's position in it.
         params: dict[str, list[tuple[RestPath, int]]] = {}
         for path in spec.rest_paths:
@@ -1017,8 +1058,9 @@ class Catalog:
           of its `(kind, group)`.
         - **wire parameters:** every wire name the dataset declares is a parameter of its
           REST path: the `start`/`end` pair and the symbol parameter of the history path (or
-          of the fetch path when there is none), and each key filled from the request, which
-          names a parameter of its own path.
+          of the fetch path when there is none), each key filled from the request, which
+          names a parameter of its own path, and each `fixed_params` name, a query parameter
+          of every REST path of the dataset.
         - **poll keys:** every `poll_keys` column is a column of the dataset's schema.
 
         Returns:
@@ -1178,7 +1220,8 @@ class Catalog:
 
         The `start`/`end` pair and the symbol parameter belong to the dataset's primary path,
         its history path or, when it has none, its fetch path; a key filled from the request
-        belongs to its own path.
+        belongs to its own path; and each of `fixed_params` belongs to every REST path, as a
+        query parameter.
 
         Args:
             spec: The dataset; every source is generated.
@@ -1201,4 +1244,10 @@ class Catalog:
             f"wire parameters: {spec.name}: {what} {name!r} is not a parameter of {path}"
             for what, path, name in expected
             if name not in {param.name for param in self._rest(path).params}
+        ] + [
+            f"wire parameters: {spec.name}: fixed parameter {name!r} is not a query parameter "
+            f"of {path}"
+            for path in spec.rest_paths
+            for name in spec.fixed_params
+            if name not in {p.name for p in self._rest(path).params if not p.in_path}
         ]

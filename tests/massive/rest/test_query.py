@@ -54,8 +54,14 @@ def test_a_target_without_query_values_has_no_question_mark() -> None:
 
 
 def test_path_values_are_percent_encoded_whole() -> None:
-    target = query.request_target(_PATH, {"stockTicker": "BRK/B X", "date": date(2026, 1, 2)}, {})
-    assert target == "/v1/open-close/BRK%2FB%20X/2026-01-02"
+    target = query.request_target(_PATH, {"stockTicker": "I:SPX X", "date": date(2026, 1, 2)}, {})
+    assert target == "/v1/open-close/I%3ASPX%20X/2026-01-02"
+
+
+def test_a_path_value_with_a_slash_is_refused() -> None:
+    # Massive answers 404 for a `%2F` segment, so such a value could never succeed.
+    with pytest.raises(ValueError, match=r"path parameters \['stockTicker'\] contain '/'"):
+        query.request_target(_PATH, {"stockTicker": "EUR/USD", "date": date(2026, 1, 2)}, {})
 
 
 def test_query_values_are_percent_encoded() -> None:
