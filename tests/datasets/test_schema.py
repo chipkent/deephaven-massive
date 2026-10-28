@@ -1,7 +1,7 @@
 """Tests for the column types, `Schema`, the key rename, and the merge of a kind's sources."""
 
 import dataclasses
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import cast
 
 import pyarrow as pa
@@ -9,6 +9,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.schema import (
     COLUMN_TYPES,
     KEY_COLUMNS,
@@ -26,10 +27,10 @@ from deephaven_massive._datasets.schema import (
     widen,
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
-from deephaven_massive._namespaces import crypto, forex, futures, indices, stocks
+from deephaven_massive._namespaces import crypto, forex, futures, indicators, indices, stocks
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.columns import col_defs
 
@@ -62,7 +63,6 @@ def test_column_types_map_to_arrow() -> None:
     assert ColumnType.INT_ARRAY.arrow_type == pa.list_(pa.int32())
     assert {t.value for t in ColumnType} == {
         "Instant",
-        "LocalDate",
         "double",
         "long",
         "int",
@@ -77,7 +77,8 @@ def test_every_wire_type_has_a_column_type() -> None:
     assert COLUMN_TYPES[WireType.EPOCH] is COLUMN_TYPES[WireType.ISO_INSTANT] is ColumnType.INSTANT
     assert COLUMN_TYPES[WireType.JSON_TEXT] is ColumnType.STRING
     assert COLUMN_TYPES[WireType.BOOL] is ColumnType.BOOLEAN
-    assert COLUMN_TYPES[WireType.DATE] is ColumnType.LOCAL_DATE
+    # Every calendar date is ISO yyyy-MM-dd text.
+    assert COLUMN_TYPES[WireType.DATE] is ColumnType.STRING
     assert COLUMN_TYPES[WireType.INT_ARRAY] is ColumnType.INT_ARRAY
     # A dataset column is never a 32-bit int: exchange and tape ids are long.
     assert ColumnType.INT not in COLUMN_TYPES.values()
@@ -89,10 +90,9 @@ def test_schema_rejects_duplicate_columns() -> None:
 
 
 def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
-    rows = [
+    rows: list[dict[str, object]] = [
         {
             "Instant": 1_700_000_000_000_000_000,
-            "LocalDate": "2025-03-03",
             "Double": 1,
             "Long": 2,
             "Int": 3,
@@ -101,7 +101,7 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
             "IntArray": 7,
             "Ignored": "extra keys are ignored",
         },
-        {"LocalDate": date(2025, 3, 4), "IntArray": [1, 2]},
+        {"IntArray": [1, 2]},
     ]
     batch = ALL_TYPES.to_arrow(rows)
     assert batch.schema == ALL_TYPES.arrow_schema()
@@ -110,7 +110,6 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
     values = dh_arrow.to_arrow(table).to_pylist()
     assert values[0]["String"] == '{"a": [2], "b": 1}'
     assert values[0]["IntArray"] == [7]
-    assert values[0]["LocalDate"] == date(2025, 3, 3)
     assert values[1]["Double"] is None
     assert values[1]["IntArray"] == [1, 2]
     assert ALL_TYPES.column_names[0] == "Instant"
@@ -119,8 +118,6 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
 def test_to_arrow_reports_schema_mismatches() -> None:
     with pytest.raises(MassiveError, match=r"schema mismatch in all\.Double \(expected double\)"):
         ALL_TYPES.to_arrow([{"Double": "x"}])
-    with pytest.raises(MassiveError, match="LocalDate"):
-        ALL_TYPES.to_arrow([{"LocalDate": "03/03/2025"}])
     with pytest.raises(MassiveError, match=r"schema mismatch in all\.String"):
         ALL_TYPES.to_arrow([{"String": {"a": {1, 2}}}])  # JSON cannot encode a set
 
@@ -261,23 +258,72 @@ def test_a_key_from_the_request_comes_first_as_text() -> None:
     assert first == SourceColumn("Symbol", WireType.STRING, parameter="stockTicker")
 
 
-def test_the_session_key_keeps_its_column() -> None:
+def test_the_date_key_becomes_the_date_column() -> None:
     files = (F, "us_futures_{venue}/trades_v1")
     futures = DatasetSpec(
         name="futures.trades",
         summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
+        row_times=RowTimes.TICK,
         flat_file_prefixes={None: files[1]},
         keys={
             files: SourceKeys(
-                KeySpec("Ticker"), KeySpec("Timestamp"), session=KeySpec("SessionEndDate")
+                KeySpec("Ticker"), KeySpec("Timestamp"), date=KeySpec("SessionEndDate")
             )
         },
     )
-    names = [c.column for c in rename(futures, source(*files))]
-    assert names[:2] == ["Symbol", "Timestamp"]
-    assert "SessionEndDate" in names
-    assert KEY_COLUMNS == {"symbol": "Symbol", "time": "Timestamp", "fanout": "Underlying"}
+    columns = {c.column: c for c in rename(futures, source(*files))}
+    assert {"Symbol", "Timestamp", "Date"} <= set(columns)
+    assert "SessionEndDate" not in columns  # the vendor's column is not kept beside it
+    assert cast("Field", columns["Date"].field).wire_key == "session_end_date"
+    assert KEY_COLUMNS == {
+        "symbol": "Symbol",
+        "time": "Timestamp",
+        "end": "TimestampEnd",
+        "fanout": "Underlying",
+        "date": "Date",
+    }
+
+
+def test_a_bar_takes_its_start_and_its_end_from_its_keys() -> None:
+    channel = (W, "stocks/AM")
+    keys = SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart"), end=KeySpec("EndTimestamp"))
+    bars = DatasetSpec(
+        name="stocks.bars",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        is_bars=True,
+        history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
+        channels={Timespan.MINUTE: "AM"},
+        keys={channel: keys},
+    )
+    names = [c.column for c in rename(bars, source(*channel))]
+    assert {"TimestampStart", "TimestampEnd"} <= set(names)
+    assert {"Timestamp", "WindowStart", "EndTimestamp"}.isdisjoint(names)
+    assert [f.wire_key for f in required_fields(bars, source(*channel))] == ["sym", "s", "e"]
+
+
+def test_rename_refuses_an_end_or_date_key_of_the_wrong_type() -> None:
+    channel = (W, "stocks/AM")
+    bars = DatasetSpec(
+        name="stocks.bars",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        is_bars=True,
+        history_path="/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}",
+        channels={Timespan.MINUTE: "AM"},
+        keys={channel: SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart"), end=KeySpec("Open"))},
+    )
+    with pytest.raises(ValueError, match=r"the end key 'Open' is double, not an instant"):
+        rename(bars, source(*channel))
+    dated = dataclasses.replace(
+        bars,
+        keys={
+            channel: SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart"), date=KeySpec("Close"))
+        },
+    )
+    with pytest.raises(ValueError, match=r"the date key 'Close' is double, not a date"):
+        rename(dated, source(*channel))
 
 
 def test_a_projection_keeps_and_names_the_member_fields() -> None:
@@ -350,16 +396,17 @@ def test_required_keys_resolve_to_the_fields_behind_them() -> None:
         name="futures.trades",
         summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
+        row_times=RowTimes.TICK,
         history_path=trades[1],
         flat_file_prefixes={None: files[1]},
         keys={
             trades: SourceKeys(
                 KeySpec("ticker", from_request=True),
                 KeySpec("Timestamp"),
-                session=KeySpec("SessionEndDate"),
+                date=KeySpec("SessionEndDate"),
             ),
             files: SourceKeys(
-                KeySpec("Ticker"), KeySpec("Timestamp"), session=KeySpec("SessionEndDate")
+                KeySpec("Ticker"), KeySpec("Timestamp"), date=KeySpec("SessionEndDate")
             ),
         },
     )
@@ -433,11 +480,14 @@ def test_rename_refuses_a_repeated_column() -> None:
 
 
 def test_the_column_of_each_key() -> None:
-    assert key_column("symbol", KeySpec("Ticker")) == "Symbol"
-    assert key_column("time", KeySpec("SipTimestamp")) == "Timestamp"
-    assert key_column("fanout", KeySpec("UnderlyingTicker")) == "Underlying"
-    assert key_column("fanout", KeySpec("FilerCik", instrument=False)) == "FilerCik"
-    assert key_column("session", KeySpec("SessionEndDate")) == "SessionEndDate"
+    ticks, bars = stocks.TRADES, stocks.BARS
+    assert key_column(ticks, "symbol", KeySpec("Ticker")) == "Symbol"
+    assert key_column(ticks, "time", KeySpec("SipTimestamp")) == "Timestamp"
+    assert key_column(bars, "time", KeySpec("WindowStart")) == "TimestampStart"
+    assert key_column(bars, "end", KeySpec("EndTimestamp")) == "TimestampEnd"
+    assert key_column(ticks, "fanout", KeySpec("UnderlyingTicker")) == "Underlying"
+    assert key_column(ticks, "fanout", KeySpec("FilerCik", instrument=False)) == "FilerCik"
+    assert key_column(ticks, "date", KeySpec("SessionEndDate")) == "Date"
 
 
 def test_a_fanout_key_that_is_no_instrument_keeps_its_column_and_is_required() -> None:
@@ -498,9 +548,13 @@ def test_the_merge_puts_the_declared_keys_first() -> None:
     names = schema.column_names
     assert names[:3] == ("Symbol", "AdditionalUnderlyings", "Cfi")
     assert schema.name == "options.contracts"
-    # Only Symbol and Timestamp lead; Underlying keeps its field's place in the source.
+    # Only the library's columns lead; Underlying keeps its field's place in the source, and
+    # the arrival time comes last.
     fields = [f.column for f in source(*contracts).fields if f.column != "Ticker"]
-    assert names[1:] == tuple("Underlying" if c == "UnderlyingTicker" else c for c in fields)
+    assert names[1:] == (
+        *("Underlying" if c == "UnderlyingTicker" else c for c in fields),
+        "TimestampInsert",
+    )
 
 
 def test_the_merge_follows_the_membership_positions() -> None:
@@ -540,7 +594,8 @@ def test_the_merge_follows_the_membership_positions() -> None:
     names = dataset_schema(trades, (trades,), tables).column_names
     # The history path's columns come before the last-trade path's own Zeta.
     assert names.index("Conditions") < names.index("Zeta")
-    assert names[-1] == "Zeta"
+    assert names[:3] == ("Symbol", "Date", "Timestamp")
+    assert names[-2:] == ("Zeta", "TimestampInsert")
 
 
 def test_the_merge_joins_types_across_sources() -> None:
@@ -616,7 +671,10 @@ def test_epochs_of_different_units_share_a_column() -> None:
     )
     tables = {"stocks/T": made, "stocks/Q": other}
     schema = dataset_schema(stream, (stream, second), lambda _, key: tables[key])
-    assert [(c.name, c.type) for c in schema.columns] == [("At", ColumnType.INSTANT)]
+    assert [(c.name, c.type) for c in schema.columns] == [
+        ("At", ColumnType.INSTANT),
+        ("TimestampInsert", ColumnType.INSTANT),
+    ]
 
 
 # --- Column descriptions ---------------------------------------------------------------------
@@ -699,7 +757,7 @@ def test_a_dataset_takes_its_asset_class_s_description_of_a_shared_source() -> N
             asset_class=asset_class,
             fetch_path="/shared",
         )
-        (column,) = dataset_schema(dataset, (dataset,), lambda *_: made).columns
+        column, _ = dataset_schema(dataset, (dataset,), lambda *_: made).columns
         found[asset_class] = column.description
     assert found == {
         AssetClass.OPTIONS: "Per share of the underlying.",
@@ -726,7 +784,7 @@ def test_a_key_column_quotes_its_asset_class_s_description() -> None:
             fetch_path="/shared",
             keys={(R, "/shared"): SourceKeys(KeySpec("Ticker"))},
         )
-        (column,) = dataset_schema(dataset, (dataset,), lambda *_: made).columns
+        column, _ = dataset_schema(dataset, (dataset,), lambda *_: made).columns
         quoted[asset_class] = column.description.split("REST `ticker`: ")[1]
     assert quoted == {
         AssetClass.OPTIONS: '"The option contract symbol."',
@@ -853,7 +911,7 @@ def test_a_vendor_field_named_like_a_key_keeps_its_vendor_text() -> None:
         name="reference.x", summary="A dataset for the tests.", fetch_path="/status"
     )
     made = Source(key="/status", transport=R, fields=(stamped,))
-    (column,) = dataset_schema(status, (status,), lambda *_: made).columns
+    column, _ = dataset_schema(status, (status,), lambda *_: made).columns
     assert (column.name, column.description) == ("Timestamp", "When the status was last updated.")
 
 
@@ -877,34 +935,134 @@ def test_a_key_part_without_text_names_the_key_and_repeats_once() -> None:
     )
 
 
-def timestamp_description(dataset: DatasetSpec) -> str:
+def description(dataset: DatasetSpec, name: str) -> str:
     columns = CATALOG.dataset_schema(dataset).columns
-    return next(c.description for c in columns if c.name == "Timestamp")
+    return next(c.description for c in columns if c.name == name)
 
 
 @pytest.mark.parametrize(
-    ("dataset", "zone"),
+    ("dataset", "zone", "first"),
     [
-        (stocks.BARS, "New York time"),
-        (indices.BARS, "New York time"),
-        (forex.BARS, "UTC"),
-        (crypto.BARS, "UTC"),
-        (futures.BARS, None),
+        (stocks.BARS, "New York time", "a month's, quarter's, or year's first weekday"),
+        (indices.BARS, "New York time", "a month's, quarter's, or year's first weekday"),
+        (forex.BARS, "UTC", "a week's Monday)"),
+        (crypto.BARS, "UTC", "a week's Monday)"),
     ],
 )
-def test_a_bars_timestamp_is_described_as_the_window_start(
-    dataset: DatasetSpec, zone: str | None
+def test_a_bars_start_is_described_as_the_window_start(
+    dataset: DatasetSpec, zone: str, first: str
 ) -> None:
     # Some sources' own text calls their stamp the window's end; the library's never is.
-    described = timestamp_description(dataset)
-    sentence = "The start of the bar's window, as an Instant."
-    if zone is not None:
-        sentence += (
-            f" A bar of a day or longer is stamped at 00:00 {zone} of the day it starts on, "
-            "whichever source serves it; each source's own stamp, quoted next, is moved to "
-            "that time."
-        )
-    assert described.startswith(f"{sentence} From REST `")
-    assert timestamp_description(stocks.TRADES).startswith(
+    described = description(dataset, "TimestampStart")
+    assert described.startswith(
+        "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
+        f"00:00 {zone} of its window's first day ("
+    )
+    assert first in described
+    assert "each source's own stamp, quoted next, is moved there. From REST `" in described
+    assert description(stocks.TRADES, "Timestamp").startswith(
         "The row's primary time, as an Instant. From REST `"
     )
+
+
+def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
+    assert description(futures.BARS, "TimestampStart").startswith(
+        "The start of the bar's window, as an Instant: Massive's own window start. From REST "
+        "`window_start`"
+    )
+    date_text = description(futures.BARS, "Date")
+    assert date_text.startswith("The futures session of the bar (its trading date)")
+    assert "From REST `session_end_date`" in date_text
+    end = description(futures.BARS, "TimestampEnd")
+    assert "17:00 Chicago time on its session date" in end
+    assert "the later of that and Massive's `e`" in end
+    trades = description(futures.TRADES, "Date")
+    assert "the next 17:00 Chicago time" in trades
+    assert "m.streams()" in trades
+
+
+def test_the_library_describes_its_time_columns() -> None:
+    stock_end = description(stocks.BARS, "TimestampEnd")
+    assert stock_end.startswith("The exclusive end of the bar's window, as an Instant")
+    assert 'on=["Symbol", "Timestamp>=TimestampEnd"]' in stock_end
+    assert stock_end.endswith("at 00:00 New York time after its window's last day.")
+    assert description(indices.BARS, "TimestampEnd").endswith("Chicago day is not verified.")
+    assert description(stocks.BARS, "Date").startswith(
+        "The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart`"
+    )
+    assert "join longer bars on `TimestampEnd`" in description(stocks.BARS, "Date")
+    assert description(crypto.TRADES, "Date") == (
+        "The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`."
+    )
+    insert = description(stocks.SNAPSHOTS, "TimestampInsert")
+    assert insert.startswith("When the library received the row, as an Instant")
+
+
+def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
+    assert description(stocks.DAILY_OPEN_CLOSE, "TimestampStart") == (
+        "The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`."
+    )
+    assert description(stocks.DAILY_OPEN_CLOSE, "TimestampEnd") == (
+        "The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of "
+        "the next day."
+    )
+    assert description(indices.DAILY_OPEN_CLOSE, "TimestampEnd").endswith(
+        "Chicago day is not verified."
+    )
+    assert description(crypto.DAILY_OPEN_CLOSE, "Date").startswith(
+        "The day the summary covers, as ISO yyyy-MM-dd text: a UTC calendar day. From REST `day`"
+    )
+    assert description(indicators.SMA, "TimestampStart").startswith(
+        "The start of the bar the value is computed at, as an Instant."
+    )
+    assert "day zone of the symbol's class" in description(indicators.SMA, "TimestampEnd")
+    assert "day zone of the symbol's class" in description(indicators.SMA, "Date")
+
+
+def test_library_time_columns_are_supplied_by_every_transport() -> None:
+    columns = {c.name: c for c in CATALOG.dataset_schema(futures.TRADES).columns}
+    # Date comes from the rows' session over REST and the files, and is computed on the stream.
+    assert columns["Date"].supplied_by == (R, F, W)
+    assert dict(columns["Date"].wire_keys) == {
+        R: ("session_end_date",),
+        F: ("session_end_date",),
+    }
+    assert columns["TimestampInsert"].supplied_by == (R, F, W)
+    assert dict(columns["TimestampInsert"].wire_keys) == {}
+    names = CATALOG.dataset_schema(stocks.BARS).column_names
+    assert names[:4] == ("Symbol", "Date", "TimestampStart", "TimestampEnd")
+    assert names[-1] == "TimestampInsert"
+    assert "EndTimestamp" not in names
+
+
+def test_a_column_note_follows_the_description() -> None:
+    made = Source(key="/notes", transport=R, fields=(described("A price.", "p", "Price"),))
+    dataset = DatasetSpec(
+        name="reference.x",
+        summary="A dataset for the tests.",
+        fetch_path="/notes",
+        column_notes={"Price": "A note.", "TimestampInsert": "Another."},
+    )
+    columns = {c.name: c for c in dataset_schema(dataset, (dataset,), lambda *_: made).columns}
+    assert columns["Price"].description == "A price. A note."
+    assert columns["TimestampInsert"].description.endswith("the latest poll's. Another.")
+    bare = Source(key="/notes", transport=R, fields=(described("", "p", "Price"),))
+    alone = dataset_schema(dataset, (dataset,), lambda *_: bare).columns[0]
+    assert alone.description == "A note."
+    assert "Split-adjusted when" in description(stocks.BARS, "Close")
+    assert "multiplied by its ratio" in description(stocks.BARS, "Volume")
+
+
+def test_the_merge_refuses_a_vendor_column_of_another_type_than_the_library_s() -> None:
+    made = Source(
+        key="/x",
+        transport=R,
+        fields=(Field(wire_key="i", column="TimestampInsert", wire_type=WireType.STRING),),
+    )
+    dataset = DatasetSpec(name="reference.x", summary="A dataset for the tests.", fetch_path="/x")
+    with pytest.raises(
+        ValueError,
+        match=r"^member types: reference\.x: column 'TimestampInsert' is string in a source but "
+        r"epoch as the library fills it$",
+    ):
+        dataset_schema(dataset, (dataset,), lambda *_: made)

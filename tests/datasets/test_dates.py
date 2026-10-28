@@ -15,6 +15,8 @@ from deephaven_massive._datasets.dates import (
     NEW_YORK,
     DaySpan,
     TimeRange,
+    add_weekdays,
+    bar_days,
     bar_sessions,
     bar_starts,
     bounds,
@@ -25,13 +27,16 @@ from deephaven_massive._datasets.dates import (
     day_zone,
     flat_file_published,
     futures_bar_request,
+    futures_period_last,
     futures_session,
     futures_session_before,
+    futures_session_end,
     futures_session_open,
     instant_bound,
     intraday,
     parse_date_like,
     publish_time,
+    unit_ns,
 )
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._massive import WireUnit
@@ -703,10 +708,112 @@ def test_futures_bar_sessions_keep_whole_periods_of_session_dates() -> None:
     # Good Friday 2024 had no session; the week of 03-25 is still Monday to Friday.
     good_friday = DaySpan(date(2024, 3, 25), date(2024, 3, 28))
     assert bar_sessions(good_friday, timespan=Timespan.WEEK, multiplier=1).empty
+    # A two-month bar labelled with a February session covers January and February if the
+    # label is its last session, February and March if it is its first: both fit only for
+    # February labels.
     months = bar_sessions(
         DaySpan(date(2025, 1, 1), date(2025, 3, 31)), timespan=Timespan.MONTH, multiplier=2
     )
-    assert months == DaySpan(date(2025, 1, 1), date(2025, 2, 28))
+    assert months == DaySpan(date(2025, 2, 1), date(2025, 2, 28))
+
+
+def test_futures_bars_of_several_sessions_fit_under_both_readings_of_their_label() -> None:
+    week = DaySpan(date(2025, 3, 3), date(2025, 3, 7))
+    # Two sessions: a Monday label could cover the Friday before; a Friday label the Monday
+    # after. Sessions count as weekdays, so Tuesday to Thursday fit either way.
+    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=2) == DaySpan(
+        date(2025, 3, 4), date(2025, 3, 6)
+    )
+    # Over a weekend: Friday and the Monday after are consecutive sessions.
+    across = DaySpan(date(2025, 3, 6), date(2025, 3, 10))
+    assert bar_sessions(across, timespan=Timespan.SESSION, multiplier=2) == DaySpan(
+        date(2025, 3, 7), date(2025, 3, 7)
+    )
+    # A range that starts and ends on a weekend holds the weekdays between.
+    weekend = DaySpan(date(2025, 3, 1), date(2025, 3, 9))
+    assert bar_sessions(weekend, timespan=Timespan.SESSION, multiplier=1) == week
+    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=5) == DaySpan(
+        date(2025, 3, 7), date(2025, 3, 3)
+    )
+    assert bar_sessions(week, timespan=Timespan.SESSION, multiplier=5).empty
+    two_weeks = DaySpan(date(2025, 3, 3), date(2025, 3, 21))
+    assert bar_sessions(two_weeks, timespan=Timespan.WEEK, multiplier=2) == DaySpan(
+        date(2025, 3, 8), date(2025, 3, 14)
+    )
+
+
+def test_futures_session_bar_starts_count_weekdays() -> None:
+    # A three-session bar that ends on Monday's session starts in Thursday's.
+    span = TimeRange(
+        futures_session_open(date(2025, 3, 3)).astimezone(UTC),
+        datetime(2025, 3, 10, 17, tzinfo=CHICAGO).astimezone(UTC),
+    )
+    starts = bar_starts(AssetClass.FUTURES, span, timespan=Timespan.SESSION, multiplier=3)
+    assert starts.start == futures_session_open(date(2025, 3, 3)).astimezone(UTC)
+    assert starts.end == futures_session_open(date(2025, 3, 7)).astimezone(UTC)
+    # Ending on a Saturday keeps the bars that end with Friday's session.
+    saturday = TimeRange(span.start, datetime(2025, 3, 8, 12, tzinfo=CHICAGO).astimezone(UTC))
+    starts = bar_starts(AssetClass.FUTURES, saturday, timespan=Timespan.SESSION, multiplier=2)
+    assert starts.end == futures_session_open(date(2025, 3, 7)).astimezone(UTC)
+
+
+def test_add_weekdays_skips_weekends_both_ways() -> None:
+    friday, saturday = date(2025, 3, 7), date(2025, 3, 8)
+    assert add_weekdays(friday, 0) == friday
+    assert add_weekdays(friday, 1) == date(2025, 3, 10)
+    assert add_weekdays(date(2025, 3, 10), -1) == friday
+    assert add_weekdays(saturday, 1) == date(2025, 3, 10)
+    assert add_weekdays(saturday, -1) == friday
+    assert add_weekdays(date(2024, 3, 28), 3) == date(2024, 4, 2)  # no holiday calendar
+
+
+def test_bar_days_cover_each_period_s_window() -> None:
+    sunday, monday = date(2025, 3, 2), date(2025, 3, 3)
+    stock_week = (monday, date(2025, 3, 8))
+    assert bar_days(AssetClass.STOCKS, sunday, timespan=Timespan.WEEK, multiplier=1) == stock_week
+    assert bar_days(AssetClass.STOCKS, monday, timespan=Timespan.WEEK, multiplier=1) == stock_week
+    assert bar_days(AssetClass.CRYPTO, monday, timespan=Timespan.WEEK, multiplier=2) == (
+        monday,
+        date(2025, 3, 17),
+    )
+    assert bar_days(AssetClass.STOCKS, monday, timespan=Timespan.DAY, multiplier=3) == (
+        monday,
+        date(2025, 3, 6),
+    )
+    # June 2024 starts on a Saturday: its stock window starts Monday the 3rd and ends Friday
+    # the 28th; forex keeps the whole month.
+    june = date(2024, 6, 1)
+    assert bar_days(AssetClass.STOCKS, june, timespan=Timespan.MONTH, multiplier=1) == (
+        date(2024, 6, 3),
+        date(2024, 6, 29),
+    )
+    assert bar_days(AssetClass.FOREX, june, timespan=Timespan.MONTH, multiplier=1) == (
+        june,
+        date(2024, 7, 1),
+    )
+    assert bar_days(AssetClass.STOCKS, date(2025, 1, 1), timespan=Timespan.YEAR, multiplier=1) == (
+        date(2025, 1, 1),
+        date(2026, 1, 1),
+    )
+
+
+def test_futures_period_last_takes_the_later_reading() -> None:
+    label = date(2024, 3, 25)
+    assert futures_period_last(label, timespan=Timespan.WEEK, multiplier=1) == date(2024, 3, 29)
+    assert futures_period_last(label, timespan=Timespan.WEEK, multiplier=2) == date(2024, 4, 5)
+    assert futures_period_last(label, timespan=Timespan.MONTH, multiplier=1) == date(2024, 3, 29)
+    assert futures_period_last(label, timespan=Timespan.QUARTER, multiplier=1) == date(2024, 3, 29)
+
+
+def test_a_futures_session_is_over_at_17_chicago() -> None:
+    assert futures_session_end(date(2025, 3, 3)) == datetime(2025, 3, 3, 17, tzinfo=CHICAGO)
+    assert futures_session(futures_session_end(date(2025, 3, 3))) == date(2025, 3, 4)
+
+
+def test_unit_ns_is_one_intraday_unit() -> None:
+    assert unit_ns(Timespan.SECOND) == 10**9
+    assert unit_ns(Timespan.MINUTE) == 60 * 10**9
+    assert unit_ns(Timespan.HOUR) == 3_600 * 10**9
 
 
 def test_months_leave_out_their_leading_and_trailing_weekend_days() -> None:

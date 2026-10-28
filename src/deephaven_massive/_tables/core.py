@@ -224,6 +224,18 @@ class RestTransport(Protocol):
         """
         ...
 
+    def fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Return every raw JSON row of a REST path for a query, following its pages.
+
+        For the library's own lookups (the futures schedule calendar of the WebSocket
+        streams), which read a few fields and build no table.
+
+        Args:
+            template: The path template; it takes no path parameter.
+            query: The query parameters, by wire name.
+        """
+        ...
+
     def fetch(self, spec: DatasetSpec, request: Request) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 

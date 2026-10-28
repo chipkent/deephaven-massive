@@ -12,7 +12,8 @@ import inspect
 import io
 import json
 import re
-from collections.abc import Callable, Iterator
+import threading
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -25,6 +26,7 @@ from deephaven.stream import blink_to_append_only
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets.catalog import KeySpec
 from deephaven_massive._datasets.dates import CHICAGO
 from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._enums import Recency
@@ -373,20 +375,22 @@ def test_no_futures_dataset_has_a_last_endpoint() -> None:
 
 
 @pytest.mark.parametrize("name", ["trades", "quotes", "bars"])
-def test_market_data_starts_with_symbol_and_timestamp(name: str) -> None:
+def test_market_data_starts_with_symbol_session_date_and_time(name: str) -> None:
     schema = CATALOG.dataset_schema(_spec(name))
-    assert schema.column_names[:2] == ("Symbol", "Timestamp")
+    times = ("TimestampStart", "TimestampEnd") if name == "bars" else ("Timestamp",)
+    assert schema.column_names[: 2 + len(times)] == ("Symbol", "Date", *times)
+    assert schema.column_names[-1] == "TimestampInsert"
     types = {column.name: column.type.value for column in schema.columns}
     assert types["Symbol"] == "String"
-    assert types["Timestamp"] == "Instant"
-    assert types["SessionEndDate"] == "LocalDate"
-    assert "Ticker" not in types
-    assert "Underlying" not in types
+    assert all(types[time] == "Instant" for time in times)
+    # The session, `session_end_date`, is the row's `Date`, ISO text.
+    assert types["Date"] == "String"
+    assert {"Ticker", "Underlying", "SessionEndDate"}.isdisjoint(types)
 
 
 def test_bar_times_come_from_the_window_start() -> None:
     names = CATALOG.dataset_schema(_spec("bars")).column_names
-    assert "WindowStart" not in names
+    assert {"WindowStart", "EndTimestamp", "Timestamp"}.isdisjoint(names)
     assert "SettlementPrice" in names
 
 
@@ -404,7 +408,10 @@ def test_snapshots_name_the_contract_symbol_and_have_no_single_time() -> None:
 def test_reference_datasets_take_no_symbols(name: str) -> None:
     spec = _spec(name)
     assert not CATALOG.takes_symbols(spec)
-    assert spec.keys == {}
+    # Only a row time is declared, where the rows have one: `Timestamp` is the library's name.
+    timed = name in {"market_status", "schedules"}
+    assert all(keys.declared() == (("time", KeySpec("Timestamp")),) for keys in spec.keys.values())
+    assert bool(spec.keys) == timed
     schema = CATALOG.dataset_schema(spec)
     assert "Symbol" not in schema.column_names
     assert set(spec.poll_keys) <= set(schema.column_names)
@@ -414,7 +421,8 @@ def test_schedule_and_status_times_are_instants_and_sessions_dates() -> None:
     for name in ("market_status", "schedules"):
         types = {c.name: c.type.value for c in CATALOG.dataset_schema(_spec(name)).columns}
         assert types["Timestamp"] == "Instant"
-        assert types["SessionEndDate"] == "LocalDate"
+        assert types["SessionEndDate"] == "String"  # every date is ISO text
+        assert "Date" not in types  # reference rows have no trading-day column of the library
 
 
 # Docstrings: each factory starts with its summary and links its column reference section.
@@ -497,10 +505,14 @@ NS = 10**9
 
 
 def rows(table: Table) -> list[dict[str, Any]]:
-    # Instants become epoch nanoseconds, so assertions keep every digit.
+    # Instants become epoch nanoseconds, so assertions keep every digit. Every dataset row
+    # carries when it arrived, last, which the rows here leave out once it is checked.
     data = dh_arrow.to_arrow(table)
     columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
     out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    if "TimestampInsert" in data.column_names:
+        assert data.column_names[-1] == "TimestampInsert"
+        assert all(row.pop("TimestampInsert") is not None for row in out)
     return out
 
 
@@ -567,14 +579,14 @@ def test_tick_history_over_rest_reads_each_session_by_its_date(
         )
     ]
     payload = json.loads(load_fixture(OWNER, fixture))["results"]
-    # The fixture's last row belongs to the next session; its SessionEndDate drops it.
+    # The fixture's last row belongs to the next session; its session, `Date`, drops it.
     assert payload[-1]["session_end_date"] == "2024-12-18"
     assert [(r["Symbol"], r["Timestamp"], r["SequenceNumber"]) for r in out] == [
         (symbol, p["timestamp"], p["sequence_number"])
         for p in payload
         if p["session_end_date"] == "2024-12-17"
     ]
-    assert {r["SessionEndDate"] for r in out} == {date(2024, 12, 17)}
+    assert {r["Date"] for r in out} == {"2024-12-17"}
     assert all(r["Exchange"] is None for r in out)  # only the flat files carry it
 
 
@@ -591,7 +603,7 @@ def test_trades_rest_rows(
         "ReportSequence": 12033289,
         "Price": 6052.0,
         "Size": 3,
-        "SessionEndDate": date(2024, 12, 17),
+        "Date": "2024-12-17",  # Massive's session_end_date
         "Channel": 360,
     }
     assert {name: first[name] for name in supplied} == supplied
@@ -636,9 +648,13 @@ def test_session_bars_over_rest(
             },
         )
     ]
-    assert [(r["Symbol"], r["Timestamp"], r["SessionEndDate"], r["Close"]) for r in out] == [
-        ("GCJ5", 1738540800000000000, date(2025, 2, 4), 2874.2),
-        ("GCJ5", 1738627200000000000, date(2025, 2, 5), 2884.8),
+    # A session bar starts at Massive's window start and ends at 17:00 Chicago time on its
+    # session date, which is its `Date`.
+    assert [
+        (r["Symbol"], r["TimestampStart"], r["TimestampEnd"], r["Date"], r["Close"]) for r in out
+    ] == [
+        ("GCJ5", 1738540800000000000, chicago_open(date(2025, 2, 4)), "2025-02-04", 2874.2),
+        ("GCJ5", 1738627200000000000, chicago_open(date(2025, 2, 5)), "2025-02-05", 2884.8),
     ]
     assert out[0]["SettlementPrice"] == 2875.8
     assert out[0]["Volume"] == 133127.0
@@ -718,7 +734,7 @@ def test_contracts_over_rest(
         )
     ]
     assert [(r["Ticker"], r["ProductCode"], r["Active"], r["LastTradeDate"]) for r in out] == [
-        ("ESZ6", "ES", True, date(2026, 12, 18))
+        ("ESZ6", "ES", True, "2026-12-18")
     ]
     assert out[0]["TradeTickSize"] == 0.25
     assert "Symbol" not in out[0]
@@ -772,7 +788,7 @@ def test_products_over_rest(
         ("/futures/v1/products", {"product_code": ["EBE"], "limit": ["50000"]})
     ]
     assert [(r["ProductCode"], r["TradingVenue"], r["Date"], r["LastUpdated"]) for r in out] == [
-        ("EBE", "XNYM", date(2025, 7, 7), date(2025, 2, 22))
+        ("EBE", "XNYM", "2025-07-07", "2025-02-22")
     ]
     assert out[0]["UnitOfMeasureQty"] == 1000.0
 
@@ -793,7 +809,7 @@ def test_market_status_over_rest(
             "MarketEvent": "open",
             "Name": "ERCOT North 345 kV Hub Day-Ahead 5 MW Off-Peak Futures",
             "ProductCode": "ERL",
-            "SessionEndDate": date(2025, 12, 5),
+            "SessionEndDate": "2025-12-05",
             "Timestamp": 1764889200 * NS,  # 2025-12-04T23:00:00+00:00
             "TradingVenue": "XNYM",
         }
@@ -823,9 +839,9 @@ def test_schedules_over_rest(
         )
     ]
     assert [(r["Event"], r["Timestamp"], r["SessionEndDate"]) for r in out] == [
-        ("pre_open", 1717966800 * NS, date(2024, 6, 10)),
-        ("open", 1717970400 * NS, date(2024, 6, 10)),
-        ("close", 1718053200 * NS, date(2024, 6, 10)),
+        ("pre_open", 1717966800 * NS, "2024-06-10"),
+        ("open", 1717970400 * NS, "2024-06-10"),
+        ("close", 1718053200 * NS, "2024-06-10"),
     ]
 
 
@@ -866,6 +882,40 @@ REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
 WS_TIMEOUT = 15.0
 
 
+PRODUCTS = {"ESZ4": "ES", "6CH5": "6C"}
+"""The product of each contract the streams below read, as `/futures/v1/contracts` lists it."""
+
+SCHEDULES = {
+    # A made-up fold: Friday 2024-12-13's trading belongs to the session of Monday 12-16, so a
+    # trade the 17:00 Chicago rule dates 12-13 is moved to 12-16 by the schedule.
+    "ES": [
+        ("2024-12-12", "2024-12-11T23:00:00+00:00", "2024-12-12T22:00:00+00:00"),
+        ("2024-12-16", "2024-12-12T23:00:00+00:00", "2024-12-16T22:00:00+00:00"),
+    ],
+    # Regular sessions, which agree with the rule.
+    "6C": [
+        ("2024-12-20", "2024-12-19T23:00:00+00:00", "2024-12-20T22:00:00+00:00"),
+        ("2025-07-08", "2025-07-07T22:00:00+00:00", "2025-07-08T21:00:00+00:00"),
+    ],
+}
+"""Each product's sessions: the session date, its pre-open, and its close."""
+
+
+def schedule_rows(template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+    # The contracts and schedules the streams' session calendar looks up, as Massive serves
+    # them: one row per contract, and a pre-open and a close per session.
+    if template == "/futures/v1/contracts":
+        tickers = cast("tuple[str, ...]", query["ticker.any_of"])
+        return [{"ticker": t, "product_code": PRODUCTS[t]} for t in tickers if t in PRODUCTS]
+    products = cast("tuple[str, ...]", query["product_code.any_of"])
+    return [
+        {"product_code": product, "session_end_date": day, "event": event, "timestamp": stamp}
+        for product in products
+        for day, opens, closes in SCHEDULES.get(product, [])
+        for event, stamp in (("pre_open", opens), ("close", closes))
+    ]
+
+
 @pytest.fixture
 def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", flush_interval=3600.0))
@@ -884,6 +934,7 @@ def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]
         m._core,
         resolve_host=lambda *_: REALTIME,
         record_verdict=lambda *_: None,
+        fetch_rows=schedule_rows,
         client_factory=client,
     )
     cast("Any", m._core._ports)._streams = connections
@@ -901,6 +952,16 @@ def subscribed(server: FakeMassiveServer, topic: str) -> None:
         )
 
     server.wait_for(named, WS_TIMEOUT)
+
+
+def wait_until(condition: Callable[[], bool]) -> None:
+    # Bounded wait for the session calendar's worker thread.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(int(WS_TIMEOUT / 0.02)):
+        if condition():
+            return
+        pause.wait(0.02)
+    assert condition()
 
 
 def flush(m: dm.MassiveSession) -> None:
@@ -940,6 +1001,10 @@ def test_one_frame_lands_in_blink(
     frame = json.loads(load_fixture(OWNER, "ws_frames.json"))[index]
     live = build(ws_session.futures).blink()
     seen = blink_to_append_only(live)
+    # The stream's contract is looked up as it opens; its schedule places its rows.
+    calendar = cast("Any", ws_session._core._ports)._streams.futures_sessions()
+    product = PRODUCTS[frame["sym"]]
+    wait_until(lambda: product in calendar._sessions)
 
     def landed(arrived: list[dict[str, Any]]) -> bool:
         # The frame may reach the session after any one flush, so every check flushes again.
@@ -953,8 +1018,13 @@ def test_one_frame_lands_in_blink(
     (row,) = rows_when(seen, landed)
     assert row["Symbol"] == frame["sym"]
     time_key = "t" if frame["ev"] in {"T", "Q"} else "s"
-    assert row["Timestamp"] == at_ms(frame[time_key])  # sent in milliseconds
-    assert row["SessionEndDate"] is None  # the stream carries no session
+    time = "Timestamp" if frame["ev"] in {"T", "Q"} else "TimestampStart"
+    assert row[time] == at_ms(frame[time_key])  # sent in milliseconds
+    assert row["TimestampInsert"] is not None
+    # The stream carries no session: the rule dates the trade and quote 2024-12-13, and the
+    # schedule moves them to the session it places them in; the bars' agree with the rule.
+    expected = {"T": "2024-12-16", "Q": "2024-12-16", "A": "2024-12-20", "AM": "2025-07-08"}
+    assert row["Date"] == expected[frame["ev"]]
     if frame["ev"] == "T":
         assert (row["Price"], row["Size"], row["SequenceNumber"]) == (6064.5, 100, 32599300)
     elif frame["ev"] == "Q":
@@ -966,7 +1036,10 @@ def test_one_frame_lands_in_blink(
     else:
         assert (row["Open"], row["Close"], row["Volume"]) == (6994.5, 6995.0, 91.0)
         assert row["DollarVolume"] == 1353.1
-        assert row["EndTimestamp"] == at_ms(frame["e"])
+        # The end is the start plus the bar's length; for a one-second bar, the later of that
+        # and Massive's `e`, which agree here.
+        length = 1_000 if frame["ev"] == "A" else 60_000
+        assert row["TimestampEnd"] == at_ms(frame["s"] + length)
     ws_session.release(live)
 
 
@@ -1024,8 +1097,9 @@ def test_one_block_round_trips_through_the_flat_files(
     assert len(out) == 1
     row = out[0]
     assert row["Symbol"] == wire["ticker"]
-    assert row["Timestamp"] == int(wire[time_key])
-    assert row["SessionEndDate"] == day
+    time = "TimestampStart" if time_key == "window_start" else "Timestamp"
+    assert row[time] == int(wire[time_key])
+    assert row["Date"] == day.isoformat()  # the file's session_end_date
     assert row["Exchange"] == (int(wire["exchange"]) if "exchange" in wire else None)
     if "close" in wire:
         assert (row["Close"], row["Volume"]) == (float(wire["close"]), float(wire["volume"]))
@@ -1033,15 +1107,28 @@ def test_one_block_round_trips_through_the_flat_files(
         assert row["SequenceNumber"] == int(wire["sequence_number"])
 
 
-def test_bars_of_several_sessions_by_date_are_refused(
+def test_bars_of_several_sessions_by_date_fit_under_both_readings_of_their_label(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
+    # Whether Massive labels a 2-session bar with its first session or its last is not
+    # documented, so a bar is kept only when both readings fit the range: Tuesday to Thursday
+    # of 2025-02-03 to 02-07, never the Monday (its other session may be the Friday before) or
+    # the Friday (its other session may be the Monday after).
+    def bar(label: str) -> dict[str, object]:
+        start = chicago_open(date.fromisoformat(label) - timedelta(days=1))
+        return {"ticker": "GCJ5", "session_end_date": label, "window_start": start, "close": 1.0}
+
+    labels = ["2025-02-03", "2025-02-04", "2025-02-05", "2025-02-06", "2025-02-07"]
+    fake_rest.reply(
+        "/futures/v1/aggs/GCJ5", Reply({"status": "OK", "results": [*map(bar, labels)]})
+    )
     q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION, multiplier=2)
-    with pytest.raises(
-        ValueError, match=r"^futures\.bars: bars of 2 sessions cannot be selected by session dates"
-    ):
-        q.history("2025-02-04", "2025-02-07")
-    assert sent(fake_rest) == []
+    out = rows(q.history("2025-02-03", "2025-02-07", source=dm.HistorySource.REST))
+    assert [r["TimestampStart"] for r in out] == [bar(day)["window_start"] for day in labels[1:4]]
+    # A bar of several sessions has no single date; it ends at the latest its label allows:
+    # the second weekday session from its start, plus four days for a holiday.
+    assert {r["Date"] for r in out} == {None}
+    assert out[0]["TimestampEnd"] == chicago_open(date(2025, 2, 9))
 
 
 def test_history_with_dates_refuses_a_session_end_date_filter(

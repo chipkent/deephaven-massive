@@ -61,7 +61,6 @@ TABLE_DESCRIPTION = "stocks.trades: Trades of US-listed stocks, tick by tick."
 def test_every_column_type_has_a_deephaven_type() -> None:
     assert {t: dh_type(t) for t in ColumnType} == {
         ColumnType.INSTANT: dtypes.Instant,
-        ColumnType.LOCAL_DATE: dtypes.LocalDate,
         ColumnType.DOUBLE: dtypes.double,
         ColumnType.LONG: dtypes.long,
         ColumnType.INT: dtypes.int32,

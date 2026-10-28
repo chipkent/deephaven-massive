@@ -5,9 +5,11 @@ import functools
 import gc
 import gzip
 import io
+import itertools
 import logging
 import re
 import threading
+import time
 import tracemalloc
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -31,6 +33,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.dates import CHICAGO, DaySpan
 from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
 from deephaven_massive._ingest import flatfiles
@@ -78,7 +81,7 @@ def keys(symbol: str | KeySpec, time: str, *, session: bool = False) -> SourceKe
     return SourceKeys(
         KeySpec(symbol) if isinstance(symbol, str) else symbol,
         KeySpec(time),
-        session=KeySpec("SessionEndDate") if session else None,
+        date=KeySpec("SessionEndDate") if session else None,
     )
 
 
@@ -135,6 +138,7 @@ FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
+    row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
     keys={
@@ -213,11 +217,18 @@ def request(symbols: object = ("AAPL",), **fields: object) -> Request:
     return Request(symbols=cast("Any", symbols), **cast("dict[str, Any]", fields))
 
 
-def rows(table: Table) -> list[dict[str, Any]]:
-    # Instants become epoch nanoseconds, so assertions keep every digit.
+def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit. Every row carries the
+    # instant its block was decoded, last; it is checked here and, unless asked for, left out,
+    # so an assertion compares only what the files hold.
     data = dh_arrow.to_arrow(table)
+    assert data.column_names[-1] == "TimestampInsert"
+    assert data.column("TimestampInsert").null_count == 0
     columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
     out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    if not arrival:
+        for row in out:
+            del row["TimestampInsert"]
     return out
 
 
@@ -480,7 +491,11 @@ def synthetic_catalog() -> Catalog:
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
-        synthetic_catalog(), SYNTHETIC, prefix=SYNTHETIC_FILES, symbols=dm.ALL, window=window
+        synthetic_catalog(),
+        SYNTHETIC,
+        prefix=SYNTHETIC_FILES,
+        request=request(dm.ALL),
+        window=window,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -491,7 +506,9 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
             "Conditions": [12, None],
         }
     )
-    out = transform.apply(batch).to_pydict()
+    out = transform.apply(batch, received=7).to_pydict()
+    # Every row of the block arrived together.
+    assert [int(v.value) for v in out["TimestampInsert"]] == [7, 7]
     assert [
         None if v is None else int(v.timestamp() * 10**3) for v in out["ParticipantTimestamp"]
     ] == [
@@ -689,10 +706,15 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
     )
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-03", "2025-03-03")
-    assert pick(t, "Symbol", "Timestamp", "Open", "Volume", "Transactions", "Vwap") == [
-        ("AAPL", 1740978000000000000, 241.79, 47184000.0, 612403, None),
-        ("MSFT", 1740978000000000000, 398.82, 26093000.0, 402122, None),
+    # The day file stamps a bar at the 16:00 close; it runs from midnight to midnight.
+    day = 1740978000000000000
+    assert pick(
+        t, "Symbol", "Date", "TimestampStart", "TimestampEnd", "Open", "Volume", "Transactions"
+    ) == [
+        ("AAPL", "2025-03-03", day, day + 86_400 * 10**9, 241.79, 47184000.0, 612403),
+        ("MSFT", "2025-03-03", day, day + 86_400 * 10**9, 398.82, 26093000.0, 402122),
     ]
+    assert pick(t, "Vwap") == [(None,), (None,)]
     assert caplog.messages == [
         "stocks.bars history: AUTO chose FLAT_FILES (every symbol)",
         "stocks.bars history: source=S3 files=1 skipped=none",
@@ -720,6 +742,23 @@ def test_each_file_becomes_one_table(
     assert t.size == 6
     # The empty schema table, then one table per file, although each file has many blocks.
     assert sorted(converted) == [0, 2, 4]
+
+
+def test_every_block_carries_the_instant_it_was_decoded(
+    *,
+    session: dm.MassiveSession,
+    many_blocks: Callable[[str], int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each block's rows share the instant the block was decoded; later blocks, later instants.
+    blocks = many_blocks(TRADES_0303)
+    ticks = itertools.count(1_000)
+    monkeypatch.setattr(time, "time_ns", lambda: next(ticks))
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    arrived = [row["TimestampInsert"] for row in rows(t, arrival=True)]
+    assert len(arrived) == 4000
+    assert arrived == sorted(arrived)  # one reader reads the file's blocks in order
+    assert 1 < len(set(arrived)) <= blocks + 1
 
 
 def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
@@ -939,7 +978,9 @@ class RestRecorder:
     def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         self.calls.append((spec, request, window))
         # A table in the dataset's schema, as the REST transport returns.
-        return dh_arrow.to_table(schema_of(spec).to_arrow([{"Symbol": "from REST"}]))
+        return dh_arrow.to_table(
+            schema_of(spec).to_arrow([{"Symbol": "from REST", "TimestampInsert": 1}])
+        )
 
 
 def test_auto_delegates_few_symbols_to_rest(
@@ -979,11 +1020,11 @@ def test_futures_read_every_venue_by_default_in_venue_order(
     t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
     assert sorted(fake_s3.keys()) == sorted(FUTURES_0304.format(v) for v in VENUES)
     # Venue order within a date: CME, CBOT, NYMEX, COMEX.
-    assert pick(t, "ReportSequence", "SessionEndDate") == [
-        (0, date(2025, 3, 4)),
-        (1, date(2025, 3, 4)),
-        (2, date(2025, 3, 4)),
-        (3, date(2025, 3, 4)),
+    assert pick(t, "ReportSequence", "Date") == [
+        (0, "2025-03-04"),
+        (1, "2025-03-04"),
+        (2, "2025-03-04"),
+        (3, "2025-03-04"),
     ]
 
 
@@ -994,10 +1035,10 @@ def test_futures_read_one_venue_when_asked(
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
     t = q.history("2025-03-04", "2025-03-04")
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
-    assert pick(t, "Symbol", "Timestamp", "SessionEndDate", "ReportSequence") == [
-        ("ESH5", 1741042800000000000, date(2025, 3, 4), 31),
-        ("ESH5", 1741100400000000000, date(2025, 3, 4), 32),
-        ("NQH5", 1741100400000000000, date(2025, 3, 4), 33),
+    assert pick(t, "Symbol", "Timestamp", "Date", "ReportSequence") == [
+        ("ESH5", 1741042800000000000, "2025-03-04", 31),
+        ("ESH5", 1741100400000000000, "2025-03-04", 32),
+        ("NQH5", 1741100400000000000, "2025-03-04", 33),
     ]
 
 
@@ -1013,9 +1054,7 @@ def test_futures_evening_instants_read_only_the_next_session(
         source=HistorySource.FLAT_FILES,
     )
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
-    assert pick(t, "Symbol", "Timestamp", "SessionEndDate") == [
-        ("ESH5", 1741042800000000000, date(2025, 3, 4))
-    ]
+    assert pick(t, "Symbol", "Timestamp", "Date") == [("ESH5", 1741042800000000000, "2025-03-04")]
 
 
 def test_futures_instants_inside_one_session_need_only_its_file(
@@ -1542,7 +1581,11 @@ def test_a_cancelled_or_closed_read_makes_no_request(
     assert isinstance(transport, flatfiles.FlatFileHistory)
     window = whole_days(STOCK_TRADES, "2025-03-03")
     transform = flatfiles._Transform.build(
-        CATALOG, STOCK_TRADES, prefix="us_stocks_sip/trades_v1", symbols=dm.ALL, window=window
+        CATALOG,
+        STOCK_TRADES,
+        prefix="us_stocks_sip/trades_v1",
+        request=request(dm.ALL),
+        window=window,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()
@@ -1936,7 +1979,9 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
 ) -> None:
     # Converting a file's rows can fail in Arrow (out of memory, say): it is a failed read of
     # that file, named like any other.
-    def exhausted(transform: flatfiles._Transform, batch: pa.RecordBatch) -> pa.RecordBatch:
+    def exhausted(
+        transform: flatfiles._Transform, batch: pa.RecordBatch, *, received: int
+    ) -> pa.RecordBatch:
         raise pa.ArrowMemoryError("malloc of size 1048576 failed")
 
     monkeypatch.setattr(flatfiles._Transform, "apply", exhausted)
@@ -2164,7 +2209,9 @@ def test_minute_bar_files_keep_only_whole_bars_of_an_instant_range(
         datetime(2025, 3, 3, 14, 32, 30, tzinfo=UTC),
         source=HistorySource.FLAT_FILES,
     )
-    assert pick(t, "Timestamp") == [(minutes[1],)]
+    assert pick(t, "Date", "TimestampStart", "TimestampEnd") == [
+        ("2025-03-03", minutes[1], minutes[2])
+    ]
 
 
 def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(

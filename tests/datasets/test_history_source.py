@@ -33,6 +33,7 @@ from deephaven_massive._datasets.history_source import (
     within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._massive import Transport
 
@@ -47,7 +48,7 @@ def files(
 ) -> dict[tuple[Transport, str], SourceKeys]:
     # The keys every flat-file prefix declares: its ticker, its time, and a futures session.
     keys = SourceKeys(
-        KeySpec("Ticker"), KeySpec(time), session=KeySpec("SessionEndDate") if session else None
+        KeySpec("Ticker"), KeySpec(time), date=KeySpec("SessionEndDate") if session else None
     )
     return {(FF, prefix): keys for prefix in prefixes.values()}
 
@@ -128,6 +129,7 @@ FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
+    row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
     keys=files({None: "us_futures_{venue}/trades_v1"}, "Timestamp", session=True),
@@ -254,9 +256,10 @@ def test_futures_bars_by_date() -> None:
     # A session bar of a session still trading is left out: the session of 03-10 opened at
     # 17:00 Chicago on 03-09, and NOW is 11:00 Chicago on 03-10.
     sessions = window(FUTURES_BARS, "2025-03-06", None, timespan=Timespan.SESSION)
-    assert sessions.sessions == DaySpan(date(2025, 3, 6), date(2025, 3, 9))
+    # No session ends on a Saturday or Sunday, so the files read are Thursday's and Friday's.
+    assert sessions.sessions == DaySpan(date(2025, 3, 6), date(2025, 3, 7))
     assert sessions.times is None
-    assert partition_dates(FUTURES_BARS, sessions) == tuple(date(2025, 3, d) for d in (6, 7, 8, 9))
+    assert partition_dates(FUTURES_BARS, sessions) == (date(2025, 3, 6), date(2025, 3, 7))
     # So is an intraday bar that has not ended.
     live = window(FUTURES_BARS, "2025-03-10", None, timespan=Timespan.MINUTE)
     assert live.times is not None
@@ -481,7 +484,9 @@ def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
         "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
         "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY); "
         "stocks.bars flat files hold only 1-minute, 1-day bars; "
-        "flat-file bars are unadjusted; pass adjusted=False; "
+        "flat-file bars are unadjusted (as traded) and one history() never mixes adjusted and "
+        "unadjusted prices, so adjusted bars come only from REST; pass adjusted=False for the "
+        "flat files; "
         "the file for 2025-03-03 is not yet published; flat files land ~11:00 ET next day "
         "(a day's file counts as published from 11:30 New York time after the day ends). "
         "REST: stocks.bars history over REST needs explicit symbols."
@@ -690,14 +695,18 @@ def test_crypto_and_forex_day_bars_follow_the_usual_auto_rule() -> None:
     assert choose(CRYPTO_BARS, crypto, dates=unpublished) is HistorySource.REST
 
 
-def test_futures_bars_of_several_sessions_by_date_are_refused() -> None:
-    for timespan in (Timespan.SESSION, Timespan.WEEK, Timespan.MONTH):
-        with pytest.raises(
-            ValueError,
-            match=rf"^futures\.bars: bars of 2 {timespan.value}s cannot be selected by session "
-            r"dates, .*; pass datetimes, or multiplier=1$",
-        ):
-            window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=timespan, multiplier=2)
+def test_futures_bars_of_several_sessions_by_date_fit_under_both_label_readings() -> None:
+    # Whether Massive labels such a bar with its first or last session is not documented, so
+    # the dates keep the labels whose bar fits either way.
+    sessions = window(
+        FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.SESSION, multiplier=2
+    )
+    assert sessions.sessions == DaySpan(date(2025, 3, 4), date(2025, 3, 6))
+    assert sessions.times is None
+    months = window(FUTURES_BARS, "2024-11-01", "2025-01-31", timespan=Timespan.MONTH, multiplier=2)
+    assert months.sessions == DaySpan(date(2024, 12, 1), date(2024, 12, 31))
+    weeks = window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.WEEK, multiplier=2)
+    assert weeks.empty
     # Datetimes, multiplier 1, and intraday multiples are fine.
     start = datetime(2025, 3, 2, 17, tzinfo=CHICAGO)
     assert not window(

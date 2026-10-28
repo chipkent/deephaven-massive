@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, ChannelFamily, Direction, Timespan, _require_enum
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query
@@ -121,6 +122,11 @@ QUOTES: Final = DatasetSpec(
 )
 """`m.crypto.quotes`: the `XQ` stream only; Massive serves no crypto quote history."""
 
+_STREAM_BAR_KEYS: Final = SourceKeys(
+    symbol=KeySpec("Pair"), time=KeySpec("WindowStart"), end=KeySpec("EndTimestamp")
+)
+"""The keys of a WebSocket bars channel: the pair, the window's start, and its end `e`."""
+
 BARS: Final = DatasetSpec(
     name="crypto.bars",
     summary="Open, high, low, close, and volume bars of crypto pairs, over any time window.",
@@ -136,8 +142,8 @@ BARS: Final = DatasetSpec(
         (_R, _PREV): _keys(KeySpec("Ticker"), "WindowStart"),
         (_R, _RANGE): _keys(_request("cryptoTicker"), "WindowStart"),
         (_R, _GROUPED): _keys(KeySpec("Ticker"), "WindowStart"),
-        (_W, "crypto/XAS"): _keys(KeySpec("Pair"), "WindowStart"),
-        (_W, "crypto/XA"): _keys(KeySpec("Pair"), "WindowStart"),
+        (_W, "crypto/XAS"): _STREAM_BAR_KEYS,
+        (_W, "crypto/XA"): _STREAM_BAR_KEYS,
         (_F, _MINUTE_FILES): _keys(KeySpec("Ticker"), "WindowStart"),
         (_F, _DAY_FILES): _keys(KeySpec("Ticker"), "WindowStart"),
     },
@@ -186,8 +192,9 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     fetch_path=_OPEN_CLOSE,
     # The body names the pair as `BTC-USD`; the transport canonicalizes it to `X:BTCUSD`.
-    keys={(_R, _OPEN_CLOSE): _keys(KeySpec("Symbol"))},
+    keys={(_R, _OPEN_CLOSE): SourceKeys(symbol=KeySpec("Symbol"), date=KeySpec("Day"))},
     per_symbol=True,
+    row_times=RowTimes.DAY,
 )
 """`m.crypto.daily_open_close`: one request per pair for one day's open and close."""
 
@@ -227,8 +234,10 @@ class _Crypto(Namespace):
     def trades(self, symbols: Symbols) -> StreamHistoryLatestQuery:
         """Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
-        Each row is one trade on one exchange: its price, size, exchange ID, conditions, and
-        the exchange's own (participant) time, which is the row's `Timestamp`.
+        Each row is one trade on one exchange: its price, size, exchange ID, conditions, and the
+        exchange's own (participant) time, which is the row's `Timestamp`. Each row also carries
+        its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and
+        `TimestampInsert`, when the library received it.
 
         Transports: the stream verbs (`blink()`, `append_only()`, `ring()`, `last_by()`)
         read the WebSocket `XT` channel; `history()` reads `/v3/trades/{cryptoTicker}` over
@@ -272,7 +281,9 @@ class _Crypto(Namespace):
         """Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
         Each row is one exchange's top of book for one pair, with its bid and ask prices and
-        sizes and the exchange's (participant) time, which is the row's `Timestamp`.
+        sizes and the exchange's (participant) time, which is the row's `Timestamp`. Each row
+        also carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of
+        `Timestamp`), and `TimestampInsert`, when the library received it.
 
         Transports: the WebSocket `XQ` channel only, through the stream verbs (`blink()`,
         `append_only()`, `ring()`, `last_by()`). Massive serves no crypto quote history and no
@@ -338,9 +349,14 @@ class _Crypto(Namespace):
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
         Each row is one bar of one pair: open, high, low, close, volume, and, where the
-        transport supplies them, the volume-weighted average price and the trade count. The
-        row's `Timestamp` is the start of the bar's window; see below for bars of a day or
-        longer.
+        transport supplies them, the volume-weighted average price and the trade count. It
+        carries its window, from `TimestampStart` to the exclusive `TimestampEnd`, its trading
+        day `Date` (ISO `yyyy-MM-dd` text, the UTC day), and `TimestampInsert`, when the library
+        received it. `TimestampEnd` is the first instant at which the bar is complete, so join
+        on it (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed
+        bars; an intraday bar ends its length after its start, and a bar of a day or longer at
+        00:00 UTC after its window's last day. `Date` is null for a bar that spans more than one
+        UTC date.
 
         The timespan and multiplier decide the transports and so the query's class:
 
@@ -354,13 +370,13 @@ class _Crypto(Namespace):
 
         `history()` reads the aggregates range endpoint over REST, one pair at a time, or the
         `global_crypto/minute_aggs_v1` and `global_crypto/day_aggs_v1` flat files for 1-minute
-        and 1-day bars. Crypto has no splits or other corporate actions, so there is no
-        `adjusted` choice and the library sends Massive's `adjusted` parameter on no request.
-        There is no `limit`: `history()` pages internally (the endpoint's own `limit` counts
-        base aggregates, not rows, so it cannot cap rows) and `fetch()` returns one row per
-        pair.
+        and 1-day bars. Crypto has no splits or other corporate actions, so its bars are never
+        adjusted: there is no `adjusted` choice and the library sends Massive's `adjusted`
+        parameter on no request. There is no `limit`: `history()` pages internally (the
+        endpoint's own `limit` counts base aggregates, not rows, so it cannot cap rows) and
+        `fetch()` returns one row per pair.
 
-        A 1-day bar covers one UTC day and is stamped at 00:00 UTC of that day, whatever the
+        A 1-day bar covers one UTC day and starts at 00:00 UTC of that day, whatever the
         source. The `global_crypto/day_aggs_v1` files stamp it at the day's last millisecond
         (23:59:59.999 UTC), which is moved to 00:00 UTC. Massive's documented REST samples do
         not sit on a UTC day boundary (the aggregates range and `/prev` at midnight New York
@@ -427,8 +443,10 @@ class _Crypto(Namespace):
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value of crypto pairs, streamed as it updates.
 
-        Each row is one fair-market-value update of one pair: Massive's proprietary estimate
-        of its price and the time of the estimate, which is the row's `Timestamp`.
+        Each row is one fair-market-value update of one pair: Massive's proprietary estimate of
+        its price and the time of the estimate, which is the row's `Timestamp`. Each row also
+        carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`),
+        and `TimestampInsert`, when the library received it.
 
         Transports: the WebSocket `FMV` channel only, through the stream verbs (`blink()`,
         `append_only()`, `ring()`, `last_by()`), served from `business.massive.com/crypto`

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 import pytest
 from deephaven import dtypes, input_table
-from deephaven.arrow import to_table
+from deephaven.arrow import to_arrow, to_table
 from deephaven.stream import blink_to_append_only
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -28,6 +28,7 @@ from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
+from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.stream import (
     ChannelPlan,
     Flusher,
@@ -90,6 +91,21 @@ def trade(symbol: str, price: float = 1.0, **fields: object) -> dict[str, object
     return row
 
 
+ARRIVED = 1_700_000_000_123_456_789
+"""When the test frames arrive, epoch nanoseconds: every converted row's `TimestampInsert`."""
+
+
+def arrivals(rows: list[dict[str, object]]) -> list[int]:
+    # One arrival per row, as the flusher passes them: every row of one frame.
+    return [ARRIVED] * len(rows)
+
+
+def to_arrow_column(table: Table, name: str) -> list[int]:
+    # One Instant column of a table, as epoch nanoseconds.
+    values: list[int] = to_arrow(table).column(name).cast(pa.int64()).to_pylist()
+    return values
+
+
 def wait_for(condition: Callable[[], bool]) -> None:
     # Bounded wait for an update-graph cycle to apply a change.
     pause = threading.Event()  # never set; only paces the loop
@@ -145,8 +161,8 @@ def test_conversion_maps_symbols_and_converts_every_column(
         },
     ]
     with caplog.at_level(logging.WARNING):
-        converted = plan.convert(rows, cache)
-        plan.convert(rows, cache)  # cached: no second warning
+        converted = plan.convert(rows, cache, arrived=arrivals(rows))
+        plan.convert(rows, cache, arrived=arrivals(rows))  # cached: no second warning
     assert converted.failures == []
     batch = converted.batch
     assert batch.column("Symbol").to_pylist() == ["C:EURUSD", None]
@@ -165,7 +181,7 @@ def test_conversion_drops_and_reports_rows_with_bad_timestamps(
         trade("MSFT", SipTimestamp=5),
         trade("IBM", TrfTimestamp=2**62),
     ]
-    converted = plan.convert(rows, {})
+    converted = plan.convert(rows, {}, arrived=arrivals(rows))
     batch = converted.batch
     assert batch.column("Symbol").to_pylist() == ["AAPL"]
     assert (converted.symbols, converted.null_symbols) == (frozenset({"AAPL"}), False)
@@ -191,7 +207,7 @@ def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) 
         columns=(*plan.columns, (ColumnType.STRING, "Venue", None, None)),
         arrow_schema=plan.arrow_schema.append(pa.field("Venue", pa.string())),
     )
-    batch = wider.convert([trade("AAPL")], {}).batch
+    batch = wider.convert([trade("AAPL")], {}, arrived=[ARRIVED]).batch
     assert batch.column("Venue").to_pylist() == [None]
 
 
@@ -216,7 +232,7 @@ def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink
 def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.MassiveSession) -> None:
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
-    converted = plan.convert([trade("AAPL"), trade("MSFT")], {})
+    converted = plan.convert([trade("AAPL"), trade("MSFT")], {}, arrived=[ARRIVED] * 2)
     batch = to_table(converted.batch)
     every, _ = make_sink(core, ALL)
     assert every._select(batch, converted) is batch
@@ -238,7 +254,7 @@ def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.Massiv
     assert some._select(batch, converted) is batch
     some.set_symbols(frozenset())
     assert some._select(batch, converted) is None
-    nameless = plan.convert([trade("AAPL"), trade("not a symbol")], {})
+    nameless = plan.convert([trade("AAPL"), trade("not a symbol")], {}, arrived=[ARRIVED] * 2)
     with_null = to_table(nameless.batch)
     some.set_symbols(frozenset({"AAPL"}))
     filtered = some._select(with_null, nameless)  # a null Symbol row needs the filter
@@ -251,7 +267,7 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
 ) -> None:
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
-    converted = plan.convert([trade("AAPL")], {})
+    converted = plan.convert([trade("AAPL")], {}, arrived=[ARRIVED])
     batch = to_table(converted.batch)
     sink, _ = make_sink(core, ALL)
     assert sink.publish(batch, converted) == 1
@@ -291,6 +307,176 @@ def test_a_reactive_stream_starts_with_no_symbols(massive_session: dm.MassiveSes
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     sink, _ = make_sink(massive_session._core, SymbolTable(watchlist))
     assert not sink.receives("AAPL")
+
+
+# --- Time columns -------------------------------------------------------------------------------
+
+MINUTE_NS = 60 * 10**9
+# Friday 2025-03-07 16:30 CT and 17:30 CT: the second belongs to Monday 03-10's session.
+BEFORE_ROLL_MS = 1_741_386_600_000
+AFTER_ROLL_MS = 1_741_390_200_000
+
+
+def futures_trade(symbol: str, at_ms: int) -> dict[str, object]:
+    return {"Ticker": symbol, "Timestamp": at_ms, "SequenceNumber": 1, "Price": 1.0, "Size": 1}
+
+
+def futures_bar(start_ms: int, end_ms: int) -> dict[str, object]:
+    return {
+        "Ticker": "ESM5",
+        "WindowStart": start_ms,
+        "EndTimestamp": end_ms,
+        "Open": 1.0,
+        "High": 1.0,
+        "Low": 1.0,
+        "Close": 1.0,
+        "Volume": 1,
+        "DollarVolume": 1.0,
+        "Transactions": 1,
+    }
+
+
+class FakeSessionDates:
+    """A schedule calendar that moves one symbol's rows to a fixed date and misses another's."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str | None], list[int | None], list[str | None]]] = []
+
+    def correct(
+        self, symbols: pa.Array, instants: pa.Array, dates: pa.Array
+    ) -> tuple[pa.Array, list[tuple[str, str]]]:
+        names = symbols.to_pylist()
+        self.calls.append((names, instants.to_pylist(), dates.to_pylist()))
+        fixed = [
+            "2025-03-11" if name == "ESM5" else day
+            for name, day in zip(names, dates.to_pylist(), strict=True)
+        ]
+        misses = [("NQM5", "NQM5 missed")] if "NQM5" in names else []
+        return pa.array(fixed, pa.string()), misses
+
+
+def test_a_futures_row_gets_the_rule_session_corrected_by_the_schedules(
+    massive_session: dm.MassiveSession,
+) -> None:
+    spec = massive_session._core.catalog.by_name["futures.trades"]
+    plan = ChannelPlan.build(massive_session._core.catalog, spec, "T")
+    rows = [
+        futures_trade("GCJ5", BEFORE_ROLL_MS),
+        futures_trade("GCJ5", AFTER_ROLL_MS),
+        futures_trade("ESM5", BEFORE_ROLL_MS),
+        futures_trade("NQM5", BEFORE_ROLL_MS),
+    ]
+    sessions = FakeSessionDates()
+    converted = plan.convert(rows, {}, arrived=[ARRIVED] * 4, sessions=sessions)
+    assert converted.batch.column("Date").to_pylist() == [
+        "2025-03-07",
+        "2025-03-10",  # after Friday's roll: Monday's session
+        "2025-03-11",  # moved by the schedules
+        "2025-03-07",
+    ]
+    assert sessions.calls[0][2] == ["2025-03-07", "2025-03-10", "2025-03-07", "2025-03-07"]
+    assert converted.misses == (("NQM5", "NQM5 missed"),)
+    # Without a calendar, the rule's dates stand.
+    alone = plan.convert(rows, {}, arrived=[ARRIVED] * 4)
+    assert alone.batch.column("Date").to_pylist()[2] == "2025-03-07"
+    assert alone.misses == ()
+
+
+def test_a_streamed_bar_ends_its_length_after_its_start(
+    massive_session: dm.MassiveSession,
+) -> None:
+    spec = massive_session._core.catalog.by_name["stocks.bars"]
+    plan = ChannelPlan.build(massive_session._core.catalog, spec, "AM")
+    start = 1_741_012_200_000  # 2025-03-03 14:30Z
+    row = {
+        "Ticker": "AAPL",
+        "WindowStart": start,
+        "EndTimestamp": start + 59_999,  # Massive's `e`: recomputed, not kept
+        "Open": 1.0,
+        "Close": 1.0,
+        "High": 1.0,
+        "Low": 1.0,
+        "Volume": 1,
+    }
+    batch = plan.convert([row], {}, arrived=[ARRIVED]).batch
+    assert batch.column("TimestampStart").cast(pa.int64()).to_pylist() == [start * 10**6]
+    assert batch.column("TimestampEnd").cast(pa.int64()).to_pylist() == [start * 10**6 + MINUTE_NS]
+    assert batch.column("Date").to_pylist() == ["2025-03-03"]
+    assert "EndTimestamp" not in batch.schema.names
+
+
+def test_a_futures_second_bar_ends_at_the_later_end(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    spec = massive_session._core.catalog.by_name["futures.bars"]
+    plan = ChannelPlan.build(massive_session._core.catalog, spec, "A")
+    start = BEFORE_ROLL_MS
+    rows = [futures_bar(start, start + 60_000), futures_bar(start, start + 1_000)]
+    with caplog.at_level(logging.WARNING):
+        batch = plan.convert(rows, {}, arrived=[ARRIVED] * 2).batch
+    ends = batch.column("TimestampEnd").cast(pa.int64()).to_pylist()
+    assert ends == [(start + 60_000) * 10**6, (start + 1_000) * 10**6]
+    assert caplog.text.count("is not its start plus one second") == 1
+
+
+def test_every_row_takes_the_arrival_of_its_frame(
+    massive_session: dm.MassiveSession, flusher: Flusher
+) -> None:
+    core = massive_session._core
+    sink, blink = make_sink(core, ALL)
+    shown = blink_to_append_only(blink)
+    flusher.routes.add("T", sink)
+    before = time.time_ns()
+    flusher.rows("T", [trade("AAPL")])
+    buffer = flusher.routes.buffer("T")
+    assert buffer is not None
+    (stamped, rows) = buffer.get_nowait()  # the frame, with the instant it was handed over
+    assert before <= stamped <= time.time_ns()
+    assert [row["Ticker"] for row in rows] == ["AAPL"]
+    # Two frames of one flush: each row takes its own frame's arrival.
+    buffer.put((111, [trade("AAPL"), trade("MSFT")]))
+    buffer.put((222, [trade("IBM")]))
+    flusher.flush()
+    wait_for(lambda: shown.size == 3)
+    inserted = to_arrow_column(shown, "TimestampInsert")
+    assert inserted == [111, 111, 222]
+
+
+def test_a_session_miss_shows_in_the_streams_error_without_failing_it(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = massive_session._core
+    spec = core.catalog.by_name["futures.trades"]
+    plan = ChannelPlan.build(core.catalog, spec, "T")
+    updates: list[dict[int, StreamUpdate]] = []
+    monkeypatch.setattr(core, "update_streams", updates.append)
+    flusher = Flusher(core, "test-flush", interval=3600.0, sessions=FakeSessionDates())
+    sinks = []
+    for stream_id, symbols in ((1, ("NQM5",)), (2, ("ESM5",))):
+        opened = open_stream_tables(
+            plan,
+            core.catalog.dataset_schema(spec),
+            symbols,
+            stream_id=stream_id,
+            host="socket.test",
+            path="/futures",
+            on_shutdown=lambda: None,
+            on_symbols=lambda *_: None,
+        )
+        flusher.routes.add("T", opened.sink)
+        sinks.append(opened.sink)
+    flusher.rows(
+        "T", [futures_trade("NQM5", BEFORE_ROLL_MS), futures_trade("ESM5", BEFORE_ROLL_MS)]
+    )
+    flusher.flush()
+    flusher.stop()
+    assert not any(sink.failed for sink in sinks)
+    assert updates == [
+        {
+            1: StreamUpdate(rows_published=1, error="NQM5 missed"),
+            2: StreamUpdate(rows_published=1),
+        }
+    ]
 
 
 # --- Flusher -----------------------------------------------------------------------------------
@@ -505,7 +691,7 @@ def test_benchmark_fan_out(
     sinks = [make_sink(core, (symbol,))[0] for symbol in symbols]
 
     def shared() -> None:
-        converted = plan.convert(rows, {})
+        converted = plan.convert(rows, {}, arrived=arrivals(rows))
         table = to_table(converted.batch)
         for sink in sinks:
             sink.publish(table, converted)
@@ -515,7 +701,8 @@ def test_benchmark_fan_out(
         for row in rows:
             buckets.setdefault(row["Ticker"], []).append(row)
         for symbol, sink in zip(symbols, sinks, strict=True):
-            sink.publisher.add(to_table(plan.convert(buckets.get(symbol, []), {}).batch))
+            own = buckets.get(symbol, [])
+            sink.publisher.add(to_table(plan.convert(own, {}, arrived=arrivals(own)).batch))
 
     shared_rate = rows_per_flush / _median_seconds(shared)
     grouped_rate = rows_per_flush / _median_seconds(grouped)

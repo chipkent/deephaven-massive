@@ -15,19 +15,25 @@ are subscribed; this module owns everything that touches Deephaven for a stream:
   (`None` for `dm.ALL`), and its count of published rows.
 - `Flusher`, one per connection: a daemon thread that every `flush_interval` drains the
   connection's row buffers (one `queue.SimpleQueue` per channel, fed by the connection's loop
-  thread) and its control queue (failures and drift), and publishes.
+  thread with each frame's rows and the instant it arrived) and its control queue (failures and
+  drift), and publishes.
 
-**Fan-out.** Per channel and flush, the rows (keyed by long-form column, symbols as the wire
-spells them) are converted once: one Arrow table built from the rows, raw symbols mapped to
-canonical ones per distinct symbol, every epoch run through the timestamp routine as a
-vectorized mask, columns widened to the dataset schema. A row whose timestamp fails the bound
-fails only the streams that would have received it, and is dropped from the batch. The batch
-becomes one static Deephaven table (`deephaven.arrow.to_table`); then each `dm.ALL` stream gets
-`publisher.add(batch)` and each symbol stream `publisher.add(batch.where_in(filter, "Symbol"))`,
-where `filter` is a static one-column table cached per stream and rebuilt only when the stream's
-symbols change. So the Python work is O(rows) per channel and flush, independent of the number
-of streams, and the per-stream work is one Java filter and one `add`. Each flush ends with one
-`SessionCore.update_streams` call carrying every stream's published-row total.
+**Fan-out.** Per channel and flush, the rows (keyed by long-form column, symbols as the wire spells
+them) are converted once: one Arrow table built from the rows, raw symbols mapped to canonical ones
+per distinct symbol, every epoch run through the timestamp routine as a vectorized mask, columns
+widened to the dataset schema, and the library's time columns filled (`row_times.TimeRule`): `Date`,
+a bar's end, and `TimestampInsert`, the instant each row's frame arrived. Futures messages carry no
+session date, so a futures row's `Date` is the 17:00 Chicago rule's, corrected by the connection's
+`FuturesSessionDates` (the WebSocket transport's schedule calendar), which never waits; a row its
+schedules do not cover keeps the rule's date, and the streams that receive it show the miss in their
+`m.streams()` row. A row whose timestamp fails the bound fails only the streams that would have
+received it, and is dropped from the batch. The batch becomes one static Deephaven table
+(`deephaven.arrow.to_table`); then each `dm.ALL` stream gets `publisher.add(batch)` and each symbol
+stream `publisher.add(batch.where_in(filter, "Symbol"))`, where `filter` is a static one-column
+table cached per stream and rebuilt only when the stream's symbols change. So the Python work is
+O(rows) per channel and flush, independent of the number of streams, and the per-stream work is one
+Java filter and one `add`. Each flush ends with one `SessionCore.update_streams` call carrying every
+stream's published-row total.
 
 **Failures.** The connection's loop thread never calls Java, so it hands every stream failure
 (a refused topic, a rejected row, a rejected key) to the flush thread's control queue; the
@@ -49,9 +55,10 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 import weakref
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, TypeVar, cast
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -60,6 +67,7 @@ from deephaven.arrow import to_table
 from deephaven.column import string_col
 from deephaven.stream.table_publisher import table_publisher
 
+from deephaven_massive._datasets.row_times import TimeRule, time_column
 from deephaven_massive._datasets.schema import key_column, rename, required_fields, widen
 from deephaven_massive._datasets.symbols import SymbolTable, canonical
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
@@ -88,6 +96,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ChannelPlan",
     "Flusher",
+    "FuturesSessionDates",
     "OpenedStream",
     "RowFailure",
     "StreamSink",
@@ -99,7 +108,6 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 _SYMBOL: Final = "Symbol"
-_TIMESTAMP: Final = "Timestamp"
 
 _WIRE_ARROW: Final[Mapping[WireType, pa.DataType]] = {
     WireType.LONG: pa.int64(),
@@ -115,6 +123,33 @@ _WIRE_ARROW: Final[Mapping[WireType, pa.DataType]] = {
 """The Arrow type of each wire type as the WebSocket client delivers its values: an epoch as its
 raw integer count (converted by its unit afterwards), an ISO-8601 instant as integer
 nanoseconds, a date as a `datetime.date`, and a list as a list of integers."""
+
+
+class FuturesSessionDates(Protocol):
+    """The schedule calendar that corrects streamed futures rows' session dates.
+
+    The WebSocket transport gives a futures connection's flusher one
+    (`_ingest/futures_sessions.py`); `ChannelPlan.convert` hands it the rule's dates of every
+    futures row. It never waits on the network: what its schedules do not cover yet keeps the
+    rule's date.
+    """
+
+    def correct(
+        self, symbols: pa.Array, instants: pa.Array, dates: pa.Array
+    ) -> tuple[pa.Array, list[tuple[str, str]]]:
+        """Return the rows' session dates, corrected by the schedules, and the new misses.
+
+        Args:
+            symbols: The rows' canonical symbols, `string`.
+            instants: The rows' instants (a tick's time, a bar's start), epoch nanoseconds,
+                `int64`.
+            dates: The 17:00 Chicago rule's session dates, ISO text.
+
+        Returns:
+            The dates to keep, one per row; and each miss reported for the first time, as
+            `(symbol, message)`: a row its schedules cannot place, which keeps the rule's date.
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,12 +176,15 @@ class Converted:
         symbols: The batch's distinct canonical symbols, so a stream that receives none of
             them, or all of them, needs no filter.
         null_symbols: True when some row of the batch has no valid symbol (a null `Symbol`).
+        misses: The futures rows whose session the schedules could not place, reported for the
+            first time, as `(symbol, message)`; they keep the 17:00 Chicago rule's date.
     """
 
     batch: pa.Table
     failures: list[RowFailure]
     symbols: frozenset[str] = frozenset()
     null_symbols: bool = False
+    misses: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -169,6 +207,10 @@ class ChannelPlan:
         symbol_field: The long-form column of the rows that holds the raw symbol.
         required: The long-form columns a row must carry: the dataset's keys for the channel's
             source, excluding keys filled from a request (`set_required`).
+        times: How the rows' time columns are filled: the dataset's row times, its class,
+            and for bars the channel's timespan (`row_times.TimeRule`).
+        time_name: The dataset's time column (`Timestamp`, or a bar's `TimestampStart`), whose
+            epoch `0` is kept, and so fails the timestamp bound, rather than read as absent.
     """
 
     dataset: str
@@ -179,6 +221,8 @@ class ChannelPlan:
     arrow_schema: pa.Schema
     symbol_field: str
     required: frozenset[str]
+    times: TimeRule
+    time_name: str
 
     @classmethod
     def build(cls, catalog: Catalog, spec: DatasetSpec, channel: str) -> ChannelPlan:
@@ -209,7 +253,9 @@ class ChannelPlan:
         # A WebSocket source has no key filled from a request: every column has its field.
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
         schema = catalog.dataset_schema(spec)
-        _, symbol_field = fields[key_column("symbol", symbol)]
+        _, symbol_field = fields[key_column(spec, "symbol", symbol)]
+        # A bars channel serves one timespan, always of one unit.
+        timespan = next(span for span, name in spec.channels.items() if name == channel)
         return cls(
             dataset=spec.name,
             asset_class=asset_class,
@@ -226,28 +272,41 @@ class ChannelPlan:
             arrow_schema=schema.arrow_schema(),
             symbol_field=symbol_field.column,
             required=frozenset(f.column for f in required_fields(spec, source)),
+            times=TimeRule(spec.name, spec.times, asset_class, timespan),
+            time_name=time_column(spec.times),
         )
 
     def convert(
-        self, rows: Sequence[Mapping[str, object]], symbols: dict[str, str | None]
+        self,
+        rows: Sequence[Mapping[str, object]],
+        symbols: dict[str, str | None],
+        *,
+        arrived: Sequence[int],
+        sessions: FuturesSessionDates | None = None,
     ) -> Converted:
         """Turn one flush's rows of the channel into a batch of the dataset's schema.
 
         Pure Arrow apart from the symbol map: the rows become one Arrow table at once, each
         distinct raw symbol is mapped to its canonical form once (and remembered in
-        `symbols`), every epoch column runs through the masked timestamp routine, and every
-        column is widened to its dataset type. A row with a timestamp that overflows or lies
-        outside 1990 to 2100 is dropped and reported; a raw symbol that is not valid for the
-        class becomes a null `Symbol` and is logged once.
+        `symbols`), every epoch column runs through the masked timestamp routine, every
+        column is widened to its dataset type, and the library's time columns are filled
+        (`row_times.TimeRule.fill`). A row with a timestamp that overflows or lies outside
+        1990 to 2100 is dropped and reported; a raw symbol that is not valid for the class
+        becomes a null `Symbol` and is logged once.
 
         Args:
             rows: The decoded rows, keyed by long-form column.
             symbols: The caller's map from raw to canonical symbol, read and extended here;
                 one per flush thread and plan, so it needs no lock.
+            arrived: When each row's frame arrived, epoch nanoseconds, one per row: the rows'
+                `TimestampInsert`.
+            sessions: For a futures channel, the schedule calendar that corrects the rows'
+                session dates; None keeps the 17:00 Chicago rule's.
 
         Returns:
             The batch without the failing rows, one `RowFailure` per failing row in row order,
-            and the batch's distinct symbols.
+            the batch's distinct symbols, and the futures session misses reported for the
+            first time.
         """
         wire = pa.Table.from_pylist(list(rows), schema=self.wire_schema)
         count = wire.num_rows
@@ -262,7 +321,7 @@ class ChannelPlan:
             if name == _SYMBOL:
                 values = self._canonical(values, symbols)
             elif unit is not None:
-                nanos, bad = masked_instants(unit, values, time_column=name == _TIMESTAMP)
+                nanos, bad = masked_instants(unit, values, time_column=name == self.time_name)
                 if pc.call_function("any", [bad]).as_py():
                     label = f"{self.dataset}.{name}"
                     for index in pc.call_function("indices_nonzero", [bad]).to_pylist():
@@ -272,6 +331,18 @@ class ChannelPlan:
                 values = nanos
             arrays.append(widen(values, column_type.arrow_type))
         batch = pa.Table.from_arrays(arrays, schema=self.arrow_schema)
+        misses: list[tuple[str, str]] = []
+
+        def corrected(symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
+            fixed, found = cast("FuturesSessionDates", sessions).correct(symbols, instants, dates)
+            misses.extend(found)
+            return fixed
+
+        batch = self.times.fill(
+            batch,
+            received=pa.array(arrived, pa.int64()),
+            session_dates=None if sessions is None else corrected,
+        )
         rejected: list[RowFailure] = []
         if failed is not None:
             canonical_symbols = batch.column(_SYMBOL)
@@ -286,6 +357,7 @@ class ChannelPlan:
             rejected,
             symbols=frozenset(s for s in distinct if s is not None),
             null_symbols=None in distinct,
+            misses=tuple(misses),
         )
 
     def _canonical(self, raw: pa.Array, symbols: dict[str, str | None]) -> pa.Array:
@@ -500,6 +572,10 @@ class StreamSink:
             return True
 
 
+_Frame = tuple[int, list[dict[str, object]]]
+"""One frame's rows of one channel, with the instant it arrived (epoch nanoseconds)."""
+
+
 class _Routes:
     """The streams of one connection by channel, and the row buffer of each channel.
 
@@ -515,7 +591,7 @@ class _Routes:
         """Start with no stream and no buffer."""
         self._lock = threading.Lock()
         self._routes: Mapping[str, tuple[StreamSink, ...]] = {}
-        self._buffers: Mapping[str, queue.SimpleQueue[list[dict[str, object]]]] = {}
+        self._buffers: Mapping[str, queue.SimpleQueue[_Frame]] = {}
 
     def add(self, channel: str, sink: StreamSink) -> None:
         """Route a channel's rows to a stream, creating the channel's buffer if needed.
@@ -570,7 +646,7 @@ class _Routes:
         with self._lock:
             return self._routes
 
-    def buffers(self) -> tuple[tuple[str, queue.SimpleQueue[list[dict[str, object]]]], ...]:
+    def buffers(self) -> tuple[tuple[str, queue.SimpleQueue[_Frame]], ...]:
         """Return the row buffer of each channel that has ever been routed.
 
         Returns:
@@ -579,7 +655,7 @@ class _Routes:
         with self._lock:
             return tuple(self._buffers.items())
 
-    def buffer(self, channel: str) -> queue.SimpleQueue[list[dict[str, object]]] | None:
+    def buffer(self, channel: str) -> queue.SimpleQueue[_Frame] | None:
         """Return the row buffer of a channel.
 
         Args:
@@ -641,22 +717,33 @@ class Flusher:
         "_final",
         "_flush_lock",
         "_interval",
+        "_sessions",
         "_stop",
         "_symbols",
         "_thread",
         "routes",
     )
 
-    def __init__(self, core: SessionCore, name: str, *, interval: float) -> None:
+    def __init__(
+        self,
+        core: SessionCore,
+        name: str,
+        *,
+        interval: float,
+        sessions: FuturesSessionDates | None = None,
+    ) -> None:
         """Create the flusher; nothing runs until `start()`.
 
         Args:
             core: The session's core, held weakly.
             name: The thread's name, for thread dumps.
             interval: Seconds between flushes (`MassiveConfig.flush_interval`).
+            sessions: For a futures connection, the schedule calendar that corrects its rows'
+                session dates; None otherwise.
         """
         self._core = weakref.ref(core)
         self._interval = interval
+        self._sessions = sessions
         self.routes: Final = _Routes()
         self._control: queue.SimpleQueue[_Fail | _Drift] = queue.SimpleQueue()
         self._flush_lock = threading.Lock()
@@ -697,9 +784,11 @@ class Flusher:
         return not self._thread.is_alive()
 
     def rows(self, channel: str, rows: list[dict[str, object]]) -> None:
-        """Buffer one frame's rows of a channel. Never blocks.
+        """Buffer one frame's rows of a channel, with the instant they arrived. Never blocks.
 
-        Rows of a channel no stream was ever routed to are dropped.
+        The instant, `time.time_ns()` now, on the connection's loop thread as the frame is
+        handed over, becomes every row's `TimestampInsert`. Rows of a channel no stream was
+        ever routed to are dropped.
 
         Args:
             channel: The channel.
@@ -707,7 +796,7 @@ class Flusher:
         """
         buffer = self.routes.buffer(channel)
         if buffer is not None:
-            buffer.put(rows)
+            buffer.put((time.time_ns(), rows))
 
     def fail(self, stream_ids: Iterable[int], error: MassiveError) -> None:
         """Ask the flush thread to fail streams. Never blocks.
@@ -768,8 +857,9 @@ class Flusher:
             for channel, frames in drained.items():
                 sinks = routes.get(channel, ())
                 if frames and sinks:
-                    rows = [row for frame in frames for row in frame]
-                    self._publish(core, rows, sinks, updates=updates)
+                    rows = [row for _, frame in frames for row in frame]
+                    arrived = [at for at, frame in frames for _ in frame]
+                    self._publish(core, rows, sinks, arrived=arrived, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
                     self._report_drift(core, routes.get(item.channel, ()), item.drift)
@@ -782,6 +872,7 @@ class Flusher:
         rows: list[dict[str, object]],
         sinks: tuple[StreamSink, ...],
         *,
+        arrived: list[int],
         updates: dict[int, StreamUpdate],
     ) -> None:
         """Convert a channel's rows once per dataset and add them to each of its streams.
@@ -790,7 +881,8 @@ class Flusher:
             core: The session's core.
             rows: The channel's rows of this flush, in arrival order.
             sinks: The channel's streams.
-            updates: Receives each stream's new published-row total.
+            arrived: When each row's frame arrived, epoch nanoseconds, one per row.
+            updates: Receives each stream's new published-row total and session-date misses.
         """
         by_plan: dict[ChannelPlan, list[StreamSink]] = {}
         for sink in sinks:
@@ -798,7 +890,9 @@ class Flusher:
                 by_plan.setdefault(sink.plan, []).append(sink)
         for plan, readers in by_plan.items():
             try:
-                self._publish_plan(core, plan, rows, readers=readers, updates=updates)
+                self._publish_plan(
+                    core, plan, rows, readers=readers, arrived=arrived, updates=updates
+                )
             except Exception as error:  # one dataset's failure never costs the others their rows
                 logger.exception("%s: could not publish a %s batch", plan.dataset, plan.channel)
                 failure = MassiveError(
@@ -814,18 +908,31 @@ class Flusher:
         rows: list[dict[str, object]],
         *,
         readers: list[StreamSink],
+        arrived: list[int],
         updates: dict[int, StreamUpdate],
     ) -> None:
         """Convert a channel's rows for one dataset once and add them to its streams.
+
+        A futures session-date miss (a row the schedules cannot place, which keeps the 17:00
+        Chicago rule's date) is shown in the `Error` of every stream that receives its symbol;
+        it does not fail the stream.
 
         Args:
             core: The session's core.
             plan: The dataset's plan for the channel.
             rows: The channel's rows of this flush.
             readers: The dataset's streams on the channel.
-            updates: Receives each stream's new published-row total.
+            arrived: When each row's frame arrived, epoch nanoseconds, one per row.
+            updates: Receives each stream's new published-row total and session-date misses.
         """
-        converted = plan.convert(rows, self._symbols.setdefault(plan, {}))
+        converted = plan.convert(
+            rows, self._symbols.setdefault(plan, {}), arrived=arrived, sessions=self._sessions
+        )
+        for symbol, message in converted.misses:
+            for sink in readers:
+                if sink.receives(symbol):
+                    found = updates.get(sink.stream_id, StreamUpdate())
+                    updates[sink.stream_id] = replace(found, error=message)
         for failure in converted.failures:
             error = MassiveError(failure.message)
             for sink in readers:
@@ -836,7 +943,8 @@ class Flusher:
         table = to_table(converted.batch)
         for sink in readers:
             if sink.publish(table, converted):
-                updates[sink.stream_id] = StreamUpdate(rows_published=sink.rows_published)
+                found = updates.get(sink.stream_id, StreamUpdate())
+                updates[sink.stream_id] = replace(found, rows_published=sink.rows_published)
 
     @staticmethod
     def _report_drift(core: SessionCore, sinks: tuple[StreamSink, ...], drift: DriftReport) -> None:

@@ -44,11 +44,10 @@ __all__ = ["COLUMN_TABLE_DESCRIPTIONS", "col_defs", "column_table", "describe", 
 
 logger = logging.getLogger(__name__)
 
-# `dtypes.Instant` and `dtypes.LocalDate` are annotated as `type` by deephaven-core although
-# they are `DType` instances, so the table is typed by value and narrowed on lookup.
+# `dtypes.Instant` is annotated as `type` by deephaven-core although it is a `DType`
+# instance, so the table is typed by value and narrowed on lookup.
 _DH_TYPES: Final[Mapping[ColumnType, object]] = {
     ColumnType.INSTANT: dtypes.Instant,
-    ColumnType.LOCAL_DATE: dtypes.LocalDate,
     ColumnType.DOUBLE: dtypes.double,
     ColumnType.LONG: dtypes.long,
     ColumnType.INT: dtypes.int32,
@@ -183,8 +182,8 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "Name": "The column name.",
         "Type": (
-            "The column's Deephaven type: long, int, double, boolean, String, Instant, LocalDate, "
-            "or int[]."
+            "The column's Deephaven type: long, int, double, boolean, String, Instant, or int[]; "
+            "a calendar date is ISO yyyy-MM-dd text, a String."
         ),
         "Description": "What the column holds; empty when Massive gives no description.",
         "SuppliedBy": (

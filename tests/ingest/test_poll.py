@@ -211,29 +211,34 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     dh_exec_ctx: object,
     rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
 ) -> None:
-    # Every column of the related companies is a poll key, so a `last_by` would have nothing
-    # to aggregate: the table holds each distinct row once, across cycles.
+    # Every vendor column of the related companies is a poll key; only the arrival time is
+    # left to aggregate, so the table holds each distinct row once, across cycles, with the
+    # time of the latest cycle that returned it.
     spec = _session.CATALOG.by_name["reference.related_companies"]
     schema = _session.CATALOG.dataset_schema(spec)
-    assert set(spec.poll_keys) == set(schema.column_names)
+    assert {*spec.poll_keys, "TimestampInsert"} == set(schema.column_names)
     scope = new_scope()
     with scope.open():
         table, publisher = poll.build_table(
             spec, schema, PollMode.UPSERT, stream_id=1, stop=threading.Event()
         )
 
-    def cycle(*pairs: tuple[str, str]) -> None:
+    def cycle(arrived: int, *pairs: tuple[str, str]) -> None:
         names = ("Underlying", "Symbol")
-        data = pa.table({n: [p[i] for p in pairs] for i, n in enumerate(names)})
-        publisher.add(dh_arrow.to_table(data.select(list(schema.column_names))))
+        data = {n: [p[i] for p in pairs] for i, n in enumerate(names)}
+        stamps = pa.array([arrived] * len(pairs), pa.int64()).cast(pa.timestamp("ns", "UTC"))
+        table = pa.table({**data, "TimestampInsert": stamps})
+        publisher.add(dh_arrow.to_table(table.select(list(schema.column_names))))
 
-    def held(rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
-        return sorted((row["Underlying"], row["Symbol"]) for row in rows)
+    def held(rows: list[dict[str, Any]]) -> list[tuple[str, str, int]]:
+        return sorted(
+            (row["Underlying"], row["Symbol"], int(row["TimestampInsert"].value)) for row in rows
+        )
 
-    cycle(("AAPL", "MSFT"), ("AAPL", "GOOGL"), ("AAPL", "MSFT"))
-    rows_when(table, lambda rows: held(rows) == [("AAPL", "GOOGL"), ("AAPL", "MSFT")])
-    cycle(("AAPL", "MSFT"), ("AAPL", "AMZN"))  # GOOGL absent: UPSERT never deletes
-    expected = [("AAPL", "AMZN"), ("AAPL", "GOOGL"), ("AAPL", "MSFT")]
+    cycle(1, ("AAPL", "MSFT"), ("AAPL", "GOOGL"), ("AAPL", "MSFT"))
+    rows_when(table, lambda rows: held(rows) == [("AAPL", "GOOGL", 1), ("AAPL", "MSFT", 1)])
+    cycle(2, ("AAPL", "MSFT"), ("AAPL", "AMZN"))  # GOOGL absent: UPSERT never deletes
+    expected = [("AAPL", "AMZN", 2), ("AAPL", "GOOGL", 1), ("AAPL", "MSFT", 2)]
     rows = rows_when(table, lambda rows: held(rows) == expected)
     assert len(rows) == 3
     scope.release()

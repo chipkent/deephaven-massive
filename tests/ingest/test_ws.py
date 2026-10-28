@@ -27,7 +27,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._ingest import futures_sessions, ws
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
@@ -38,7 +38,7 @@ from deephaven_massive._tables.watchlist import SymbolWatch
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -181,6 +181,9 @@ class Harness:
         self.statuses: list[Status] = []
         self.states: list[WsState] = []
         self.opens = 0
+        # The futures schedule calendar's REST lookups: recorded, answered from `rows`.
+        self.fetched: list[tuple[str, dict[str, object]]] = []
+        self.rows: dict[str, list[dict[str, object]]] = {}
         self.session = dm.MassiveSession(
             dm.MassiveConfig(
                 api_key="test-key",
@@ -193,6 +196,7 @@ class Harness:
             self.session._core,
             resolve_host=self.resolve,
             record_verdict=self.record_verdict,
+            fetch_rows=self.fetch_rows,
             client_factory=self.factory,
         )
         clients._streams = self.connections
@@ -205,6 +209,13 @@ class Harness:
             if (verdict_class, verdict_family) == (asset_class, family):
                 return decision
         return self._decide(asset_class, family)
+
+    def fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        # The REST transport's `fetch_rows`, for the futures schedule calendar.
+        with self.cond:
+            self.fetched.append((template, dict(query)))
+            self.cond.notify_all()
+            return list(self.rows.get(template, []))
 
     def record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
@@ -1619,3 +1630,70 @@ def test_a_topic_reconnects_once_per_session(harness: Harness) -> None:
     assert harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert not harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert harness.connections.first_no_ack("/options", "T.AAPL")
+
+
+# --- The futures schedule calendar --------------------------------------------------------------
+
+
+def looked_up(harness: Harness, *tickers: str) -> None:
+    # Wait until the calendar has asked Massive's contracts for every ticker.
+    def asked() -> bool:
+        sent = {
+            ticker
+            for path, query in harness.fetched
+            if path == "/futures/v1/contracts"
+            for ticker in cast("tuple[str, ...]", query["ticker.any_of"])
+        }
+        return set(tickers) <= sent
+
+    harness.wait(lambda _: asked())
+
+
+def test_a_futures_stream_looks_up_its_contracts_as_it_opens(harness: Harness) -> None:
+    result = harness.query(FUTURES, ["ESZ5", "GCQ6-GCJ7"]).blink()
+    looked_up(harness, "ESZ5", "GCQ6")
+    assert harness.connections.futures_sessions() is harness.connections.futures_sessions()
+    harness.session.release(result)
+
+
+def test_a_futures_watchlist_looks_up_the_contracts_it_adds(harness: Harness) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
+    result = harness.query(FUTURES, watchlist).blink()
+    looked_up(harness, "ESZ5")
+    watchlist.add(new_table([string_col("Symbol", ["NQZ5"])]))
+    looked_up(harness, "NQZ5")
+    harness.session.release(result)
+
+
+def test_a_stock_stream_makes_no_calendar(harness: Harness) -> None:
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    assert harness.connections._sessions is None
+    harness.session.release(result)
+
+
+def test_one_calendar_wins_a_race_and_closes_with_the_connections(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[futures_sessions.FuturesSessions] = []
+    real = futures_sessions.FuturesSessions
+
+    def racing(
+        fetch: Callable[..., list[dict[str, object]]], *, label: str
+    ) -> futures_sessions.FuturesSessions:
+        calendar = real(fetch, label=label)
+        created.append(calendar)
+        if len(created) == 1:  # another caller installs its calendar meanwhile
+            winner = real(fetch, label=label)
+            created.append(winner)
+            harness.connections._sessions = winner
+        return calendar
+
+    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesSessions", racing)
+    found = harness.connections.futures_sessions()
+    loser, winner = created
+    assert found is winner
+    assert not loser._thread.is_alive()  # the loser was closed at once
+    harness.close()
+    assert not winner._thread.is_alive()

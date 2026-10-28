@@ -16,10 +16,11 @@ to keep.
   `pyarrow.compute.is_in` (symbol pushdown) and to the window's `Timestamp` range (for bars,
   the starts of the bars whose whole window fits the range); only the surviving rows are
   renamed to the dataset's columns, have their condition and indicator lists parsed, and are
-  converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's start, the
-  16:00 New York session close (stocks), midnight in Chicago (indices), or 23:59:59.999 UTC
-  (forex and crypto), are stamped at 00:00 of their day in the class day zone
-  (`history_source.stamp_rule`). The
+  converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's
+  start, the 16:00 New York session close (stocks), midnight in Chicago (indices), or
+  23:59:59.999 UTC (forex and crypto), are stamped at 00:00 of their day in the class day zone
+  (`history_source.stamp_rule`). Every block's rows then get the library's time columns
+  (`row_times.TimeRule`), with `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
   columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
@@ -89,6 +90,7 @@ import contextlib
 import functools
 import logging
 import threading
+import time
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -106,6 +108,7 @@ from deephaven_massive._datasets.history_source import (
     stamp_rule,
     within_publication_grace,
 )
+from deephaven_massive._datasets.row_times import DATE, TimeRule, time_column, time_rule
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
@@ -143,7 +146,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
     from deephaven_massive._tables.core import SessionCore
@@ -274,6 +276,8 @@ class _Transform:
         arrow_schema: The dataset's Arrow schema.
         session_header: For futures, the header that holds the session date; None otherwise.
         prefix: The prefix the files come from, for messages.
+        times: How the rows' time columns are filled (`row_times.TimeRule`).
+        time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
             zone (`history_source.stamp_rule`); None otherwise.
     """
@@ -284,6 +288,8 @@ class _Transform:
     arrow_schema: pa.Schema
     session_header: str | None
     prefix: str
+    times: TimeRule
+    time_name: str
     stamps: StampRule | None = None
 
     @classmethod
@@ -293,7 +299,7 @@ class _Transform:
         spec: DatasetSpec,
         *,
         prefix: str,
-        symbols: NormalizedSymbols | None,
+        request: Request,
         window: HistoryWindow,
         stamps: StampRule | None = None,
     ) -> _Transform:
@@ -308,8 +314,9 @@ class _Transform:
             catalog: The catalog, for the generated source and the dataset's schema.
             spec: The dataset.
             prefix: The dataset's prefix for the request; a futures prefix holds `{venue}`.
-            symbols: The canonical symbols to keep, as a tuple; anything else (`dm.ALL`, or
-                None for a dataset without instruments) keeps every row.
+            request: The normalized arguments: the canonical symbols to keep, as a tuple
+                (anything else, `dm.ALL` or None for a dataset without instruments, keeps every
+                row), and the bars' timespan and multiplier.
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
                 every time of their files, which hold exactly the requested sessions.
@@ -326,12 +333,15 @@ class _Transform:
         # Every column of a flat-file source is a field: no key of one comes from the request.
         header = {c.column: cast("Field", c.field).wire_key for c in renamed}
         keys = spec.keys_for(Transport.FLAT_FILES, prefix)
-        session = keys.session
-        session_header = None if session is None else header[session.column]
-        time = by_column["Timestamp"]
+        # The session key is renamed to `Date`; the files' own header holds it.
+        session_header = None if keys.date is None else header[DATE]
+        time_name = time_column(spec.times)
         to_ns = functools.partial(
-            to_epoch_ns_array, f"{spec.name}.Timestamp", cast("TimeUnit", time.unit)
+            to_epoch_ns_array,
+            f"{spec.name}.{time_name}",
+            cast("TimeUnit", by_column[time_name].unit),
         )
+        symbols = request.symbols
         plan = ReadPlan(
             columns=tuple(
                 ReadColumn(
@@ -344,7 +354,7 @@ class _Transform:
             ),
             symbol_header=header["Symbol"],
             symbols=pa.array(symbols, pa.string()) if isinstance(symbols, tuple) else None,
-            time_header=header["Timestamp"],
+            time_header=header[time_name],
             window_ns=_window_ns(window),
             to_ns=to_ns,
             session=None,
@@ -358,6 +368,8 @@ class _Transform:
             arrow_schema=schema.arrow_schema(),
             session_header=session_header,
             prefix=prefix,
+            times=time_rule(spec, request),
+            time_name=time_name,
             stamps=stamps,
         )
 
@@ -374,17 +386,20 @@ class _Transform:
             return self.plan
         return replace(self.plan, session=(self.session_header, key.day))
 
-    def apply(self, batch: pa.RecordBatch) -> pa.RecordBatch:
+    def apply(self, batch: pa.RecordBatch, *, received: int) -> pa.RecordBatch:
         """Turn one batch of surviving rows into a block of the dataset's schema.
 
         Pure Arrow: the timestamp routine on every epoch `Instant`, the merge's widening of a
-        column whose source type is narrower than the dataset's, and nulls for the schema
-        columns the prefix does not carry. The lists are already parsed, the rows already
+        column whose source type is narrower than the dataset's, nulls for the schema
+        columns the prefix does not carry, and the library's time columns
+        (`row_times.TimeRule.fill`). The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
         reader.
 
         Args:
             batch: One block's surviving rows, with the plan's columns.
+            received: When the block was decoded, epoch nanoseconds: every row's
+                `TimestampInsert`.
 
         Returns:
             The block in the dataset's schema.
@@ -395,7 +410,8 @@ class _Transform:
         `MassiveError` of `timestamps.day_starts`.
         """
         arrays = [self._column(batch, column) for column in self.columns]
-        return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
+        rows = pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
+        return self.times.fill(rows, received=received)
 
     def _column(
         self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]
@@ -408,7 +424,7 @@ class _Transform:
 
         Returns:
             An Arrow array of the column's type, one value per row of `batch`. In an `Instant`
-            column other than `Timestamp`, an epoch value of `0` is null.
+            column other than the dataset's time column, an epoch value of `0` is null.
         """
         column_type, name, source = column
         if source is None:
@@ -416,9 +432,9 @@ class _Transform:
         values = batch[name]
         if source.unit is not None:
             label = f"{self.dataset}.{name}"
-            values = instants(label, source.unit, values, time_column=name == "Timestamp")
+            values = instants(label, source.unit, values, time_column=name == self.time_name)
         values = widen(values, column_type.arrow_type)
-        if name == "Timestamp" and self.stamps is not None:
+        if name == self.time_name and self.stamps is not None:
             values = self.stamps.stamp(
                 self.dataset,
                 values,
@@ -531,7 +547,7 @@ class FlatFileHistory:
             self._core.catalog,
             spec,
             prefix=prefix,
-            symbols=request.symbols,
+            request=request,
             window=window,
             stamps=_flat_file_stamps(spec, request),
         )
@@ -801,7 +817,7 @@ class FlatFileHistory:
                 if not reported:  # every batch of a file carries the same report
                     self._core.drift.report(transform.dataset, Transport.FLAT_FILES, drift)
                     reported = True
-                rows = transform.apply(batch)
+                rows = transform.apply(batch, received=time.time_ns())
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes

@@ -5,10 +5,10 @@ then calls that transport; the transports themselves only do I/O. The module is 
 current time comes from `_now`, which tests replace) and makes no network or Deephaven call.
 
 - `history_window` turns a call's bounds into a `HistoryWindow`: the bounds by kind (whole
-  days or sessions, or exact instants; `dates.bounds`), the rows to keep (on `Timestamp`, and
-  for futures named by date on `SessionEndDate`), and the instants a REST request covers.
-  Bars are kept only when their whole window lies inside the range and has ended
-  (`dates.bar_starts`, `dates.bar_sessions`).
+  days or sessions, or exact instants; `dates.bounds`), the rows to keep (on `Timestamp`, or a
+  bar's `TimestampStart`, and for futures named by date on their session, `Date`), and the
+  instants a REST request covers. Bars are kept only when their whole window lies inside the
+  range and has ended (`dates.bar_starts`, `dates.bar_sessions`).
 - `partition_dates` turns a window into the dates of the flat files it needs, in the asset
   class's day zone; a futures date names a trading session.
 - `rest_history_problem` says why REST cannot serve a request, if it cannot: the dataset has
@@ -19,9 +19,11 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   bars only 1-minute and 1-day bars, and 1-session bars for futures, and only unadjusted where
   the dataset has an `adjusted` parameter), and every file the range needs is already
   published. When both sources can, many symbols (`MassiveConfig.flat_file_symbol_threshold`
-  or more, or `dm.ALL`) read flat files and fewer use REST. Bars of a day or longer are
-  stamped alike by every source (`stamp_rule`), and a stamp of a form Massive is not known to
-  use fails loudly, so the choice never changes which day a bar is labelled with.
+  or more, or `dm.ALL`) read flat files and fewer use REST. One call never mixes sources, and
+  so never mixes adjusted and unadjusted prices: adjusted bars come only from REST. Bars of a
+  day or longer are stamped alike by every source (`stamp_rule`), and a stamp of a form
+  Massive is not known to use fails loudly, so the choice never changes which day a bar is
+  labelled with.
 
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
 after the next day starts in the class's day zone (`dates.publish_time`); futures use their
@@ -126,9 +128,11 @@ class HistoryWindow:
     Attributes:
         span: The bounds by kind: the whole days (for futures, sessions) of two dates, or the
             exact instants of two datetimes.
-        times: The `Timestamp` range a row must lie in (for bars, the bar starts whose whole
-            window fits), or None where only `sessions` bounds the rows.
-        sessions: The `SessionEndDate`s a row must have, for futures named by date; else None.
+        times: The range a row's `Timestamp` must lie in (for bars, the range of the
+            `TimestampStart`s whose whole window fits), or None where only `sessions` bounds
+            the rows.
+        sessions: The futures session dates (`Date`, Massive's `session_end_date`) a row must
+            have, for futures named by date; else None.
         requested: The instants a REST request covers: a time axis's range, or the
             aggregates' `{from}` (where the first fitting bar's period begins) and `{to}`;
             None for futures trades and quotes named by date, which are requested one
@@ -163,8 +167,9 @@ def history_window(
     datetimes a half-open range of instants, and an `end` of None reads through now. Ticks are
     kept inside the range. A bar is kept only when its whole window lies inside the range and
     has ended by now (`dates.bar_starts`); for futures named by date, a bar of a session or
-    longer is kept by its `SessionEndDate` (`dates.bar_sessions`, over the sessions finished by
-    now), and an intraday bar by its session and its end.
+    longer is kept by its session label, `Date` (`dates.bar_sessions`, over the sessions
+    finished by now, under both readings of the label of a bar of several units), and an
+    intraday bar by its session and its end.
 
     Args:
         spec: The dataset.
@@ -178,9 +183,8 @@ def history_window(
         The window.
 
     An unparseable or naive bound, a date mixed with a datetime, or a reversed range raises
-    the `ValueError` of `dates.bounds`. Futures named by session dates raise the `ValueError`
-    of `_futures_sessions` for a `session_end_date` filter on trades or quotes, and for bars
-    of a session or longer with a `multiplier` above 1.
+    the `ValueError` of `dates.bounds`. Futures trades and quotes named by session dates raise
+    the `ValueError` of `_futures_sessions` for a `session_end_date` filter.
     """
     moment = _now() if now is None else now
     asset_class = day_class(spec, classes)
@@ -219,10 +223,8 @@ def _futures_sessions(
 
     Raises:
         ValueError: For trades or quotes on a query that also filters `session_end_date` (in
-            any of its forms), which the dates set themselves; or for bars of a session or
-            longer that span several units (`multiplier` above 1), whose session label
-            Massive does not document, so the bars that lie in the sessions cannot be told
-            apart. Each message names what to pass instead.
+            any of its forms), which the dates set themselves; the message says to drop the
+            filter or pass datetimes.
     """
     timespan = request.timespan
     if not spec.is_bars or timespan is None:
@@ -233,12 +235,6 @@ def _futures_sessions(
                 "session_end_date filter, or pass datetimes to combine it with a time range"
             )
         return HistoryWindow(span, None, span, None)
-    if not intraday(timespan) and request.multiplier > 1:
-        raise ValueError(
-            f"{spec.name}: bars of {request.multiplier} {timespan.value}s cannot be selected by "
-            "session dates, since the session Massive labels such a bar with is not verified; "
-            "pass datetimes, or multiplier=1"
-        )
     requested = futures_bar_request(span)
     if intraday(timespan):
         ended = TimeRange(requested.start, min(requested.end, now))
@@ -432,6 +428,11 @@ def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule | None:
     also be stamped on the day its period starts, or the whole-window rule would place it in
     another period.
 
+    The indicators' values are per bar too, but their stamps are not checked: Massive
+    documents none of their times (its samples sit at arbitrary milliseconds), and no other
+    source serves them, so an indicator value of a day or longer is labelled with the day its
+    stamp falls on (`row_times.TimeRule`).
+
     Args:
         spec: The dataset.
         request: The normalized arguments.
@@ -562,7 +563,11 @@ def _flat_file_problems(
         else:
             problems.append(f"{spec.name} has no flat files")
     if request.adjusted is True:
-        problems.append("flat-file bars are unadjusted; pass adjusted=False")
+        problems.append(
+            "flat-file bars are unadjusted (as traded) and one history() never mixes adjusted "
+            "and unadjusted prices, so adjusted bars come only from REST; pass adjusted=False "
+            "for the flat files"
+        )
     zone = _PARTITION_ZONES[spec.asset_class]
     cutoff = config.flat_file_publish_cutoff
     late = [d for d in dates if not flat_file_published(d, now=now, zone=zone, cutoff=cutoff)]

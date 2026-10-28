@@ -13,10 +13,9 @@ failure can fail the table (`publish_failure`) in every mode:
   poller keeps every identity it appended for its whole life: each is a row the append-only
   table holds, so the set never outgrows the table, and no row is ever appended twice.
 - `UPSERT`: the blink table's `last_by` on the dataset's poll keys (`DatasetSpec.poll_keys`):
-  keyed, and a key never leaves. When the poll keys are every column
-  (`reference.related_companies`), `last_by` has nothing to aggregate, so the result is the
-  blink table's `select_distinct` on them instead: each distinct row once, accumulated over
-  every cycle, which is what that `last_by` would keep.
+  keyed, and a key never leaves. Poll keys that are every vendor column
+  (`reference.related_companies`) still leave `TimestampInsert` to aggregate, so each distinct
+  row is kept once, with the time of the latest poll that returned it.
 - `REPLACE`: the same `last_by`, plus one *tombstone* row for each key the previous cycle had
   and this one lacks, marked in a hidden boolean column that the result filters on and drops;
   so a key absent from the latest cycle leaves the table, also when the cycle is empty. A cycle
@@ -24,6 +23,9 @@ failure can fail the table (`publish_failure`) in every mode:
   `last_by` state keeps a hidden row for every key ever seen, as the `last_by()` of a stream
   does, so a `REPLACE` table over a churning key set (an options chain, the day's movers) grows
   with the keys it has ever held.
+
+Every row's `TimestampInsert` is when its page of the cycle arrived, so in a keyed table it is
+the time of the latest poll that returned the row; it is never part of a row's identity.
 
 A cycle reads a reactive symbol table once, with `Table.snapshot()` on the poller thread (never
 in a listener), and requests the dataset's fetch path for the symbols it holds; a fan-out path
@@ -66,6 +68,7 @@ from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 from deephaven.stream.table_publisher import table_publisher
 
+from deephaven_massive._datasets.row_times import INSERT
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalizer
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
@@ -536,8 +539,9 @@ class Poller:
 
         Raises:
             RowDataError: Naming the dataset, the key column, the first such row's position in
-                the cycle, and that row's non-null values, truncated to `_ROW_TEXT`
-                characters, so the row can be found although it was never published.
+                the cycle, and that row's non-null values but its `TimestampInsert`, truncated
+                to `_ROW_TEXT` characters, so the row can be found although it was never
+                published.
         """
         nullable = self._spec.nullable_poll_keys
         for name in (key for key in self._spec.poll_keys if key not in nullable):
@@ -545,7 +549,8 @@ class Poller:
             row = pc.index(missing, True).as_py()
             if row >= 0:
                 (values,) = table.slice(row, 1).to_pylist()
-                text = repr({k: v for k, v in values.items() if v is not None})
+                # The row as Massive sent it: the arrival time is the library's own.
+                text = repr({k: v for k, v in values.items() if v is not None and k != INSERT})
                 text = text if len(text) <= _ROW_TEXT else text[: _ROW_TEXT - 3] + "..."
                 raise RowDataError(
                     f"{self._spec.name} poll(): row {row} of the cycle has a null poll key "
@@ -635,8 +640,9 @@ def build_table(
 
     Returns:
         The result (append-only for `APPEND`, the `last_by` of the poll keys for `UPSERT`,
-        or their `select_distinct` when they are every column, and for `REPLACE` that
-        `last_by` without its tombstones and their hidden column) and the publisher.
+        and for `REPLACE` that `last_by` without its tombstones and their hidden column) and
+        the publisher. Every schema ends with `TimestampInsert`, which no dataset keys on, so
+        `last_by` always has a column to aggregate.
     """
     definitions = col_defs(schema)
     replace = mode is PollMode.REPLACE
@@ -647,11 +653,7 @@ def build_table(
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
-    keys = list(spec.poll_keys)
-    # When every column is a key, `last_by` has no column to aggregate and Deephaven refuses
-    # it. Its rows would be the distinct key rows, which `select_distinct` of a blink table
-    # keeps across cycles. `REPLACE` never takes that branch: its hidden column is not a key.
-    keyed = blink.select_distinct(keys) if set(definitions) <= set(keys) else blink.last_by(keys)
+    keyed = blink.last_by(list(spec.poll_keys))
     if not replace:
         return keyed, publisher
     return keyed.where(LIVE_COLUMN).drop_columns(LIVE_COLUMN), publisher

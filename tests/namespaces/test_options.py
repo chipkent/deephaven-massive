@@ -187,12 +187,15 @@ def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
 
 
 @pytest.mark.parametrize("spec", [options.TRADES, options.QUOTES, options.BARS, options.FMV])
-def test_kind_datasets_lead_with_symbol_and_an_instant_timestamp(spec: DatasetSpec) -> None:
+def test_kind_datasets_lead_with_symbol_date_and_their_instants(spec: DatasetSpec) -> None:
     schema = CATALOG.dataset_schema(spec)
-    assert schema.column_names[:2] == ("Symbol", "Timestamp")
+    times = ("TimestampStart", "TimestampEnd") if spec.is_bars else ("Timestamp",)
+    assert schema.column_names[: 2 + len(times)] == ("Symbol", "Date", *times)
+    assert schema.column_names[-1] == "TimestampInsert"
     types = {c.name: c.type for c in schema.columns}
     assert types["Symbol"] is ColumnType.STRING
-    assert types["Timestamp"] is ColumnType.INSTANT
+    assert types["Date"] is ColumnType.STRING
+    assert all(types[name] is ColumnType.INSTANT for name in (*times, "TimestampInsert"))
     assert "Underlying" not in types
     assert "Ticker" not in types
 
@@ -209,8 +212,21 @@ def test_trades_merge_the_rest_stream_and_flat_file_columns() -> None:
 
 def test_bars_key_on_the_window_start() -> None:
     names = CATALOG.dataset_schema(options.BARS).column_names
-    assert "WindowStart" not in names
+    assert {"WindowStart", "EndTimestamp", "Timestamp"}.isdisjoint(names)
     assert {"Open", "High", "Low", "Close", "Volume", "Vwap"} <= set(names)
+
+
+def test_bar_prices_say_how_they_are_adjusted() -> None:
+    columns = {c.name: c.description for c in CATALOG.dataset_schema(options.BARS).columns}
+    for name in ("Open", "High", "Low", "Close", "Vwap"):
+        assert "Split-adjusted when the query's adjusted is True" in columns[name], name
+        assert "never adjusts for cash dividends" in columns[name], name
+    assert "multiplied by its ratio" in columns["Volume"]
+    opened = {
+        c.name: c.description for c in CATALOG.dataset_schema(options.DAILY_OPEN_CLOSE).columns
+    }
+    assert "Split-adjusted" in opened["PreMarket"]
+    assert "Split-adjusted" in opened["Volume"]
 
 
 @pytest.mark.parametrize(
@@ -241,9 +257,10 @@ def test_snapshots_carry_the_greeks_and_the_per_ticker_error() -> None:
 def test_daily_open_close_has_symbol_and_its_day() -> None:
     schema = CATALOG.dataset_schema(options.DAILY_OPEN_CLOSE)
     types = {c.name: c.type for c in schema.columns}
-    assert schema.column_names[0] == "Symbol"
-    assert types["From"] is ColumnType.LOCAL_DATE
-    assert "Timestamp" not in types
+    # The day, `from`, is the row's `Date`, from which the library sets the day's window.
+    assert schema.column_names[:4] == ("Symbol", "Date", "TimestampStart", "TimestampEnd")
+    assert types["Date"] is ColumnType.STRING
+    assert {"From", "Timestamp"}.isdisjoint(types)
 
 
 # --- Fixtures --------------------------------------------------------------------------------
@@ -664,17 +681,27 @@ def test_bars_fetch_the_previous_session_and_read_a_range(
     fake_rest.reply(wire(f"/v2/aggs/ticker/{TSLA}/prev"), Reply(body(load_fixture, "prev.json")))
     prev = rows(rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
-    # `/prev` stamps the bar at the 16:00 New York close (1605042000000); it is moved to the
-    # start of its New York day, as the range stamps it.
-    assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Volume"]) for r in prev] == [
-        (TSLA, ny_midnight_ns(date(2020, 11, 10)), 115.97, 131704427.0)
+    # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
+    # whole New York day, as the range stamps it.
+    assert [
+        (r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in prev
+    ] == [
+        (
+            TSLA,
+            "2020-11-10",
+            ny_midnight_ns(date(2020, 11, 10)),
+            ny_midnight_ns(date(2020, 11, 11)),
+            115.97,
+        )
     ]
 
     contract = "O:RDFN211119C00025000"
     start = int(datetime(2021, 9, 23, 4, tzinfo=UTC).timestamp()) * 1000  # New York midnight
     end = int(datetime(2021, 9, 25, 4, tzinfo=UTC).timestamp()) * 1000 - 1
     path = f"/v2/aggs/ticker/{contract}/range/1/day/{start}/{end}"
-    fake_rest.reply(wire(path), Reply(body(load_fixture, "range.json")))
+    # The sample echoes `adjusted: true`; unadjusted bars come back saying so.
+    ranged = cast("dict[str, object]", body(load_fixture, "range.json"))
+    fake_rest.reply(wire(path), Reply({**ranged, "adjusted": False}))
     bars = rows(
         rest_session.options.bars(contract, dm.Timespan.DAY, adjusted=False).history(
             date(2021, 9, 23), date(2021, 9, 24), source=HistorySource.REST
@@ -684,9 +711,9 @@ def test_bars_fetch_the_previous_session_and_read_a_range(
         path,
         {"adjusted": ["false"], "limit": ["50000"], "sort": ["asc"]},
     )
-    assert [(r["Symbol"], r["Timestamp"], r["Close"]) for r in bars] == [
-        (contract, 1632369600000 * 10**6, 26.2),
-        (contract, 1632456000000 * 10**6, 28.3),
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Close"]) for r in bars] == [
+        (contract, "2021-09-23", 1632369600000 * 10**6, 26.2),
+        (contract, "2021-09-24", 1632456000000 * 10**6, 28.3),
     ]
 
 
@@ -702,7 +729,9 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_fails(
         Reply({"status": "OK", "results": [{"T": TSLA, "t": afternoon, "c": 1.0}]}),
     )
     prev = rows(rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch())
-    assert [r["Timestamp"] for r in prev] == [ny_midnight_ns(date(2024, 11, 29))]
+    assert [(r["Date"], r["TimestampStart"]) for r in prev] == [
+        ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
+    ]
     with pytest.raises(
         dm.MassiveError,
         match=r"^options\.bars: a 1-day bar from /v2/aggs/ticker/\{optionsTicker\}/prev is "
@@ -748,7 +777,7 @@ def test_chain_reads_one_underlying(
         0.00229,
         1543.0,
     )
-    assert row["DetailsExpirationDate"] == date(2022, 1, 21)
+    assert row["DetailsExpirationDate"] == "2022-01-21"  # every date is ISO text
     assert row["DayLastUpdated"] == 1605195918507251700
 
 
@@ -839,7 +868,7 @@ def test_contracts_list_or_read_each_contract(
         {"as_of": ["2021-11-01"]},
     )
     assert [(r["Symbol"], r["Underlying"], r["ExpirationDate"]) for r in described] == [
-        (one, "AAPL", date(2021, 11, 19))
+        (one, "AAPL", "2021-11-19")
     ]
 
 
@@ -865,8 +894,12 @@ def test_daily_open_close_reads_one_day_per_contract(
         rest_session.options.daily_open_close(TSLA, date(2023, 1, 9), adjusted=False).fetch()
     )
     assert sent(fake_rest) == [(path, {"adjusted": ["false"]})]
-    assert [(r["Symbol"], r["From"], r["Open"], r["Close"], r["AfterHours"]) for r in out] == [
-        (TSLA, date(2023, 1, 9), 25.0, 26.35, 26.35)
+    assert [(r["Symbol"], r["Date"], r["Open"], r["Close"], r["AfterHours"]) for r in out] == [
+        (TSLA, "2023-01-09", 25.0, 26.35, 26.35)
+    ]
+    # Its window is the New York day of its date.
+    assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (ny_midnight_ns(date(2023, 1, 9)), ny_midnight_ns(date(2023, 1, 10)))
     ]
 
 
@@ -896,6 +929,7 @@ class Streams:
             self.session._core,
             resolve_host=self.resolve,
             record_verdict=lambda *_: None,
+            fetch_rows=lambda *_: [],
             client_factory=self.factory,
         )
         cast("Any", self.session._core._ports)._streams = self.connections
@@ -1015,8 +1049,29 @@ def bar_frame(event: str) -> dict[str, object]:
     [
         ("trades", "T", TRADE_FRAME, {"Timestamp": 1629820676333 * 10**6, "Price": 1.54}),
         ("quotes", "Q", QUOTE_FRAME, {"Timestamp": 1644506128351 * 10**6, "BidPrice": 9.71}),
-        ("bars-second", "A", bar_frame("A"), {"Timestamp": 1632419640000 * 10**6, "Close": 2.05}),
-        ("bars-minute", "AM", bar_frame("AM"), {"Timestamp": 1632419640000 * 10**6, "Vwap": 2.05}),
+        (
+            "bars-second",
+            "A",
+            bar_frame("A"),
+            # The end is the start plus the bar's length, not the frame's `e`.
+            {
+                "TimestampStart": 1632419640000 * 10**6,
+                "TimestampEnd": 1632419641000 * 10**6,
+                "Date": "2021-09-23",
+                "Close": 2.05,
+            },
+        ),
+        (
+            "bars-minute",
+            "AM",
+            bar_frame("AM"),
+            {
+                "TimestampStart": 1632419640000 * 10**6,
+                "TimestampEnd": 1632419700000 * 10**6,
+                "Date": "2021-09-23",
+                "Vwap": 2.05,
+            },
+        ),
         (
             "fmv",
             "FMV",
@@ -1120,7 +1175,13 @@ CALL = "O:IWM230327C00137000"
                 f"{CALL},15,11.07,11.07,11.07,11.07,1678716000000000000,1",
             ],
             lambda m: m.options.bars(PUT, adjusted=False),
-            {"Timestamp": 1678715580000000000, "Close": 11.82, "Transactions": 1},
+            {
+                "Date": "2023-03-13",
+                "TimestampStart": 1678715580000000000,
+                "TimestampEnd": 1678715640000000000,
+                "Close": 11.82,
+                "Transactions": 1,
+            },
         ),
         (
             "us_options_opra/day_aggs_v1",
@@ -1130,7 +1191,13 @@ CALL = "O:IWM230327C00137000"
                 f"{CALL},1,35.77,35.77,35.77,35.77,1678680000000000000,1",
             ],
             lambda m: m.options.bars(PUT, dm.Timespan.DAY, adjusted=False),
-            {"Timestamp": 1678680000000000000, "Close": 9.83, "Volume": 200.0},
+            {
+                "Date": "2023-03-13",
+                "TimestampStart": 1678680000000000000,
+                "TimestampEnd": 1678766400000000000,
+                "Close": 9.83,
+                "Volume": 200.0,
+            },
         ),
     ],
 )

@@ -26,9 +26,19 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
   are stamped at 00:00 of their day in the class day zone, and a stamp Massive is not known to
   use raises (`history_source.stamp_rule`, `_stamped`).
+- **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`):
+  `Date`, a bar's `TimestampStart` and `TimestampEnd`, and `TimestampInsert`, the instant the
+  page arrived. The day zone of each call follows its own symbols' class (`dates.day_class`),
+  so a crypto indicator gets UTC days and a stock indicator New York days.
+- **Adjustment.** Bars requested with an explicit `adjusted` must come back on that basis: each
+  page's `adjusted` echo (`Page.adjusted`) that differs from the request raises
+  `MassiveError`, and a page without one logs a WARNING once per path and session, so one
+  call never silently mixes adjusted and unadjusted prices.
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
-  `MassiveConfig.max_concurrency` at a time. HTTP 404 for one symbol drops that symbol with
-  one WARNING; any other error fails the call.
+  `MassiveConfig.max_concurrency` at a time. A symbol with no data returns no rows: HTTP 404
+  on its first request drops that symbol with one WARNING. HTTP 404 on a later page of a
+  symbol's pages means its data was cut short and raises `MassiveError`, and any other error
+  fails the call.
 - **Rows.** Each page's rows go through `_massive.to_batch` (strict decoding against the path's
   generated fields), then `schema.rename`'s column mapping for the dataset, the timestamp
   routine of `_datasets/timestamps.py`, and the lattice widening of `schema.widen`, into one
@@ -74,6 +84,7 @@ from deephaven import arrow as dh_arrow
 from deephaven_massive._datasets.catalog import filter_key, takes_instants
 from deephaven_massive._datasets.dates import day_class, instant_bound, trades_at_weekends
 from deephaven_massive._datasets.history_source import StampRule, partition_dates, stamp_rule
+from deephaven_massive._datasets.row_times import DATE, time_column, time_rule
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
@@ -639,6 +650,8 @@ class _Converter:
             canonicalized.
         symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
             from the request.
+        time_name: The dataset's time column (`row_times.time_column`), whose epoch `0` is
+            kept, and so fails the timestamp bound, rather than read as absent.
     """
 
     dataset: str
@@ -650,6 +663,7 @@ class _Converter:
     projected: bool
     asset_class: AssetClass | None
     symbol_key: str | None
+    time_name: str
 
     @classmethod
     def build(cls, catalog: Catalog, spec: DatasetSpec, rest_path: RestPath) -> _Converter:
@@ -681,6 +695,7 @@ class _Converter:
             ),
             asset_class=spec.asset_class,
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
+            time_name=time_column(spec.times),
         )
 
     def convert(
@@ -752,7 +767,9 @@ class _Converter:
                     )
                 if source.unit is not None:
                     label = f"{self.dataset}.{name}"
-                    values = instants(label, source.unit, values, time_column=name == "Timestamp")
+                    values = instants(
+                        label, source.unit, values, time_column=name == self.time_name
+                    )
                 arrays.append(widen(values, target))
         return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
 
@@ -784,18 +801,21 @@ class _Converter:
             return value
 
 
-def _keep(batch: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
-    """Keep the rows of a `history()` window: on `Timestamp`, and for sessions `SessionEndDate`.
+def _keep(batch: pa.RecordBatch, window: HistoryWindow | None, *, time: str) -> pa.RecordBatch:
+    """Keep the rows of a `history()` window: on their time, and for sessions on `Date`.
 
     A request can return rows outside the window: the aggregates' `{from}/{to}` reach whole
     periods, a bar may not lie wholly inside the range, and futures bars named by date are
-    requested over a window widened for holidays. A row is kept when its `Timestamp` lies in
-    `HistoryWindow.times` and its `SessionEndDate` in `HistoryWindow.sessions`, where the
-    window sets them. Without the column a bound is about, that bound keeps every row.
+    requested over a window widened for holidays. A row is kept when its time column lies in
+    `HistoryWindow.times` and its session date, `Date` (Massive's `session_end_date`, as ISO
+    text, which orders as dates do), in `HistoryWindow.sessions`, where the window sets them.
+    Without the column a bound is about, that bound keeps every row. It runs before the time
+    columns are filled, so a bar of several sessions still carries its label here.
 
     Args:
         batch: Rows in the dataset's schema.
         window: The `history()` window, or None for `fetch()` and `poll()`.
+        time: The dataset's time column: `Timestamp`, or a bar's `TimestampStart`.
 
     Returns:
         The rows inside the window.
@@ -804,12 +824,12 @@ def _keep(batch: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch
         return batch
     names = batch.schema.names
     masks = []
-    if window.sessions is not None and "SessionEndDate" in names:
-        sessions = batch.column("SessionEndDate")
-        masks.append(pc.greater_equal(sessions, pa.scalar(window.sessions.first)))
-        masks.append(pc.less_equal(sessions, pa.scalar(window.sessions.last)))
-    if window.times is not None and "Timestamp" in names:
-        times = batch.column("Timestamp")
+    if window.sessions is not None and DATE in names:
+        sessions = batch.column(DATE)
+        masks.append(pc.greater_equal(sessions, pa.scalar(window.sessions.first.isoformat())))
+        masks.append(pc.less_equal(sessions, pa.scalar(window.sessions.last.isoformat())))
+    if window.times is not None and time in names:
+        times = batch.column(time)
         masks.append(pc.greater_equal(times, pa.scalar(window.times.start_ns, times.type)))
         masks.append(pc.less(times, pa.scalar(window.times.end_ns, times.type)))
     if not masks:
@@ -980,9 +1000,10 @@ class RestReader:
         rest_path: RestPath,
         calls: Sequence[Call],
         *,
+        request: Request,
         limit: int | None,
         window: HistoryWindow | None = None,
-        stamps: StampRule | None = None,
+        remedy: str = "",
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
     ) -> tuple[pa.Table, int]:
@@ -991,18 +1012,21 @@ class RestReader:
         One call runs on this thread; several run on `executor`, or on a pool of
         `min(max_concurrency, calls)` threads made for this read. If a call fails, or this
         thread is interrupted, the calls not yet started are cancelled, the read waits for the
-        running ones, and the failure of the earliest call is raised.
+        running ones, and the failure of the earliest call is raised. Every page's rows get
+        the library's time columns (`_call`).
 
         Args:
             spec: The dataset.
             rest_path: The path.
             calls: The planned calls, in result order.
+            request: The normalized arguments: the timespan and multiplier of bars, and the
+                `adjusted` basis every page must echo.
             limit: The cap on each call's rows, or None; `read_fetch` caps the total.
             window: The `history()` window whose rows to keep, or None.
-            stamps: How the bars' stamps are treated (`history_source.stamp_rule`): bars of
-                a day or longer move to 00:00 of their day in the class day zone, and a stamp
-                Massive is not known to use raises `MassiveError`; None, the default, keeps
-                the stamps as sent.
+            remedy: What the caller can do instead when a bar's stamp is refused, which the
+                verb supplies; bars of a day or longer move to 00:00 of their day in the class
+                day zone, and a stamp Massive is not known to use raises `MassiveError`
+                (`history_source.stamp_rule`).
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
@@ -1010,16 +1034,19 @@ class RestReader:
         Returns:
             The rows, in call order and then page order, and the number of requests made.
 
-        Errors: the public error of each `WireError` (`_public`), and `RowDataError` for a row
-        that breaks the schema. A closed session raises `MassiveError("... is closed")`.
+        Errors: the public error of each `WireError` (`_public`), `RowDataError` for a row
+        that breaks the schema, and the `MassiveError` of `_call` for a page on another
+        adjustment basis, a refused stamp, or a symbol whose data was cut short. A closed
+        session raises `MassiveError("... is closed")`.
         """
         converter = _Converter.build(self.catalog, spec, rest_path)
         run = functools.partial(
             self._call,
             converter,
+            request=request,
             limit=limit,
             window=window,
-            stamps=stamps,
+            remedy=remedy,
             record=record,
             spec=spec,
         )
@@ -1068,39 +1095,60 @@ class RestReader:
         call: Call,
         *,
         spec: DatasetSpec,
+        request: Request,
         limit: int | None,
         window: HistoryWindow | None,
-        stamps: StampRule | None,
+        remedy: str,
         record: Callable[[DriftReport], None] | None,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
+
+        Each page is checked against the requested adjustment basis (`_check_adjusted`), its
+        bars of a day or longer are stamped (`_stamped`), its rows outside the `history()`
+        window dropped (`_keep`), and its rows given the library's time columns
+        (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
+        call's day zone follows its own symbols' class (`dates.day_class`).
 
         Args:
             converter: The path's conversion.
             call: The call.
             spec: The dataset.
+            request: The normalized arguments.
             limit: The cap on the call's rows, or None.
             window: The `history()` window whose rows to keep, or None.
-            stamps: How the bars' stamps are treated (`_stamped`), or None to keep them.
+            remedy: What the caller can do instead when a stamp is refused.
             record: Also given each page's drift, or None.
 
         Returns:
-            The call's rows and request count; no rows for a per-symbol call answered with
-            HTTP 404, which logs one WARNING per symbol and session.
+            The call's rows and request count; no rows for a per-symbol call whose first
+            request Massive answered with HTTP 404 (a symbol with no data), which logs one
+            WARNING per symbol and session.
 
-        A failed request raises the public error of its `WireError` (`_public`), and a row
-        that breaks the schema the `RowDataError` of `_Converter.convert`; a crypto bar
-        stamped at a time Massive is not known to use the `MassiveError` of `_stamped`.
+        Raises:
+            MassiveError: If a per-symbol call's later page answers HTTP 404, so the symbol's
+                data was cut short: the message names the dataset, the symbol, the path, and
+                how many pages had arrived.
+
+        A failed request otherwise raises the public error of its `WireError` (`_public`); a
+        row that breaks the schema the `RowDataError` of `_Converter.convert`; a page on
+        another adjustment basis the `MassiveError` of `_check_adjusted`; and a bar stamped
+        at a time Massive is not known to use the `MassiveError` of `_stamped`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
         template = converter.rest_path.template
+        own = _own_symbols(spec, call.symbol, call.query)
+        zone_class = day_class(spec, map(symbol_class, own))
+        stamps = _with_remedy(stamp_rule(spec, request), remedy)
+        times = time_rule(spec, request, asset_class=zone_class)
         try:
             for page in self.state.client.pages(
                 converter.rest_path, call.path_params, call.query, limit=limit
             ):
+                received = time.time_ns()
                 requests += 1
                 self.drift.report_statuses(template, page.drift.statuses)
+                self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
                 batches, drift, flagged = converter.convert(page.rows, call.symbol)
                 self.drift.report(spec.name, Transport.REST, drift)
                 if record is not None:
@@ -1110,9 +1158,20 @@ class RestReader:
                 # not be dropped unseen by `_keep`.
                 if stamps is not None:
                     batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
-                kept.extend(_keep(batch, window) for batch in batches)
+                kept.extend(
+                    times.fill(_keep(batch, window, time=converter.time_name), received=received)
+                    for batch in batches
+                )
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
+                if requests:
+                    raise MassiveError(
+                        f"{spec.name}: {call.symbol}'s data was cut short: Massive answered "
+                        f"HTTP 404 for page {requests + 1} of {template} after {requests} "
+                        f"page{'s' if requests > 1 else ''} had arrived; retry the call",
+                        status=error.status,
+                        request_id=error.request_id,
+                    ) from error
                 if self.state.first("missing", spec.name, call.symbol):
                     logger.warning(
                         "%s: %s has no data (HTTP 404 from %s); it is left out",
@@ -1123,6 +1182,49 @@ class RestReader:
                 return _Outcome(tuple(kept), requests + 1)
             raise self._public(error) from error
         return _Outcome(tuple(kept), requests)
+
+    def _check_adjusted(
+        self, spec: DatasetSpec, request: Request, *, template: str, echoed: bool | None
+    ) -> None:
+        """Refuse a page of bars on another adjustment basis than the request asked for.
+
+        Bars sent with an explicit `adjusted` (stocks and options) are checked page by page,
+        `next_url` pages included: Massive echoes the basis of each aggregates response in its
+        envelope's `adjusted`. A page whose echo differs from the request would mix split
+        bases in one table, so it fails the call; a page without one cannot be checked, which
+        logs a WARNING once per dataset, path, and session. Every other dataset is left
+        alone: its paths echo nothing (the indicators, the daily open-close), or it has no
+        `adjusted` at all.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments, whose `adjusted` was sent.
+            template: The path template, for messages.
+            echoed: The page's echo (`Page.adjusted`), or None.
+
+        Raises:
+            MassiveError: If the echo differs from the request, naming the dataset, the path,
+                and both values.
+        """
+        sent = request.adjusted
+        if not spec.is_bars or sent is None:
+            return
+        if echoed is None:
+            if self.state.first("adjusted-echo", spec.name, template):
+                logger.warning(
+                    "%s: %s answered without its adjusted echo, so this page's split basis "
+                    "(adjusted=%s requested) cannot be checked",
+                    spec.name,
+                    template,
+                    sent,
+                )
+            return
+        if echoed is not sent:
+            raise MassiveError(
+                f"{spec.name}: Massive answered {template} with adjusted={echoed} although "
+                f"adjusted={sent} was requested, so the call would mix split-adjusted and "
+                "as-traded prices; retry it"
+            )
 
     def _warn_error_rows(
         self, converter: _Converter, flagged: Sequence[Mapping[str, object]], symbol: str | None
@@ -1174,6 +1276,31 @@ class RestReader:
                 f"rate limited: {error.message}", status=429, request_id=error.request_id
             )
         return from_wire(error)
+
+    def rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Return every raw JSON row of a REST path for a query, following its pages.
+
+        For the library's own lookups, such as the futures schedule calendar of the WebSocket
+        streams (`_ingest/futures_sessions.py`), which reads a few fields and keeps no table.
+
+        Args:
+            template: The path template, such as `"/futures/v1/schedules"`; it takes no path
+                parameter.
+            query: The query parameters, by wire name.
+
+        Returns:
+            The rows of every page, every key kept.
+
+        A failed request raises the public error of its `WireError` (`_public`):
+        `AuthenticationError`, `EntitlementError`, or `MassiveError`.
+        """
+        rest_path = self.rest_path(template)
+        try:
+            return [
+                row for page in self.state.client.pages(rest_path, {}, query) for row in page.rows
+            ]
+        except WireError as error:
+            raise self._public(error) from error
 
     def probe(self, probe: hosts.SnapshotProbe) -> list[dict[str, object]]:
         """Make a host-decision request and return its raw JSON rows.
@@ -1344,8 +1471,9 @@ class RestReader:
                 spec,
                 rest_path,
                 calls,
+                request=request,
                 limit=request.limit,
-                stamps=_with_remedy(stamp_rule(spec, request), _FETCH_REMEDY),
+                remedy=_FETCH_REMEDY,
                 record=record,
                 executor=executor,
             )
@@ -1456,6 +1584,23 @@ class RestEndpoints:
         self._write_decision(asset_class, family, decision)
         return decision
 
+    def fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Return every raw JSON row of a REST path for a query (`RestReader.rows`).
+
+        Runs on the calling thread, here the WebSocket transport's futures schedule worker,
+        and holds no library lock while it waits on the network.
+
+        Args:
+            template: The path template; it takes no path parameter.
+            query: The query parameters, by wire name.
+
+        Returns:
+            The rows of every page.
+
+        A failed request raises the public error of `RestReader.rows`.
+        """
+        return self._reader().rows(template, query)
+
     def record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
     ) -> None:
@@ -1550,8 +1695,9 @@ class RestEndpoints:
         other request covers the window's instants (`HistoryWindow.requested`): on the
         dataset's time axis, or as the aggregates' `{from}/{to}` millisecond epochs, one
         request series per symbol where the path takes one. Rows outside the window are
-        dropped (`_keep`), and bars of a day or longer are stamped at 00:00 of their day in the
-        class day zone (`_stamped`, `timestamps.day_starts`). A grouped-daily or per-session
+        dropped (`_keep`), bars of a day or longer are stamped at 00:00 of their day in the
+        class day zone (`_stamped`, `timestamps.day_starts`), and every row gets the library's
+        time columns. A symbol with no data adds no rows. A grouped-daily or per-session
         download of more than five requests first logs, at INFO, how many requests it makes
         and about how long a Basic key's 5 requests a minute make it last. Logs
         `source=REST requests=<n>` at INFO.
@@ -1565,8 +1711,10 @@ class RestEndpoints:
             A static table in the dataset's schema.
 
         Raises:
-            MassiveError: As `fetch` raises it, logged at ERROR first, and for a bar of a day or
-                longer stamped at a time or on a day Massive is not known to use for its class.
+            MassiveError: As `fetch` raises it, logged at ERROR first; for a bar of a day or
+                longer stamped at a time or on a day Massive is not known to use for its class;
+                for a page whose `adjusted` echo differs from the request; and for a symbol
+                whose later page answers HTTP 404, its data cut short.
         """
         reader = self._reader()
         if isinstance(request.symbols, _All):
@@ -1590,9 +1738,10 @@ class RestEndpoints:
                 spec,
                 rest_path,
                 calls,
+                request=request,
                 limit=None,
                 window=window,
-                stamps=_with_remedy(stamp_rule(spec, request), _history_remedy(request)),
+                remedy=_history_remedy(request),
             )
         except MassiveError as error:
             _report(error)
@@ -1886,11 +2035,12 @@ def _stamped(
             remedy of the verb that reads the bars.
 
     Returns:
-        The batch, with its `Timestamp` at 00:00 of each bar's day in the class day zone.
+        The batch, with its `TimestampStart` at 00:00 of each bar's day in the class day zone.
 
     A stamp at another time or on another day raises the `MassiveError` of
     `timestamps.day_starts`, which ends with the rule's remedy.
     """
-    index = batch.schema.get_field_index("Timestamp")
+    name = time_column(spec.times)
+    index = batch.schema.get_field_index(name)
     moved = rule.stamp(spec.name, batch.column(index), source=source)
-    return batch.set_column(index, "Timestamp", moved)
+    return batch.set_column(index, name, moved)

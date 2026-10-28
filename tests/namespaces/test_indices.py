@@ -130,8 +130,10 @@ def test_values_schema() -> None:
     # The snapshot joins the values kind with only its ticker, value, and update time.
     assert _schema(indices.VALUES) == [
         ("Symbol", "String"),
+        ("Date", "String"),
         ("Timestamp", "Instant"),
         ("Value", "double"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
@@ -140,15 +142,18 @@ def test_bars_schema() -> None:
     columns = {c.name: c for c in CATALOG.dataset_schema(indices.BARS).columns}
     for name in ("Volume", "Vwap", "Transactions"):
         assert columns[name].supplied_by == ()
+    # The stream's window end `e` is the declared end key, so it is `TimestampEnd`.
     assert _schema(indices.BARS) == [
         ("Symbol", "String"),
-        ("Timestamp", "Instant"),
+        ("Date", "String"),
+        ("TimestampStart", "Instant"),
+        ("TimestampEnd", "Instant"),
         ("Open", "double"),
         ("Close", "double"),
         ("High", "double"),
         ("Low", "double"),
         ("OfficialOpen", "double"),
-        ("EndTimestamp", "Instant"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
@@ -171,20 +176,24 @@ def test_snapshots_schema() -> None:
         ("Timeframe", "String"),
         ("Type", "String"),
         ("Value", "double"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
 def test_daily_open_close_schema() -> None:
-    # The day is a calendar date, so the row has no Timestamp.
+    # The day, `from`, is the row's `Date`, and the library sets the day's window from it.
     assert _schema(indices.DAILY_OPEN_CLOSE) == [
         ("Symbol", "String"),
+        ("Date", "String"),
+        ("TimestampStart", "Instant"),
+        ("TimestampEnd", "Instant"),
         ("AfterHours", "double"),
         ("Close", "double"),
-        ("From", "LocalDate"),
         ("High", "double"),
         ("Low", "double"),
         ("Open", "double"),
         ("PreMarket", "double"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
@@ -482,16 +491,20 @@ def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
 
 
 def rows(table: Table) -> list[dict[str, Any]]:
-    # Instants become epoch nanoseconds, so assertions keep every digit.
+    # Instants become epoch nanoseconds, so assertions keep every digit. Every dataset row
+    # carries when it arrived, last, which the rows here leave out once it is checked.
     data = dh_arrow.to_arrow(table)
     columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
     out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    if "TimestampInsert" in data.column_names:
+        assert data.column_names[-1] == "TimestampInsert"
+        assert all(row.pop("TimestampInsert") is not None for row in out)
     return out
 
 
 def bar_rows(table: Table) -> list[dict[str, Any]]:
     # The columns index bars fill; every column only other asset classes' bars fill is null.
-    filled = {name for name, _ in _schema(indices.BARS)}
+    filled = {name for name, _ in _schema(indices.BARS)} - {"TimestampInsert"}
     out = rows(table)
     for row in out:
         assert all(value is None for name, value in row.items() if name not in filled)
@@ -523,8 +536,8 @@ def test_values_fetch_reads_the_snapshot_and_drops_error_rows(
     request = (SNAPSHOT, {"ticker.any_of": ["I:NDX,I:NOPE,I:SPX"], "limit": ["250"]})
     assert sent(fake_rest) == [request, request]
     assert out == [
-        {"Symbol": "I:SPX", "Timestamp": 1748894400 * NS, "Value": 5935.94},
-        {"Symbol": "I:NDX", "Timestamp": 1748894400 * NS, "Value": 21491.1},
+        {"Symbol": "I:SPX", "Date": "2025-06-02", "Timestamp": 1748894400 * NS, "Value": 5935.94},
+        {"Symbol": "I:NDX", "Date": "2025-06-02", "Timestamp": 1748894400 * NS, "Value": 21491.1},
     ]
     # Once per session and index, however often the row comes back.
     warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -611,16 +624,19 @@ def test_previous_day_bars_fetch_one_index_a_request(
     fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
     out = bar_rows(rest_session.indices.bars("SPX", dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/I:SPX/prev", {})]
+    # The New York day, ending an hour late at 01:00 New York time (midnight in Chicago),
+    # since whether an index day bar covers the New York or the Chicago day is not verified.
     assert out == [
         {
             "Symbol": "I:SPX",
-            "Timestamp": MIDNIGHT_MS * MS,
+            "Date": "2025-06-02",
+            "TimestampStart": MIDNIGHT_MS * MS,
+            "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
             "Open": 5896.68,
             "Close": 5935.94,
             "High": 5940.35,
             "Low": 5876.0,
             "OfficialOpen": None,
-            "EndTimestamp": None,
         }
     ]
 
@@ -636,10 +652,11 @@ def test_bars_history_over_rest_fills_the_range_and_the_symbol(
     q = rest_session.indices.bars(["I:SPX"])
     out = rows(q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
-    assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Close"]) for r in out] == [
-        ("I:SPX", 1748871000000 * MS, 5896.68, 5899.02),
-        ("I:SPX", 1748871060000 * MS, 5899.02, 5898.4),
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        ("I:SPX", "2025-06-02", 1748871000000 * MS, 1748871060000 * MS),
+        ("I:SPX", "2025-06-02", 1748871060000 * MS, 1748871120000 * MS),
     ]
+    assert [(r["Open"], r["Close"]) for r in out] == [(5896.68, 5899.02), (5899.02, 5898.4)]
 
 
 HOUR_MS = 3_600_000
@@ -663,9 +680,10 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     )
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
     ranged = rows(q.history(day, day, source=dm.HistorySource.REST))
-    assert [r["Timestamp"] for r in ranged] == [MIDNIGHT_MS * MS]
-    assert [r["Timestamp"] for r in rows(q.fetch())] == [MIDNIGHT_MS * MS]
-    # A week bar stamped 01:00 on the Sunday before its week moves to that Sunday's midnight.
+    assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
+    assert [r["TimestampStart"] for r in rows(q.fetch())] == [MIDNIGHT_MS * MS]
+    # A week bar stamped 01:00 on the Sunday before its week covers that Monday-to-Friday
+    # week: it starts at Monday's midnight and ends an hour after Saturday's.
     saturday, sunday = MIDNIGHT_MS - 2 * DAY_MS, MIDNIGHT_MS - DAY_MS
     week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{saturday}/{MIDNIGHT_MS + 5 * DAY_MS - 1}"
     fake_rest.reply(
@@ -674,7 +692,9 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     week = rest_session.indices.bars("I:SPX", dm.Timespan.WEEK)
     friday = date(2025, 6, 6)
     weeks = rows(week.history(day, friday, source=dm.HistorySource.REST))
-    assert [r["Timestamp"] for r in weeks] == [sunday * MS]
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in weeks] == [
+        (None, MIDNIGHT_MS * MS, (MIDNIGHT_MS + 5 * DAY_MS + HOUR_MS) * MS)
+    ]
     # A week bar at the close, or a day bar at 02:00, is another cut: each fails loudly.
     with pytest.raises(
         dm.MassiveError, match=r"^indices\.bars: a bar from .* is stamped 2025-06-01T20:00:00"
@@ -705,7 +725,15 @@ def test_daily_open_close_fetches_each_index_for_the_day(
         "/v1/open-close/I:NDX/2025-06-02",
         "/v1/open-close/I:SPX/2025-06-02",
     ]
-    day = {"From": date(2025, 6, 2), "High": 5940.35, "Low": 5876.0, "Open": 5896.68}
+    # The day is the row's `Date`; its window is the New York day, ending an hour late.
+    day = {
+        "Date": "2025-06-02",
+        "TimestampStart": MIDNIGHT_MS * MS,
+        "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
+        "High": 5940.35,
+        "Low": 5876.0,
+        "Open": 5896.68,
+    }
     assert sorted(out, key=lambda r: r["Symbol"]) == [
         {"Symbol": "I:NDX", "AfterHours": None, "Close": 21491.1, **day, "PreMarket": 5896.68},
         {"Symbol": "I:SPX", "AfterHours": 5937.1, "Close": 5935.94, **day, "PreMarket": 5896.68},
@@ -757,6 +785,7 @@ def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]
         session._core,
         resolve_host=lambda *_: SOCKET,
         record_verdict=lambda *_: None,
+        fetch_rows=lambda *_: [],
         client_factory=client,
     )
     clients: Any = session._core._ports
@@ -781,20 +810,26 @@ def subscribed(server: FakeMassiveServer, topic: str) -> None:
         (
             "ws_values.json",
             "V.I:SPX",
-            {"Symbol": "I:SPX", "Timestamp": 1748894399000 * MS, "Value": 5935.94},
+            {
+                "Symbol": "I:SPX",
+                "Date": "2025-06-02",
+                "Timestamp": 1748894399000 * MS,
+                "Value": 5935.94,
+            },
         ),
         (
             "ws_minute_bars.json",
             "AM.I:SPX",
             {
                 "Symbol": "I:SPX",
-                "Timestamp": 1748894340000 * MS,
+                "Date": "2025-06-02",
+                "TimestampStart": 1748894340000 * MS,
+                "TimestampEnd": 1748894400000 * MS,
                 "Open": 5930.1,
                 "Close": 5935.94,
                 "High": 5936.2,
                 "Low": 5929.8,
                 "OfficialOpen": 5896.68,
-                "EndTimestamp": 1748894400000 * MS,
             },
         ),
         (
@@ -802,13 +837,15 @@ def subscribed(server: FakeMassiveServer, topic: str) -> None:
             "A.I:SPX",
             {
                 "Symbol": "I:SPX",
-                "Timestamp": 1748894399000 * MS,
+                "Date": "2025-06-02",
+                "TimestampStart": 1748894399000 * MS,
+                # A one-second bar ends a second after its start, whatever its `e` says.
+                "TimestampEnd": 1748894400000 * MS,
                 "Open": 5935.5,
                 "Close": 5935.94,
                 "High": 5936.0,
                 "Low": 5935.4,
                 "OfficialOpen": 5896.68,
-                "EndTimestamp": 1748894400000 * MS,
             },
         ),
     ],
@@ -891,19 +928,30 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
         (
             "us_indices/values_v1",
             "us_indices_values_v1_2025-06-02.csv",
-            [("I:SPX", 1748871000 * NS, 5896.68), ("I:SPX", 1748871001 * NS, 5897.12)],
+            [
+                ("I:SPX", "2025-06-02", 1748871000 * NS, None, 5896.68),
+                ("I:SPX", "2025-06-02", 1748871001 * NS, None, 5897.12),
+            ],
         ),
         (
             "us_indices/minute_aggs_v1",
             "us_indices_minute_aggs_v1_2025-06-02.csv",
-            [("I:SPX", 1748871000 * NS, 5899.02)],
+            [("I:SPX", "2025-06-02", 1748871000 * NS, 1748871060 * NS, 5899.02)],
         ),
         (
             # The file stamps the day at midnight in Chicago, 01:00 New York time, as Massive's
-            # sample does; it is stamped at the New York day's start.
+            # sample does; the bar starts at the New York day's start and ends an hour late.
             "us_indices/day_aggs_v1",
             "us_indices_day_aggs_v1_2025-06-02.csv",
-            [("I:SPX", MIDNIGHT_MS * MS, 5935.94)],
+            [
+                (
+                    "I:SPX",
+                    "2025-06-02",
+                    MIDNIGHT_MS * MS,
+                    (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
+                    5935.94,
+                )
+            ],
         ),
     ],
     ids=["values", "minute-bars", "day-bars"],
@@ -928,7 +976,10 @@ def test_one_flat_file_round_trips(
     else:
         q, value = s3_session.indices.bars(["I:SPX"]), "Close"
     out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
-    assert [(r["Symbol"], r["Timestamp"], r[value]) for r in out] == expected
+    time = "Timestamp" if value == "Value" else "TimestampStart"
+    assert [
+        (r["Symbol"], r["Date"], r[time], r.get("TimestampEnd"), r[value]) for r in out
+    ] == expected
 
 
 def test_every_index_from_a_day_file_names_explicit_symbols_as_the_way_out(
