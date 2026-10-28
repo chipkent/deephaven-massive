@@ -457,6 +457,7 @@ def test_an_optional_symbol_key_is_not_required() -> None:
         summary="A dataset for the tests.",
         fetch_path=index[1],
         keys={index: SourceKeys(symbol=KeySpec("Ticker", required=False))},
+        poll_keys=("AccessionNumber",),
     )
     assert "Symbol" in [c.column for c in rename(filings, source(*index))]
     assert required_fields(filings, source(*index)) == ()

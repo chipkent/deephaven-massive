@@ -18,7 +18,7 @@ import pytest
 from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import AssetClass, Order, Timespan
+from deephaven_massive._enums import AssetClass, Order, PollMode, Timespan
 from deephaven_massive._massive import ParamKind, Source, Transport, sources
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES
 
@@ -297,6 +297,26 @@ def test_a_rest_symbol_can_be_optional() -> None:
     optional = SourceKeys(symbol=KeySpec("Ticker", required=False))
     spec = change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): optional})
     assert spec.keys_for(R, "/v3/reference/exchanges").symbol == KeySpec("Ticker", required=False)
+
+
+@pytest.mark.parametrize("mode", [PollMode.REPLACE, PollMode.UPSERT])
+def test_a_keyed_poll_cannot_key_on_an_optional_symbol(mode: PollMode) -> None:
+    optional = SourceKeys(symbol=KeySpec("Ticker", required=False))
+    with pytest.raises(ValueError, match=r"a keyed poll\(\) cannot key on Symbol"):
+        change(
+            EXCHANGES,
+            keys={(R, "/v3/reference/exchanges"): optional},
+            poll_mode=mode,
+            poll_keys=("Symbol", "Id"),
+        )
+    # Other keys, or an APPEND poll that keys on nothing, are fine.
+    change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): optional}, poll_mode=mode)
+    change(
+        EXCHANGES,
+        keys={(R, "/v3/reference/exchanges"): optional},
+        poll_mode=PollMode.APPEND,
+        poll_keys=("Symbol",),
+    )
 
 
 def test_a_fanout_key_that_is_no_instrument_comes_from_the_rows() -> None:
@@ -907,6 +927,18 @@ def test_wire_parameters_gate() -> None:
     assert problems(stream) == ("wire parameters: stocks.luld: a time axis needs a REST path",)
     # The symbol parameter is not needed where the symbol is a path parameter.
     assert problems(CONTRACTS) == ()
+    # Every REST path of a dataset takes each parameter the library fixes, as a query parameter.
+    assert problems(change(DIVIDENDS, fixed_params={"frequency": 4})) == ()
+    assert problems(change(DIVIDENDS, fixed_params={"type": "options"})) == (
+        (
+            "wire parameters: stocks.dividends: fixed parameter 'type' is not a query "
+            "parameter of /stocks/v1/dividends"
+        ),
+    )
+    assert problems(change(STOCK_TRADES, fixed_params={"stockTicker": "AAPL"}))[-1] == (
+        "wire parameters: stocks.trades: fixed parameter 'stockTicker' is not a query "
+        "parameter of /v3/trades/{stockTicker}"
+    )
 
 
 def test_poll_keys_gate() -> None:

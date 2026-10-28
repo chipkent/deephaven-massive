@@ -19,6 +19,7 @@ from deephaven_massive._datasets.dates import (
     check_order,
     flat_file_published,
     futures_session,
+    futures_session_before,
     futures_session_open,
     futures_sessions,
     history_range,
@@ -136,11 +137,17 @@ def test_futures_session_window() -> None:
     assert (sessions.first, sessions.last) == (date(2025, 3, 3), date(2025, 3, 5))
     # From the first session's 17:00 Chicago open (UTC-6 before March 9) less the holiday
     # margin, to the regular open of the session after the last, which is exact.
-    assert timedelta(days=3) == FUTURES_HOLIDAY_MARGIN
-    assert sessions.window.start == datetime(2025, 2, 27, 23, tzinfo=UTC)
+    assert timedelta(days=4) == FUTURES_HOLIDAY_MARGIN
+    assert sessions.window.start == datetime(2025, 2, 26, 23, tzinfo=UTC)
     assert sessions.window.end == datetime(2025, 3, 5, 23, tzinfo=UTC)
     single = futures_sessions(date(2025, 3, 3), date(2025, 3, 3))
-    assert single.window.end - single.window.start == timedelta(days=4)
+    assert single.window.end - single.window.start == timedelta(days=5)
+
+
+def test_the_margin_covers_a_friday_holiday_folded_into_monday() -> None:
+    # Good Friday 2024: the session of Monday 2024-04-01 opened on Thursday at 17:00 Chicago.
+    sessions = futures_sessions(date(2024, 4, 1), date(2024, 4, 1))
+    assert sessions.window.start < datetime(2024, 3, 28, 17, tzinfo=CHICAGO)
 
 
 def test_a_session_after_a_holiday_is_inside_its_window() -> None:
@@ -271,6 +278,38 @@ def test_mixed_futures_bounds_keep_the_session_rule_on_the_date_side() -> None:
         bounds(_spec(AssetClass.FUTURES), datetime(2024, 12, 17, 18, tzinfo=CHICAGO), "2024-12-17")
 
 
+def test_a_date_start_may_end_before_its_regular_open_only_after_a_holiday() -> None:
+    spec = _spec(AssetClass.FUTURES)
+    monday = datetime(2025, 1, 20, 10, tzinfo=CHICAGO)
+    # Martin Luther King Day folded into the 2025-01-21 session, which opened on Sunday.
+    folded = bounds(spec, "2025-01-21", monday)
+    assert isinstance(folded, FuturesSessions)
+    assert folded.first == date(2025, 1, 21)
+    # Two weekday sessions (01-20 and 01-21) cannot both fold into 01-22.
+    with pytest.raises(ValueError, match="the session of 2025-01-22 cannot open that early"):
+        bounds(spec, "2025-01-22", monday)
+    # Good Friday folded into Monday's session, which opened on Thursday 17:00.
+    friday = bounds(spec, "2024-04-01", datetime(2024, 3, 29, 9, tzinfo=CHICAGO))
+    assert isinstance(friday, FuturesSessions)
+    assert friday.first == date(2024, 4, 1)
+    with pytest.raises(ValueError, match="cannot open that early"):
+        bounds(spec, "2024-04-01", datetime(2024, 3, 28, 10, tzinfo=CHICAGO))
+
+
+def test_an_instant_start_at_the_next_sessions_open_is_empty() -> None:
+    # The session of 2025-01-21 ends where the next one opens: 17:00 Chicago on 01-21.
+    opens = datetime(2025, 1, 21, 17, tzinfo=CHICAGO)
+    with pytest.raises(ValueError, match="must be before end"):
+        futures_sessions(opens, date(2025, 1, 21))
+    assert futures_sessions(opens - timedelta(microseconds=1), date(2025, 1, 21)).last
+
+
+def test_futures_session_before_excludes_the_end() -> None:
+    opens = datetime(2025, 1, 21, 17, tzinfo=CHICAGO)
+    assert futures_session_before(opens) == date(2025, 1, 21)
+    assert futures_session_before(opens + timedelta(microseconds=1)) == date(2025, 1, 22)
+
+
 def test_bounds_reject_bad_ranges() -> None:
     with pytest.raises(ValueError, match="must not be after end"):
         bounds(_spec(AssetClass.FUTURES), "2025-03-05", "2025-03-03")
@@ -280,7 +319,7 @@ def test_bounds_reject_bad_ranges() -> None:
 
 def test_futures_window_across_the_spring_dst_change() -> None:
     sessions = futures_sessions(date(2025, 3, 8), date(2025, 3, 10))
-    assert sessions.window.start == datetime(2025, 3, 4, 23, tzinfo=UTC)  # CST, UTC-6
+    assert sessions.window.start == datetime(2025, 3, 3, 23, tzinfo=UTC)  # CST, UTC-6
     assert sessions.window.end == datetime(2025, 3, 10, 22, tzinfo=UTC)  # CDT, UTC-5
 
 

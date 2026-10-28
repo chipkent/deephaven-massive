@@ -73,6 +73,14 @@ FOREX = DatasetSpec(
     channels={None: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
 )
+FOREX_FMV = DatasetSpec(
+    name="test.forex_fmv",
+    summary="A test dataset.",
+    asset_class=AssetClass.FOREX,
+    channels={None: "FMV"},
+    family=ChannelFamily.FMV,
+    keys={(W, "forex/FMV"): SourceKeys(KeySpec("Ticker"))},
+)
 OPTIONS = DatasetSpec(
     name="test.options",
     summary="A test dataset.",
@@ -429,6 +437,18 @@ def test_wire_symbols_become_canonical(
     harness.subscribed("C.EUR-USD")
     harness.send({"ev": "C", "p": "EUR/USD", "a": 1.1, "b": 1.0, "t": 1_700_000_000_000, "x": 1})
     harness.connection("wss://socket.test/forex").flusher.flush()
+    wait_for(lambda: result.size == 1)
+    assert column(result, "Symbol", dh_to_pylist) == ["C:EURUSD"]
+
+
+def test_an_fmv_frame_in_the_canonical_spelling_reaches_its_forex_stream(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # FMV frames name the pair `C:EURUSD`, while the topic spells it `EUR-USD`.
+    result = harness.query(FOREX_FMV, ["C:EURUSD"]).append_only()
+    harness.subscribed("FMV.EUR-USD")
+    harness.send({"ev": "FMV", "sym": "C:EURUSD", "fmv": 1.1, "t": 1_700_000_000_000_000_000})
+    harness.connection(harness.urls[-1]).flusher.flush()
     wait_for(lambda: result.size == 1)
     assert column(result, "Symbol", dh_to_pylist) == ["C:EURUSD"]
 

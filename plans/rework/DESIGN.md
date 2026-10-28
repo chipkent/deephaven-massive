@@ -1566,14 +1566,22 @@ timezone-aware `datetime` is used as is.
   Martin Luther King Day (Monday 2025-01-20) from Sunday 17:00 CT under the trade date
   2025-01-21. So `trades`, `quotes`, and `bars` request their instant range (`timestamp` for
   trades and quotes, `window_start` for bars) from `futures_session_open(start)` (17:00 CT
-  the day before) less `FUTURES_HOLIDAY_MARGIN` (3 days) to `futures_session_open(end + 1
+  the day before) less `FUTURES_HOLIDAY_MARGIN` (4 days) to `futures_session_open(end + 1
   day)`, which is exact because a holiday only moves a session's open earlier, and
-  post-filter `SessionEndDate` within `[start, end]`; `session_end_date` stays an ordinary
+  post-filter `SessionEndDate` within `[start, end]`. The longest known fold is a Friday
+  holiday whose trading goes to Monday's session (Good Friday 2024: the 2024-04-01 session
+  opened Thursday 17:00 CT), three days before the regular Sunday open; the fourth day is
+  slack. The margin costs REST requests up to four more days of rows at the lower end (a
+  Friday session fetches from the previous Sunday evening), all dropped by the post-filter; `session_end_date` stays an ordinary
   filter of the trades and quotes paths, never their time axis. Mixed bounds follow the same
   rule per side: a date side is a session, widened and filtered on `SessionEndDate`; a
   `datetime` side is exact and filtered on `Timestamp`
   (`history("2024-12-17", datetime(2024, 12, 17, 16, tzinfo=CT))` keeps the evening of
-  12-16, which belongs to session 12-17). Flat-file keys are assumed to be keyed by session date
+  12-16, which belongs to session 12-17). A date `start` with an `end` instant before that
+  session's regular open is a range only when one holiday opened the session early: the end
+  instant's session and every weekday session after it up to `start` may hold at most one
+  weekday, so `("2025-01-21", Monday 2025-01-20 10:00 CT)` reads the MLK trading and
+  `("2025-01-22", the same instant)` raises `ValueError`. Flat-file keys are assumed to be keyed by session date
   (**UNVERIFIED**: the futures flat-file overview says only "standardized in Central Time"; the
   implementation checks every block of every futures file against its key, and a
   `session_end_date` that differs from the key's date, or is empty, fails loudly). With
@@ -1583,9 +1591,11 @@ timezone-aware `datetime` is used as is.
   instant `t` is `(t in America/Chicago + 7 h).date()`, and the files read are the sessions
   from the session of `start` to the session of `end - 1 ns`. An intraday window reads one
   file; an evening window reads only the next session's file. When a futures range ends at an
-  instant and its last session's file is missing on a weekday (a holiday), the next existing
-  session file within the 3-day margin is read too, because the holiday's hours lie in it;
-  its rows are filtered on `Timestamp` like the others. A date-bounded range never rolls
+  instant and the run of missing files that ends it (per venue) holds a weekday (a holiday,
+  alone or followed by a weekend, such as Good Friday and the Saturday after it), the next
+  existing session file within the 4-day margin of the run's first day is read too, because
+  the holiday's hours lie in it; its rows are filtered on `Timestamp` like the others. A run
+  of weekend days after an existing Friday file reads nothing more. A date-bounded range never rolls
   forward: a date names its own session exactly. A `datetime` sent to a futures
   `session_end_date` parameter (`schedules(start=...)`) becomes the session it belongs to,
   and for the exclusive upper bound the session of the instant just before it.
@@ -1949,14 +1959,18 @@ How a request is built from a `DatasetSpec` and a `Request`:
   turned into a calendar date by `calendar_day` in `_datasets/dates.py`: a date or
   `"YYYY-MM-DD"` as given, an aware `datetime` as the calendar day it falls on in the dataset's
   day zone ([section 12](#12-timestamp-units-and-day-boundaries)).
-- **History order.** `history()` returns rows oldest first on every transport, as flat files
-  do: wherever the history path takes a direction and the caller set none, REST sends the
-  ascending one (`order=asc`, with `sort=timestamp` where that is `sort`'s only value;
+- **History order.** REST `history()` returns each request's rows, so each symbol's, oldest
+  first; the rows of several requests follow one another in request order. Wherever the
+  history path takes a direction and the caller set none, REST sends the ascending one on
+  the time axis's field when the path lists it (`order=asc` with `sort=timestamp`;
   `sort=asc` on the aggregates; `sort=window_start.asc` or, where `sort` lists no values,
-  `<time axis field>.asc` on the futures paths, which default to newest first).
+  `<time axis field>.asc` on the futures paths, which default to newest first). The order of
+  rows inside a flat file is Massive's and is not documented.
 - **Library-fixed parameters.** A parameter the library sets itself, with no argument of its
-  own (the options snapshot's `type=options`), is passed as `build_query(fixed=...)`. It is
-  sent like a typed parameter, and its whole family is reserved from `filters` ("the library
+  own (the options snapshot's `type=options`), is declared on the dataset as
+  `DatasetSpec.fixed_params`. The catalog's `wire parameters` gate requires every REST path of
+  the dataset to take it as a query parameter, so it is never blamed on the caller as a
+  parameter a path lacks. `build_query` sends it like a typed parameter, and its whole family is reserved from `filters` ("the library
   sets type itself; it is not a filter") and left out of the valid keys a refused filter
   lists. An equality form of the symbol parameter in `filters` (`ticker_any_of`) is refused
   with a message naming `symbols=`.
@@ -3221,7 +3235,10 @@ per source in a
   the stocks `filings.index`: a row without it keeps a null `Symbol` instead of failing the request
   as a missing required key. Only a `symbol` key read from a REST path's rows may set it
   False; flat files and streams filter and route rows by symbol, and the `time`, `fanout`,
-  and `session` keys are always required.
+  and `session` keys are always required. A dataset with an optional symbol key cannot key a
+  `REPLACE` or `UPSERT` `poll()` on `Symbol` (`DatasetSpec` refuses it): every row without a
+  symbol would share the null key and collapse into one row, so such a dataset declares other
+  `poll_keys`.
 
 A key is `from_request` when the source does not carry it in its rows: the symbol of a source
 that takes it as a path parameter or holds it outside the result key
@@ -3884,4 +3901,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 25 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
 | 26 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
 | 27 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
-| 28 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 3 days of margin cover every holiday run, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | A date `start` requests from the session's regular open less 3 days and post-filters `SessionEndDate`; a missing last session file of an instant range rolls forward to the next file within 3 days | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows are kept | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |
+| 28 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | A date `start` requests from the session's regular open less 4 days and post-filters `SessionEndDate`; an instant range whose trailing missing files hold a weekday rolls forward to the next file within 4 days of the run's first day | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept | `tests/namespaces/test_futures_integration.py`: `trades` and `bars` of ES for 2025-01-21, and one `YEAR` bar request; record the first row's time and whether the candles arrive |

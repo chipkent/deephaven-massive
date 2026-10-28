@@ -34,9 +34,10 @@ text such as `NA` or `NULL` is data (both are valid tickers).
 A missing file is judged by its date: on a weekend (for every class but crypto, which trades
 every day) it is skipped silently; on a weekday it is skipped with a WARNING, since it is most
 likely a market holiday. A futures exchange holiday folds into the next session, so when a
-futures range ends at an instant and its last session's file is missing on a weekday, the next
-existing session file (within `FUTURES_HOLIDAY_MARGIN`) is read too: its early-opened hours
-may lie inside the range. A missing file for the last requested date may instead be late: within
+futures range ends at an instant and the run of missing files that ends it holds a weekday (a
+holiday, alone or followed by a weekend), the next existing session file within
+`FUTURES_HOLIDAY_MARGIN` of the run's first day is read too: its early-opened hours may lie
+inside the range. A missing file for the last requested date may instead be late: within
 a day after its publication time (`within_publication_grace` in
 `_datasets/history_source.py`) it raises `MassiveError` naming both causes, and after that it is
 skipped with a WARNING like any other weekday.
@@ -490,9 +491,9 @@ class FlatFileHistory:
             transform: The request's block transform.
             keys: The files to read, in result order.
             last: The last partition date of the request.
-            roll: The futures prefix when the range ends at an instant: a weekday file of
-                `last` that is missing is then followed by the next existing session file
-                (`_roll_forward`). None reads only `keys`.
+            roll: The futures prefix when the range ends at an instant: when the run of
+                missing files that ends a venue's keys holds a weekday, the next existing
+                session file is read too (`_roll_forward`). None reads only `keys`.
 
         Returns:
             The merged table.
@@ -520,49 +521,75 @@ class FlatFileHistory:
         )
         tables = [table for part in parts if part is not None for table in part]
         if roll is not None:
-            for key in missing:
-                if key.day == last and key.day.weekday() < _SATURDAY:
-                    tables.extend(self._roll_forward(spec, transform, prefix=roll, missing=key))
+            tables.extend(
+                self._roll_forward(spec, transform, keys=keys, missing=set(missing), prefix=roll)
+            )
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
             return merge([to_table(transform.arrow_schema.empty_table()), *tables])
 
     def _roll_forward(
-        self, spec: DatasetSpec, transform: _Transform, *, prefix: str, missing: _Key
+        self,
+        spec: DatasetSpec,
+        transform: _Transform,
+        *,
+        keys: Sequence[_Key],
+        missing: set[_Key],
+        prefix: str,
     ) -> list[Table]:
-        """Read the first futures session file after a missing one, for a holiday's hours.
+        """Read, per venue, the first session file after a range's missing last files.
 
         A holiday's trading belongs to the next session, which opens early: the session of
-        Tuesday 2025-01-21 opened on Sunday 2025-01-19 at 17:00 Chicago time, so a range that
-        ends on the holiday Monday finds its rows in the 2025-01-21 file. The days after the
-        missing one are tried in order, up to `FUTURES_HOLIDAY_MARGIN`, on the caller thread;
-        the transform keeps only the rows inside the range.
+        Tuesday 2025-01-21 opened on Sunday 2025-01-19 at 17:00 Chicago time, and after Good
+        Friday 2024 the session of Monday 2024-04-01 opened on Thursday 2024-03-28. So a range
+        that ends on the holiday, or on the weekend after it, finds rows in a later file. For
+        each venue, the run of missing files that ends its keys is examined: a run of weekend
+        days only follows an existing file and needs nothing, while a run that holds a
+        weekday is followed by the days after the range, up to `FUTURES_HOLIDAY_MARGIN` past
+        the run's first day, until a file exists. The reads run on the caller thread, one at a
+        time; the transform keeps only the rows inside the range. Each read checks the session
+        before its request and after every block, as the pool's reads do, so a close stops it
+        with `"MassiveSession #1 is closed"`; the pool's cancel event is already set when this
+        runs, so these reads take an event of their own. A failed read raises the public error
+        `_read_key` raises (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
 
         Args:
             spec: The dataset, for the log.
             transform: The request's block transform.
+            keys: The request's files, in date and then venue order.
+            missing: The files of `keys` that do not exist.
             prefix: The futures prefix, with its `{venue}` placeholder.
-            missing: The missing file of the request's last session.
 
         Returns:
-            The tables of the first file found; empty when none of the days has one.
-
-        A failed read raises as `_read_key` raises it.
+            The tables of the files found, in venue order; empty when no run needs a roll or
+            none of the days has a file.
         """
-        venue = None if missing.venue is None else missing.venue.value
-        for offset in range(1, FUTURES_HOLIDAY_MARGIN.days + 1):
-            day = missing.day + timedelta(days=offset)
-            key = _Key(object_key(prefix, day, venue), day, missing.venue)
-            part = self._read_key(transform, key, cancel=threading.Event())
-            if part is not None:
-                logger.info(
-                    "%s: %s is missing; reading %s for the hours a holiday moved into it",
-                    spec.name,
-                    missing.key,
-                    key.key,
-                )
-                return part
-        return []
+        tables: list[Table] = []
+        for venue in dict.fromkeys(key.venue for key in keys):
+            own = [key for key in keys if key.venue == venue]
+            run: list[_Key] = []
+            for key in reversed(own):
+                if key not in missing:
+                    break
+                run.append(key)
+            if not any(key.day.weekday() < _SATURDAY for key in run):
+                continue
+            name = None if venue is None else venue.value
+            day, limit = own[-1].day, run[-1].day + FUTURES_HOLIDAY_MARGIN
+            while day < limit:
+                day += timedelta(days=1)
+                key = _Key(object_key(prefix, day, name), day, venue)
+                part = self._read_key(transform, key, cancel=threading.Event())
+                if part is not None:
+                    logger.info(
+                        "%s: %s is missing; reading %s for the hours a holiday moved into it",
+                        spec.name,
+                        run[-1].key,
+                        key.key,
+                    )
+                    tables.extend(part)
+                    break
+        return tables
 
     def _check_open(self) -> None:
         """Reject further work once the session's flat-file client is closed.

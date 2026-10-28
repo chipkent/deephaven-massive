@@ -1,5 +1,6 @@
 """Tests for the REST transport: requests, pages, conversion, errors, history, and hosts."""
 
+import dataclasses
 import functools
 import logging
 import threading
@@ -651,6 +652,7 @@ def test_a_row_without_an_optional_symbol_keeps_a_null_symbol(
         asset_class=AssetClass.STOCKS,
         fetch_path=DIVIDENDS_PATH,
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker", required=False))},
+        poll_keys=("Id",),
     )
     row = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([row, AAPL_DIVIDEND])))
@@ -824,9 +826,9 @@ def test_futures_bars_widen_date_bounds_to_whole_sessions(
         multiplier=5,
     )
     q = sent(fake_rest)[0][1]
-    # From the session's regular open, Monday 17:00 Chicago, less the three-day holiday
+    # From the session's regular open, Monday 17:00 Chicago, less the four-day holiday
     # margin; to the next session's regular open, which is exact.
-    opens = datetime(2025, 2, 28, 17, tzinfo=CHICAGO)
+    opens = datetime(2025, 2, 27, 17, tzinfo=CHICAGO)
     assert q["window_start.gte"] == [str(epoch_ns(opens))]
     assert q["window_start.lt"] == [str(epoch_ns(datetime(2025, 3, 4, 17, tzinfo=CHICAGO)))]
     assert q["resolution"] == ["5min"]
@@ -908,6 +910,13 @@ def test_keep_ignores_a_bound_whose_column_the_rows_lack() -> None:
         (FUTURES_AGGS_PATH, ("window_start.gte", "window_start.lt"), {"sort": "window_start.asc"}),
         (FUTURES_TRADES_PATH, ("timestamp.gte", "timestamp.lt"), {"sort": "timestamp.asc"}),
         (FUTURES_TRADES_PATH, None, {}),
+        # Several sort fields: the axis field when listed, else only the direction.
+        (
+            "/vX/reference/ipos",
+            ("announced_date.gte", "announced_date.lte"),
+            {"order": "asc", "sort": "announced_date"},
+        ),
+        ("/vX/reference/ipos", ("other.gte", "other.lt"), {"order": "asc"}),
         ("/v1/open-close/{stocksTicker}/{date}", None, {}),
     ],
 )
@@ -924,6 +933,24 @@ def test_history_asks_for_ascending_order(
     assert rest._ascending(spec, rest_path, Request()) == expected
     # A direction the caller set is kept.
     assert rest._ascending(spec, rest_path, Request(params=(("order", "desc"),))) == {}
+
+
+def test_ascending_prefers_the_axis_field_among_several_ascending_sorts() -> None:
+    spec = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="test.ascending",
+        history_path=FUTURES_AGGS_PATH,
+        time_axis=("window_start.gte", "window_start.lt"),
+    )
+    aggs = cast("RestPath", _massive.source(R, FUTURES_AGGS_PATH))
+    values = ("ticker.asc", "window_start.asc", "window_start.desc")
+    params = tuple(
+        dataclasses.replace(p, values=values) if p.name == "sort" else p for p in aggs.params
+    )
+    several = dataclasses.replace(aggs, params=params)
+    assert rest._ascending(spec, several, Request()) == {"sort": "window_start.asc"}
+    other = dataclasses.replace(spec, time_axis=("other.gte", "other.lt"))
+    assert rest._ascending(other, several, Request()) == {"sort": "ticker.asc"}
 
 
 def test_a_session_date_parameter_takes_an_instant_as_its_session() -> None:

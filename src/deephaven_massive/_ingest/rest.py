@@ -68,6 +68,7 @@ from deephaven_massive._datasets.dates import (
     NEW_YORK,
     FuturesSessions,
     futures_session,
+    futures_session_before,
     futures_session_open,
 )
 from deephaven_massive._datasets.history_source import partition_dates
@@ -135,7 +136,6 @@ _FUTURES_UNITS: Final[Mapping[Timespan, str]] = {
 endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built."""
 
 _ONE_DAY: Final = timedelta(days=1)
-_ONE_MICROSECOND: Final = timedelta(microseconds=1)
 _SESSION_DATE: Final = "session_end_date"
 """The futures date parameter that names a trading session, not a calendar day."""
 
@@ -254,7 +254,7 @@ def _date_bound(name: str, value: date, *, upper: bool) -> date:
         field = base or suffix  # the name without its comparison suffix
         if field != _SESSION_DATE:
             return value
-        value = futures_session(value - _ONE_MICROSECOND if upper else value)
+        value = futures_session_before(value) if upper else futures_session(value)
     if upper and suffix == "lt":
         return value + _ONE_DAY
     if not upper and suffix == "gt":
@@ -489,6 +489,9 @@ def _base(
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if spec.page_size is not None and "limit" in params:
+        # A page size, as the list paths read `limit`. The aggregates' range path reads its
+        # `limit` as the number of base aggregates queried instead, so no dataset declares
+        # `page_size` on it.
         cap = request.limit
         query["limit"] = spec.page_size if cap is None else min(cap, spec.page_size)
     path.update(fixed)
@@ -1596,15 +1599,18 @@ def _report(error: MassiveError) -> None:
 
 
 def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict[str, object]:
-    """Return the parameters that make a history path return its rows oldest first.
+    """Return the parameters that make a history path return each request's rows oldest first.
 
-    Flat files hold their rows in time order, and several REST history paths default to the
-    newest first (the futures trades and bars, the stocks `/v3/trades`), so `history()` asks
-    every path that takes a direction for ascending order, unless the caller set one. A path
-    with an `order` parameter gets `order=asc`, with `sort` set to the time field when that is
-    the one value `sort` takes. A path with only `sort` gets the value that sorts ascending:
-    `asc` (the aggregates), the listed `<field>.asc` (`window_start.asc`), or, where `sort`
-    lists no values, the time axis's field with `.asc` (`timestamp.asc`).
+    Several REST history paths default to the newest first (the futures trades and bars, the
+    stocks `/v3/trades`), so `history()` asks every path that takes a direction for ascending
+    order, unless the caller set one. The order holds within each request, so within each
+    symbol: the rows of several requests follow one another in request order. The field sorted
+    on is the time axis's field wherever the path lists it. A path with an `order` parameter
+    gets `order=asc`, with `sort` set to the axis field when `sort` lists it, or else to the
+    one value `sort` takes. A path with only `sort` gets the axis field's `.asc` value when it
+    is listed, otherwise the first value that sorts ascending (`asc` on the aggregates,
+    `window_start.asc`), or, where `sort` lists no values, the axis field with `.asc`
+    (`timestamp.asc`).
 
     Args:
         spec: The dataset, whose time axis names the field to sort on.
@@ -1618,17 +1624,23 @@ def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict
     if {"sort", "order"} & dict(request.params).keys():
         return {}
     sort = params.get("sort")
+    axis = None if spec.time_axis is None else spec.time_axis[0].partition(".")[0]
     if "order" in params:
         fields = sort.values if sort is not None else ()
-        return {"order": "asc", **({"sort": fields[0]} if len(fields) == 1 else {})}
+        field = axis if axis in fields else fields[0] if len(fields) == 1 else None
+        return {"order": "asc", **({"sort": field} if field is not None else {})}
     if sort is None:
         return {}
     values = [v for v in sort.values if v == "asc" or v.endswith(".asc")]
-    if values:
-        return {"sort": values[0]}
-    if spec.time_axis is None or sort.values:
+    if f"{axis}.asc" in values:
+        chosen = f"{axis}.asc"
+    elif values:
+        chosen = values[0]
+    elif axis is not None and not sort.values:
+        chosen = f"{axis}.asc"
+    else:
         return {}
-    return {"sort": f"{spec.time_axis[0].partition('.')[0]}.asc"}
+    return {"sort": chosen}
 
 
 def _range_segments(window: TimeRange | FuturesSessions) -> dict[str, object]:

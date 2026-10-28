@@ -92,6 +92,9 @@ def test_canonical_forms(asset_class: AssetClass, raw: str, expected: str) -> No
         (FX, "EU1/USD"),  # a forex code is three letters, never a digit
         (FX, "EU1USD"),
         (FX, "C:EURUS1"),
+        (STK, "-"),  # no letter or digit
+        (STK, "."),
+        (IDX, "I:-"),
     ],
 )
 def test_invalid_symbols(asset_class: AssetClass, raw: str) -> None:

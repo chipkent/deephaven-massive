@@ -283,17 +283,16 @@ def _value(name: str, value: object) -> ParamValue:
 
 
 def _filters(
-    spec: DatasetSpec, filters: object, *, typed: Iterable[str], fixed: Iterable[str]
+    spec: DatasetSpec, filters: object, *, typed: Iterable[str]
 ) -> tuple[tuple[str, ParamValue], ...]:
     """Normalize the `filters` mapping into a sorted tuple.
 
     Args:
-        spec: The dataset, for its time-axis parameter pair and symbol parameter.
+        spec: The dataset, for its time-axis parameter pair, its symbol parameter, and the
+            parameters it fixes (`DatasetSpec.fixed_params`).
         filters: The mapping as passed.
         typed: The wire names of the factory's typed parameters, set or not; a filter may not
             name one of them, nor any of its suffixed forms.
-        fixed: The wire names of the parameters the library sets itself; a filter may not name
-            one of them, nor any of its suffixed forms.
 
     Returns:
         `(name, value)` pairs sorted by name.
@@ -312,7 +311,7 @@ def _filters(
     if not isinstance(filters, Mapping):
         raise TypeError(f"filters must be a mapping, not {type(filters).__name__}")
     reserved = {filter_key(form) for name in typed for form in param_family(name)}
-    library = {filter_key(form) for name in fixed for form in param_family(name)}
+    library = {filter_key(form) for name in spec.fixed_params for form in param_family(name)}
     symbol_keys = (
         set()
         if spec.symbol_param is None
@@ -349,11 +348,18 @@ def build_query(
     start: DateLike | None = None,
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
-    fixed: Mapping[str, ParamValue] | None = None,
     filters: Mapping[str, FilterValue] | None = None,
     limit: int | None = None,
 ) -> QueryBase:
     """Validate one dataset call and return its query.
+
+    The dataset's `fixed_params` (parameters the library sets itself, such as the options
+    snapshot's `type="options"`) join the typed parameters in `Request.params` and are sent on
+    every request. The catalog's `wire parameters` gate guarantees that every REST path of the
+    dataset takes each of them, so a fixed parameter can never be blamed on the caller as a
+    parameter its path lacks. Each one's whole family is reserved from `filters` ("the library
+    sets type itself; it is not a filter") and left out of the valid keys a refused filter
+    lists.
 
     Args:
         core: The session core the query will run on.
@@ -373,10 +379,6 @@ def build_query(
         end: The upper bound of the dataset's time axis, or None.
         params: The dataset's other typed parameters by wire name; None values are dropped,
             but every key, set or not, is reserved from `filters` with its suffixed forms.
-        fixed: Parameters the library sets itself on every request, by wire name, such as
-            the options snapshot's `type="options"`; they have no argument of their own. Each
-            is sent like a typed parameter, and its whole family is reserved from `filters`
-            and left out of the valid filter keys a refused filter lists.
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
             as underscores (`Catalog.check_filters`).
         limit: The cap on the total number of rows (`Request.limit`), or None for every row;
@@ -389,7 +391,7 @@ def build_query(
     Raises:
         ValueError: If `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
             `Symbol` column, `params` or `filters` holds `adjusted`, which has its own typed
-            argument, or `params` names a key of `fixed`.
+            argument, or `params` names one of the dataset's `fixed_params`.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
     Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
@@ -412,7 +414,7 @@ def build_query(
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:
         raise ValueError("adjusted is set through build_query(adjusted=...), not params")
-    library = dict(fixed or {})
+    library = dict(spec.fixed_params)
     clash = sorted(library.keys() & (params or {}).keys())
     if clash:
         raise ValueError(f"{spec.name}: the library sets {clash} itself; they are not params")
@@ -438,10 +440,8 @@ def build_query(
                 (k, _value(k, v)) for k, v in {**(params or {}), **library}.items() if v is not None
             )
         ),
-        filters=()
-        if filters is None
-        else _filters(spec, filters, typed=params or {}, fixed=library),
+        filters=() if filters is None else _filters(spec, filters, typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
-    core.catalog.check_filters(spec, dict(request.filters), fixed=library)
+    core.catalog.check_filters(spec, dict(request.filters))
     return cls(core, spec, request)

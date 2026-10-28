@@ -59,6 +59,7 @@ __all__ = [
     "check_order",
     "flat_file_published",
     "futures_session",
+    "futures_session_before",
     "futures_session_open",
     "futures_sessions",
     "history_range",
@@ -75,14 +76,19 @@ NEW_YORK: Final = ZoneInfo("America/New_York")
 CHICAGO: Final = ZoneInfo("America/Chicago")
 """The zone in which futures sessions open and roll (17:00 America/Chicago)."""
 
-FUTURES_HOLIDAY_MARGIN: Final = timedelta(days=3)
+FUTURES_HOLIDAY_MARGIN: Final = timedelta(days=4)
 """How far before its regular open a futures session may start, so a request reaches it.
 
-A holiday's trading folds into the next session, which then opens on an earlier evening (the
-session of Tuesday 2025-01-21 opened on Sunday 2025-01-19 at 17:00 Chicago time, a day before
-its regular Monday 17:00 open). Three days cover a holiday Monday after a weekend and the runs
-of two closed days around Christmas and New Year. The rows a widened request returns from
-earlier sessions are dropped by their `SessionEndDate`."""
+A holiday's trading folds into the next session, which then opens on an earlier evening. A
+Monday holiday moves Tuesday's open one day earlier (the session of 2025-01-21 opened on
+Sunday 2025-01-19 at 17:00 Chicago time). The longest known fold is a Friday holiday whose
+trading goes to Monday's session (Good Friday 2024: the session of 2024-04-01 opened on
+Thursday 2024-03-28 at 17:00), exactly three days before the regular Sunday open; the fourth
+day is slack for rows Massive stamps just before an open. The rows a widened request returns
+from earlier sessions are dropped by their `SessionEndDate`."""
+
+_FOLDED_WEEKDAYS: Final = 1
+"""The most weekday sessions a holiday folds into the next one (`futures_sessions`)."""
 
 DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
     AssetClass.STOCKS: NEW_YORK,
@@ -98,6 +104,7 @@ and `futures_sessions`). Datasets without an asset class use New York."""
 
 _DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ONE_DAY: Final = timedelta(days=1)
+_SATURDAY: Final = 5
 
 
 def parse_date_like(value: DateLike, name: str) -> date | datetime:
@@ -310,6 +317,13 @@ def futures_sessions(start: date | datetime, end: date | datetime) -> FuturesSes
     reaches back far enough for a session a holiday opened early. Two instants are no sessions:
     `bounds` gives them a `TimeRange`.
 
+    A date `start` with an `end` instant before that session's regular open is a range only
+    when a holiday opened the session early: the instant's own session, and every weekday
+    session after it up to `start`, must be one holiday at most (`_FOLDED_WEEKDAYS`).
+    `("2025-01-21", Monday 2025-01-20 10:00 CT)` holds the Martin Luther King Day trading of
+    the 2025-01-21 session; `("2025-01-22", the same instant)` would need two weekday sessions
+    folded into one and is refused.
+
     Args:
         start: The first session date, or the first instant included.
         end: The last session date, or the first instant excluded.
@@ -318,8 +332,9 @@ def futures_sessions(start: date | datetime, end: date | datetime) -> FuturesSes
         The sessions and the request window.
 
     Raises:
-        ValueError: If the range is empty: `start` is after `end`, or the window ends before
-            it starts.
+        ValueError: If the range is empty: `start` is after `end`, the window ends before
+            it starts, or an `end` instant lies before more weekday sessions ahead of a date
+            `start` than one holiday can fold into it.
     """
     first = None if isinstance(start, datetime) else start
     last = None if isinstance(end, datetime) else end
@@ -333,6 +348,14 @@ def futures_sessions(start: date | datetime, end: date | datetime) -> FuturesSes
     upper = end if isinstance(end, datetime) else futures_session_open(end + _ONE_DAY)
     if lower >= upper:
         raise ValueError(f"start ({start!r}) must be before end ({end!r})")
+    if first is not None and isinstance(end, datetime):
+        ends_in = futures_session_before(end)
+        skipped = (ends_in + timedelta(days=n) for n in range((first - ends_in).days))
+        if sum(day.weekday() < _SATURDAY for day in skipped) > _FOLDED_WEEKDAYS:
+            raise ValueError(
+                f"start ({start}) must be before end ({end!r}): the session of {start} cannot "
+                "open that early"
+            )
     return FuturesSessions(first, last, TimeRange(lower.astimezone(UTC), upper.astimezone(UTC)))
 
 
@@ -370,6 +393,23 @@ def futures_session(moment: datetime) -> date:
         The session's end date.
     """
     return (moment.astimezone(CHICAGO) + _SESSION_ROLL).date()
+
+
+def futures_session_before(end: datetime) -> date:
+    """Return the futures session of the last instant before an exclusive end.
+
+    A range's `end` instant is excluded, so the range's last session is the one the instant
+    just before it belongs to: an end at a session's 17:00 Chicago open closes the previous
+    session, not the one that opens then.
+
+    Args:
+        end: An aware `datetime`, the first instant excluded.
+
+    Returns:
+        The session's end date (`futures_session` of `end` less one microsecond, the finest
+        step a `datetime` takes).
+    """
+    return futures_session(end - timedelta(microseconds=1))
 
 
 def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:

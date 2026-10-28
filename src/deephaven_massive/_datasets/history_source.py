@@ -34,6 +34,7 @@ from deephaven_massive._datasets.dates import (
     FuturesSessions,
     flat_file_published,
     futures_session,
+    futures_session_before,
     publish_time,
 )
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
@@ -105,14 +106,12 @@ def partition_dates(spec: DatasetSpec, window: TimeRange | FuturesSessions) -> t
         The partition dates; never empty.
     """
     if isinstance(window, FuturesSessions):
-        before_end = window.window.end - timedelta(microseconds=1)
         first = window.first or futures_session(window.window.start)
         # A date start names its session even when the end instant falls before that
         # session's regular open: a holiday opened it early (2025-01-21 from Sunday 17:00).
-        last = window.last or max(first, futures_session(before_end))
+        last = window.last or max(first, futures_session_before(window.window.end))
     elif spec.asset_class is AssetClass.FUTURES:
-        last_instant = window.end - timedelta(microseconds=1)
-        first, last = futures_session(window.start), futures_session(last_instant)
+        first, last = futures_session(window.start), futures_session_before(window.end)
     else:
         dates = window.partition_dates(_PARTITION_ZONES[spec.asset_class])
         first, last = dates[0], dates[-1]

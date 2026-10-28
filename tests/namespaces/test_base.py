@@ -10,6 +10,7 @@ against synthetic namespaces that break it.
 """
 
 import collections.abc
+import dataclasses
 import datetime as dt
 import typing
 from collections.abc import Callable, Iterator, Mapping
@@ -786,20 +787,21 @@ def test_a_typed_parameter_is_reserved_from_filters(massive_session: dm.MassiveS
 
 def test_a_fixed_parameter_is_sent_and_reserved(massive_session: dm.MassiveSession) -> None:
     # The library sets `frequency` itself here: it is sent, and no filter form may name it.
-    q = build(massive_session, DIVIDENDS, symbols=["AAPL"], fixed={"frequency": 4})
+    fixed = dataclasses.replace(DIVIDENDS, fixed_params={"frequency": 4})
+    q = build(massive_session, fixed, symbols=["AAPL"])
     assert dict(q._request.params) == {"frequency": 4}
     for key in ("frequency", "frequency_gte"):
         with pytest.raises(ValueError, match=rf"^the library sets {key} itself; it is not a"):
-            build(massive_session, DIVIDENDS, fixed={"frequency": 4}, filters={key: 4})
+            build(massive_session, fixed, filters={key: 4})
     # A refused filter's list of valid keys leaves the fixed family out.
     with pytest.raises(ValueError, match="has no filter 'nope'") as refused:
-        build(massive_session, DIVIDENDS, fixed={"frequency": 4}, filters={"nope": 1})
+        build(massive_session, fixed, filters={"nope": 1})
     assert "frequency" not in str(refused.value)
     with pytest.raises(ValueError, match="has no filter 'nope'") as listed:
         build(massive_session, DIVIDENDS, filters={"nope": 1})
     assert "frequency" in str(listed.value)
     with pytest.raises(ValueError, match=r"the library sets \['frequency'\] itself"):
-        build(massive_session, DIVIDENDS, params={"frequency": 2}, fixed={"frequency": 4})
+        build(massive_session, fixed, params={"frequency": 2})
 
 
 def test_a_symbol_filter_names_symbols(massive_session: dm.MassiveSession) -> None:

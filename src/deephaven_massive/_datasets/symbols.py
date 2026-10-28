@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 _OCC: Final = re.compile(r"^O:(?P<root>[A-Z0-9.]{1,6})(?P<expiry>\d{6})[CP]\d{8}$")
 _PLAIN: Final = re.compile(r"^[A-Z0-9.:/\-]+$")
 _PAIR_SEPARATORS: Final = re.compile(r"[/\-]")
+_ALPHANUMERIC: Final = re.compile(r"[A-Z0-9]")
 _CURRENCY: Final = re.compile(r"^[A-Z0-9]+$")
 """A crypto currency code: letters and digits of any length (`1INCH`, `USDT`)."""
 _FOREX_CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
@@ -237,8 +238,8 @@ def _class_and_body(asset_class: AssetClass | None, raw: str) -> tuple[AssetClas
         without one), and the upper-cased symbol without that prefix.
 
     Raises:
-        ValueError: If `raw` is not a plain symbol, carries another class's prefix, or is a
-            prefix with nothing after it (`I:`).
+        ValueError: If `raw` is not a plain symbol, carries another class's prefix, is a
+            prefix with nothing after it (`I:`), or has no letter or digit (`-`, `.`).
     """
     text = raw.strip().upper()
     if not _PLAIN.match(text):
@@ -249,6 +250,8 @@ def _class_and_body(asset_class: AssetClass | None, raw: str) -> tuple[AssetClas
     body = text.removeprefix(prefix) if prefix else text
     if not body:
         raise ValueError(f"{raw!r} is a prefix without a symbol")
+    if not _ALPHANUMERIC.search(body):
+        raise ValueError(f"{raw!r} is not a symbol: it has no letter or digit")
     if ":" in body:
         rule = f"use the {prefix} prefix" if prefix else "have no prefix"
         raise ValueError(
