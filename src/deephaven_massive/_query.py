@@ -394,10 +394,9 @@ class StreamQuery(QueryBase):
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
-        fails the call before any stream starts. A crypto pair the quote list cannot split
-        takes its split from Massive's crypto ticker list when the stream starts (read once per
-        session); a failed read, or a pair the list does not hold, raises `MassiveError` before
-        any topic is subscribed.
+        fails the call before any stream starts. A crypto pair takes its split from Massive's
+        crypto ticker list when the stream starts (read once per session); a failed read, or a
+        pair the list does not hold, raises `MassiveError` before any topic is subscribed.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for

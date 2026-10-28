@@ -84,7 +84,6 @@ from deephaven_massive._datasets.schema import (
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
     WireSymbols,
-    listed_pair,
     option_roots,
     symbol_class,
     unknown_symbol_message,
@@ -346,8 +345,8 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit | None) -> tuple[st
     Args:
         spec: The dataset, whose asset class is forex or crypto.
         symbol: The canonical symbol, such as `C:EURUSD` or `X:BTCUSD`.
-        split: Splits a crypto symbol, reading Massive's crypto ticker list where the quote
-            list cannot (`RestReader.crypto_pair`); None to use the quote list alone.
+        split: Splits a crypto symbol by Massive's crypto ticker list
+            (`RestReader.crypto_pair`); None for a forex dataset.
 
     Returns:
         The base and quote currencies, such as `("EUR", "USD")`.
@@ -355,8 +354,8 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit | None) -> tuple[st
     Raises:
         ValueError: If the dataset's class has no currency pairs.
 
-    A crypto symbol `split` cannot split raises its `MassiveError`; without `split`, one the
-    quote list cannot split raises the `ValueError` of `ws_symbol`.
+    A crypto symbol `split` cannot split raises its `MassiveError`; without `split`, any
+    crypto symbol raises the `KeyError` of `ws_symbol`, since no split is ever guessed.
     """
     asset_class = spec.asset_class
     if asset_class is not AssetClass.FOREX and asset_class is not AssetClass.CRYPTO:
@@ -640,9 +639,9 @@ def plan_calls(
         extra: For `history()`, query parameters added to every call after the time axis:
             the ascending direction (`_ascending`) and, for one futures session, its
             `session_end_date`; None adds none.
-        split: Splits a crypto symbol a `{from}/{to}` path takes as two currencies, reading
-            Massive's crypto ticker list where the quote list cannot (`RestReader.crypto_pair`);
-            None to use the quote list alone. Called only for such a path.
+        split: Splits a crypto symbol a `{from}/{to}` path takes as two currencies, by
+            Massive's crypto ticker list (`RestReader.crypto_pair`); called only for such a
+            path, and needed for every crypto dataset with one.
 
     Returns:
         The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
@@ -1064,10 +1063,10 @@ class RestReader:
     def crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Return a crypto ticker's base and quote currencies, with no guess.
 
-        The quote list splits a joined ticker where exactly one quote it knows ends it
-        (`symbols.listed_pair`). Where none does, or several do (`X:DOTUSD` is `DOT-USD` or
-        `DO-TUSD`), Massive's reference data says: the session reads Massive's whole list of
-        crypto tickers once, on first need (`/v3/reference/tickers?market=crypto`, every
+        A joined ticker does not say where its quote starts (`X:DOTUSD` could be `DOT-USD` or
+        `DO-TUSD`; `X:ETHWBTC` ends in `BTC` but quotes in `WBTC`), so every split comes from
+        Massive's reference data: the session reads Massive's whole list of crypto tickers
+        once, on first need (`/v3/reference/tickers?market=crypto`, every
         page), keeping each ticker's `base_currency_symbol` and `currency_symbol`, whose join
         must be the ticker. Blocks the calling thread for that read, or while another thread
         makes it; holds no lock meanwhile. A failed read is not kept, so the next call tries
@@ -1086,9 +1085,6 @@ class RestReader:
         A failed read raises its public error (`AuthenticationError`, `EntitlementError`, or
         `MassiveError`). Every message names the ticker; nothing falls back to a guessed split.
         """
-        listed = listed_pair(symbol)
-        if listed is not None:
-            return listed
         where = f"{symbol!r} cannot be split into its two currencies"
         try:
             tickers = self._crypto_tickers()
@@ -1429,7 +1425,7 @@ class RestReader:
     ) -> list[tuple[RestPath, list[Call]]]:
         """Plan the requests of a `fetch()` or `poll()` cycle, path by path.
 
-        Makes no request, except that the first crypto pair the quote list cannot split
+        Makes no request, except that the first crypto pair a path takes as two currencies
         reads the session's crypto ticker list (`crypto_pair`).
 
         Args:
@@ -1643,8 +1639,8 @@ class RestEndpoints:
         """Return a crypto ticker's base and quote, from Massive's reference data if needed.
 
         The WebSocket transport calls it, before a stream starts or on its lookup worker, for a
-        ticker the quote list cannot split (`RestReader.crypto_pair`), from the session's crypto
-        ticker list, read once.
+        crypto ticker (`RestReader.crypto_pair`), from the session's crypto ticker list, read
+        once.
 
         Args:
             symbol: A canonical crypto ticker.

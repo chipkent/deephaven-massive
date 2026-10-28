@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
 from deephaven_massive._datasets.request import HostDecision
-from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire, listed_pair
+from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
 from deephaven_massive._ingest.subscriptions import (
@@ -909,7 +909,7 @@ def _wanted(
         asset_class: The stream's class.
         channel: Its channel.
         symbols: Its normalized symbols.
-        pairs: The base and quote of crypto symbols the quote list cannot split.
+        pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list.
 
     Returns:
         `(symbols, topics)`: for `dm.ALL`, None and the channel's wildcard; for a symbol
@@ -1007,8 +1007,8 @@ class WsConnections:
                 transport's `resolve_host`, which may make one REST request.
             record_verdict: Replaces the cached decision of a (class, family) with the one the
                 server's real-time verdict implies; the REST transport's `record_verdict`.
-            crypto_pair: Returns the base and quote of a crypto ticker the quote list cannot
-                split, from Massive's reference data, cached for the session; the REST
+            crypto_pair: Returns the base and quote of a crypto ticker from Massive's crypto
+                ticker list, which the session reads once; the REST
                 transport's `crypto_pair`, which may make one REST request.
             client_factory: Creates each connection's client; by default a `WsClient` with the
                 session's key and backoffs.
@@ -1072,8 +1072,8 @@ class WsConnections:
         Static options symbols that would put more than `OPTIONS_CAP` explicit topics on the
         `/options` connection raise the `ValueError` of `_check_cap`, and a closed transport
         the `MassiveError` of `_check_open`; host resolution raises the `EntitlementError` or
-        `MassiveError` of `resolve_host`; a crypto ticker the quote list cannot split and
-        Massive's reference data does not split raises the `MassiveError` of `resolve_pairs`.
+        `MassiveError` of `resolve_host`; a crypto ticker Massive's crypto ticker list does not
+        split raises the `MassiveError` of `resolve_pairs`.
         """
         asset_class = cast("AssetClass", spec.asset_class)
         plan = self._plan(core, spec, channel)
@@ -1370,11 +1370,11 @@ class WsConnections:
             connection.post(connection.change_symbols, stream_id, added, removed)
 
     def resolve_pairs(self, symbols: Iterable[str]) -> None:
-        """Look up, once per session, the split of each crypto symbol the quote list cannot split.
+        """Look up, once per session, the base and quote of each crypto symbol.
 
-        A joined ticker that no listed quote ends, or that several end (`X:DOTUSD` is `DOT-USD`
-        or `DO-TUSD`), takes its base and quote from Massive's crypto ticker list, which the
-        session reads once; a topic is never built from a guess. May block the calling thread
+        A joined ticker does not say where its quote starts (`X:DOTUSD` could be `DOT-USD` or
+        `DO-TUSD`), so each takes its base and quote from Massive's crypto ticker list, which
+        the session reads once; a topic is never built from a guess. May block the calling thread
         for that read, with no lock held, so it runs on the caller thread before a stream
         starts, or on the lookup worker.
 
@@ -1388,7 +1388,7 @@ class WsConnections:
         for symbol in sorted(symbols):
             with self._lock:
                 known = symbol in self._pairs
-            if known or listed_pair(symbol) is not None:
+            if known:
                 continue
             try:
                 pair = self._crypto_pair(symbol)
@@ -1405,7 +1405,7 @@ class WsConnections:
         """Return a copy of the crypto splits looked up so far, for building topics.
 
         Returns:
-            The base and quote of each crypto symbol the quote list cannot split, by symbol.
+            The base and quote of each crypto symbol looked up, by symbol.
         """
         with self._lock:
             return dict(self._pairs)

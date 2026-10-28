@@ -41,11 +41,11 @@ any futures ticker as Massive writes it, so what comes out can always go back in
 symbols are a third party's global tickers (`DatasetSpec.symbols_as_written`) takes and keeps them
 as Massive writes them. A stock's case is meaningful (`KIMpL` is Kimco's series L preferred), so
 stock, index, and futures text is never re-cased; the option, forex, and crypto grammars are all
-upper case, so folding case there loses nothing. A stream splits a crypto ticker by the one quote of
-`CRYPTO_QUOTES` that ends it (`listed_pair`); where none or several do, the transport asks Massive's
-reference data for the split and passes it in (`ws_symbol`). Nothing maps one instrument to
-another: an option root (`SPXW`, `AAPL1`) is never turned into its underlying, `BRKB` never into
-`BRK.B`, and a futures year is never rewritten.
+upper case, so folding case there loses nothing. A joined crypto ticker is never split by
+guessing where its quote starts (`X:DOTUSD` reads as `DOT-USD` and as `DO-TUSD`): the transports
+take every split from Massive's crypto ticker list and pass it in (`ws_symbol`). Nothing maps one
+instrument to another: an option root (`SPXW`, `AAPL1`) is never turned into its underlying,
+`BRKB` never into `BRK.B`, and a futures year is never rewritten.
 
 Every function here is pure and thread-safe, makes no Deephaven call, and imports Deephaven for
 type checking only.
@@ -72,7 +72,6 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
 __all__ = [
-    "CRYPTO_QUOTES",
     "NormalizedSymbols",
     "ReadSymbols",
     "SymbolTable",
@@ -92,11 +91,9 @@ __all__ = [
     "check_symbol",
     "is_canonical",
     "is_forex_currency",
-    "listed_pair",
     "normalize",
     "option_roots",
     "symbol_class",
-    "topic_problem",
     "unknown_symbol_message",
     "wire_spellings",
     "ws_symbol",
@@ -157,40 +154,6 @@ _CURRENCY_CODE_LENGTH: Final = 3  # ISO 4217
 _OCC_TAIL: Final = 15
 """The characters after an OCC root: `YYMMDD`, `C` or `P`, and eight strike digits."""
 
-CRYPTO_QUOTES: Final = (
-    "PYUSD",
-    "FDUSD",
-    "USDT",
-    "USDC",
-    "TUSD",
-    "BUSD",
-    "USDE",
-    "EURC",
-    "USD",
-    "EUR",
-    "GBP",
-    "JPY",
-    "AUD",
-    "CAD",
-    "CHF",
-    "SGD",
-    "HKD",
-    "BTC",
-    "ETH",
-    "DAI",
-)
-"""The quote currencies of Massive's crypto pairs that the library knows, longest first.
-
-A canonical crypto ticker (`X:BTCUSD`) is the two codes joined, whatever the quote, so it is
-valid for every verb. Only a stream needs the WebSocket form (`BTC-USD`), and recovers it from
-the one quote of this list that ends the ticker (`listed_pair`). A ticker that no quote ends
-(`X:BTCXYZ`), or that two end (`X:DOTUSD` reads as `DOT-USD` and as `DO-TUSD`), gets no split
-from the list (`topic_problem` says why); a stream then takes the split from Massive's reference
-data, or is refused, so a wrong topic is never subscribed. The stablecoin quotes (`TUSD`,
-`PYUSD`, `FDUSD`, `BUSD`, `USDE`, `EURC`, `DAI`) are listed so that such a clash is seen rather
-than mis-split. The list is checked against the ticker fixture
-`tests/data/datasets/symbols/crypto_tickers.csv`."""
-
 _PREFIXES: Final[dict[AssetClass, str]] = {
     AssetClass.OPTIONS: "O:",
     AssetClass.INDICES: "I:",
@@ -240,37 +203,6 @@ reactive table."""
 
 
 # --- the grammar ---------------------------------------------------------------------------------
-
-
-def _crypto_splits(body: str) -> list[tuple[str, str]]:
-    """Return every split of a separator-free crypto pair at a quote of `CRYPTO_QUOTES`.
-
-    Args:
-        body: The pair without prefix or separator, such as `BTCUSDT`.
-
-    Returns:
-        `(base, quote)` for each listed quote that ends the pair after a non-empty base,
-        longest quote first; one split is unambiguous, none or several are not.
-    """
-    return [
-        (body[: -len(quote)], quote)
-        for quote in CRYPTO_QUOTES
-        if body.endswith(quote) and len(body) > len(quote)
-    ]
-
-
-def _split_crypto(body: str) -> tuple[str, str] | None:
-    """Split a separator-free crypto pair at its one quote currency, if it has exactly one.
-
-    Args:
-        body: The pair without prefix or separator, such as `BTCUSDT`.
-
-    Returns:
-        `(base, quote)` when exactly one quote of `CRYPTO_QUOTES` ends the pair after a
-        non-empty base; None when none does, or when several do and the split is ambiguous.
-    """
-    splits = _crypto_splits(body)
-    return splits[0] if len(splits) == 1 else None
 
 
 def _occ_ok(symbol: str) -> bool:
@@ -1308,8 +1240,8 @@ def ws_symbol(
 
     Forex and crypto become `BASE-QUOTE` (`C:EURUSD` to `EUR-USD`, `X:BTCUSD` to `BTC-USD`);
     every other class uses the canonical form unchanged. A crypto pair splits where `pairs`
-    says (Massive's reference data, looked up by the transport), or else at the one quote of
-    `CRYPTO_QUOTES` that ends it (`listed_pair`).
+    says: Massive's crypto ticker list, read by the transport, since a joined ticker such as
+    `X:DOTUSD` could split as `DOT-USD` or `DO-TUSD` and is never split by a guess.
 
     Massive's WebSocket documentation gives every forex channel's `ticker` parameter (`C`,
     `CA`, `CAS`, `FMV`) as `{from}-{to}`, so a forex topic is `C.EUR-USD`, even though forex
@@ -1319,15 +1251,14 @@ def ws_symbol(
     Args:
         asset_class: The symbol's class.
         symbol: A canonical symbol.
-        pairs: The base and quote of crypto symbols whose split the quote list cannot decide,
-            by canonical symbol; None for none.
+        pairs: The base and quote of crypto symbols by canonical symbol, from Massive's crypto
+            ticker list; every crypto symbol must be in it. None for no crypto symbol.
 
     Returns:
         The WebSocket form.
 
-    Raises:
-        ValueError: If a crypto symbol is in neither `pairs` nor split by exactly one quote of
-            `CRYPTO_QUOTES` (`topic_problem` gives the reason); no split is ever guessed.
+    A crypto symbol not in `pairs` raises `KeyError`; the transports resolve every crypto
+    symbol before they build its topic.
     """
     if asset_class is AssetClass.FOREX:
         # The `ticker` parameter of every forex channel is "{from}-{to}": see
@@ -1336,58 +1267,9 @@ def ws_symbol(
         body = symbol.removeprefix("C:")
         return f"{body[:_CURRENCY_CODE_LENGTH]}-{body[_CURRENCY_CODE_LENGTH:]}"
     if asset_class is AssetClass.CRYPTO:
-        split = (pairs or {}).get(symbol) or listed_pair(symbol)
-        if split is None:
-            raise ValueError(topic_problem(asset_class, symbol))
-        return f"{split[0]}-{split[1]}"
+        base, quote = (pairs or {})[symbol]
+        return f"{base}-{quote}"
     return symbol
-
-
-def listed_pair(symbol: str) -> tuple[str, str] | None:
-    """Return a crypto ticker's base and quote when exactly one listed quote ends it.
-
-    Args:
-        symbol: A canonical crypto ticker, such as `X:BTCUSD`.
-
-    Returns:
-        `(base, quote)`, such as `("BTC", "USD")`; None when no quote of `CRYPTO_QUOTES` ends
-        the pair, or several do (`X:DOTUSD` is `DOT-USD` or `DO-TUSD`), so Massive's reference
-        data must say where it splits.
-    """
-    return _split_crypto(symbol.removeprefix("X:"))
-
-
-def topic_problem(asset_class: AssetClass | None, symbol: str) -> str | None:
-    """Say why a canonical symbol cannot be streamed, or None when its topic can be built.
-
-    A crypto topic spells the pair `BASE-QUOTE`, and the quote list splits a joined ticker only
-    where exactly one quote currency it knows (`CRYPTO_QUOTES`) ends it. A ticker no quote ends
-    (`X:BTCXYZ`) or several do (`X:DOTUSD`: `DOT-USD` or `DO-TUSD`) needs Massive's reference
-    data to say where it splits; the WebSocket transport finds it in Massive's crypto ticker
-    list when the stream starts and refuses the stream if the list does not give it, so a wrong
-    topic is never subscribed. Every other
-    symbol needs nothing.
-
-    Args:
-        asset_class: The stream's class, or None to read it from the prefix.
-        symbol: A canonical symbol.
-
-    Returns:
-        Why the quote list cannot split the symbol (the candidate topics, or that no listed quote
-        ends it), or None when it can or the symbol is no crypto ticker.
-    """
-    resolved = symbol_class(symbol) if asset_class is None else asset_class
-    if resolved is not AssetClass.CRYPTO:
-        return None
-    splits = _crypto_splits(symbol.removeprefix("X:"))
-    if len(splits) == 1:
-        return None
-    if splits:
-        candidates = " or ".join(f"{base}-{quote}" for base, quote in splits)
-        reason = f"its pair splits ambiguously ({candidates})"
-    else:
-        reason = f"its quote currency is none of {', '.join(CRYPTO_QUOTES)}"
-    return f"{symbol!r} cannot be split into its two currencies by the quote list: {reason}"
 
 
 def option_roots(symbols: pa.Array) -> pa.Array:

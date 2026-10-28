@@ -179,7 +179,7 @@ class SessionClients:
         """Return a crypto ticker's base and quote through the session's REST transport.
 
         Args:
-            symbol: A canonical crypto ticker the quote list cannot split.
+            symbol: A canonical crypto ticker.
 
         Returns:
             `(base, quote)`, cached for the session by the REST transport.

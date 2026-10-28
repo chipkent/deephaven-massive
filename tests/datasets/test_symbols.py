@@ -16,18 +16,15 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.symbols import (
-    CRYPTO_QUOTES,
     SymbolTable,
     WireSymbols,
     canonical_from_wire,
     check_symbol,
     is_canonical,
     is_forex_currency,
-    listed_pair,
     normalize,
     option_roots,
     symbol_class,
-    topic_problem,
     unknown_symbol_message,
     wire_spellings,
     ws_symbol,
@@ -482,7 +479,11 @@ def test_forex_currencies_are_three_letters() -> None:
     ],
 )
 def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
-    assert ws_symbol(asset_class, symbol) == expected
+    # A crypto split comes from Massive's crypto ticker list, given here as `pairs`.
+    pairs = {symbol: tuple(expected.split("-"))} if asset_class is CRY else None
+    assert (
+        ws_symbol(asset_class, symbol, cast("dict[str, tuple[str, str]] | None", pairs)) == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -560,30 +561,20 @@ def test_wire_spellings_cover_the_flat_file_and_websocket_forms() -> None:
     assert wire_spellings(IDX, "I:SPX") == ("I:SPX", "SPX")
 
 
-def test_crypto_quotes_cover_the_vendored_tickers(
+def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
-    # The fixture is assembled from well-known pairs, not from a live listing (no API key was
-    # available). Regenerate it from /v3/reference/tickers?market=crypto with a live key, and
-    # widen CRYPTO_QUOTES if this test then fails.
+    # The fixture pairs well-known tickers with Massive's WebSocket form of each; the split
+    # comes from Massive's crypto ticker list at run time, never from the ticker text.
     text = load_fixture("datasets/symbols", "crypto_tickers.csv").decode()
     rows = list(csv.DictReader(io.StringIO(text)))
     assert len(rows) > 20
-    ambiguous = set()
     for row in rows:
         ticker, websocket = row["ticker"], row["websocket"]
         assert is_canonical(CRY, ticker)
         split = cast("tuple[str, str]", tuple(websocket.split("-")))
-        if listed_pair(ticker) is None:  # two listed quotes end it: Massive's data splits it
-            ambiguous.add(ticker)
-        else:
-            assert listed_pair(ticker) == split
         assert ws_symbol(CRY, ticker, {ticker: split}) == websocket
         assert canonical_from_wire(CRY, websocket) == ticker
-    assert ambiguous == {"X:DOTUSD", "X:SHIBUSD", "X:USDTUSD"}
-    quotes = {row["websocket"].split("-")[1] for row in rows}
-    assert quotes <= set(CRYPTO_QUOTES)
-    assert list(CRYPTO_QUOTES) == sorted(CRYPTO_QUOTES, key=len, reverse=True)
 
 
 def test_option_roots() -> None:
@@ -722,32 +713,17 @@ def test_wire_symbols_log_nothing_under_fail(caplog: pytest.LogCaptureFixture) -
     assert caplog.records == []
 
 
-def test_the_quote_list_splits_a_crypto_ticker_only_without_a_guess() -> None:
-    assert listed_pair("X:BTCUSD") == ("BTC", "USD")
-    assert listed_pair("X:BTCDAI") == ("BTC", "DAI")  # DAI is a listed quote
-    assert ws_symbol(CRY, "X:ETHUSDE") == "ETH-USDE"
-    assert topic_problem(CRY, "X:BTCUSD") is None
-    assert topic_problem(STK, "AAPL") is None
-    assert topic_problem(None, "X:BTCXYZ") == (
-        "'X:BTCXYZ' cannot be split into its two currencies by the quote list: its quote "
-        f"currency is none of {', '.join(CRYPTO_QUOTES)}"
-    )
-    # Two quotes end these, so the quote list gives no split and the transport asks Massive.
-    for symbol, candidates in (
-        ("X:BTCPYUSD", "BTC-PYUSD or BTCPY-USD"),
-        ("X:DOTUSD", "DO-TUSD or DOT-USD"),
-        ("X:SHIBUSD", "SHI-BUSD or SHIB-USD"),
-        ("X:USDTUSD", "USD-TUSD or USDT-USD"),
-    ):
-        assert listed_pair(symbol) is None
-        problem = topic_problem(CRY, symbol)
-        assert problem is not None
-        assert problem.endswith(f"its pair splits ambiguously ({candidates})")
-        with pytest.raises(ValueError, match=rf"^'{symbol}' cannot be split"):
-            ws_symbol(CRY, symbol)
-    # Given Massive's split, the topic follows it.
-    assert ws_symbol(CRY, "X:BTCPYUSD", {"X:BTCPYUSD": ("BTC", "PYUSD")}) == "BTC-PYUSD"
-    assert ws_symbol(CRY, "X:DOTUSD", {"X:DOTUSD": ("DOT", "USD")}) == "DOT-USD"
+def test_a_crypto_topic_takes_its_split_only_from_the_pairs_given() -> None:
+    # The ticker text never decides the split: X:ETHWBTC ends in BTC but quotes in WBTC, and
+    # X:DOTUSD could be DOT-USD or DO-TUSD.
+    pairs = {"X:ETHWBTC": ("ETH", "WBTC"), "X:DOTUSD": ("DOT", "USD"), "X:BTCUSD": ("BTC", "USD")}
+    assert ws_symbol(CRY, "X:ETHWBTC", pairs) == "ETH-WBTC"
+    assert ws_symbol(CRY, "X:DOTUSD", pairs) == "DOT-USD"
+    assert ws_symbol(CRY, "X:BTCUSD", pairs) == "BTC-USD"
+    with pytest.raises(KeyError, match="X:BTCUSD"):
+        ws_symbol(CRY, "X:BTCUSD")  # no split given: none is guessed
+    assert ws_symbol(FX, "C:EURUSD") == "EUR-USD"
+    assert ws_symbol(STK, "AAPL") == "AAPL"
     # A file may split a pair anywhere: every cut is looked for, and each reads back.
     for symbol in ("X:BTCXYZ", "X:BTCPYUSD", "X:BTCUSD"):
         spellings = wire_spellings(CRY, symbol)

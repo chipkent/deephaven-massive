@@ -180,7 +180,10 @@ class Harness:
         self.backoff = backoff
         self.decisions: list[tuple[AssetClass, ChannelFamily]] = []
         # What Massive's reference data says of each crypto ticker, and every lookup made.
-        self.pair_answers: dict[str, tuple[str, str] | Exception] = {}
+        self.pair_answers: dict[str, tuple[str, str] | Exception] = {
+            "X:BTCUSD": ("BTC", "USD"),
+            "X:ETHUSD": ("ETH", "USD"),
+        }
         self.lookups: list[str] = []
         self.lookup_threads: list[str] = []
         self.verdicts: list[tuple[AssetClass, ChannelFamily, HostDecision]] = []
@@ -1745,6 +1748,7 @@ def test_a_topic_reconnects_once_per_session(harness: Harness) -> None:
     assert harness.connections.first_no_ack("/options", "T.AAPL")
 
 
+# Each of these ends in two quote currencies, so only Massive's list can split it.
 AMBIGUOUS = {
     "X:DOTUSD": ("DOT", "USD"),  # DOT-USD or DO-TUSD
     "X:SHIBUSD": ("SHIB", "USD"),  # SHIB-USD or SHI-BUSD
@@ -1756,11 +1760,15 @@ AMBIGUOUS = {
 def test_an_ambiguous_crypto_pair_subscribes_the_topic_massive_gives(harness: Harness) -> None:
     # The quote list cannot split these, so Massive's reference data does, once per ticker.
     harness.pair_answers.update(AMBIGUOUS)
-    result = harness.query(CRYPTO, [*AMBIGUOUS, "X:BTCUSD"]).blink()
-    harness.subscribed("XT.DOT-USD", "XT.SHIB-USD", "XT.USDT-USD", "XT.BTC-PYUSD", "XT.BTC-USD")
-    assert sorted(harness.lookups) == sorted(AMBIGUOUS)  # X:BTCUSD needs no lookup
+    harness.pair_answers["X:ETHWBTC"] = ("ETH", "WBTC")  # ends in BTC, quotes in WBTC
+    result = harness.query(CRYPTO, [*AMBIGUOUS, "X:BTCUSD", "X:ETHWBTC"]).blink()
+    harness.subscribed(
+        "XT.DOT-USD", "XT.SHIB-USD", "XT.USDT-USD", "XT.BTC-PYUSD", "XT.BTC-USD", "XT.ETH-WBTC"
+    )
+    looked_up = sorted([*AMBIGUOUS, "X:BTCUSD", "X:ETHWBTC"])  # every pair: none is guessed
+    assert sorted(harness.lookups) == looked_up
     again = harness.query(CRYPTO, ["X:DOTUSD"]).append_only()  # another stream: cached
-    assert sorted(harness.lookups) == sorted(AMBIGUOUS)
+    assert sorted(harness.lookups) == looked_up
     for table in (result, again):
         harness.session.release(table)
 
@@ -1846,7 +1854,7 @@ def test_a_watchlist_change_racing_close_is_dropped(harness: Harness) -> None:
     (stream_id,) = harness.connections._streams
     harness.connections._lookups.shutdown()
     harness.connections._symbols_changed(stream_id, frozenset({"X:ETHUSD"}), frozenset())
-    assert harness.lookups == []
+    assert harness.lookups == ["X:BTCUSD"]  # the stream's own pair, before it started
     harness.session.release(result)
 
 

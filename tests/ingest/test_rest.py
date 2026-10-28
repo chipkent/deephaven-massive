@@ -592,8 +592,12 @@ def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
         "closingTrades": [],
     }
     fake_rest.reply("/v1/open-close/crypto/BTC/USD/2025-03-03", Reply(body))
+    serve_pairs(fake_rest)
     out = fetch(session, CRYPTO_OPEN_CLOSE, symbols=["X:BTCUSD"], params={"date": date(2025, 3, 3)})
-    assert [path for path, _ in sent(fake_rest)] == ["/v1/open-close/crypto/BTC/USD/2025-03-03"]
+    assert [path for path, _ in sent(fake_rest)] == [
+        TICKERS_PATH,  # the pair's split comes from Massive's crypto ticker list
+        "/v1/open-close/crypto/BTC/USD/2025-03-03",
+    ]
     assert [(r["Symbol"], r["Open"]) for r in out] == [("X:BTCUSD", 90000.5)]
 
 
@@ -607,6 +611,32 @@ def _ticker(symbol: str, base: str, quote: str) -> dict[str, object]:
     }
 
 
+TICKERS_PATH = "/v3/reference/tickers"
+PAIRS = {
+    "X:BTCUSD": ("BTC", "USD"),
+    "X:ETHUSD": ("ETH", "USD"),
+    "X:SOLUSD": ("SOL", "USD"),
+    "X:XRPUSD": ("XRP", "USD"),
+}
+"""The crypto pairs these tests use, as Massive's crypto ticker list splits them."""
+
+
+def serve_pairs(server: FakeRestServer) -> None:
+    # Massive's crypto ticker list, which a `{from}/{to}` path reads once per session.
+    rows = [_ticker(symbol, base, quote) for symbol, (base, quote) in PAIRS.items()]
+    server.reply(TICKERS_PATH, Reply(envelope(rows)))
+
+
+def sent_data(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET but the read of the crypto ticker list.
+    return [(path, query) for path, query in sent(server) if path != TICKERS_PATH]
+
+
+def split_pair(symbol: str) -> tuple[str, str]:
+    # The split of a crypto pair, as `RestReader.crypto_pair` reads it from the list.
+    return PAIRS[symbol]
+
+
 LIST_QUERY = {"market": ["crypto"], "limit": ["1000"]}
 """The query of the first page of Massive's crypto ticker list."""
 
@@ -614,13 +644,14 @@ LIST_QUERY = {"market": ["crypto"], "limit": ["1000"]}
 def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # X:DOTUSD ends in USD and in TUSD: the reference data says where it splits, never a guess.
+    # X:DOTUSD ends in USD and in TUSD: Massive's list says where it splits, never a guess.
     # The whole list is read once, every page, and serves every later pair of the session.
     second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
     first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
     fake_rest.reply("/v3/reference/tickers?market=crypto&limit=1000", Reply(first_page))
     fake_rest.reply(
-        "/v3/reference/tickers?cursor=two", Reply(envelope([_ticker("X:SHIBUSD", "SHIB", "USD")]))
+        "/v3/reference/tickers?cursor=two",
+        Reply(envelope([_ticker("X:SHIBUSD", "SHIB", "USD"), _ticker("X:ETHWBTC", "ETH", "WBTC")])),
     )
     body = {"symbol": "DOT-USD", "isUTC": True, "day": "2025-03-03T00:00:00Z", "open": 4.5}
     fake_rest.reply("/v1/open-close/crypto/DOT/USD/2025-03-03", Reply(body), Reply(body))
@@ -631,6 +662,8 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
         assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
     reader = cast("Any", session._core.rest_transport())._reader()
     assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
+    # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
+    assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
     assert sent(fake_rest) == [
         ("/v3/reference/tickers", LIST_QUERY),
         ("/v3/reference/tickers", {"cursor": ["two"]}),
@@ -686,7 +719,6 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
     ) as raised:
         reader.crypto_pair("X:DOTUSD")
     assert raised.value.status == 403
-    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")  # the quote list: no request
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the failure was not kept
     assert len(sent(fake_rest)) == 2
 
@@ -889,9 +921,10 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         "/v1/last/crypto/BTC/USD",
         Reply({"status": "success", "request_id": "r1", "symbol": "BTC-USD", "last": last}),
     )
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
         out = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
-    assert sorted(path for path, _ in sent(fake_rest)) == [
+    assert sorted(path for path, _ in sent_data(fake_rest)) == [
         "/v1/last/crypto/BTC/USD",
         "/v1/last/crypto/ETH/USD",
     ]
@@ -1237,6 +1270,7 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"oops", status=500))
+    serve_pairs(fake_rest)
     with pytest.raises(dm.MassiveError, match="HTTP 500"):
         fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD", "X:SOLUSD"])
 
@@ -1827,6 +1861,7 @@ def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
@@ -1847,7 +1882,7 @@ def test_a_read_fans_out_on_the_callers_pool(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
-    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols)
+    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
     with ThreadPoolExecutor(2) as pool:
         table, requests = reader.read(CRYPTO_LAST, path, calls, limit=None, executor=pool)
         assert not pool._shutdown  # the caller's pool stays open
@@ -1898,7 +1933,9 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
-    calls = rest.plan_calls(CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols)
+    calls = rest.plan_calls(
+        CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols, split=split_pair
+    )
     # The other symbols are answered at once with HTTP 404 (no rows), so the one worker could
     # run through every queued call before the read wakes up to cancel them. Each call after
     # the failed one is held at the server until the last two calls are done, which only the
@@ -2013,6 +2050,7 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
         "/v1/last/crypto/BTC/USD",
         Reply({"status": "success", "request_id": "r", "last": refused}),
     )
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
         (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert row["Symbol"] == "X:BTCUSD"

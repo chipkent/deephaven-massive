@@ -93,14 +93,13 @@ def stream_topics(
             (`ws_symbol`: `C:EURUSD` is `EUR-USD`, `X:BTCUSD` is `BTC-USD`).
         channel: The channel, such as `"T"`.
         symbols: Canonical symbols.
-        pairs: The base and quote of crypto symbols the quote list cannot split, from
-            Massive's reference data; None for none.
+        pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list;
+            None for a class other than crypto.
 
     Returns:
         The topics, such as `{"T.AAPL", "T.MSFT"}`.
 
-    A crypto symbol neither in `pairs` nor split by the quote list raises the `ValueError` of
-    `ws_symbol`.
+    A crypto symbol not in `pairs` raises the `KeyError` of `ws_symbol`.
     """
     return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
 

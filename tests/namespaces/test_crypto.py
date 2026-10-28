@@ -577,8 +577,12 @@ def test_trades_fetch_reads_the_last_trade_of_each_pair(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, "/v1/last/crypto/BTC/USD", load_fixture(OWNER, "last_trade.json"))
+    serve_pairs(fake_rest)
     out = rows(rest_session.crypto.trades("X:BTCUSD").fetch())
-    assert sent(fake_rest) == [("/v1/last/crypto/BTC/USD", {})]
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", {"market": ["crypto"], "limit": ["1000"]}),  # the pair's split
+        ("/v1/last/crypto/BTC/USD", {}),
+    ]
     [row] = out
     supplied = {
         "Symbol": "X:BTCUSD",
@@ -758,9 +762,13 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
 ) -> None:
     path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
     serve(fake_rest, path, load_fixture(OWNER, "open_close.json"))
+    serve_pairs(fake_rest)
     q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
     [row] = rows(q.fetch())
-    assert sent(fake_rest) == [(path, {})]
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", {"market": ["crypto"], "limit": ["1000"]}),  # the pair's split
+        (path, {}),
+    ]
     # The body's `BTC-USD` is canonical in `Symbol`; the trades stay JSON text.
     assert (row["Symbol"], row["Day"], row["Open"], row["Close"], row["IsUtc"]) == (
         "X:BTCUSD",
@@ -788,7 +796,7 @@ class WsSession:
             core,
             resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "a test"),
             record_verdict=lambda *_: None,
-            crypto_pair=unexpected_lookup,
+            crypto_pair=listed_pair,
             client_factory=self.client,
         )
         cast("Any", core._ports)._streams = connections
@@ -1029,9 +1037,36 @@ def test_a_flat_file_that_dashes_its_pairs_is_read(
     ]
 
 
-def unexpected_lookup(symbol: str) -> tuple[str, str]:
-    # These streams use no crypto pair that needs Massive's reference data.
-    raise AssertionError(f"unexpected crypto pair lookup of {symbol}")
+PAIRS = {
+    symbol: (symbol[2:-3], "USD")
+    for symbol in (
+        "X:ADAUSD",
+        "X:ARDRUSD",
+        "X:BCDUSD",
+        "X:BTCUSD",
+        "X:DRNUSD",
+        "X:ETHUSD",
+        "X:FSNUSD",
+        "X:LINKUSD",
+        "X:NGCUSD",
+        "X:SOLUSD",
+    )
+} | {"X:BTCPYUSD": ("BTC", "PYUSD")}
+"""The pairs these tests use, as Massive's crypto ticker list splits them."""
+
+
+def listed_pair(symbol: str) -> tuple[str, str]:
+    # Massive's crypto ticker list, as the REST transport's lookup reads it.
+    return PAIRS[symbol]
+
+
+def serve_pairs(server: FakeRestServer) -> None:
+    # The list itself, for a path that takes a pair as two currencies.
+    rows_ = [
+        {"ticker": t, "market": "crypto", "base_currency_symbol": b, "currency_symbol": q}
+        for t, (b, q) in PAIRS.items()
+    ]
+    server.reply("/v3/reference/tickers", Reply({"status": "OK", "results": rows_}))
 
 
 def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(

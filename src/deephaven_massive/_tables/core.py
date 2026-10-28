@@ -211,8 +211,8 @@ class RestTransport(Protocol):
     def crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Return a crypto ticker's base and quote, looking them up in Massive if needed.
 
-        Called by the WebSocket transport for a ticker the quote list cannot split, before a
-        stream starts or on its lookup worker. The first such call of the session blocks while
+        Called by the WebSocket transport for each crypto ticker of a stream, before it starts
+        or on its lookup worker. The first such call of the session blocks while
         it reads Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every
         page), which the session then keeps; a failed read is read again by the next call.
 

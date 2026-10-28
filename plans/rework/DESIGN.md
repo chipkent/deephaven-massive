@@ -1606,22 +1606,21 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   three-letter ISO 4217 codes; a crypto pair is `X:` and the two codes joined, whatever the
   quote. A stream needs the WebSocket form (`BTC-USD`), and two REST paths take the pair as
   two codes (`/v1/last/crypto/{from}/{to}` and `/v1/open-close/crypto/{from}/{to}/{date}`), so
-  the library splits a pair without a guess: where exactly one quote of `CRYPTO_QUOTES` ends
-  the ticker, that quote splits it; where none does (`X:BTCXYZ`) or several do (`X:DOTUSD`:
-  `DOT-USD` or `DO-TUSD`), the split comes from Massive's list of crypto tickers
+  the library splits a pair, never by a guess: the joined ticker does not say where its quote
+  starts (`X:DOTUSD` could be `DOT-USD` or `DO-TUSD`; `X:ETHWBTC` ends in `BTC` but quotes in
+  `WBTC`), so every split comes from Massive's list of crypto tickers
   (`/v3/reference/tickers?market=crypto`, every page, each row's `base_currency_symbol` and
-  `currency_symbol`, whose join must be the ticker). The session reads that list once, on first
+  `currency_symbol`, whose join must be the ticker); the library keeps no list of quote
+  currencies of its own. The session reads that list once, on first
   need, through its REST client, and keeps it for its life; a failed read is not kept, so the
-  next need reads it again. A stream needs it when it starts or when a symbol table adds such a
-  ticker (on the session's `crypto pairs` worker, section 18.1). A failed read refuses the
+  next need reads it again. A stream needs it when it starts or when a symbol table adds a
+  crypto ticker (on the session's `crypto pairs` worker, section 18.1). A failed read refuses the
   stream with the read's `MassiveError`, and a ticker the list does not hold, or whose
   currencies do not join to it, refuses it with a `MassiveError` naming the ticker; nothing
   falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
   fails a `poll()` table, since every later cycle would read the same list. Every other REST
-  path and every flat file needs no split. The list holds the
-  stablecoin quotes (`TUSD`, `PYUSD`, `FDUSD`, `BUSD`, `USDE`, `EURC`, `DAI`) so such a clash
-  is seen and resolved rather than mis-split, and a flat-file filter looks for a crypto pair
-  split at every point. Every grammar is
+  path and every flat file needs no split: a flat-file filter looks for a crypto pair split
+  at every point. Every grammar is
   matched against the whole text, so a trailing newline never passes. A dataset that spans classes
   (indicators, reference data, the unified `m.snapshots()`) declares no class: the prefix
   selects the grammar (`O:`, `I:`, `C:`, `X:`), and a symbol without one is a stock.
@@ -1722,8 +1721,8 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   `X:BTC-USD` and `C:EUR-USD`
   (https://massive.com/knowledge-base/article/why-doesnt-a-bar-from-the-rest-api-match-the-flat-files),
   and the forex quotes sample shows `X:EUR-USD`, so a request for `X:BTCUSD` or `C:EURUSD`
-  matches those rows, which hold the canonical ticker; a crypto pair whose quote is not in
-  `CRYPTO_QUOTES` is looked for split at every point.
+  matches those rows, which hold the canonical ticker; a crypto pair is looked for split at
+  every point, since its joined ticker does not say where its quote starts.
 - **The index prefix comes from the endpoint, never from the name.** A ticker without `I:` on
   a dataset of the indices class is read as `I:` and the ticker; on any other dataset it is a
   stock. No conversion looks a name up (`SPX` is never recognized as an index by its name).
@@ -2799,7 +2798,7 @@ without the GIL.
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
-| crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (a REST request, once per session) for a ticker a symbol table added that the quote list cannot split; then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | take `registry_lock` across the request; call Deephaven |
+| crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (a REST request, once per session) for each crypto ticker a symbol table adds; then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | take `registry_lock` across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
 
@@ -4547,11 +4546,12 @@ document already reflects them.
     written, with their own converter `canonical_symbol_future_spread` and no builder from legs;
     a futures dataset takes any ticker as written; a dataset of global third-party tickers
     (TMX) keeps them as written; under a convention only that convention's grammar applies;
-    any `X:` ticker is canonical, and a stream splits it by the quote list or, where that list
-    gives no single split, by Massive's crypto ticker list, read once per session, refusing a
-    ticker the list does not hold rather than guessing; under `WARN` a keyed `poll()` adds
-    `RawSymbol` to its key, so an unreadable row is kept by its text; a failed symbol table fails the result; an unreadable
-    WebSocket spelling fails every stream of the channel.
+    any `X:` ticker is canonical, and wherever a pair must be split (a stream, the last-trade
+    and daily open/close paths) its base and quote come only from Massive's crypto ticker
+    list, read once per session, and a ticker the list does not hold is refused rather than
+    guessed; under `WARN` a keyed `poll()` adds `RawSymbol` to its key, so an unreadable row
+    is kept by its text; a failed symbol table fails the result; an unreadable WebSocket
+    spelling fails every stream of the channel.
 
 ## 23. Open verification items
 
@@ -4612,4 +4612,4 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 45 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
 | 46 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 47 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
 | 47 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
-| 48 | Which crypto quote currencies Massive's pairs use beyond `CRYPTO_QUOTES` | Any `X:` ticker is canonical; a pair no single listed quote ends is split by Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, read once per session) wherever a split is needed (a stream, `/v1/last/crypto/{from}/{to}`, `/v1/open-close/crypto/{from}/{to}/{date}`), and a pair the list does not hold is refused there; every other path serves it | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_crypto.py`: `X:DOTUSD`, `X:SHIBUSD`, `X:USDTUSD`, and `X:BTCPYUSD` subscribe their own topics, and `X:BTCXYZ` unlisted is refused | `tests/namespaces/test_crypto_integration.py`: `reference.tickers(market=dm.Market.CRYPTO)`; record every quote outside the list and widen it |
+| 48 | Whether Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`) holds every pair its WebSocket channels and the last-trade and daily open/close paths serve, with a `base_currency_symbol` and `currency_symbol` that join to the ticker | Any `X:` ticker is canonical; wherever a pair must be split (a stream, `/v1/last/crypto/{from}/{to}`, `/v1/open-close/crypto/{from}/{to}/{date}`) the split comes only from that list, read once per session, and a pair the list does not hold, or whose currencies do not join to it, is refused there; every other path serves it | `tests/ingest/test_ws.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_crypto.py`: `X:DOTUSD`, `X:SHIBUSD`, `X:USDTUSD`, `X:BTCPYUSD`, and `X:ETHWBTC` subscribe the topic the list gives, and `X:BTCXYZ`, unlisted, is refused | `tests/namespaces/test_crypto_integration.py`: one read of the list; record every row whose currencies do not join to its ticker, and stream a sample of pairs to confirm their topics |

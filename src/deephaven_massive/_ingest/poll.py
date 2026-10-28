@@ -147,8 +147,8 @@ class UnlistedPairError(MassiveError):
     """A crypto ticker whose two currencies Massive's reference data does not give.
 
     A path that takes the pair as two currencies (`/v1/open-close/crypto/{from}/{to}/...`)
-    needs the split, and the quote list cannot decide it; the session's crypto ticker list,
-    read once, does not list the ticker, or gives currencies that do not join to it. A
+    needs the split, which only Massive's reference data gives; the session's crypto ticker
+    list, read once, does not list the ticker, or gives currencies that do not join to it. A
     `poll()` table fails with it, since every later cycle would read the same list.
     """
 
