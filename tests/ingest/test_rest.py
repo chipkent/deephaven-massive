@@ -1946,7 +1946,7 @@ def test_a_long_grouped_daily_download_is_announced(
 def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Any stamp of a forex 1-day bar moves to 00:00 UTC of its day, unchecked.
+    # The range's 00:00 UTC stays and the day's last millisecond moves to 00:00 UTC.
     march_3, march_4 = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 4))
     path = f"/v2/aggs/ticker/C:EURUSD/range/1/day/{march_3}/{utc_ms(date(2025, 3, 5)) - 1}"
     bars = [{"t": march_3, "c": 1.0}, {"t": march_4 + 86_400_000 - 1, "c": 2.0}]
@@ -1964,10 +1964,14 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         (march_3 * 10**6, 1.0),
         (march_4 * 10**6, 2.0),
     ]
-    # The grouped day of every pair, stamped anywhere in its day.
+    # The grouped day of every pair, stamped at its last millisecond.
     grouped = FOREX_GROUPED_PATH.format(date="2025-03-03")
-    new_york = ny_ms(date(2025, 3, 3))
-    fake_rest.reply(grouped, Reply(envelope([{"T": "C:EURUSD", "t": new_york, "c": 3.0}])))
+    last_ms, new_york = march_4 - 1, ny_ms(date(2025, 3, 3))
+    fake_rest.reply(
+        grouped,
+        Reply(envelope([{"T": "C:EURUSD", "t": last_ms, "c": 3.0}])),
+        Reply(envelope([{"T": "C:EURUSD", "t": new_york, "c": 3.0}])),
+    )
     every = history(
         session,
         FOREX_BARS,
@@ -1978,6 +1982,21 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         adjusted=True,
     )
     assert [(r["Symbol"], r["Timestamp"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
+    # A stamp at midnight New York time is another day cut: it fails loudly.
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^forex\.bars: a 1-day bar from /v2/aggs/grouped/locale/global/market/fx/\{date\} "
+        r"is stamped 2025-03-03T05:00:00\+00:00 \(2025-03-03T05:00:00\+00:00 in UTC\)",
+    ):
+        history(
+            session,
+            FOREX_BARS,
+            start="2025-03-03",
+            end="2025-03-03",
+            symbols=dm.ALL,
+            timespan=Timespan.DAY,
+            adjusted=True,
+        )
 
 
 def test_a_history_by_instants_is_not_announced_however_many_symbols(
@@ -2018,8 +2037,9 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
     with pytest.raises(
         dm.MassiveError,
         match=r"^crypto\.bars: a bar from /v2/aggs/ticker/\{cryptoTicker\}/range/.* is stamped "
-        r"2025-03-03T05:00:00\+00:00, which is not a UTC day boundary.*source=dm\.HistorySource"
-        r"\.FLAT_FILES",
+        r"2025-03-03T05:00:00\+00:00 \(2025-03-03T05:00:00\+00:00 in UTC\), which is not a "
+        r"time of day Massive is known to stamp such a bar at \(00:00:00\.000 in UTC\).*"
+        r"source=dm\.HistorySource\.FLAT_FILES",
     ):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     # A week bar at 00:00 UTC Monday is kept as stamped.

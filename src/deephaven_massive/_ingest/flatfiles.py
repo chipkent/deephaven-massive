@@ -16,8 +16,10 @@ to keep.
   `pyarrow.compute.is_in` (symbol pushdown) and to the window's `Timestamp` range (for bars,
   the starts of the bars whose whole window fits the range); only the surviving rows are
   renamed to the dataset's columns, have their condition and indicator lists parsed, and are
-  converted to the column types here. Forex and crypto 1-day bars, which `day_aggs_v1` stamps
-  at 23:59:59.999 UTC, are stamped at 00:00 UTC of their day (`timestamps.utc_day_stamps`). The
+  converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's start, the
+  16:00 New York session close (stocks), midnight in Chicago (indices), or 23:59:59.999 UTC
+  (forex and crypto), are stamped at 00:00 of their day in the class day zone
+  (`history_source.stamp_rule`). The
   headers, their types, and their timestamp units are the prefix's generated fields
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
   columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
@@ -109,7 +111,6 @@ from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
     to_epoch_ns_array,
-    utc_day_stamps,
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue
 from deephaven_massive._errors import (
@@ -271,11 +272,9 @@ class _Transform:
             fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
         session_header: For futures, the header that holds the session date; None otherwise.
-        day_source: For forex and crypto 1-day bars, the prefix the bars come from, whose
-            stamps move to 00:00 UTC of their day (`timestamps.utc_day_stamps`); None
-            otherwise.
-        checked_days: True when a 1-day bar stamped elsewhere in its UTC day than its first
-            or last millisecond fails the read (crypto).
+        prefix: The prefix the files come from, for messages.
+        stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
+            zone (`history_source.stamp_rule`); None otherwise.
     """
 
     dataset: str
@@ -283,8 +282,8 @@ class _Transform:
     columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
     arrow_schema: pa.Schema
     session_header: str | None
-    day_source: str | None = None
-    checked_days: bool = False
+    prefix: str = ""
+    stamps: StampRule | None = None
 
     @classmethod
     def build(
@@ -295,7 +294,7 @@ class _Transform:
         prefix: str,
         symbols: NormalizedSymbols | None,
         window: HistoryWindow,
-        stamps: StampRule = StampRule.KEEP,
+        stamps: StampRule | None = None,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -313,8 +312,8 @@ class _Transform:
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
                 every time of their files, which hold exactly the requested sessions.
-            stamps: How the bars' stamps are treated (`history_source.stamp_rule`); the
-                files hold only 1-day bars of the rules other than `KEEP`.
+            stamps: How the bars' stamps are treated (`history_source.stamp_rule`), or None
+                to keep them; the files hold only 1-day bars of the classes that have one.
 
         Returns:
             The transform.
@@ -357,8 +356,8 @@ class _Transform:
             columns=tuple((c.type, c.name, by_column.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
             session_header=session_header,
-            day_source=None if stamps is StampRule.KEEP else prefix,
-            checked_days=stamps is StampRule.UTC_DAY_CHECKED,
+            prefix=prefix,
+            stamps=stamps,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -391,8 +390,8 @@ class _Transform:
 
         A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
         `timestamps.instants`.
-        A crypto 1-day bar stamped elsewhere in its UTC day than its first or last millisecond
-        raises the `MassiveError` of `timestamps.utc_day_stamps`.
+        A 1-day bar stamped at a time of day Massive is not known to use raises the
+        `MassiveError` of `timestamps.day_starts`.
         """
         arrays = [self._column(batch, column) for column in self.columns]
         return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
@@ -418,13 +417,11 @@ class _Transform:
             label = f"{self.dataset}.{name}"
             values = instants(label, source.unit, values, time_column=name == "Timestamp")
         values = widen(values, column_type.arrow_type)
-        if name == "Timestamp" and self.day_source is not None:
-            source_label = f"the flat files {self.day_source}"
-            values = utc_day_stamps(
+        if name == "Timestamp" and self.stamps is not None:
+            values = self.stamps.stamp(
                 self.dataset,
                 values,
-                source=source_label,
-                checked=self.checked_days,
+                source=f"the flat files {self.prefix}",
                 remedy="read REST with source=dm.HistorySource.REST",
             )
         return values

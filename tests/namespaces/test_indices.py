@@ -642,6 +642,53 @@ def test_bars_history_over_rest_fills_the_range_and_the_symbol(
     ]
 
 
+HOUR_MS = 3_600_000
+DAY_MS = 86_400_000
+
+
+def bars_reply(*stamps: int) -> Reply:
+    return Reply({"status": "OK", "results": [{"T": "I:SPX", "t": t, "c": 1.0} for t in stamps]})
+
+
+def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The range stamps a day at midnight in Chicago (01:00 New York time), `/prev` at the
+    # 16:00 close; both mean the New York day, stamped at its start.
+    day = date(2025, 6, 2)
+    day_path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + DAY_MS - 1}"
+    fake_rest.reply(quote(day_path), bars_reply(MIDNIGHT_MS + HOUR_MS))
+    fake_rest.reply(
+        quote(PREVIOUS.format(indicesTicker="I:SPX")), bars_reply(MIDNIGHT_MS + 16 * HOUR_MS)
+    )
+    q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
+    ranged = rows(q.history(day, day, source=dm.HistorySource.REST))
+    assert [r["Timestamp"] for r in ranged] == [MIDNIGHT_MS * MS]
+    assert [r["Timestamp"] for r in rows(q.fetch())] == [MIDNIGHT_MS * MS]
+    # A week bar stamped 01:00 on the Sunday before its week moves to that Sunday's midnight.
+    saturday, sunday = MIDNIGHT_MS - 2 * DAY_MS, MIDNIGHT_MS - DAY_MS
+    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{saturday}/{MIDNIGHT_MS + 5 * DAY_MS - 1}"
+    fake_rest.reply(
+        quote(week_path), bars_reply(sunday + HOUR_MS), bars_reply(sunday + 16 * HOUR_MS)
+    )
+    week = rest_session.indices.bars("I:SPX", dm.Timespan.WEEK)
+    friday = date(2025, 6, 6)
+    weeks = rows(week.history(day, friday, source=dm.HistorySource.REST))
+    assert [r["Timestamp"] for r in weeks] == [sunday * MS]
+    # A week bar at the close, or a day bar at 02:00, is another cut: each fails loudly.
+    with pytest.raises(
+        dm.MassiveError, match=r"^indices\.bars: a bar from .* is stamped 2025-06-01T20:00:00"
+    ):
+        week.history(day, friday, source=dm.HistorySource.REST)
+    fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^indices\.bars: a 1-day bar from /v2/aggs/ticker/\{indicesTicker\}/range/.* is "
+        r"stamped 2025-06-02T06:00:00\+00:00 \(2025-06-02T02:00:00-04:00 in America/New_York\)",
+    ):
+        q.history(day, day, source=dm.HistorySource.REST)
+
+
 def test_daily_open_close_fetches_each_index_for_the_day(
     *,
     rest_session: dm.MassiveSession,
@@ -852,6 +899,8 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             [("I:SPX", 1748871000 * NS, 5899.02)],
         ),
         (
+            # The file stamps the day at midnight in Chicago, 01:00 New York time, as Massive's
+            # sample does; it is stamped at the New York day's start.
             "us_indices/day_aggs_v1",
             "us_indices_day_aggs_v1_2025-06-02.csv",
             [("I:SPX", MIDNIGHT_MS * MS, 5935.94)],

@@ -14,9 +14,10 @@ import functools
 import inspect
 import json
 import threading
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
+from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
@@ -76,6 +77,10 @@ NAMES = (
     "contracts",
     "daily_open_close",
 )
+
+
+def ny_midnight_ns(day: date) -> int:
+    return int(datetime.combine(day, time(), ZoneInfo("America/New_York")).timestamp()) * 10**9
 
 
 def request_of(query: QueryBase) -> dict[str, Any]:
@@ -659,8 +664,10 @@ def test_bars_fetch_the_previous_session_and_read_a_range(
     fake_rest.reply(wire(f"/v2/aggs/ticker/{TSLA}/prev"), Reply(body(load_fixture, "prev.json")))
     prev = rows(rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
+    # `/prev` stamps the bar at the 16:00 New York close (1605042000000); it is moved to the
+    # start of its New York day, as the range stamps it.
     assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Volume"]) for r in prev] == [
-        (TSLA, 1605042000000 * 10**6, 115.97, 131704427.0)
+        (TSLA, ny_midnight_ns(date(2020, 11, 10)), 115.97, 131704427.0)
     ]
 
     contract = "O:RDFN211119C00025000"
@@ -681,6 +688,23 @@ def test_bars_fetch_the_previous_session_and_read_a_range(
         (contract, 1632369600000 * 10**6, 26.2),
         (contract, 1632456000000 * 10**6, 28.3),
     ]
+
+
+def test_a_daily_bar_stamped_off_a_known_time_fails_loudly(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # 13:00 New York time is neither the day's start nor the session close.
+    early = int(datetime(2024, 11, 29, 18, tzinfo=UTC).timestamp()) * 1000
+    fake_rest.reply(
+        wire(f"/v2/aggs/ticker/{TSLA}/prev"),
+        Reply({"status": "OK", "results": [{"T": TSLA, "t": early, "c": 1.0}]}),
+    )
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^options\.bars: a 1-day bar from /v2/aggs/ticker/\{optionsTicker\}/prev is "
+        r"stamped 2024-11-29T18:00:00\+00:00 \(2024-11-29T13:00:00-05:00 in America/New_York\)",
+    ):
+        rest_session.options.bars(TSLA, dm.Timespan.DAY).fetch()
 
 
 def test_chain_reads_one_underlying(

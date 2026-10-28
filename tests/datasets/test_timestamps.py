@@ -1,7 +1,9 @@
 """Tests for the unit of each epoch field and the timestamp routine."""
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, tzinfo
+from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
@@ -13,14 +15,13 @@ from deephaven_massive._datasets.timestamps import (
     MIN_INSTANT_NS,
     TimeUnit,
     UnitMismatchError,
-    check_utc_midnights,
+    day_starts,
     instants,
     masked_instants,
     mismatch_message,
     time_unit,
     to_epoch_ns,
     to_epoch_ns_array,
-    utc_day_stamps,
 )
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType, WireUnit, source, sources
@@ -246,64 +247,103 @@ def test_a_masked_failure_reads_as_the_routine_would_raise_it() -> None:
 
 
 DAY_NS = 86_400 * 10**9
+HOUR_NS = 3600 * 10**9
+MS_NS = 10**6
 MARCH_3 = 1_740_960_000 * 10**9  # 2025-03-03T00:00Z
+NEW_YORK = ZoneInfo("America/New_York")
+CLOSE = time(16)
+LAST_MS = time(23, 59, 59, 999_000)
 
 
 def stamps(*values: int | None) -> pa.Array:
     return pa.array(values, pa.timestamp("ns", "UTC"))
 
 
-def test_utc_day_stamps_move_each_bar_to_its_days_start() -> None:
-    # The aggregates' 00:00 UTC stays; day_aggs_v1's 23:59:59.999 UTC moves to its day's start.
-    last_ms = MARCH_3 + DAY_NS - 10**6
-    values = stamps(MARCH_3, last_ms, None)
-    for checked in (True, False):
-        moved = utc_day_stamps("crypto.bars", values, source="REST", checked=checked, remedy="r")
-        assert moved.type == values.type
-        assert moved.cast(pa.int64()).to_pylist() == [MARCH_3, MARCH_3, None]
-    # A stamp anywhere in the first or last millisecond counts as that boundary.
-    edge = stamps(MARCH_3 + 999_999, MARCH_3 + DAY_NS - 1)
-    assert utc_day_stamps("crypto.bars", edge, source="x", checked=True, remedy="r").cast(
-        pa.int64()
-    ).to_pylist() == [MARCH_3, MARCH_3]
+def ns(moment: datetime) -> int:
+    return int(moment.timestamp()) * 10**9 + moment.microsecond * 1000
 
 
-def test_forex_day_stamps_move_any_stamp_of_the_day() -> None:
-    new_york_midnight = MARCH_3 + 5 * 3600 * 10**9
-    moved = utc_day_stamps(
-        "forex.bars", stamps(new_york_midnight), source="x", checked=False, remedy="r"
+def starts(values: pa.Array, zone: tzinfo, *known: time, what: str = "1-day bar") -> list[Any]:
+    moved = day_starts(
+        "x.bars", values, zone=zone, known=known, source="src", what=what, remedy="r"
     )
-    assert moved.cast(pa.int64()).to_pylist() == [MARCH_3]
+    assert moved.type == values.type
+    return cast("list[Any]", moved.cast(pa.int64()).to_pylist())
 
 
-@pytest.mark.parametrize("offset", [10**6, 5 * 3600 * 10**9, DAY_NS - 10**6 - 1])
-def test_a_crypto_stamp_inside_its_day_fails_loudly(offset: int) -> None:
+def test_utc_day_stamps_move_each_known_stamp_to_its_days_start() -> None:
+    # The aggregates' 00:00 UTC stays; day_aggs_v1's 23:59:59.999 UTC moves to its day's start.
+    last_ms = MARCH_3 + DAY_NS - MS_NS
+    assert starts(stamps(MARCH_3, last_ms, None), UTC, LAST_MS) == [MARCH_3, MARCH_3, None]
+    # A stamp anywhere in the first or last millisecond counts as that boundary.
+    edge = stamps(MARCH_3 + MS_NS - 1, MARCH_3 + DAY_NS - 1)
+    assert starts(edge, UTC, LAST_MS) == [MARCH_3, MARCH_3]
+
+
+def test_new_york_stamps_move_by_wall_clock_across_daylight_saving_time() -> None:
+    # 16:00 New York is 21:00 UTC in winter and 20:00 UTC in summer; both are the close.
+    winter, summer = date(2025, 3, 7), date(2025, 3, 10)  # the clocks change on 03-09
+    days = [datetime.combine(d, time(), NEW_YORK) for d in (winter, summer)]
+    closes = [datetime.combine(d, CLOSE, NEW_YORK) for d in (winter, summer)]
+    values = stamps(*(ns(moment) for moment in [*days, *closes]))
+    assert starts(values, NEW_YORK, CLOSE) == [ns(day) for day in days * 2]
+    # Midnight in Chicago is 01:00 New York time all year.
+    chicago = datetime(2025, 7, 1, tzinfo=ZoneInfo("America/Chicago"))
+    expected = ns(datetime(2025, 7, 1, tzinfo=NEW_YORK))
+    assert starts(stamps(ns(chicago)), NEW_YORK, time(1)) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("zone", "known", "offset"),
+    [
+        (UTC, (LAST_MS,), MS_NS),
+        (UTC, (LAST_MS,), 5 * HOUR_NS),  # midnight New York time: another day cut
+        (UTC, (LAST_MS,), DAY_NS - MS_NS - 1),
+        (UTC, (), DAY_NS - MS_NS),  # a longer bar must start at 00:00
+        (NEW_YORK, (CLOSE,), 5 * HOUR_NS + 13 * HOUR_NS),  # a 13:00 early close
+        (NEW_YORK, (CLOSE,), 5 * HOUR_NS + 16 * HOUR_NS + MS_NS),  # a millisecond after 16:00
+        (NEW_YORK, (CLOSE,), 0),  # 19:00 New York time, the day before
+        (NEW_YORK, (), 5 * HOUR_NS + 16 * HOUR_NS),  # a longer bar at the close
+    ],
+)
+def test_an_unknown_stamp_fails_loudly(zone: tzinfo, known: tuple[time, ...], offset: int) -> None:
     with pytest.raises(
-        MassiveError, match=r"^crypto\.bars: a 1-day bar from /v2/aggs/x is stamped 2025-03-03T"
+        MassiveError, match=r"^crypto\.bars: a bar from /v2/aggs/x is stamped 2025-03-0"
     ) as caught:
-        utc_day_stamps(
+        day_starts(
             "crypto.bars",
-            stamps(MARCH_3, MARCH_3 + offset),
+            stamps(MARCH_3 + 5 * HOUR_NS, MARCH_3 + offset),
+            zone=zone,
+            known=known,
             source="/v2/aggs/x",
-            checked=True,
+            what="bar",
             remedy="read the flat files",
         )
     message = str(caught.value)
-    assert "is not a UTC day boundary" in message
+    assert f" in {zone}), which is not a time of day Massive is known to stamp such a bar at (" in (
+        message
+    )
     assert message.endswith(
         "; read the flat files, and report the stamp so the day cut can be settled"
     )
 
 
-def test_longer_crypto_bars_must_start_at_utc_midnight() -> None:
-    week = stamps(MARCH_3, MARCH_3 + 7 * DAY_NS, None)
-    check_utc_midnights("crypto.bars", week, source="x", remedy="r")  # no error
-    new_york = MARCH_3 + 5 * 3600 * 10**9
-    with pytest.raises(
-        MassiveError, match=r"^crypto\.bars: a bar from /v2/aggs/x is stamped 2025-03-03T05:00"
-    ):
-        check_utc_midnights(
-            "crypto.bars", stamps(MARCH_3, new_york), source="/v2/aggs/x", remedy="r"
+def test_the_refusal_names_the_stamp_in_both_zones_and_the_accepted_times() -> None:
+    close = datetime(2024, 11, 29, 13, tzinfo=NEW_YORK)
+    with pytest.raises(MassiveError) as caught:
+        day_starts(
+            "stocks.bars",
+            stamps(ns(close)),
+            zone=NEW_YORK,
+            known=(CLOSE,),
+            source="the flat files us_stocks_sip/day_aggs_v1",
+            what="1-day bar",
+            remedy="read REST",
         )
-    with pytest.raises(MassiveError, match="is not a UTC day boundary"):
-        check_utc_midnights("crypto.bars", stamps(MARCH_3 + DAY_NS - 1), source="x", remedy="r")
+    assert str(caught.value) == (
+        "stocks.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is stamped "
+        "2024-11-29T18:00:00+00:00 (2024-11-29T13:00:00-05:00 in America/New_York), which is "
+        "not a time of day Massive is known to stamp such a bar at (00:00:00.000, 16:00:00.000 "
+        "in America/New_York), so it may cover other days than the one it would be labelled "
+        "with; read REST, and report the stamp so the day cut can be settled"
+    )

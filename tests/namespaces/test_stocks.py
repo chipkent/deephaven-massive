@@ -767,8 +767,10 @@ def test_daily_bars_fetch_the_previous_session(
     serve(fake_rest, load_fixture, bars_prev="/v2/aggs/ticker/AAPL/prev")
     out = table_rows(rest_session.stocks.bars("AAPL", dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/AAPL/prev", {"adjusted": "true"})]
+    # `/prev` stamps the bar at the 16:00 New York close (1605042000000); it is moved to the
+    # start of its New York day, as the range stamps it.
     assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
-        ("AAPL", 1605042000000 * 10**6, 115.97, 116.3058)
+        ("AAPL", new_york_midnight_ns(date(2020, 11, 10)), 115.97, 116.3058)
     ]
 
 
@@ -793,7 +795,8 @@ def test_all_daily_bars_read_the_grouped_daily_path(
     query = rest_session.stocks.bars(dm.ALL, dm.Timespan.DAY)
     out = table_rows(query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"adjusted": "true"})]
-    assert {r["Timestamp"] for r in out} == {1602705600000 * 10**6}
+    # Grouped daily stamps its bars at the 16:00 close (1602705600000), moved to the day's start.
+    assert {r["Timestamp"] for r in out} == {new_york_midnight_ns(date(2020, 10, 14))}
     assert len(out) == 3
 
 
@@ -1335,6 +1338,69 @@ def flat_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
     m.close()
 
 
+def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
+    *, fake_rest: FakeRestServer, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # The range stamps a day at its start; grouped daily, `/prev`, and the files at the close.
+    day = date(2023, 3, 28)
+    start = new_york_midnight_ns(day)
+    close = start // 10**6 + 16 * 3_600_000
+    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
+    )
+    after = new_york_midnight_ns(date(2023, 3, 29)) // 10**6 - 1
+    fake_rest.reply(
+        f"/v2/aggs/ticker/BCC/range/1/day/{start // 10**6}/{after}",
+        Reply({"status": "OK", "results": [{"t": start // 10**6, "c": 61.99}]}),
+    )
+    bar = {"T": "BCC", "t": close, "c": 61.99}
+    fake_rest.reply("/v2/aggs/ticker/BCC/prev", Reply({"status": "OK", "results": [bar]}))
+    fake_rest.reply(
+        "/v2/aggs/grouped/locale/us/market/stocks/2023-03-28",
+        Reply({"status": "OK", "results": [bar]}),
+    )
+    fake_s3.put(
+        "us_stocks_sip/day_aggs_v1/2023/03/2023-03-28.csv.gz",
+        make_csv_gz(
+            "ticker,volume,open,close,high,low,window_start,transactions\n"
+            f"BCC,248274,61.68,61.99,62.565,61.41,{close * 10**6},4073\n"
+        ),
+    )
+    with dm.MassiveSession(config) as m:
+        bars = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
+        every = m.stocks.bars(dm.ALL, dm.Timespan.DAY, adjusted=False)
+        tables = [
+            bars.history(day, day, source=dm.HistorySource.REST),
+            every.history(day, day, source=dm.HistorySource.REST),
+            bars.history(day, day, source=dm.HistorySource.FLAT_FILES),
+            m.stocks.bars("BCC", dm.Timespan.DAY).fetch(),
+        ]
+        stamped = [[(r["Symbol"], r["Timestamp"]) for r in table_rows(t)] for t in tables]
+    assert stamped == [[("BCC", start)]] * 4
+
+
+def test_a_day_file_stamped_at_an_early_close_fails_loudly(
+    *, flat_session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # 13:00 New York time, the close of a short day, is not a stamp Massive is known to use.
+    early = new_york_midnight_ns(date(2024, 11, 29)) + 13 * 3600 * 10**9
+    fake_s3.put(
+        "us_stocks_sip/day_aggs_v1/2024/11/2024-11-29.csv.gz",
+        make_csv_gz(
+            "ticker,volume,open,close,high,low,window_start,transactions\n"
+            f"BCC,1,61.68,61.99,62.565,61.41,{early},1\n"
+        ),
+    )
+    query = flat_session.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^stocks\.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is "
+        r"stamped 2024-11-29T18:00:00\+00:00 .*; read REST with source=dm\.HistorySource\.REST",
+    ):
+        query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES)
+
+
 # Each flat-file prefix: the call, the file's fixture (the vendor's documented example rows,
 # with one AAPL row added to prove the symbol filter, and the minute bars' 17-digit sample
 # times written as the nanoseconds the files carry), and the rows `history()` returns for one
@@ -1366,7 +1432,8 @@ FLAT_CASES: list[tuple[str, Callable[[Any], HistoryQuery], str, str, list[tuple[
         lambda s: s.bars(["BCC"], dm.Timespan.DAY, adjusted=False),
         "day_aggs_v1_2023-03-28.csv",
         "Close",
-        [("BCC", 1680033600000000000, 61.99)],
+        # Stamped at the 16:00 New York close in the file, at the start of its day here.
+        [("BCC", 1679976000000000000, 61.99)],
     ),
 ]
 

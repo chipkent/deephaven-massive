@@ -36,13 +36,13 @@ Every nanosecond value after 1973-03-03 is at least 10**17 and a millisecond val
 10**17 only in the year 3,170,000, so the rule cannot misclassify. The unit is picked per value
 before step 2, and the detected unit is logged once at INFO.
 
-**1-day bars of forex and crypto** (`utc_day_stamps`) mean the UTC day on every source, but
-Massive stamps them differently: 00:00 UTC on the aggregates range, 23:59:59.999 UTC in the
-`day_aggs_v1` flat files. Each stamp is moved to 00:00 UTC of its day. For crypto, whose cut
-is not verified (older REST samples sit at midnight New York time), a stamp at any other
-millisecond of the UTC day than its first or last raises `MassiveError`, so a bar of another
-day cut is never returned under a UTC label. A crypto bar of several days or longer from REST
-must be stamped 00:00 UTC for the same reason (`check_utc_midnights`).
+**Bars of a day or longer** (`day_starts`) are stamped at 00:00 of the day they start on, in
+the class day zone, whichever source serves them. Massive stamps the same bar differently by
+source (the day's start on the aggregates range, the 16:00 New York session close on the stock
+grouped daily and `/prev`, the day's last millisecond in the forex and crypto day files), so
+each stamp at a time of day Massive is known to use moves to that day's 00:00, and any other
+raises `MassiveError`, so a bar of another day cut is never returned under a label it may not
+match. Which times each class accepts is decided by `history_source.stamp_rule`.
 
 The bound applies to epoch integers only, never to ISO-8601 text, so a pre-1990 date written as
 text stays valid. The module is pure: it makes no Deephaven or network call, and its only state
@@ -52,7 +52,7 @@ is the once-only log line.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
@@ -63,7 +63,8 @@ from deephaven_massive._errors import MassiveError, log_once
 from deephaven_massive._massive import Transport
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
+    from datetime import tzinfo
 
     from deephaven_massive._massive import Field, Source
 
@@ -73,14 +74,13 @@ __all__ = [
     "MIN_INSTANT_NS",
     "TimeUnit",
     "UnitMismatchError",
-    "check_utc_midnights",
+    "day_starts",
     "instants",
     "masked_instants",
     "mismatch_message",
     "time_unit",
     "to_epoch_ns",
     "to_epoch_ns_array",
-    "utc_day_stamps",
 ]
 
 logger = logging.getLogger(__name__)
@@ -364,79 +364,93 @@ def _overflows(unit: TimeUnit, value: int) -> bool:
     return abs(value * _NS_PER[_fixed(unit, value)]) > _INT64_MAX
 
 
-_DAY_NS: Final = 86_400 * 10**9
 _MS_NS: Final = 10**6
-_LAST_MS_NS: Final = _DAY_NS - _MS_NS
-"""The first nanosecond of the last millisecond of a day: 23:59:59.999."""
 
 
-def utc_day_stamps(
-    label: str, values: pa.Array, *, source: str, checked: bool, remedy: str
+def day_starts(
+    label: str,
+    values: pa.Array,
+    *,
+    zone: tzinfo,
+    known: Collection[time],
+    source: str,
+    what: str,
+    remedy: str,
 ) -> pa.Array:
-    """Move the stamps of 1-day bars to 00:00 UTC of the day each one falls on.
+    """Stamp each bar at 00:00 of the day it falls on, refusing a stamp of an unknown form.
 
-    A forex or crypto 1-day bar covers one UTC day. The aggregates range stamps it at the
-    day's 00:00 UTC, and the `day_aggs_v1` flat files at its last millisecond (23:59:59.999
-    UTC); both become 00:00 UTC of that day, so every source labels a day alike.
+    Massive stamps the same bar of a day or longer differently by source: at the start of the
+    day on the aggregates range, at the session close (16:00 New York time) on the stock
+    grouped daily and `/prev`, at the day's last millisecond in the forex day files. Each
+    stamp whose wall-clock time of day in `zone`, to the millisecond, is 00:00 or one of
+    `known` moves to 00:00 of its date there, so every source labels a bar alike. Any other
+    stamp raises: the bar may cover other days than the one it would be labelled with, so it
+    is never relabelled.
 
     Args:
-        label: The dataset, for the message, such as `"crypto.bars"`.
+        label: The dataset, for the message, such as `"stocks.bars"`.
         values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
+        zone: The class day zone: New York for stocks, options, and indices; UTC for forex and
+            crypto. Its midnights start the bars' days, daylight saving time included.
+        known: The other wall-clock times of day, in `zone`, at which Massive is known to
+            stamp these bars; empty when only 00:00 is accepted.
         source: Where the bars came from, for the message, such as a REST path template or a
             flat-file prefix.
-        checked: True to refuse a stamp that is neither the first nor the last millisecond of
-            its UTC day (crypto, whose day cut is not verified); False to move any stamp to its
-            day's start (forex).
+        what: The kind of bar, for the message, such as `"1-day bar"`.
         remedy: What the caller can do instead, for the message, such as reading the other
             source.
 
     Returns:
-        The stamps at 00:00 UTC, in the same type; nulls stay null.
+        The stamps at 00:00 of their day in `zone`, in the type of `values`; nulls stay null.
 
-    If `checked`, a stamp elsewhere in its UTC day raises the `MassiveError` of `_refuse`,
-    naming the dataset, the source, the stamp, and `remedy`: such a bar would cover another
-    day than the UTC day it would be labelled with.
+    A stamp at any other time of day raises the `MassiveError` of `_refuse`, naming the
+    dataset, the source, the stamp in UTC and in `zone`, the accepted times, and `remedy`.
     """
-    ns = values.cast(pa.int64())
-    days = pc.divide(ns, _DAY_NS)  # epoch nanoseconds of bars are positive: this floors
-    starts = pc.multiply(days, _DAY_NS)
-    if checked:
-        offset = pc.subtract(ns, starts)
-        odd = pc.and_(pc.greater_equal(offset, _MS_NS), pc.less(offset, _LAST_MS_NS))
-        _refuse(label, ns, odd, source=source, what="1-day bar", remedy=remedy)
-    return starts.cast(values.type)
+    name = str(zone)
+    local = pc.local_timestamp(values.cast(pa.timestamp("ns", name)))
+    midnight = pc.floor_temporal(local, unit="day")
+    # Both are wall-clock nanoseconds of the same day, so the difference is positive and the
+    # integer division floors it to the millisecond.
+    offset = pc.divide(pc.subtract(local.cast(pa.int64()), midnight.cast(pa.int64())), _MS_NS)
+    accepted = pa.array(sorted({0, *(_millisecond_of_day(moment) for moment in known)}), pa.int64())
+    odd = pc.and_(pc.is_valid(offset), pc.invert(pc.is_in(offset, value_set=accepted)))
+    _refuse(label, values, odd, zone=zone, known=known, source=source, what=what, remedy=remedy)
+    return pc.assume_timezone(midnight, timezone=name).cast(values.type)
 
 
-def check_utc_midnights(label: str, values: pa.Array, *, source: str, remedy: str) -> None:
-    """Refuse bars of several days or longer whose stamps are not 00:00 UTC.
-
-    A crypto bar of several days, a week, or longer is built from UTC days, so it must start at
-    a UTC midnight; one stamped at midnight New York time would cover hours of the day after
-    its last one, while its stamp places it inside the requested days.
+def _millisecond_of_day(moment: time) -> int:
+    """Return a wall-clock time of day as whole milliseconds since midnight.
 
     Args:
-        label: The dataset, for the message, such as `"crypto.bars"`.
-        values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
-        source: Where the bars came from, for the message: a REST path template.
-        remedy: What the caller can do instead, for the message.
+        moment: The time of day, naive.
 
-    A stamp that is not 00:00 UTC raises the `MassiveError` of `_refuse`, naming the dataset,
-    the source, the stamp, and `remedy`.
+    Returns:
+        The milliseconds; a fraction of a millisecond is dropped.
     """
-    ns = values.cast(pa.int64())
-    odd = pc.not_equal(pc.multiply(pc.divide(ns, _DAY_NS), _DAY_NS), ns)
-    _refuse(label, ns, odd, source=source, what="bar", remedy=remedy)
+    return ((moment.hour * 60 + moment.minute) * 60 + moment.second) * 1000 + (
+        moment.microsecond // 1000
+    )
 
 
 def _refuse(
-    label: str, ns: pa.Array, odd: pa.Array, *, source: str, what: str, remedy: str
+    label: str,
+    values: pa.Array,
+    odd: pa.Array,
+    *,
+    zone: tzinfo,
+    known: Collection[time],
+    source: str,
+    what: str,
+    remedy: str,
 ) -> None:
-    """Raise for the first bar a mask marks as off the UTC day cut, if any.
+    """Raise for the first bar a mask marks as stamped at an unknown time of day, if any.
 
     Args:
         label: The dataset, for the message.
-        ns: The stamps, as epoch nanoseconds.
-        odd: True for each stamp that is off the cut; null for a null stamp.
+        values: The stamps, an Arrow `timestamp("ns", "UTC")` array.
+        odd: True for each refused stamp; False for an accepted or null one.
+        zone: The class day zone.
+        known: The accepted times of day besides 00:00.
         source: Where the bars came from, for the message.
         what: The kind of bar, for the message, such as `"1-day bar"`.
         remedy: What the caller can do instead, for the message.
@@ -446,10 +460,13 @@ def _refuse(
     """
     if not pc.any(odd).as_py():
         return
-    bad_ns = pc.filter(ns, odd)[0].as_py()
+    bad_ns = pc.filter(values.cast(pa.int64()), odd)[0].as_py()
     bad = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=bad_ns // 1000)
+    times = ", ".join(t.isoformat("milliseconds") for t in sorted({time(0), *known}))
     raise MassiveError(
-        f"{label}: a {what} from {source} is stamped {bad.isoformat()}, which is not a UTC day "
-        "boundary, so it does not cover the UTC days it would be labelled with; "
-        f"{remedy}, and report the stamp so the day cut can be settled"
+        f"{label}: a {what} from {source} is stamped {bad.isoformat()} "
+        f"({bad.astimezone(zone).isoformat()} in {zone}), which is not a time of day Massive is "
+        f"known to stamp such a bar at ({times} in {zone}), so it may cover other days than the "
+        f"one it would be labelled with; {remedy}, and report the stamp so the day cut can be "
+        "settled"
     )

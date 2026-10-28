@@ -27,6 +27,8 @@ from deephaven_massive._datasets.timestamps import TimeUnit
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
+from deephaven_massive._namespaces import crypto, forex, futures, indices, stocks
+from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.columns import col_defs
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -858,4 +860,36 @@ def test_a_key_part_without_text_names_the_key_and_repeats_once() -> None:
     schema = dataset_schema(dataset, (dataset,), lambda *_: made)
     assert schema.columns[0].description == (
         "The instrument, in the library's canonical symbol form. REST `sym`."
+    )
+
+
+def timestamp_description(dataset: DatasetSpec) -> str:
+    columns = CATALOG.dataset_schema(dataset).columns
+    return next(c.description for c in columns if c.name == "Timestamp")
+
+
+@pytest.mark.parametrize(
+    ("dataset", "zone"),
+    [
+        (stocks.BARS, "New York time"),
+        (indices.BARS, "New York time"),
+        (forex.BARS, "UTC"),
+        (crypto.BARS, "UTC"),
+        (futures.BARS, None),
+    ],
+)
+def test_a_bars_timestamp_is_described_as_the_window_start(
+    dataset: DatasetSpec, zone: str | None
+) -> None:
+    # Some sources' own text calls their stamp the window's end; the library's never is.
+    described = timestamp_description(dataset)
+    sentence = "The start of the bar's window, as an Instant."
+    if zone is not None:
+        sentence += (
+            f" A bar of a day or longer is stamped at 00:00 {zone} of the day it starts on, "
+            "on every source, whatever time of day the source stamps it with."
+        )
+    assert described.startswith(f"{sentence} REST `")
+    assert timestamp_description(stocks.TRADES).startswith(
+        "The row's primary time, as an Instant. REST `"
     )

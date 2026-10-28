@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+import pyarrow as pa
 import pytest
 
 import deephaven_massive as dm
@@ -274,17 +275,50 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
 
 
 def test_stamp_rule() -> None:
+    # 1-day bars accept each class's documented vendor stamps; longer bars only the start.
     day = request(timespan=Timespan.DAY)
-    assert stamp_rule(FOREX_BARS, day) is StampRule.UTC_DAY
-    assert stamp_rule(CRYPTO_BARS, day) is StampRule.UTC_DAY_CHECKED
-    assert stamp_rule(STOCK_BARS, day) is StampRule.KEEP
-    assert stamp_rule(FOREX_BARS, request(timespan=Timespan.MINUTE)) is StampRule.KEEP
-    assert stamp_rule(FOREX_BARS, request(timespan=Timespan.DAY, multiplier=2)) is (StampRule.KEEP)
-    for timespan, multiplier in ((Timespan.DAY, 2), (Timespan.WEEK, 1), (Timespan.YEAR, 1)):
+    close, chicago, last_ms = time(16), time(1), time(23, 59, 59, 999_000)
+    options_bars = replace(STOCK_BARS, asset_class=AssetClass.OPTIONS)
+    assert stamp_rule(STOCK_BARS, day) == StampRule(NEW_YORK, frozenset({close}), "1-day bar")
+    assert stamp_rule(options_bars, day) == StampRule(NEW_YORK, frozenset({close}), "1-day bar")
+    assert stamp_rule(INDEX_BARS, day) == StampRule(
+        NEW_YORK, frozenset({chicago, close}), "1-day bar"
+    )
+    assert stamp_rule(FOREX_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
+    assert stamp_rule(CRYPTO_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
+    for timespan, multiplier in (
+        (Timespan.DAY, 2),
+        (Timespan.WEEK, 1),
+        (Timespan.MONTH, 1),
+        (Timespan.QUARTER, 1),
+        (Timespan.YEAR, 3),
+    ):
         longer = request(timespan=timespan, multiplier=multiplier)
-        assert stamp_rule(CRYPTO_BARS, longer) is StampRule.UTC_MIDNIGHT
-    assert stamp_rule(CRYPTO_BARS, request(timespan=Timespan.HOUR)) is StampRule.KEEP
-    assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is (StampRule.KEEP)
+        assert stamp_rule(STOCK_BARS, longer) == StampRule(NEW_YORK, frozenset(), "bar")
+        assert stamp_rule(options_bars, longer) == StampRule(NEW_YORK, frozenset(), "bar")
+        assert stamp_rule(INDEX_BARS, longer) == StampRule(NEW_YORK, frozenset({chicago}), "bar")
+        assert stamp_rule(FOREX_BARS, longer) == StampRule(UTC, frozenset(), "bar")
+        assert stamp_rule(CRYPTO_BARS, longer) == StampRule(UTC, frozenset(), "bar")
+    # Intraday bars, futures bars, and datasets that are not bars keep their stamps.
+    assert stamp_rule(CRYPTO_BARS, request(timespan=Timespan.HOUR)) is None
+    assert stamp_rule(STOCK_BARS, request(timespan=Timespan.MINUTE, multiplier=5)) is None
+    assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.SESSION)) is None
+    assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.WEEK)) is None
+    assert stamp_rule(replace(STOCK_BARS, asset_class=None), day) is None
+    assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is None
+
+
+def test_a_stamp_rule_stamps_through_the_timestamp_routine() -> None:
+    rule = stamp_rule(STOCK_BARS, request(timespan=Timespan.DAY))
+    assert rule is not None
+    close = datetime(2025, 7, 1, 16, tzinfo=NEW_YORK)
+    values = pa.array([close], pa.timestamp("ns", "UTC"))
+    moved = rule.stamp("stocks.bars", values, source="s", remedy="r").to_pylist()
+    assert moved == [datetime(2025, 7, 1, tzinfo=NEW_YORK)]
+    with pytest.raises(dm.MassiveError, match=r"^stocks\.bars: a 1-day bar from s is stamped"):
+        rule.stamp(
+            "stocks.bars", pa.array([close.replace(hour=13)], values.type), source="s", remedy="r"
+        )
 
 
 def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -853,10 +853,11 @@ BAR_HEADER = ("ticker", "volume", "open", "close", "high", "low", "window_start"
 
 
 @pytest.mark.parametrize(
-    ("timespan", "prefix"),
+    ("timespan", "prefix", "offset"),
     [
-        (dm.Timespan.MINUTE, "global_forex/minute_aggs_v1"),
-        (dm.Timespan.DAY, "global_forex/day_aggs_v1"),
+        (dm.Timespan.MINUTE, "global_forex/minute_aggs_v1", 0),
+        # The day files stamp a day at its last millisecond; it is stamped at its start here.
+        (dm.Timespan.DAY, "global_forex/day_aggs_v1", 86_400 * 10**9 - 10**6),
     ],
 )
 def test_bar_files_round_trip(
@@ -865,9 +866,10 @@ def test_bar_files_round_trip(
     fake_s3: FakeS3,
     timespan: dm.Timespan,
     prefix: str,
+    offset: int,
 ) -> None:
     start = epoch_ns(datetime(2025, 3, 3, tzinfo=UTC))
-    values = ("C:EURUSD", 120, 1.08063, 1.08033, 1.0807, 1.0803, start, 120)
+    values = ("C:EURUSD", 120, 1.08063, 1.08033, 1.0807, 1.0803, start + offset, 120)
     fake_s3.put_csv(file_key(prefix), BAR_HEADER, [dict(zip(BAR_HEADER, values, strict=True))])
     # With no `adjusted` to rule them out, AUTO reads every pair's bars from the files.
     query = files_session.forex.bars(dm.ALL, timespan)

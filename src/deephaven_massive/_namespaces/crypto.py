@@ -339,8 +339,8 @@ class _Crypto(Namespace):
 
         Each row is one bar of one pair: open, high, low, close, volume, and, where the
         transport supplies them, the volume-weighted average price and the trade count. The
-        row's `Timestamp` is the bar's window time as the source stamps it: the start of the
-        window for the streams, the minute bars, and the REST bars; see below for 1-day bars.
+        row's `Timestamp` is the start of the bar's window; see below for bars of a day or
+        longer.
 
         The timespan and multiplier decide the transports and so the query's class:
 

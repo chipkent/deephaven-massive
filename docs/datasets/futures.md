@@ -70,7 +70,7 @@ Open, high, low, close, and volume bars of futures contracts.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. REST `ticker`: "The ticker for the contract." FLAT_FILES `ticker`: "The exchange symbol that this item is traded under." WS `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. REST `window_start`: "The timestamp of the beginning of the candlestick’s aggregation window." FLAT_FILES `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WS `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `window_start` | `window_start` | `s` |
+| `Timestamp` | Instant | The start of the bar's window, as an Instant. REST `window_start`: "The timestamp of the beginning of the candlestick’s aggregation window." FLAT_FILES `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window." WS `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `window_start` | `window_start` | `s` |
 | `Volume` | double | The number of contracts that traded within the timeframe. | REST, flat files, WebSocket | `volume` | `volume` | `v` |
 | `Open` | double | The opening price within the timeframe. | REST, flat files, WebSocket | `open` | `open` | `o` |
 | `Close` | double | The last price within the timeframe. | REST, flat files, WebSocket | `close` | `close` | `c` |

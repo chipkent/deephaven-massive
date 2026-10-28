@@ -23,9 +23,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`_keep`). Futures trades
   and quotes named by session dates are requested one session at a time
   (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
-  (weekdays only for the classes that do not trade at weekends). Forex and crypto 1-day bars
-  are stamped at 00:00 UTC of their day, and a crypto bar of a day or longer off the UTC day
-  cut raises (`history_source.stamp_rule`, `_stamped`).
+  (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
+  are stamped at 00:00 of their day in the class day zone, and a stamp Massive is not known to
+  use raises (`history_source.stamp_rule`, `_stamped`).
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. HTTP 404 for one symbol drops that symbol with
   one WARNING; any other error fails the call.
@@ -83,9 +83,7 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
-    check_utc_midnights,
     instants,
-    utc_day_stamps,
 )
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._errors import MassiveError, from_wire, log_once
@@ -984,7 +982,7 @@ class RestReader:
         *,
         limit: int | None,
         window: HistoryWindow | None = None,
-        stamps: StampRule = StampRule.KEEP,
+        stamps: StampRule | None = None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
     ) -> tuple[pa.Table, int]:
@@ -1001,9 +999,10 @@ class RestReader:
             calls: The planned calls, in result order.
             limit: The cap on each call's rows, or None; `read_fetch` caps the total.
             window: The `history()` window whose rows to keep, or None.
-            stamps: How the bars' stamps are treated (`history_source.stamp_rule`): forex and
-                crypto 1-day bars move to 00:00 UTC of their day, and a crypto stamp off the
-                UTC day cut raises `MassiveError`; `KEEP`, the default, for everything else.
+            stamps: How the bars' stamps are treated (`history_source.stamp_rule`): bars of
+                a day or longer move to 00:00 of their day in the class day zone, and a stamp
+                Massive is not known to use raises `MassiveError`; None, the default, keeps
+                the stamps as sent.
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
@@ -1071,7 +1070,7 @@ class RestReader:
         spec: DatasetSpec,
         limit: int | None,
         window: HistoryWindow | None,
-        stamps: StampRule,
+        stamps: StampRule | None,
         record: Callable[[DriftReport], None] | None,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
@@ -1082,7 +1081,7 @@ class RestReader:
             spec: The dataset.
             limit: The cap on the call's rows, or None.
             window: The `history()` window whose rows to keep, or None.
-            stamps: How the bars' stamps are treated (`_stamped`).
+            stamps: How the bars' stamps are treated (`_stamped`), or None to keep them.
             record: Also given each page's drift, or None.
 
         Returns:
@@ -1091,7 +1090,7 @@ class RestReader:
 
         A failed request raises the public error of its `WireError` (`_public`), and a row
         that breaks the schema the `RowDataError` of `_Converter.convert`; a crypto bar
-        stamped off the UTC day cut the `MassiveError` of `_stamped`.
+        stamped at a time Massive is not known to use the `MassiveError` of `_stamped`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
@@ -1107,7 +1106,7 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
-                if stamps is not StampRule.KEEP:
+                if stamps is not None:
                     batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
                 kept.extend(_keep(batch, window) for batch in batches)
         except WireError as error:
@@ -1834,7 +1833,7 @@ _REST_REMEDY: Final = (
     "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES if S3 credentials are "
     "configured"
 )
-"""What a caller can do when Massive's REST bars are not cut at UTC midnight."""
+"""What a caller can do when Massive's REST bars are stamped at an unknown time of day."""
 
 
 def _stamped(
@@ -1846,22 +1845,14 @@ def _stamped(
         spec: The dataset, for the message.
         source: The REST path template the bars came from, for the message.
         batch: Rows in the dataset's schema.
-        rule: `UTC_DAY` or `UTC_DAY_CHECKED` moves each stamp to 00:00 UTC of its day (the
-            latter refusing a stamp off the day's first or last millisecond);
-            `UTC_MIDNIGHT` refuses a stamp that is not 00:00 UTC and keeps the rest.
+        rule: The day zone and the stamps Massive is known to use besides 00:00.
 
     Returns:
-        The batch, with its `Timestamp` at the start of each bar's UTC day.
+        The batch, with its `Timestamp` at 00:00 of each bar's day in the class day zone.
 
-    A refused stamp raises the `MassiveError` of `timestamps.utc_day_stamps` or
-    `timestamps.check_utc_midnights`, which names `source=dm.HistorySource.FLAT_FILES` as the
-    way around it.
+    A stamp at another time of day raises the `MassiveError` of `timestamps.day_starts`, which
+    names `source=dm.HistorySource.FLAT_FILES` as the way around it.
     """
     index = batch.schema.get_field_index("Timestamp")
-    values = batch.column(index)
-    if rule is StampRule.UTC_MIDNIGHT:
-        check_utc_midnights(spec.name, values, source=source, remedy=_REST_REMEDY)
-        return batch
-    checked = rule is StampRule.UTC_DAY_CHECKED
-    moved = utc_day_stamps(spec.name, values, source=source, checked=checked, remedy=_REST_REMEDY)
+    moved = rule.stamp(spec.name, batch.column(index), source=source, remedy=_REST_REMEDY)
     return batch.set_column(index, "Timestamp", moved)

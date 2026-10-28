@@ -39,7 +39,7 @@ import logging
 import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, tzinfo
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from deephaven_massive._datasets.dates import DAY_ZONES, NEW_YORK
 from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
@@ -595,6 +596,38 @@ _KEY_SENTENCES: Final[Mapping[str, str]] = {
 """The library's own sentence for each renamed key column; its description goes on to name
 the wire key or request parameter behind it on each transport."""
 
+_BAR_START: Final = "The start of the bar's window, as an Instant."
+"""The library's sentence for a bars dataset's `Timestamp`, which is never a bar's end, even
+where a source's own description of its stamp says so."""
+
+_ZONE_NAMES: Final[Mapping[tzinfo, str]] = {NEW_YORK: "New York time", UTC: "UTC"}
+"""How a key sentence names each class day zone (`dates.DAY_ZONES`)."""
+
+
+def _key_sentence(spec: DatasetSpec, name: str) -> str:
+    """Return the library's sentence for one of a dataset's renamed key columns.
+
+    Args:
+        spec: The dataset.
+        name: `Symbol`, `Timestamp`, or `Underlying`.
+
+    Returns:
+        The sentence; for a bars dataset's `Timestamp`, the start of the bar's window and,
+        for a class the library stamps, where a bar of a day or longer is stamped.
+    """
+    if name != "Timestamp" or not spec.is_bars:
+        return _KEY_SENTENCES[name]
+    # The classes with a day zone are those whose bars of a day or longer the library stamps
+    # at midnight (`history_source.stamp_rule`); futures bars keep Massive's own stamps.
+    zone = DAY_ZONES.get(spec.asset_class) if spec.asset_class is not None else None
+    if zone is None:
+        return _BAR_START
+    return (
+        f"{_BAR_START} A bar of a day or longer is stamped at 00:00 {_ZONE_NAMES[zone]} of the "
+        "day it starts on, on every source, whatever time of day the source stamps it with."
+    )
+
+
 _Contribution = tuple[Transport, SourceColumn]
 """One column one source of a dataset contributes, with the source's transport."""
 
@@ -672,7 +705,7 @@ def _description(
         named = ", ".join(f"`{member}`" for member in suppliers)
         return f"Always null for `{spec.name}`; supplied by {named}."
     if is_key and name in _KEY_SENTENCES:
-        parts = [_KEY_SENTENCES[name]]
+        parts = [_key_sentence(spec, name)]
         for transport, column in own:
             part = _key_part(transport, column, asset_class)
             if part not in parts:
@@ -778,8 +811,10 @@ def dataset_schema(
        supplies, says so and names the members that do, in member order:
        ``Always null for `crypto.trades`; supplied by `stocks.trades`.``
     3. `Symbol`, `Timestamp`, and `Underlying`, when they are declared key columns of the
-       dataset, get the library's own sentence ("The row's primary time, as an Instant."),
-       followed, per source in the order of rule 1, by the wire key the source renames and
+       dataset, get the library's own sentence ("The row's primary time, as an Instant.";
+       for a bars dataset's `Timestamp`, "The start of the bar's window, as an Instant." and,
+       for every class but futures, where a bar of a day or longer is stamped), followed, per
+       source in the order of rule 1, by the wire key the source renames and
        its quoted field description
        (``REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp..."``), or, for a
        key filled from the request, the request parameter it came from (``REST: the

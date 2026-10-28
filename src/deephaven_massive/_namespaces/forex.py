@@ -324,9 +324,11 @@ class _Forex(Namespace):
 
         A one-day bar is the UTC day and is stamped at 00:00 UTC on every source: the range
         already is, and the grouped daily, `/prev`, and the day files (stamped 23:59:59.999
-        UTC) are moved to the start of their day. `history()` returns only the bars whose
-        whole window lies inside the range and has ended, so the current day's bar never
-        appears. Forex trades from Sunday evening UTC, so its weeks run Monday to
+        UTC) are moved to the start of their day; a bar of several days or longer must be
+        stamped 00:00 UTC. Any other stamp fails the call with `MassiveError` naming the
+        source, since the bar may cover other days than its label. `history()` returns only
+        the bars whose whole window lies inside the range and has ended, so the current day's
+        bar never appears. Forex trades from Sunday evening UTC, so its weeks run Monday to
         Sunday and its months, quarters, and years are whole calendar periods.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at

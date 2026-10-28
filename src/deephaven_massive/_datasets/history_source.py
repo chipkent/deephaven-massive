@@ -19,9 +19,9 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   bars only 1-minute and 1-day bars, and 1-session bars for futures, and only unadjusted where
   the dataset has an `adjusted` parameter), and every file the range needs is already
   published. When both sources can, many symbols (`MassiveConfig.flat_file_symbol_threshold`
-  or more, or `dm.ALL`) read flat files and fewer use REST. Forex and crypto 1-day bars are
-  stamped alike by every source (`stamp_rule`), and a crypto stamp off the UTC day boundary
-  fails loudly, so the choice never changes which day a bar covers.
+  or more, or `dm.ALL`) read flat files and fewer use REST. Bars of a day or longer are
+  stamped alike by every source (`stamp_rule`), and a stamp of a form Massive is not known to
+  use fails loudly, so the choice never changes which day a bar is labelled with.
 
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
 after the next day starts in the class's day zone (`dates.publish_time`); futures use their
@@ -33,7 +33,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from enum import Enum, auto
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 from deephaven_massive._datasets.catalog import filter_key, param_family
@@ -55,12 +54,15 @@ from deephaven_massive._datasets.dates import (
     intraday,
     publish_time,
 )
+from deephaven_massive._datasets.timestamps import day_starts
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
     from datetime import tzinfo
+
+    import pyarrow as pa
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -295,57 +297,121 @@ def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | Non
     return flat_file_published(day, now=moment, zone=zone, cutoff=cutoff)
 
 
-class StampRule(Enum):
-    """How a transport treats the `Timestamp` of a request's bars (`stamp_rule`)."""
+@dataclass(frozen=True, slots=True)
+class StampRule:
+    """How the transports stamp the bars of a request of a day or longer (`stamp_rule`).
 
-    KEEP = auto()
-    """Every other request: the stamps are kept as the source sends them."""
-    UTC_DAY = auto()
-    """Forex 1-day bars: each stamp moves to 00:00 UTC of the day it falls in."""
-    UTC_DAY_CHECKED = auto()
-    """Crypto 1-day bars: each stamp moves to 00:00 UTC of its day, and a stamp elsewhere than
-    the day's first or last millisecond fails, since the day cut is not verified."""
-    UTC_MIDNIGHT = auto()
-    """Crypto bars of several days or of a week or longer, from REST: each stamp must be
-    00:00 UTC, or the bar would cover other days than its label."""
+    Made per request on the calling thread and only read afterwards, so reader threads may
+    share it.
+
+    Attributes:
+        zone: The class day zone; every bar is stamped at 00:00 there of the day it starts on.
+        known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
+            the class's bars of this length on some source; each moves to 00:00 of its day.
+        what: The kind of bar, for messages: `"1-day bar"` or `"bar"`.
+    """
+
+    zone: tzinfo
+    known: frozenset[time]
+    what: str
+
+    def stamp(self, label: str, values: pa.Array, *, source: str, remedy: str) -> pa.Array:
+        """Stamp a column of bars at 00:00 of their days (`timestamps.day_starts`).
+
+        Args:
+            label: The dataset, for the message.
+            values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
+            source: Where the bars came from, for the message: a REST path template or a
+                flat-file prefix.
+            remedy: What the caller can do instead, for the message.
+
+        Returns:
+            The stamps at the start of their days, in the same type; nulls stay null.
+
+        A stamp at another time of day than 00:00 or one of `known` raises the `MassiveError`
+        of `timestamps.day_starts`.
+        """
+        return day_starts(
+            label,
+            values,
+            zone=self.zone,
+            known=self.known,
+            source=source,
+            what=self.what,
+            remedy=remedy,
+        )
 
 
-_UTC_DAY_RULES: Final[Mapping[AssetClass | None, StampRule]] = {
-    AssetClass.FOREX: StampRule.UTC_DAY,
-    AssetClass.CRYPTO: StampRule.UTC_DAY_CHECKED,
+_SESSION_CLOSE: Final = time(16)
+"""The 16:00 New York session close: grouped daily, `/prev`, and the stock day files stamp a
+stock, option, or index 1-day bar there."""
+
+_CHICAGO_MIDNIGHT: Final = time(1)
+"""Midnight in Chicago, as New York time (the two zones change clocks together): the indices
+range and day files stamp their 1-day bars there."""
+
+_LAST_MILLISECOND: Final = time(23, 59, 59, 999_000)
+"""The last millisecond of a UTC day: forex grouped daily and `/prev` and the forex and crypto
+day files stamp their 1-day bars there."""
+
+_ONE_DAY_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
+    AssetClass.STOCKS: frozenset({_SESSION_CLOSE}),
+    AssetClass.OPTIONS: frozenset({_SESSION_CLOSE}),
+    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT, _SESSION_CLOSE}),
+    AssetClass.FOREX: frozenset({_LAST_MILLISECOND}),
+    AssetClass.CRYPTO: frozenset({_LAST_MILLISECOND}),
 }
-"""The rule of the 1-day bars of each class whose 1-day bars mean the UTC day."""
+"""Per class, the times of day besides 00:00 at which some source stamps a 1-day bar, all from
+Massive's documented samples. Futures bars keep their own stamps and session labels."""
+
+_LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
+    AssetClass.STOCKS: frozenset(),
+    AssetClass.OPTIONS: frozenset(),
+    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT}),
+    AssetClass.FOREX: frozenset(),
+    AssetClass.CRYPTO: frozenset(),
+}
+"""Per class, the times of day besides 00:00 accepted for a bar of several days, a week, or
+longer, which only the aggregates range serves. No sample shows one; the indices range's
+midnight in Chicago is presumed from its 1-day bars."""
 
 _DAYS_OR_LONGER: Final = frozenset(
     {Timespan.DAY, Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR}
 )
 
 
-def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule:
-    """Return how the transports treat the stamps of a request's bars.
+def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule | None:
+    """Return how the transports stamp a request's bars, or None to keep the stamps as sent.
 
-    Forex and crypto 1-day bars mean the UTC day on every source, but Massive stamps them
-    differently by source (00:00 UTC on the aggregates range, 23:59:59.999 UTC in the
-    `day_aggs_v1` flat files), so each stamp moves to 00:00 UTC of its day
-    (`timestamps.utc_day_stamps`). Crypto's day cut is not verified (the documented REST
-    samples sit at midnight New York time), so a crypto 1-day stamp elsewhere than a UTC day
-    boundary fails, and so does a crypto bar of several days or longer whose stamp is not
-    00:00 UTC (`timestamps.check_utc_midnights`).
+    One `history()` call returns the same rows whichever source answers it, so every bar of a
+    day or longer, of every class but futures, is stamped at 00:00 of the day it starts on in
+    the class day zone (New York for stocks, options, and indices; UTC for forex and crypto).
+    Massive stamps a 1-day bar at the day's start on the aggregates range but at the session
+    close (stocks, options, indices) or the day's last millisecond (forex, crypto) on other
+    sources, and the indices range and day files at midnight in Chicago; those stamps move to
+    the day's start, and any other stamp fails, since such a bar may cover other days than its
+    label (the documented crypto REST samples sit at midnight New York time, another day cut).
 
     Args:
         spec: The dataset.
         request: The normalized arguments.
 
     Returns:
-        The rule; `StampRule.KEEP` for everything else.
+        The rule for bars of a day or longer of stocks, options, indices, forex, and crypto;
+        None for intraday bars, futures bars, and every dataset that is not bars.
     """
-    if not spec.is_bars or request.timespan not in _DAYS_OR_LONGER:
-        return StampRule.KEEP
+    asset_class = spec.asset_class
+    if (
+        not spec.is_bars
+        or request.timespan not in _DAYS_OR_LONGER
+        or asset_class is None
+        or asset_class not in _ONE_DAY_STAMPS
+    ):
+        return None
+    zone = DAY_ZONES[asset_class]
     if request.timespan is Timespan.DAY and request.multiplier == 1:
-        return _UTC_DAY_RULES.get(spec.asset_class, StampRule.KEEP)
-    if spec.asset_class is AssetClass.CRYPTO:
-        return StampRule.UTC_MIDNIGHT
-    return StampRule.KEEP
+        return StampRule(zone, _ONE_DAY_STAMPS[asset_class], "1-day bar")
+    return StampRule(zone, _LONGER_STAMPS[asset_class], "bar")
 
 
 def within_publication_grace(

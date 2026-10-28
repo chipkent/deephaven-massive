@@ -588,8 +588,10 @@ class HistoryQuery(QueryBase):
         bars of a session or longer with `multiplier` above 1 cannot be named by dates (their
         session label is not verified) and raise `ValueError`; pass datetimes. There is no
         holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
-        week. Forex and crypto 1-day bars are stamped at 00:00 UTC of their day whatever the
-        source. There is no `limit`: the library pages internally.
+        week. A bar of a day or longer is stamped at 00:00 of the day it starts on, in the
+        class day zone (New York for stocks, options, and indices; UTC for forex and crypto),
+        whatever the source; a futures bar keeps Massive's window start. There is no `limit`:
+        the library pages internally.
 
         Flat files (S3) can serve a request when S3 credentials are configured, the dataset
         has files for it (bars: only 1-minute and 1-day bars, and 1-session bars for futures,
@@ -598,9 +600,10 @@ class HistoryQuery(QueryBase):
         the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. A crypto bar of a day or longer whose stamp is off
-        the UTC day cut fails loudly, whichever source serves it, so the source never changes
-        which days a bar covers; `source=` picks a source explicitly. A reactive symbol table
+        `dm.ALL`); otherwise it uses REST. A bar of a day or longer stamped at a time of day
+        Massive is not known to use for its class fails loudly, whichever source serves it, so
+        the source never changes which day a bar is labelled with; `source=` picks a source
+        explicitly. A reactive symbol table
         is read once, when the verb is called, and every source receives the same sorted
         canonical symbols; rows that are not valid symbols of the class are ignored with a
         WARNING. Flat-file reads skip a missing weekend file silently and a missing weekday
@@ -643,10 +646,10 @@ class HistoryQuery(QueryBase):
         yet published (flat files land ~11:00 ET next day), or was a market holiday"; after
         that the day is skipped with a WARNING, as a holiday); when a futures range named by
         instants ends on a holiday and the next session's file, which holds the holiday's
-        hours, is not published yet or does not exist within 7 days; when a crypto bar of a
-        day or longer is stamped off the UTC day cut (a 1-day bar elsewhere than its day's first
-        or last millisecond, a longer one elsewhere than 00:00 UTC); or once the session is
-        closed.
+        hours, is not published yet or does not exist within 7 days; when a bar of a day or
+        longer is stamped at a time of day Massive is not known to use for its class (a crypto
+        1-day bar at midnight New York time, say), naming the dataset, the source, and the
+        other source; or once the session is closed.
 
         Example:
             ::
