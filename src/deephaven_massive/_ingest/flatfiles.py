@@ -478,6 +478,7 @@ class FlatFileHistory:
         window: HistoryWindow,
         *,
         dates: Sequence[date],
+        call: int,
     ) -> Table:
         """Return the rows of `window` from the dataset's flat files, as one static table.
 
@@ -495,6 +496,8 @@ class FlatFileHistory:
                 static symbols (the query reads a reactive symbol table before this call).
             window: The call's window (`history_window` in `_datasets/history_source.py`).
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
+            call: The call's id (`SessionCore.next_stream_id`), which names its reader threads
+                (`"massive #1 call-9 files_0"`).
 
         Returns:
             A static table in the dataset's schema: the files' rows in date order (and, for
@@ -530,7 +533,8 @@ class FlatFileHistory:
         )
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
-        return self._read(spec, transform, keys, last=dates[-1], roll=roll)
+        threads = f"{self._core.thread_prefix} call-{call} files"
+        return self._read(spec, transform, keys, last=dates[-1], roll=roll, threads=threads)
 
     def _read(
         self,
@@ -540,6 +544,7 @@ class FlatFileHistory:
         *,
         last: date,
         roll: str | None = None,
+        threads: str,
     ) -> Table:
         """Read files on a pool of reader threads and merge their rows into one static table.
 
@@ -559,13 +564,14 @@ class FlatFileHistory:
             roll: The futures prefix when the range ends at an instant: when the run of
                 missing files that ends a venue's keys holds a weekday, the next existing
                 session file is read too (`_roll_forward`). None reads only `keys`.
+            threads: The name prefix of the reader threads, such as `"massive #1 call-9 files"`.
 
         Returns:
             The merged table.
         """
         cancel = threading.Event()
         workers = min(self._core.config.max_concurrency, len(keys))
-        with ThreadPoolExecutor(workers, f"{self._core.label} flat files") as pool:
+        with ThreadPoolExecutor(workers, threads) as pool:
             futures = [pool.submit(self._read_key, transform, key, cancel=cancel) for key in keys]
             try:
                 wait(futures, return_when=FIRST_EXCEPTION)

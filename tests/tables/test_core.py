@@ -1333,9 +1333,12 @@ class _Ports:
 
 def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContext) -> None:
     catalog = _catalog.Catalog((SPEC,))
-    core = _core.SessionCore(dm.MassiveConfig(api_key="k"), dh_exec_ctx, "core", catalog=catalog)
+    core = _core.SessionCore(
+        dm.MassiveConfig(api_key="k"), dh_exec_ctx, "core", catalog=catalog, thread_prefix="t"
+    )
     try:
         assert core.catalog is catalog
+        assert core.thread_prefix == "t"
         with pytest.raises(RuntimeError, match=r"^core has no transports attached$"):
             core.rest_transport()
         ports = _Ports()

@@ -36,6 +36,7 @@ EXPECTED_EXPORTS = [
     "ConditionDataType",
     "Sip",
     "TickerType",
+    "enable_debug_logging",
     "__version__",
 ]
 
@@ -57,7 +58,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 22
+    assert len(EXPECTED_EXPORTS) == 23
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 
@@ -173,3 +174,8 @@ def test_importing_the_package_imports_no_private_module() -> None:
 
 def test_reading_a_name_imports_only_its_defining_module() -> None:
     assert _modules_loaded_by("Timespan") == ["deephaven_massive._enums"]
+
+
+def test_the_logging_switch_needs_no_other_module() -> None:
+    # It must work before a Deephaven server exists, so it loads nothing that needs the JVM.
+    assert _modules_loaded_by("enable_debug_logging") == ["deephaven_massive._logging"]

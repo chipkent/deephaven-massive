@@ -14,25 +14,35 @@ once, at import, from the `DATASETS` of every namespace module. Every core holds
 so the dataset layer never has to find the namespace modules itself.
 
 The module also numbers sessions (`MassiveSession #1`, a per-process counter, used in the
-`repr`, in error messages, and in the same-key WARNING) and keeps the weak registry of open
-sessions that warns when a second open session uses the same API key.
+`repr`, in error messages, and in the same-key WARNING, and `massive #1` at the start of every
+library thread's name) and keeps the weak registry of open sessions that warns when a second
+open session uses the same API key. Creating a session applies the logging environment
+variables once per process (`_logging.configure_from_environment`) and logs, at INFO, one line
+describing the environment: the versions that matter, the configuration without its secrets,
+and whether a proxy or a CA bundle is set, so a log attached to a bug report says what ran.
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
+import os
+import re
+import sys
 import threading
 import weakref
+from importlib.metadata import PackageNotFoundError, requires, version
 from typing import TYPE_CHECKING, Final, Self, cast
 
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 
+from deephaven_massive import _massive
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._logging import configure_from_environment
 from deephaven_massive._namespaces import (
     crypto,
     economy,
@@ -104,14 +114,87 @@ _session_numbers = itertools.count(1)
 _open_sessions: list[weakref.ref[SessionCore]] = []
 
 
-def _next_label() -> str:
-    """Return the next session label of the process.
+# What ends the distribution name of a requirement such as "orjson>=3.9; extra == 'orjson'".
+_AFTER_NAME: Final = re.compile(r"[\s;<>=!~\[(@]")
+
+
+def _next_number() -> int:
+    """Return the next session number of the process.
 
     Returns:
-        `"MassiveSession #<n>"`, numbered from 1.
+        The number, from 1: the session is `MassiveSession #<n>`, and its threads' names start
+        with `massive #<n>`.
     """
     with _keys_lock:
-        return f"MassiveSession #{next(_session_numbers)}"
+        return next(_session_numbers)
+
+
+def _version(distribution: str) -> str:
+    """Return the installed version of a distribution, for the environment line.
+
+    Args:
+        distribution: The distribution's name, such as `"pyarrow"`.
+
+    Returns:
+        Its version, or `"not installed"`.
+    """
+    try:
+        return version(distribution)
+    except PackageNotFoundError:
+        return "not installed"
+
+
+def _dependency_versions() -> str:
+    """Return the installed version of every dependency the library declares, optional ones too.
+
+    Returns:
+        `"<name> <version>"` per dependency in the order the package metadata lists them, joined
+        by `", "`, such as `"boto3 1.40.1, ..., orjson not installed"`; an optional dependency
+        that is not installed (`orjson`, whose absence means the standard library decodes JSON)
+        says so.
+    """
+    names = dict.fromkeys(
+        _AFTER_NAME.split(requirement, maxsplit=1)[0]
+        for requirement in requires("deephaven-massive") or ()
+    )
+    return ", ".join(f"{name} {_version(name)}" for name in names)
+
+
+def _log_environment(label: str, config: MassiveConfig) -> None:
+    """Log, at INFO, what a bug report needs to know about the process and the configuration.
+
+    The line names the library's version; Python's, with whether the GIL is enabled (it is
+    off on a free-threaded build run with `PYTHON_GIL=0`); the version of every dependency
+    the library declares (`_dependency_versions`; `orjson` installed means it decodes JSON,
+    else the standard library does); the date of the Massive specification snapshot the schemas were
+    generated from; the configuration's `repr`, which leaves out both secrets, with each
+    secret shown only as set or unset; and whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set
+    (never their values, since a proxy URL may hold a password). Nothing is computed when INFO
+    is off for this logger.
+
+    Args:
+        label: The session's label, such as `"MassiveSession #1"`.
+        config: The session's configuration.
+    """
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    gil = "on" if getattr(sys, "_is_gil_enabled", lambda: True)() else "off"
+    versions = _dependency_versions()
+    secret = "set" if config.s3_secret_access_key is not None else "unset"
+    logger.info(
+        "%s: deephaven-massive %s, Python %s (GIL %s), %s; Massive spec snapshot of %s; %r with "
+        "api_key set, s3_secret_access_key %s; HTTPS_PROXY %s, SSL_CERT_FILE %s",
+        label,
+        _version("deephaven-massive"),
+        sys.version.split()[0],
+        gil,
+        versions,
+        _massive.provenance().fetched,
+        config,
+        secret,
+        "set" if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") else "unset",
+        "set" if os.environ.get("SSL_CERT_FILE") else "unset",
+    )
 
 
 def _register(core: SessionCore) -> None:
@@ -232,7 +315,13 @@ class MassiveSession:
                 "create the session from the console or an application script, or use "
                 "make_user_exec_ctx() without freeze_vars."
             )
-        core = SessionCore(config, exec_ctx, _next_label(), catalog=CATALOG)
+        configure_from_environment()
+        number = _next_number()
+        label = f"MassiveSession #{number}"
+        _log_environment(label, config)
+        core = SessionCore(
+            config, exec_ctx, label, catalog=CATALOG, thread_prefix=f"massive #{number}"
+        )
         core.attach(SessionClients(core))
         _register(core)
         self._core = core

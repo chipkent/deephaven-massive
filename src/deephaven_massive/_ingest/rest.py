@@ -958,12 +958,15 @@ class RestReader:
         catalog: The dataset catalog.
         drift: The session's drift registry.
         max_concurrency: The most requests of one fan-out at a time.
+        threads: The name prefix of the threads of a fan-out pool this reader makes, such as
+            `"massive #1 call-7 rest"`: the session, the call, and the transport.
     """
 
     state: RestState
     catalog: Catalog
     drift: DriftRegistry
     max_concurrency: int
+    threads: str
 
     def rest_path(self, template: str) -> RestPath:
         """Return a generated REST path.
@@ -1049,9 +1052,7 @@ class RestReader:
             The outcomes, in call order.
         """
         own = executor is None
-        pool = executor or ThreadPoolExecutor(
-            min(self.max_concurrency, len(calls)), f"{self.state.label} REST"
-        )
+        pool = executor or ThreadPoolExecutor(min(self.max_concurrency, len(calls)), self.threads)
         futures = [pool.submit(run, call) for call in calls]
         try:
             wait(futures, return_when=FIRST_EXCEPTION)
@@ -1379,10 +1380,24 @@ class RestEndpoints:
         self._core = core
         self._state = state
 
-    def _reader(self) -> RestReader:
-        """Return a reader of the session's paths."""
+    def _reader(self, role: str) -> RestReader:
+        """Return a reader of the session's paths.
+
+        Args:
+            role: What the reader serves, such as `"call-7"` or `"hosts"`: its fan-out
+                threads are named `"<session prefix> <role> rest_<n>"`.
+
+        Returns:
+            The reader.
+        """
         core = self._core
-        return RestReader(self._state, core.catalog, core.drift, core.config.max_concurrency)
+        return RestReader(
+            self._state,
+            core.catalog,
+            core.drift,
+            core.config.max_concurrency,
+            f"{core.thread_prefix} {role} rest",
+        )
 
     def _static(self, table: pa.Table) -> Table:
         """Convert rows to a static Deephaven table, inside the session's execution context.
@@ -1425,7 +1440,7 @@ class RestEndpoints:
                 asset_class,
                 family,
                 ws_hosts=self._core.config.ws_hosts,
-                fetch=self._reader().probe,
+                fetch=self._reader("hosts").probe,
             )
         except BaseException as error:
             self._state.forget_host(key, future)
@@ -1506,7 +1521,7 @@ class RestEndpoints:
             )
         )
 
-    def fetch(self, spec: DatasetSpec, request: Request) -> Table:
+    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
         """Return every row the dataset's fetch path returns for the request, as a static table.
 
         Requests run on this thread, or for a per-symbol path on a pool of up to
@@ -1517,6 +1532,8 @@ class RestEndpoints:
             spec: The dataset, with a fetch path.
             request: The normalized arguments, with static symbols (the query reads a reactive
                 table before this call).
+            call: The call's id (`SessionCore.next_stream_id`), which names its fan-out
+                threads (`"massive #1 call-7 rest_0"`).
 
         Returns:
             A static table in the dataset's schema.
@@ -1530,7 +1547,7 @@ class RestEndpoints:
         A parameter a path does not take raises the `ValueError` of `_base` before any request:
         every path is planned before the first one is read.
         """
-        reader = self._reader()
+        reader = self._reader(f"call-{call}")
         try:
             table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
         except MassiveError as error:
@@ -1538,7 +1555,9 @@ class RestEndpoints:
             raise
         return self._static(table)
 
-    def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
+    def history(
+        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+    ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
         `dm.ALL` reads the grouped-daily path, one request per day of the window (weekdays only
@@ -1558,6 +1577,7 @@ class RestEndpoints:
             spec: The dataset; `history()` has checked that REST can serve the request.
             request: The normalized arguments, with static symbols.
             window: The call's window (`history_window` in `_datasets/history_source.py`).
+            call: The call's id, which names its fan-out threads, as in `fetch`.
 
         Returns:
             A static table in the dataset's schema.
@@ -1566,7 +1586,7 @@ class RestEndpoints:
             MassiveError: As `fetch` raises it, logged at ERROR first, and for a crypto 1-day
                 bar stamped elsewhere in its UTC day than its first or last millisecond.
         """
-        reader = self._reader()
+        reader = self._reader(f"call-{call}")
         if isinstance(request.symbols, _All):
             rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
             path, query = _base(spec, rest_path, request, fixed={})
@@ -1621,7 +1641,7 @@ class RestEndpoints:
         takes fails here (`RestReader.check_parameters`), and one the cycle's path lacks fails
         the table then (`UnsupportedParameterError`).
         """
-        reader = self._reader()
+        reader = self._reader("poll")
         if isinstance(request.symbols, SymbolTable):
             reader.check_parameters(spec, request)
             # The table's symbols choose among every fetch path at each cycle.

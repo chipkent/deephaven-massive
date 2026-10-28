@@ -250,9 +250,12 @@ class Connection:
         self._started = False
         self._closing = False
         self._timer: threading.Timer | None = None
+        self._start_name = f"{core.thread_prefix} start {decision.host}{self.path}"
         config = core.config
         self.flusher: Final = Flusher(
-            core, f"massive-flush {decision.host}{self.path}", interval=config.flush_interval
+            core,
+            f"{core.thread_prefix} flush {decision.host}{self.path}",
+            interval=config.flush_interval,
         )
         cluster = f"{asset_class.value}/"
         sources = [s for k, s in _massive.sources(Transport.WS).items() if k.startswith(cluster)]
@@ -318,6 +321,7 @@ class Connection:
                 self._start_locked()
                 return
             self._timer = threading.Timer(delay, self._start_later)
+            self._timer.name = self._start_name
             self._timer.daemon = True
             self._timer.start()
 
@@ -838,25 +842,30 @@ class Connection:
 
 
 class _WsClientFactory:
-    """The factory of real `WsClient`s, with the session's key and backoffs.
+    """The factory of real `WsClient`s, with the session's key, backoffs, and thread prefix.
 
     Holds the API key, which goes only into each client's authentication frame and is never
     logged; its `repr` does not show it.
     """
 
-    __slots__ = ("_api_key", "_backoff", "_max_backoff")
+    __slots__ = ("_api_key", "_backoff", "_max_backoff", "_thread_prefix")
 
-    def __init__(self, api_key: str, *, backoff: float, max_backoff: float) -> None:
+    def __init__(
+        self, api_key: str, *, backoff: float, max_backoff: float, thread_prefix: str
+    ) -> None:
         """Keep the settings every client gets.
 
         Args:
             api_key: The session's key.
             backoff: `MassiveConfig.reconnect_backoff`.
             max_backoff: `MassiveConfig.max_reconnect_backoff`.
+            thread_prefix: The session's thread prefix (`"massive #1"`), which starts each
+                client thread's name.
         """
         self._api_key = api_key
         self._backoff = backoff
         self._max_backoff = max_backoff
+        self._thread_prefix = thread_prefix
 
     def __call__(
         self,
@@ -891,6 +900,7 @@ class _WsClientFactory:
             on_state=on_state,
             reconnect_backoff=self._backoff,
             max_reconnect_backoff=self._max_backoff,
+            thread_prefix=self._thread_prefix,
         )
 
 
@@ -1012,7 +1022,9 @@ class WsConnections:
             config.api_key,
             backoff=config.reconnect_backoff,
             max_backoff=config.max_reconnect_backoff,
+            thread_prefix=core.thread_prefix,
         )
+        self._thread_prefix = core.thread_prefix
         self._reconnect_backoff = config.reconnect_backoff
         self._pinned = frozenset(config.ws_hosts)
         # Guarded by registry_lock.
@@ -1403,7 +1415,7 @@ class WsConnections:
         mover = threading.Thread(
             target=self._move,
             args=(connection, decision),
-            name=f"massive-move {connection.url}",
+            name=f"{self._thread_prefix} move {connection.decision.host}{connection.path}",
             daemon=True,
         )
         mover.start()

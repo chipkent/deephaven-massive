@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -708,7 +709,26 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
     assert "X:ETHUSD has no data (HTTP 404" in caplog.text
 
 
+def test_fan_out_threads_are_named_after_the_session_and_the_call(
+    session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    last = {"conditions": [1], "exchange": 1, "price": 1.5, "size": 0.1, "timestamp": 1704310200000}
+    for pair in ("BTC/USD", "ETH/USD"):
+        body = {"status": "success", "request_id": "r", "symbol": pair, "last": last}
+        fake_rest.reply(f"/v1/last/crypto/{pair}", Reply(body))
+
+    with caplog.at_level(logging.DEBUG, "deephaven_massive"):
+        fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD"])
+    workers = {str(r.threadName) for r in caplog.records if r.threadName != "MainThread"}
+
+    # The call's id is the first of the test, and each worker's number follows the prefix.
+    prefix = f"{session._core.thread_prefix} call-1 rest_"
+    assert workers
+    assert all(re.fullmatch(rf"{re.escape(prefix)}\d", name) for name in workers), workers
+
+
 def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
+
     spec = DatasetSpec(
         summary="A dataset for the tests.",
         name="stocks.pair",
@@ -1025,7 +1045,7 @@ def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     session.close()
     with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
-        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)))
+        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1)
 
 
 # --- History -----------------------------------------------------------------------------------
@@ -1624,7 +1644,7 @@ def test_a_read_fans_out_on_the_callers_pool(
             f"/v1/last/crypto/{pair}",
             Reply({"status": "success", "request_id": "r", "symbol": pair, "last": last}),
         )
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
     calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols)
@@ -1665,7 +1685,7 @@ def test_an_error_row_needs_only_its_symbol(
     )
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     table, _ = reader.read_fetch(timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",))
     assert table.column("Symbol").to_pylist() == ["I:VIX"]
     assert table.column("Timestamp").to_pylist() == [None]
@@ -1675,7 +1695,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest.plan_calls(CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols)
@@ -1777,7 +1797,7 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
 
 
 def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> None:
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
     table, requests = reader.read_fetch(DIVIDENDS, request, symbols=())

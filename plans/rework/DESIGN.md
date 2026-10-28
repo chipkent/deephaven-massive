@@ -144,7 +144,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 22 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 23 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -178,6 +178,10 @@ dm.TickerType
 dm.Locale
 dm.ConditionDataType
 dm.Sip
+
+# Logging
+dm.enable_debug_logging    # enable_debug_logging(path=None): the library's log, DEBUG and up,
+                           # to stderr or a file (section 17.1)
 
 # Version
 dm.__version__             # from importlib.metadata
@@ -225,8 +229,10 @@ _enums.py                the fifteen public enums, Recency, ChannelFamily, _requ
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
                          from_wire
+_logging.py              enable_debug_logging and the DEEPHAVEN_MASSIVE_LOG variables; standard
+                         library only, so it works before a Deephaven server exists (section 17.1)
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
-                         (section 6)
+                         (section 6); applies the logging variables and logs the environment line
 _query.py                the six query classes and their verbs, through the core's ports (section 7)
 _namespaces/
   __init__.py            docstring only
@@ -388,7 +394,7 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
 | 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
-| 5 | API | the root `__init__`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. |
+| 5 | API | the root `__init__`, `_logging`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. `_logging` imports only the standard library. |
 
 **Composition.** `_session.py` is the one module that sees every layer. It imports every
 namespace module statically and names each once, in `NAMESPACE_MODULES` (a test compares the
@@ -481,6 +487,15 @@ Not configurable:
 
 There is no `tier` field. No entitlement endpoint exists, so a tier field would be a claim the
 server corrects.
+
+The log is not configured through `MassiveConfig`: it belongs to the process, not to a session.
+Two environment variables turn it on, read once per process when the first session is created
+([section 17.1](#171-the-log)):
+
+| Variable | Meaning |
+|---|---|
+| `DEEPHAVEN_MASSIVE_LOG` | A level name (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, any case). Unset or blank changes nothing; any other value raises `ValueError` naming the variable from `MassiveSession()`. |
+| `DEEPHAVEN_MASSIVE_LOG_FILE` | With `DEEPHAVEN_MASSIVE_LOG`, append the lines to this file (UTF-8) instead of stderr; ignored alone. |
 
 ## 6. `MassiveSession` and lifecycle
 
@@ -2604,6 +2619,78 @@ nearest entitled alternative. For example: "Quotes are
 not available on 15-minute delayed stock plans; `m.stocks.snapshots(symbols).poll(15)` provides
 delayed NBBO via REST".
 
+### 17.1 The log
+
+The requirement: a log from a failing run, with the issue text, is enough for an agent to
+reproduce and fix the bug. It uses only Python's standard `logging`.
+
+**Loggers.** Every module logs through `logging.getLogger(__name__)`, so each library logger is a
+child of `deephaven_massive` and names the file that wrote the record.
+
+**Off by default.** Nothing is configured at import. WARNING and ERROR records reach
+`sys.stderr` through Python's last-resort handler, which Deephaven captures; lower levels are
+dropped.
+
+**Two switches.** Each adds one handler to the `deephaven_massive` logger and sets that
+logger's level; turning the log on again replaces the handler and closes the old one:
+
+- `DEEPHAVEN_MASSIVE_LOG=<level>` (and `DEEPHAVEN_MASSIVE_LOG_FILE=<path>`), read when the first
+  `MassiveSession` is created ([section 5](#5-massiveconfig)). Not at import: a script that
+  starts `deephaven_server.Server` may import the library before the server replaces
+  `sys.stderr`, and a handler made then would keep the old stream. A session needs the server,
+  so by then `sys.stderr` is final. The variables are skipped once `enable_debug_logging` has
+  run.
+- `dm.enable_debug_logging(path=None)`, for a running console, where a new variable takes effect
+  only after a worker restart. It sets DEBUG; `path` appends to a file instead of stderr, and an
+  unopenable `path` raises its `OSError` and keeps the previous handler.
+
+Setting the level alone (`logging.getLogger("deephaven_massive").setLevel(logging.DEBUG)`) shows
+nothing below WARNING, because the last-resort handler drops lower levels; that is why the
+function exists. A user who configures logging already only sets the level.
+
+**The handler.** A `StreamHandler` on `sys.stderr` (Deephaven copies stderr into its log, the
+container log, and the web IDE's log panel), or a `FileHandler(path, encoding="utf-8")`. The
+format is `%(asctime)sZ %(levelname)s [%(threadName)s] %(name)s: %(message)s` with times in UTC
+(`formatter.converter = time.gmtime`). `propagate` stays on, so `caplog` and any root handler
+still see every record; Deephaven installs no root handler, so nothing is printed twice. There
+is no queue, rotation, JSON, custom field, or context variable: each line costs one locked write.
+
+**Correlation.** Every library thread is named `massive #<session> <role>`: `reaper`,
+`diagnostics`, `ws <host>/<cluster>`, `flush <host>/<cluster>`, `start <host>/<cluster>`,
+`move <host>/<cluster>`, `poll-<stream id>` and its pool `poll-<stream id> rest_<n>`. Each static
+verb (`fetch()`, `history()`) is one call: it takes an id from the stream-id counter, so call
+ids never collide with the `StreamId`s of `m.streams()`, logs `call <id> start: <query>.<verb>`
+and then `call <id> done: <rows> rows in <s> s` or `call <id> failed after <s> s: <error>` at
+DEBUG, and its worker threads are `call-<id> rest_<n>` or `call-<id> files_<n>`. The wire
+clients cannot see the session, so `WsClient` takes the prefix as a constructor argument.
+
+**The environment line.** `MassiveSession()` logs one INFO line at creation: the library's
+version; Python's, with whether the GIL is enabled; the version of every dependency the
+library declares (an absent `orjson` means the standard library decodes JSON); the date of the
+Massive spec snapshot; the configuration's `repr`, with each secret shown only as set or unset;
+and whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values.
+
+**Secrets.** The API key travels only in the REST client's header and the WebSocket
+authentication frame; the S3 secret goes only to boto3; the proxy password is already
+stripped (`net.http`). A server can still echo a secret, so each client passes every excerpt of
+a server's words it logs or puts in an error through `net.secrets` (`redact` on text, `redacted`
+on a built `WireError`), which replaces its own secret with `***`. The library never enables
+DEBUG on urllib3 or botocore, and the websockets frame log stays off
+([section 19.2](#192-the-websocket-client)). The planted-secret test
+(`tests/massive/net/test_secrets.py`) runs the fakes with distinctive secrets and DEBUG on every
+logger through a 401, a 429, bodies and a status that echo the key, `auth_failed`, and an S3
+403, and finds neither secret in any record or error; the logging rules of
+`tests/test_layout.py` are a cheap backstop (no secret name in a logging call, every thread
+and pool named, no logging call under a leaf lock).
+
+**Cost.** With the log off, a level check fails and nothing is formatted (`%` arguments,
+enforced by ruff's `G` rules); a value that costs a call to compute is computed only under
+`isEnabledFor`. Nothing is logged per row or per frame except a failure.
+
+**Bug reports.** `.github/ISSUE_TEMPLATE/bug_report.yml` asks for the code that was run, the
+log of a run with `DEBUG` on, `m.streams()` and `m.connections()` printed, and what was
+expected, with a recipe for a hang.
+
 ## 18. Concurrency model
 
 Free-threaded CPython (`PYTHON_GIL=0`) is a gating target. The library's locking must be correct
@@ -2623,6 +2710,10 @@ without the GIL.
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
+
+Every thread and pool the library creates is named `massive #<session> <role>`, so each log line
+names its session and its call or stream ([section 17.1](#171-the-log)); `tests/test_layout.py`
+checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor` a prefix.
 
 ### 18.2 Shared state and ownership
 
@@ -2740,6 +2831,8 @@ net/                 shared by every client; imports nothing else in _massive
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
+  secrets.py         redact, redacted: a client's secrets become *** in any server text it logs
+                     or quotes in an error
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
   types.py           Transport, Source(key, transport, fields, memberships),
@@ -4336,6 +4429,14 @@ document already reflects them.
     listed the stocks, forex, crypto, and indices unified-snapshot pages). A dataset of one
     asset class links only that class's page of a shared source; the footer keeps the fetch
     date ([section 7.4](#74-column-descriptions)).
+56. **A debug log good enough to fix a bug from** (2026-10-28). Standard `logging` only, off
+    by default; `DEEPHAVEN_MASSIVE_LOG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`), read at the first
+    session, and `dm.enable_debug_logging(path=None)` turn it on; stderr by default and a file
+    only when asked for. Log too much rather than too little: offending values, whole rows, and
+    error bodies at DEBUG, the same values in error messages, with no truncation that hides the
+    problem. Secrets are never logged. Every change logs what it decides (`AGENTS.md`). The bug
+    report asks for the log and `m.streams()`, and adds no warning about what a log contains
+    ([section 17.1](#171-the-log)).
 
 ## 23. Open verification items
 

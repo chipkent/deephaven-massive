@@ -1229,7 +1229,9 @@ def test_a_connection_that_does_not_end_is_reported(
 
 
 def test_the_default_factory_builds_real_clients(harness: Harness) -> None:
-    factory = ws._WsClientFactory("test-key", backoff=15.0, max_backoff=30.0)
+    factory = ws._WsClientFactory(
+        "test-key", backoff=15.0, max_backoff=30.0, thread_prefix="massive #7"
+    )
     client = factory(
         "wss://socket.test/stocks",
         sources=[],
@@ -1239,6 +1241,7 @@ def test_the_default_factory_builds_real_clients(harness: Harness) -> None:
         on_state=lambda *_: None,
     )
     assert isinstance(client, _massive.WsClient)
+    assert client._thread.name == "massive #7 ws socket.test/stocks"
     client.close()
     client.start()
     assert client.join(TIMEOUT)

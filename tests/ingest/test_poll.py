@@ -151,7 +151,7 @@ def fail_one_poll_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
     failures = [RuntimeError("conversion failed")]
 
     def flaky(data: pa.Table) -> Table:
-        if failures and " poll #" in threading.current_thread().name:
+        if failures and " poll-" in threading.current_thread().name:
             raise failures.pop()
         return convert(data)
 

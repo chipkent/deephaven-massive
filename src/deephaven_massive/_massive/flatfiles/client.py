@@ -89,6 +89,7 @@ from deephaven_massive._massive.net.retry import (
     is_tls_failure,
     transient_wait,
 )
+from deephaven_massive._massive.net.secrets import redact
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -684,7 +685,8 @@ class FlatFileClient:
         status = _status(error)
         details = error.response.get("Error", {})
         code = details.get("Code", "")
-        server = f"{code}: {details.get('Message', '')}"
+        # S3 never echoes the secret, but its words are the server's, so they are cleaned.
+        server = redact(f"{code}: {details.get('Message', '')}", self._secret_access_key)
         context: dict[str, Any] = {
             "status": status,
             "host": self._host,

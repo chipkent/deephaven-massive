@@ -224,6 +224,8 @@ def test_it_authenticates_and_opens_generation_one(
     assert connection.user_agent == USER_AGENT
     assert h.recorder.states() == [WsState.CONNECTING]
     assert h.recorder.threads == {h.client._thread.ident}
+    # A client used alone names its thread with the default prefix.
+    assert h.client._thread.name == "massive ws 127.0.0.1/stocks"
 
 
 def _log_a_session(make_client: Callable[..., Harness], caplog: pytest.LogCaptureFixture) -> str:
@@ -328,6 +330,31 @@ def drifted_handshake(request: pytest.FixtureRequest, fake_ws_server: FakeMassiv
         fake_ws_server.greet_next(value)
     else:
         fake_ws_server.auth_replies.append(value)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        ("auth_timeout", f"echoes {KEY}"),  # an unknown reply that quotes the key
+        json.dumps([{"ev": "other", "echo": KEY}]).encode(),  # no status object at all
+    ],
+    ids=["unknown-reply", "no-status"],
+)
+def test_a_broken_reply_that_echoes_the_key_is_logged_without_it(
+    *,
+    reply: tuple[str, str] | bytes,
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_ws_server.auth_replies.append(reply)
+    h = make_client()
+    h.recorder.wait_open(1)
+    [record] = [r for r in caplog.records if "broke protocol" in r.getMessage()]
+    assert record.exc_info is not None
+    text = logging.Formatter().format(record)
+    assert "***" in text
+    assert KEY not in text
 
 
 @pytest.mark.usefixtures("drifted_handshake")
