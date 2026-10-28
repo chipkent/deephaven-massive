@@ -15,9 +15,10 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   whether its parameter is a timestamp or a date typed over an instant field such as
   `published_utc`, the instants that start the bounds' days in the request's day zone), the
   symbol parameter (`DatasetSpec.symbol_param`, at most `DatasetSpec.symbols_per_request`
-  symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, and the page
-  size (`DatasetSpec.page_size`).
-  `Request.limit` is never sent: it caps the total rows, and the client stops paging there.
+  symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, the page
+  size (`DatasetSpec.page_size`, or `Request.limit` when that is smaller, so a small cap
+  fetches no more than it keeps), and for `history()` the ascending direction (`_ascending`).
+  `Request.limit` caps the total rows, and the client stops paging there.
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. HTTP 404 for one symbol drops that symbol with
   one WARNING; any other error fails the call.
@@ -68,6 +69,8 @@ from deephaven_massive._datasets.dates import (
     FuturesSessions,
     day_class,
     day_zone,
+    futures_session,
+    futures_session_before,
     instant_bound,
 )
 from deephaven_massive._datasets.history_source import partition_dates
@@ -135,6 +138,8 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
+_SESSION_DATE: Final = "session_end_date"
+"""The futures date parameter that names a trading session, not a calendar day."""
 
 
 _RATE_LIMIT_ADVICE: Final = (
@@ -168,7 +173,11 @@ def _date_bound(asset_class: AssetClass | None, name: str, value: date, *, upper
     falls on in the request's day zone (`dates.day_zone`); an upper `datetime` is the first
     instant excluded, so it names the day of the instant just before it. The rows of such an
     axis are whole days, so a day the range covers only in part is included, as `history()`
-    includes the flat-file partition of a partly covered day.
+    includes the flat-file partition of a partly covered day. A futures `session_end_date`
+    parameter names a trading session, not a calendar day: an instant there becomes the
+    session it belongs to (`dates.futures_session`, which rolls at 17:00 Chicago time; for the
+    upper bound, `dates.futures_session_before`), before any day-zone conversion, so an
+    evening instant names the next session rather than its Chicago calendar day.
 
     Args:
         asset_class: The class whose day zone applies (`dates.day_class`), or None.
@@ -179,8 +188,11 @@ def _date_bound(asset_class: AssetClass | None, name: str, value: date, *, upper
     Returns:
         The day to send.
     """
-    suffix = name.rpartition(".")[2]
-    if isinstance(value, datetime):
+    base, _, suffix = name.rpartition(".")
+    field = base or suffix  # the name without its comparison suffix
+    if isinstance(value, datetime) and field == _SESSION_DATE:
+        value = futures_session_before(value) if upper else futures_session(value)
+    elif isinstance(value, datetime):
         moment = value - _ONE_MICROSECOND if upper else value
         value = moment.astimezone(day_zone(asset_class)).date()
     if upper and suffix == "lt":
@@ -304,8 +316,7 @@ def _pair(spec: DatasetSpec, symbol: str) -> tuple[str, str]:
     """
     if spec.asset_class not in (AssetClass.FOREX, AssetClass.CRYPTO):
         raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
-    spelled = ws_symbol(spec.asset_class, symbol)
-    base, _, quote = spelled.replace("/", "-").partition("-")
+    base, _, quote = ws_symbol(spec.asset_class, symbol).partition("-")
     return base, quote
 
 
@@ -478,7 +489,8 @@ def _base(
     Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
     in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
     segment, the indicators' query parameter); `Request.adjusted` when it is set; and the
-    futures `resolution` and the page size when the path takes them.
+    futures `resolution` and the page size when the path takes them. The page size is
+    `DatasetSpec.page_size`, or `Request.limit` when that is smaller.
 
     Args:
         spec: The dataset.
@@ -510,7 +522,11 @@ def _base(
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if spec.page_size is not None and "limit" in params:
-        query["limit"] = spec.page_size
+        # A page size, as the list paths read `limit`. The aggregates' range path reads its
+        # `limit` as the number of base aggregates queried instead (at most 50,000); its
+        # datasets set that maximum, and bars take no `limit` argument, so no cap shrinks it.
+        cap = request.limit
+        query["limit"] = spec.page_size if cap is None else min(cap, spec.page_size)
     path.update(fixed)
     return path, query
 
@@ -556,6 +572,7 @@ def plan_calls(
     fixed: Mapping[str, object] | None = None,
     dates: tuple[date | None, date | None] = (None, None),
     exact: tuple[datetime, datetime] | None = None,
+    order: Mapping[str, object] | None = None,
 ) -> list[Call]:
     """Plan the requests that serve a dataset call on one REST path.
 
@@ -571,6 +588,8 @@ def plan_calls(
         fixed: Path parameters the caller sets.
         dates: The time-axis bounds (`_axis_query`); open by default.
         exact: For `history()`, the window's exact instants (`_axis_query`).
+        order: For `history()`, the query parameters that ask for ascending rows
+            (`_ascending`), added to every call after the time axis; None adds none.
 
     Returns:
         The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
@@ -602,7 +621,7 @@ def plan_calls(
         zone_class = day_class(spec, map(symbol_class, _own_symbols(spec, symbol, own_query)))
         axis = _axis_query(spec, rest_path, dates=dates, exact=exact, asset_class=zone_class)
         sent = _filter_days(rest_path, {**query, **axis}, zone_class)
-        calls.append(Call({**path, **own_path}, {**sent, **own_query}, symbol))
+        calls.append(Call({**path, **own_path}, {**sent, **(order or {}), **own_query}, symbol))
     return calls
 
 
@@ -746,16 +765,19 @@ class _Converter:
                 arrays.append(widen(values, target))
         return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
 
-    def _canonical(self, value: str) -> str:
+    def _canonical(self, value: str | None) -> str | None:
         """Return a symbol read from the rows in its canonical form (`AUD/USD` as `C:AUDUSD`).
 
         Args:
-            value: The row's symbol; the rows always carry it (a required key).
+            value: The row's symbol; None only where the dataset declares its symbol key
+                optional (`KeySpec.required` False) and the row has none.
 
         Returns:
-            The canonical symbol; a value that is no valid symbol of the class is kept as sent,
-            and logged once per process at WARNING.
+            The canonical symbol, or None for a row without one; a value that is no valid
+            symbol of the class is kept as sent, and logged once per process at WARNING.
         """
+        if value is None:
+            return None
         try:
             return canonical(self.asset_class, value)
         except (TypeError, ValueError):
@@ -775,8 +797,10 @@ def _keep(batch: pa.RecordBatch, window: TimeRange | FuturesSessions | None) -> 
     """Keep the rows of a `history()` window: `[start, end)` on `Timestamp`, or the sessions.
 
     A request can return rows outside the window: the aggregates' `{from}/{to}` take whole
-    days, and futures bars are requested over a widened window. Without the column the window
-    is about, every row is kept.
+    days, and a futures range with a date bound is requested over a window widened for
+    holidays. Futures sessions keep the rows whose `SessionEndDate` lies in `[first, last]`,
+    and on a side given as an instant, whose `Timestamp` lies inside the window there. Without
+    the column a bound is about, that bound keeps every row.
 
     Args:
         batch: Rows in the dataset's schema.
@@ -786,21 +810,29 @@ def _keep(batch: pa.RecordBatch, window: TimeRange | FuturesSessions | None) -> 
         The rows inside the window.
     """
     names = batch.schema.names
-    if isinstance(window, FuturesSessions):
-        if "SessionEndDate" not in names:
-            return batch
-        sessions = batch.column("SessionEndDate")
-        mask = pc.and_(
-            pc.greater_equal(sessions, pa.scalar(window.first)),
-            pc.less_equal(sessions, pa.scalar(window.last)),
-        )
-        return batch.filter(mask)
-    if window is None or "Timestamp" not in names:
+    if window is None:
         return batch
-    times = batch.column("Timestamp")
-    start = pa.scalar(window.start_ns, times.type)
-    end = pa.scalar(window.end_ns, times.type)
-    return batch.filter(pc.and_(pc.greater_equal(times, start), pc.less(times, end)))
+    span = window.window if isinstance(window, FuturesSessions) else window
+    # A None side is an instant, bounded on `Timestamp`; a date side on `SessionEndDate`.
+    first, last = (
+        (window.first, window.last) if isinstance(window, FuturesSessions) else (None, None)
+    )
+    sessions = batch.column("SessionEndDate") if "SessionEndDate" in names else None
+    times = batch.column("Timestamp") if "Timestamp" in names else None
+    masks = []
+    if first is not None:
+        if sessions is not None:
+            masks.append(pc.greater_equal(sessions, pa.scalar(first)))
+    elif times is not None:
+        masks.append(pc.greater_equal(times, pa.scalar(span.start_ns, times.type)))
+    if last is not None:
+        if sessions is not None:
+            masks.append(pc.less_equal(sessions, pa.scalar(last)))
+    elif times is not None:
+        masks.append(pc.less(times, pa.scalar(span.end_ns, times.type)))
+    if not masks:
+        return batch
+    return batch.filter(functools.reduce(pc.and_, masks))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1540,8 +1572,9 @@ class RestEndpoints:
             fixed = _range_segments(window) if ranged else {}
             bounds: tuple[date | None, date | None]
             if isinstance(window, FuturesSessions):
-                bounds = (window.first, window.last)
-                window_instants = (window.window.start, window.window.end)
+                span = window.window
+                bounds = (window.first or span.start, window.last or span.end)
+                window_instants = (span.start, span.end)
             else:
                 bounds = (request.start, request.end)
                 window_instants = (window.start, window.end)
@@ -1553,6 +1586,7 @@ class RestEndpoints:
                 fixed=fixed,
                 dates=bounds,
                 exact=window_instants,
+                order=_ascending(spec, rest_path, request),
             )
         try:
             table, requests = reader.read(spec, rest_path, calls, limit=None, window=window)
@@ -1619,6 +1653,51 @@ def _report(error: MassiveError) -> None:
         error: The failure.
     """
     logger.error("%s", error)
+
+
+def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict[str, object]:
+    """Return the parameters that make a history path return each request's rows oldest first.
+
+    Several REST history paths default to the newest first (the futures trades and bars, the
+    stocks `/v3/trades`), so `history()` asks every path that takes a direction for ascending
+    order, unless the caller set one. The order holds within each request, so within each
+    symbol: the rows of several requests follow one another in request order. The field sorted
+    on is the time axis's field wherever the path lists it. A path with an `order` parameter
+    gets `order=asc`, with `sort` set to the axis field when `sort` lists it, or else to the
+    one value `sort` takes. A path with only `sort` gets the axis field's `.asc` value when it
+    is listed, otherwise the first value that sorts ascending (`asc` on the aggregates,
+    `window_start.asc`), or, where `sort` lists no values, the axis field with `.asc`
+    (`timestamp.asc`).
+
+    Args:
+        spec: The dataset, whose time axis names the field to sort on.
+        rest_path: The history path.
+        request: The normalized arguments; a `sort` or `order` already set is kept.
+
+    Returns:
+        The parameters to add, by wire name; empty for a path that takes no direction.
+    """
+    params = {p.name: p for p in rest_path.params if not p.in_path}
+    if {"sort", "order"} & dict(request.params).keys():
+        return {}
+    sort = params.get("sort")
+    axis = None if spec.time_axis is None else spec.time_axis[0].partition(".")[0]
+    if "order" in params:
+        fields = sort.values if sort is not None else ()
+        field = axis if axis in fields else fields[0] if len(fields) == 1 else None
+        return {"order": "asc", **({"sort": field} if field is not None else {})}
+    if sort is None:
+        return {}
+    values = [v for v in sort.values if v == "asc" or v.endswith(".asc")]
+    if f"{axis}.asc" in values:
+        chosen = f"{axis}.asc"
+    elif values:
+        chosen = values[0]
+    elif axis is not None and not sort.values:
+        chosen = f"{axis}.asc"
+    else:
+        return {}
+    return {"sort": chosen}
 
 
 def _range_segments(window: TimeRange | FuturesSessions) -> dict[str, object]:
