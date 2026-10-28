@@ -7,7 +7,9 @@ channel lands one frame from the fake WebSocket server in `blink()`, and every f
 round-trips one file through the fake S3.
 """
 
+import itertools
 import json
+import string
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
@@ -31,7 +33,7 @@ from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._ingest import poll, ws
 from deephaven_massive._massive import RestPath, Source, Status, Transport, source, to_batch
 from deephaven_massive._namespaces import forex
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -45,6 +47,7 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._session import CATALOG
+from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply
 from tests._fakes.s3 import FakeS3
 from tests._fakes.ws import FakeMassiveServer
@@ -188,7 +191,8 @@ def test_conversion_keeps_the_vendor_symbol() -> None:
 
 
 @pytest.mark.parametrize(
-    "symbols", ["EUR/USD", "eur-usd", "EURUSD", "C:EURUSD", ["EUR/USD", "C:EURUSD"]]
+    "symbols",
+    ["EUR/USD", "eur-usd", "EURUSD", "eurusd", "C:EURUSD", "c:eurusd", ["EUR/USD", "C:EURUSD"]],
 )
 def test_every_pair_form_becomes_the_canonical_ticker(
     massive_session: dm.MassiveSession, symbols: str | list[str]
@@ -277,10 +281,16 @@ def test_conversion(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.conversion(" aud", "Usd ", amount=100, precision=4)
     assert type(query) is Query
     assert request(query) == Request(
-        params=(("amount", 100.0), ("from", "AUD"), ("precision", "4"), ("to", "USD"))
+        params=(("amount", 100), ("from", "AUD"), ("precision", "4"), ("to", "USD"))
     )
     default = request(massive_session.forex.conversion("EUR", "USD"))
     assert dict(default.params) == {"amount": 1.0, "from": "EUR", "precision": "2", "to": "USD"}
+
+
+def test_a_large_integer_amount_keeps_every_digit(massive_session: dm.MassiveSession) -> None:
+    amount = 10**17 + 1
+    query = massive_session.forex.conversion("EUR", "USD", amount=amount)
+    assert dict(request(query).params)["amount"] == amount
 
 
 @pytest.mark.parametrize(
@@ -289,10 +299,14 @@ def test_conversion(massive_session: dm.MassiveSession) -> None:
         ({"from_currency": "EURO"}, (ValueError, "from_currency='EURO' is not a three-letter")),
         ({"to_currency": "U$D"}, (ValueError, r"to_currency='U\$D' is not a three-letter")),
         ({"from_currency": 840}, (TypeError, "from_currency must be a str, not int")),
-        ({"amount": 0}, (ValueError, "amount must be positive")),
-        ({"amount": "1"}, (TypeError, "amount must be a number")),
-        ({"precision": 5}, (ValueError, "precision must be 0 to 4, got 5")),
-        ({"precision": -1}, (ValueError, "precision must be 0 to 4")),
+        ({"amount": 0}, (ValueError, "amount must be positive and finite, got 0")),
+        ({"amount": -1.5}, (ValueError, "amount must be positive and finite, got -1.5")),
+        ({"amount": float("inf")}, (ValueError, "amount must be positive and finite, got inf")),
+        ({"amount": float("nan")}, (ValueError, "amount must be positive and finite, got nan")),
+        ({"amount": "1"}, (TypeError, "amount must be an int or float, not str")),
+        ({"amount": True}, (TypeError, "amount must be an int or float, not bool")),
+        ({"precision": 5}, (ValueError, r"precision must be one of \[0, 1, 2, 3, 4\], got 5")),
+        ({"precision": -1}, (ValueError, "precision must be one of")),
         ({"precision": 2.0}, (TypeError, "precision must be an int, not float")),
         ({"precision": True}, (TypeError, "precision must be an int, not bool")),
     ],
@@ -614,9 +628,7 @@ def test_conversion_sends_the_pair_amount_and_precision(
     body = fixture_body(load_fixture, "conversion.json")
     fake_rest.reply("/v1/conversion/AUD/USD", Reply(body))
     table = rest_session.forex.conversion("aud", "usd", amount=100, precision=4).fetch()
-    assert sent(fake_rest) == [
-        ("/v1/conversion/AUD/USD", {"amount": ["100.0"], "precision": ["4"]})
-    ]
+    assert sent(fake_rest) == [("/v1/conversion/AUD/USD", {"amount": ["100"], "precision": ["4"]})]
     columns = ("Symbol", "Converted", "InitialAmount", "LastAsk", "LastBid", "LastTimestamp")
     # The vendor's `AUD/USD` becomes the canonical pair.
     assert pick(table, *columns) == [
@@ -853,3 +865,105 @@ def test_bar_files_round_trip(
     assert pick(table, *BAR_COLUMNS) == [
         ("C:EURUSD", start, 1.08063, 1.0807, 1.0803, 1.08033, 120.0, None)
     ]
+
+
+# --- Batched snapshots and poll(), end to end -------------------------------------------------
+
+
+def test_a_long_snapshot_list_is_split_into_requests_of_250(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(SNAPSHOTS_PATH, Reply(fixture_body(load_fixture, "snapshots.json")))
+    codes = ["".join(letters) for letters in itertools.product(string.ascii_uppercase, repeat=3)]
+    pairs = [f"{code}/USD" for code in codes[:251]]
+    rest_session.forex.snapshots(pairs).fetch()
+    sizes = sorted(len(query["tickers"][0].split(",")) for _, query in sent(fake_rest))
+    assert sizes == [1, 250]
+
+
+@pytest.fixture
+def poll_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    # A manual clock: each poll cycle waits until the test advances it.
+    clock = FakeClock(manual=True)
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    return clock
+
+
+def next_cycle(clock: FakeClock) -> None:
+    # Ends the wait after a cycle and returns once the next cycle has run and waits again.
+    clock.wait_for_sleepers(1)
+    waits = len(clock.waits)
+    clock.advance(60)
+    until(lambda: len(clock.waits) > waits)
+
+
+def until(condition: Callable[[], bool]) -> None:
+    # Waits for the update graph to apply a published cycle; fails after WAIT seconds.
+    pause = threading.Event()  # never set; only paces the wait
+    for _ in range(int(WAIT / 0.01)):
+        if condition():
+            return
+        pause.wait(0.01)
+    assert condition()
+
+
+def snapshot_row(ticker: str, change: float) -> dict[str, object]:
+    return {"ticker": ticker, "todaysChangePerc": change, "updated": 1_605_280_919_000}
+
+
+@pytest.mark.parametrize(
+    ("make", "path"),
+    [
+        (lambda m: m.forex.snapshots(["EUR/USD", "GBP/USD"]), SNAPSHOTS_PATH),
+        (
+            lambda m: m.forex.movers(dm.Direction.GAINERS),
+            "/v2/snapshot/locale/global/markets/forex/gainers",
+        ),
+    ],
+)
+def test_snapshot_polls_keep_one_row_per_symbol(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    poll_clock: FakeClock,
+    make: Callable[[dm.MassiveSession], Query],
+    path: str,
+) -> None:
+    first = {
+        "status": "OK",
+        "tickers": [snapshot_row("C:EURUSD", 1.0), snapshot_row("C:GBPUSD", 2.0)],
+    }
+    second = {"status": "OK", "tickers": [snapshot_row("C:EURUSD", 3.0)]}
+    fake_rest.reply(path, Reply(first), Reply(second))
+    table = make(rest_session).poll(60)
+    until(
+        lambda: (
+            sorted(pick(table, "Symbol", "TodaysChangePerc"))
+            == [
+                ("C:EURUSD", 1.0),
+                ("C:GBPUSD", 2.0),
+            ]
+        )
+    )
+    # The next cycle replaces the rows by Symbol: EUR/USD is updated, GBP/USD leaves.
+    next_cycle(poll_clock)
+    until(lambda: pick(table, "Symbol", "TodaysChangePerc") == [("C:EURUSD", 3.0)])
+    assert [p for p, _ in sent(fake_rest)] == [path, path]
+
+
+def test_a_conversion_poll_keeps_one_row(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    poll_clock: FakeClock,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    body = fixture_body(load_fixture, "conversion.json")
+    fake_rest.reply("/v1/conversion/AUD/USD", Reply(body), Reply({**body, "converted": 74.0}))
+    table = rest_session.forex.conversion("AUD", "USD", amount=100).poll(60)
+    until(lambda: pick(table, "Symbol", "Converted") == [("C:AUDUSD", 73.14)])
+    next_cycle(poll_clock)
+    until(lambda: pick(table, "Symbol", "Converted") == [("C:AUDUSD", 74.0)])

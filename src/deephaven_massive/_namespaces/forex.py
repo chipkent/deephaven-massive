@@ -17,11 +17,12 @@ declares the symbol as filled from the request, so the row's `Symbol` is the who
 
 from __future__ import annotations
 
+import functools
 import logging
+import math
 import re
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
-from deephaven_massive._config import require_positive_number
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import (
     AssetClass,
@@ -30,7 +31,7 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
-from deephaven_massive._massive import Transport
+from deephaven_massive._massive import Transport, source
 from deephaven_massive._namespaces.base import Namespace, build_query
 
 if TYPE_CHECKING:
@@ -57,9 +58,6 @@ _PAGE_SIZE: Final = 50_000
 
 _CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
 """A currency code as the conversion endpoint takes it: three ISO 4217 letters."""
-
-_PRECISIONS: Final = range(5)
-"""The decimal places the conversion endpoint accepts (its `precision` enum, 0 to 4)."""
 
 _LAST_QUOTE: Final = "/v1/last_quote/currencies/{from}/{to}"
 _QUOTES: Final = "/v3/quotes/{fxTicker}"
@@ -150,6 +148,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_REST, _SNAPSHOTS): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="tickers",
+    symbols_per_request=250,
 )
 """`m.forex.snapshots`: the full-market snapshot, narrowed by its `tickers` parameter."""
 
@@ -157,7 +156,7 @@ _MOVERS: Final = "/v2/snapshot/locale/global/markets/forex/{direction}"
 
 MOVERS: Final = DatasetSpec(
     name="forex.movers",
-    summary="The twenty currency pairs with the largest percentage gain or loss today.",
+    summary="The twenty currency pairs that gained or lost the most since the previous UTC close.",
     asset_class=AssetClass.FOREX,
     fetch_path=_MOVERS,
     keys={(_REST, _MOVERS): SourceKeys(symbol=KeySpec("Ticker"))},
@@ -201,6 +200,21 @@ def _currency(name: str, value: object) -> str:
     if not _CURRENCY.match(code):
         raise ValueError(f"{name}={value!r} is not a three-letter currency code such as 'USD'")
     return code
+
+
+@functools.cache
+def _precisions() -> frozenset[int]:
+    """Return the decimal places the conversion endpoint accepts, from its generated parameter.
+
+    The endpoint declares `precision` as an enum of digit strings (`"0"` to `"4"` at the
+    snapshot), so the accepted values follow a refresh of the generated files.
+
+    Returns:
+        The accepted values, as integers.
+    """
+    path = source(Transport.REST, _CONVERSION)
+    (param,) = (p for p in path.params if p.name == "precision")
+    return frozenset(int(value) for value in param.values)
 
 
 class _Forex(Namespace):
@@ -299,15 +313,15 @@ class _Forex(Namespace):
         The timespan decides the transports, and so the query's class. One-second and
         one-minute bars (`multiplier=1`) stream from the `CAS` and `CA` WebSocket channels
         and have `history()`; one-day bars (`multiplier=1`) have `history()` and `fetch()`,
-        the previous completed session's bar from `/v2/aggs/ticker/{t}/prev`; every other
+        the previous UTC day's bar from `/v2/aggs/ticker/{t}/prev`; every other
         timespan and multiplier is `history()` only. `history()` reads the REST aggregate
         range (`/v2/aggs/ticker/{t}/range/…`) or the `global_forex/minute_aggs_v1` and
         `global_forex/day_aggs_v1` flat files, which hold only unadjusted bars. There is no
         `limit`: `history()` pages internally. `dm.ALL` streams every pair (the `CA.*` or
         `CAS.*` topic), and `history()` accepts it for one-day bars, through the grouped
         daily endpoint (`/v2/aggs/grouped/locale/global/market/fx/{date}`, one request per
-        day) or the day files, and for one-minute bars through the minute files; `fetch()`
-        with `dm.ALL` raises `ValueError`.
+        day) or the day files, and for one-minute bars through the minute files (with
+        `adjusted=False`); `fetch()` with `dm.ALL` raises `ValueError`.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#bars.
@@ -418,12 +432,13 @@ class _Forex(Namespace):
         return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))
 
     def movers(self, direction: Direction) -> Query:
-        """The twenty currency pairs with the largest percentage gain or loss today.
+        """The twenty currency pairs that gained or lost the most since the previous UTC close.
 
         One request to `/v2/snapshot/locale/global/markets/forex/{direction}` returns the top
-        gainers or losers since the previous day's close, in the same columns as
-        `snapshots()`. Massive clears the snapshot daily at 12:00 AM Eastern, so it can be
-        empty early in the day. It is REST only: `fetch()`, or `poll(interval)` for a live
+        gainers or losers by percentage change since the previous UTC day's close, in the
+        same columns as `snapshots()`; the day bars follow the UTC day too. Massive clears the
+        snapshot daily at 12:00 AM Eastern and repopulates it as quotes arrive, so it can be
+        empty just after that reset. It is REST only: `fetch()`, or `poll(interval)` for a live
         table keyed by `Symbol` whose rows come and go as the ranking changes. It takes no
         symbols, so `dm.ALL` does not apply, and has no `limit`: Massive returns at most
         twenty pairs.
@@ -466,9 +481,10 @@ class _Forex(Namespace):
             from_currency: The currency to convert from, a three-letter code such as
                 `"AUD"`; case and surrounding whitespace are ignored.
             to_currency: The currency to convert to, such as `"USD"`.
-            amount: The amount of `from_currency` to convert, a positive number. Defaults to
-                1.0.
-            precision: The decimal places of the converted amount, 0 to 4. Defaults to 2.
+            amount: The amount of `from_currency` to convert, a positive, finite `int` or
+                `float`; an `int` is sent as is. Defaults to 1.0.
+            precision: The decimal places of the converted amount, one of the values the
+                endpoint's specification lists (0 to 4). Defaults to 2.
 
         Returns:
             A query; nothing is requested until `fetch()` or `poll()` is called.
@@ -477,20 +493,24 @@ class _Forex(Namespace):
             TypeError: If a currency is not a `str`, `amount` is not a number, or `precision`
                 is not an `int` (a `bool` is neither).
             ValueError: If a currency is not three letters, `amount` is not positive and
-                finite, or `precision` is outside 0 to 4.
+                finite, or `precision` is not one the endpoint accepts.
 
         Example:
             ::
 
                 usd = m.forex.conversion("AUD", "USD", amount=100.0, precision=4).fetch()
         """
-        source = _currency("from_currency", from_currency)
+        base = _currency("from_currency", from_currency)
         target = _currency("to_currency", to_currency)
-        value = require_positive_number("amount", amount)
+        if isinstance(amount, bool) or not isinstance(amount, int | float):
+            raise TypeError(f"amount must be an int or float, not {type(amount).__name__}")
+        if not amount > 0 or amount == math.inf:  # NaN fails the first test
+            raise ValueError(f"amount must be positive and finite, got {amount!r}")
         if isinstance(precision, bool) or not isinstance(precision, int):
             raise TypeError(f"precision must be an int, not {type(precision).__name__}")
-        if precision not in _PRECISIONS:
-            raise ValueError(f"precision must be 0 to 4, got {precision}")
-        # The endpoint's `precision` is an enum of the digits "0" to "4", so it is sent as text.
-        params = {"from": source, "to": target, "amount": value, "precision": str(precision)}
+        accepted = _precisions()
+        if precision not in accepted:
+            raise ValueError(f"precision must be one of {sorted(accepted)}, got {precision}")
+        # The endpoint's `precision` is an enum of digit strings, so it is sent as text.
+        params = {"from": base, "to": target, "amount": amount, "precision": str(precision)}
         return cast("Query", build_query(self._core, CONVERSION, params=params))
