@@ -339,6 +339,25 @@ def test_gate_stale_entry_channel_and_prefix_entries_naming_nothing() -> None:
     ]
 
 
+def test_gate_stale_entry_description_fixes_no_field_takes() -> None:
+    # Under a declared key a key fix replaces, under a key only an example sends, and quoting
+    # text the vendor does not give: none of these entries could ever take effect.
+    real_hand = HandInput()
+    fix = overrides.DescriptionFix(vendor="Not the vendor's text.", text="x", reason="test")
+    unused = {
+        ("/vX/reference/tickers/{id}/events", "event_type"): fix,
+        ("futures/T", "z"): fix,
+    }
+    hand = dataclasses.replace(
+        real_hand, description_fixes={**real_hand.description_fixes, **unused}
+    )
+    assert _problems(hand) == [("stale-entry", *key) for key in sorted(unused)]
+    hand = dataclasses.replace(
+        real_hand, description_fixes={**real_hand.description_fixes, ("stocks/T", "p"): fix}
+    )
+    assert _problems(hand) == [("stale-entry", "stocks/T", "p")]
+
+
 def test_gate_shape_two_transports_with_one_source_key() -> None:
     # A channel and a prefix spelled alike would make every hand entry naming them ambiguous.
     message = {"type": "object", "properties": {"price": {"type": "number"}}}
