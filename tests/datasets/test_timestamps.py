@@ -237,5 +237,7 @@ def test_a_masked_failure_reads_as_the_routine_would_raise_it() -> None:
     assert mismatch_message("t.T", TimeUnit.MILLISECONDS, 5) == (
         "timestamp unit mismatch for t.T: 5 ms is outside 1990 to 2100"
     )
-    with pytest.raises(ValueError, match=r"1700000000000 ms is a valid timestamp for t\.T"):
-        mismatch_message("t.T", TimeUnit.MILLISECONDS, 1_700_000_000_000)
+    assert mismatch_message("t.T", TimeUnit.FMV_MAGNITUDE, 2**62) == (
+        "timestamp unit mismatch for t.T: 4611686018427387904 ms|ns is outside 1990 to 2100"
+    )
+    assert mismatch_message("t.T", TimeUnit.SECONDS, 2**40).endswith("overflows 64-bit nanoseconds")

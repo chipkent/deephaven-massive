@@ -153,7 +153,9 @@ class SessionClients:
             connections = self._streams
             created = connections is None
             if connections is None:
-                connections = self._streams = WsConnections(core, resolve_host=self._resolve_host)
+                connections = self._streams = WsConnections(
+                    core, resolve_host=self._resolve_host, record_verdict=self._record_verdict
+                )
         if created:
             core.on_close(connections.close)
         return WsTransport(core, connections)
@@ -169,6 +171,21 @@ class SessionClients:
             The decision, cached for the session by the REST transport.
         """
         return self.rest().resolve_host(asset_class, family)
+
+    def _record_verdict(
+        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        """Record the server's real-time verdict as the session's host decision of a pair.
+
+        The REST transport keeps the one cache of host decisions and the pair's REST row of
+        `m.connections()`; this replaces both, so later streams of the pair use the delayed host.
+
+        Args:
+            asset_class: The class.
+            family: The family.
+            decision: The decision the verdict implies (`DELAYED`, evidence `server verdict: ...`).
+        """
+        self.rest().record_verdict(asset_class, family, decision)
 
     def flat_files(self) -> FlatFileTransport:
         """Return a flat-file transport for one `history()` call.

@@ -16,7 +16,6 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -32,7 +31,9 @@ from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
+from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
 from deephaven_massive._types import override
 
@@ -46,405 +47,6 @@ if TYPE_CHECKING:
 
 TIMEOUT = 15.0
 W = Transport.WS
-
-
-# --- Subscriptions: the reconcile loop alone ---------------------------------------------------
-
-
-class FakeSender:
-    """Records what `Subscriptions` asks the client to send, in order."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, int, tuple[str, ...]]] = []
-
-    def subscribe(self, generation: int, topics: Sequence[str]) -> None:
-        self.calls.append(("subscribe", generation, tuple(topics)))
-
-    def unsubscribe(self, generation: int, topics: Sequence[str]) -> None:
-        self.calls.append(("unsubscribe", generation, tuple(topics)))
-
-    def reconnect(self) -> None:
-        self.calls.append(("reconnect", 0, ()))
-
-    def take(self) -> list[tuple[str, int, tuple[str, ...]]]:
-        calls, self.calls = self.calls, []
-        return calls
-
-
-@dataclass
-class FakeTimer:
-    callback: Callable[..., None]
-    args: tuple[object, ...]
-    cancelled: bool = False
-
-    def cancel(self) -> None:
-        self.cancelled = True
-
-
-@dataclass
-class FakeTimers:
-    """A manual `call_later`: timers run only when a test fires them."""
-
-    timers: list[FakeTimer] = field(default_factory=list)
-
-    def call_later(self, delay: float, callback: Callable[..., None], *args: object) -> FakeTimer:
-        assert delay == 5.0
-        timer = FakeTimer(callback, args)
-        self.timers.append(timer)
-        return timer
-
-    def live(self) -> list[FakeTimer]:
-        return [t for t in self.timers if not t.cancelled]
-
-    def fire(self) -> None:
-        due, self.timers = self.live(), []
-        for timer in due:
-            if not timer.cancelled:
-                timer.callback(*timer.args)
-
-
-@dataclass
-class Loop:
-    subs: ws.Subscriptions
-    sender: FakeSender
-    timers: FakeTimers
-    refused: list[tuple[tuple[str, ...], str]]
-    verdicts: list[Status]
-
-
-def make_loop(*, cap: int | None = None, verdict: bool = False) -> Loop:
-    sender, timers = FakeSender(), FakeTimers()
-    refused: list[tuple[tuple[str, ...], str]] = []
-    verdicts: list[Status] = []
-
-    def step_refused(status: Status) -> bool:
-        verdicts.append(status)
-        return verdict
-
-    subs = ws.Subscriptions(
-        sender,
-        call_later=timers.call_later,
-        ack_timeout=5.0,
-        cap=cap,
-        on_refused=lambda topics, message: refused.append((topics, message)),
-        on_step_refused=step_refused,
-        on_change=lambda: None,
-    )
-    return Loop(subs, sender, timers, refused, verdicts)
-
-
-def ack(*topics: str) -> Status:
-    return Status(kind=StatusKind.ACK, topics=topics, message="subscribed to: ...")
-
-
-def refusal(*topics: str, message: str = "not authorized") -> Status:
-    return Status(kind=StatusKind.REFUSED, topics=topics, message=message)
-
-
-def test_nothing_is_sent_without_a_generation() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.reconcile()
-    assert loop.sender.take() == []
-    assert loop.subs.counts() == (1, 0, 0, 0)
-
-
-def test_each_generation_sends_the_whole_desired_set() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.MSFT", "T.AAPL"])
-    loop.subs.opened(1)
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL", "T.MSFT"))]
-    loop.subs.status(ack("T.AAPL", "T.MSFT"))
-    assert loop.subs.counts() == (2, 2, 0, 0)
-    loop.subs.ended()
-    loop.subs.opened(2)
-    assert loop.sender.take() == [("subscribe", 2, ("T.AAPL", "T.MSFT"))]
-
-
-def test_one_step_is_in_flight_at_a_time() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.add(["T.MSFT"])
-    loop.subs.reconcile()
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
-    assert loop.subs.counts() == (2, 0, 1, 0)
-    loop.subs.status(ack("T.AAPL"))
-    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
-
-
-def test_an_acknowledgement_of_an_unsent_topic_is_ignored() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.MSFT"))
-    assert loop.subs.counts() == (1, 0, 1, 0)
-
-
-def test_an_unparsed_acknowledgement_acknowledges_the_step_and_warns_once(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL", "T.MSFT"])
-    with caplog.at_level(logging.WARNING, logger=ws.__name__):
-        loop.subs.opened(1)
-        loop.subs.status(ack())
-        loop.subs.add(["T.IBM"])
-        loop.subs.reconcile()
-        loop.subs.status(ack())
-    assert loop.subs.counts() == (3, 3, 0, 0)
-    assert len([r for r in caplog.records if "named no topic" in r.message]) == 1
-
-
-def test_removed_topics_are_unsubscribed_after_the_step() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL", "T.MSFT"])
-    loop.subs.opened(1)
-    loop.subs.remove(["T.MSFT"])
-    loop.subs.reconcile()
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL", "T.MSFT"))]  # in flight: waits
-    loop.subs.status(ack("T.AAPL"))  # T.MSFT left D: its watchdog went with it
-    assert loop.sender.take() == [("unsubscribe", 1, ("T.MSFT",))]
-    assert loop.subs.counts() == (1, 1, 0, 0)
-
-
-def test_topics_are_counted_per_stream() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.AAPL"))
-    loop.subs.remove(["T.AAPL"])
-    loop.subs.reconcile()
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
-    assert loop.subs.wanted
-    loop.subs.remove(["T.AAPL"])
-    loop.subs.reconcile()
-    assert loop.sender.take() == [("unsubscribe", 1, ("T.AAPL",))]
-    assert not loop.subs.wanted
-
-
-def test_topics_are_exact_strings() -> None:
-    # T.A is not a prefix of T.AAPL, and T.* covers nothing until acknowledged.
-    loop = make_loop()
-    loop.subs.add(["T.A", "T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.A"))
-    assert loop.subs.counts() == (2, 1, 1, 0)
-
-
-def test_adding_a_wildcard_makes_before_it_breaks() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.AAPL"))
-    loop.sender.take()
-    loop.subs.add(["T.*"])
-    loop.subs.reconcile()
-    assert loop.sender.take() == [("subscribe", 1, ("T.*",))]  # T.AAPL stays on the wire
-    loop.subs.status(ack("T.*"))
-    assert loop.sender.take() == [("unsubscribe", 1, ("T.AAPL",))]
-    assert loop.subs.counts() == (2, 1, 0, 0)
-
-
-def test_a_refused_wildcard_keeps_the_explicit_topics() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.AAPL"))
-    loop.sender.take()
-    loop.subs.add(["T.*"])
-    loop.subs.reconcile()
-    loop.subs.status(refusal("T.*", message="not authorized: T.*"))
-    assert loop.refused == [(("T.*",), "not authorized: T.*")]
-    assert loop.sender.take() == [("subscribe", 1, ("T.*",))]  # no unsubscription
-    assert loop.subs.counts() == (1, 1, 0, 0)
-
-
-def test_removing_a_wildcard_waits_for_the_explicit_topics() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.*", "T.AAPL", "T.MSFT", "T.IBM"])
-    loop.subs.opened(1)
-    assert loop.sender.take() == [("subscribe", 1, ("T.*", "T.AAPL", "T.IBM", "T.MSFT"))]
-    loop.subs.status(ack("T.*", "T.AAPL", "T.IBM", "T.MSFT"))
-    assert loop.sender.take() == [("unsubscribe", 1, ("T.AAPL", "T.IBM", "T.MSFT"))]
-    loop.subs.remove(["T.*"])
-    loop.subs.reconcile()
-    # The explicit topics come back first; the wildcard stays until each is resolved.
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL", "T.IBM", "T.MSFT"))]
-    loop.subs.status(ack("T.AAPL"))
-    loop.subs.status(refusal("T.IBM"))
-    assert loop.sender.take() == []
-    loop.timers.fire()  # T.MSFT: the single re-send
-    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
-    loop.timers.fire()  # T.MSFT: NO_ACK resolves it, and the wildcard can go
-    assert loop.sender.take() == [("reconnect", 0, ()), ("unsubscribe", 1, ("T.*",))]
-
-
-def test_a_wildcard_removed_before_its_acknowledgement_leaves_after_the_step() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.*"])
-    loop.subs.opened(1)
-    loop.subs.remove(["T.*"])
-    loop.subs.reconcile()
-    loop.subs.status(ack("T.*"))
-    assert loop.sender.take() == [
-        ("subscribe", 1, ("T.*",)),
-        ("unsubscribe", 1, ("T.*",)),
-    ]
-
-
-def test_a_missing_acknowledgement_is_resent_once_then_no_ack_reconnects() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.sender.take()
-    loop.timers.fire()
-    assert loop.sender.take() == [("subscribe", 1, ("T.AAPL",))]
-    loop.timers.fire()
-    assert loop.sender.take() == [("reconnect", 0, ())]
-    assert loop.subs.counts() == (1, 0, 0, 1)  # still desired; the stream never fails
-    assert loop.refused == []
-
-
-def test_a_second_no_ack_of_a_topic_does_not_reconnect(caplog: pytest.LogCaptureFixture) -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    for generation in (1, 2):
-        loop.subs.opened(generation)
-        loop.timers.fire()
-        loop.timers.fire()
-        loop.subs.ended()
-    calls = loop.sender.take()
-    assert [c for c in calls if c[0] == "reconnect"] == [("reconnect", 0, ())]
-    assert [r.levelno for r in caplog.records if "no acknowledgement" in r.message] == [
-        logging.ERROR,
-        logging.ERROR,
-    ]
-
-
-def test_a_watchdog_of_an_ended_generation_does_not_escalate() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    stale = loop.timers.live()
-    loop.subs.ended()
-    assert all(t.cancelled for t in stale)
-    loop.subs.opened(2)
-    loop.sender.take()
-    stale[0].callback(*stale[0].args)  # a watchdog that ran despite its cancellation
-    assert loop.sender.take() == []
-
-
-def test_a_watchdog_whose_topic_left_the_wire_does_not_escalate() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL", "T.MSFT"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.AAPL"))
-    [timer] = loop.timers.live()
-    loop.subs.remove(["T.MSFT"])  # cancels T.MSFT's watchdog
-    assert timer.cancelled
-    timer.callback(*timer.args)
-    assert loop.sender.take() == [
-        ("subscribe", 1, ("T.AAPL", "T.MSFT")),
-        ("unsubscribe", 1, ("T.MSFT",)),
-    ]
-
-
-def test_a_refused_topic_leaves_d_until_a_stream_wants_it_again() -> None:
-    loop = make_loop()
-    loop.subs.add(["Q.AAPL", "T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(refusal("Q.AAPL", "T.IBM"))  # T.IBM is nobody's: not reported
-    loop.subs.status(ack("T.AAPL"))
-    assert loop.refused == [(("Q.AAPL",), "not authorized")]
-    assert loop.subs.counts() == (1, 1, 0, 0)
-    loop.subs.add(["Q.AAPL"])  # a new stream tries it again
-    loop.subs.reconcile()
-    assert loop.sender.take()[-1] == ("subscribe", 1, ("Q.AAPL",))
-
-
-def test_a_refusal_naming_no_topic_refuses_the_step_in_flight() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL", "T.MSFT"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.AAPL", "T.MSFT"))
-    loop.subs.add(["Q.AAPL", "Q.MSFT"])
-    loop.subs.reconcile()
-    loop.subs.status(refusal())
-    assert loop.refused == [(("Q.AAPL", "Q.MSFT"), "not authorized")]
-    assert len(loop.verdicts) == 1  # the whole step was unresolved: the verdict was asked
-
-
-def test_a_partly_resolved_step_is_never_a_verdict() -> None:
-    loop = make_loop(verdict=True)
-    loop.subs.add(["T.AAPL", "T.MSFT"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.AAPL"))
-    loop.subs.status(refusal(message="real-time data needs a plan"))
-    assert loop.verdicts == []
-    assert loop.refused == [(("T.MSFT",), "real-time data needs a plan")]
-
-
-def test_a_verdict_the_connection_takes_changes_nothing_here() -> None:
-    loop = make_loop(verdict=True)
-    loop.subs.add(["T.ESZ5"])
-    loop.subs.opened(1)
-    loop.sender.take()
-    loop.subs.status(refusal(message="real-time data needs a plan"))
-    assert loop.refused == []
-    assert loop.sender.take() == []
-
-
-def test_a_refusal_with_nothing_in_flight_is_only_logged(caplog: pytest.LogCaptureFixture) -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.AAPL"))
-    with caplog.at_level(logging.WARNING, logger=ws.__name__):
-        loop.subs.status(refusal(message="huh"))
-    assert loop.refused == []
-    assert "no subscription was in flight: huh" in caplog.text
-
-
-def test_other_statuses_change_nothing() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    for kind in (StatusKind.MAX_CONNECTIONS, StatusKind.OTHER):
-        loop.subs.status(Status(kind=kind, message="x"))
-    assert loop.subs.counts() == (1, 0, 1, 0)
-
-
-def test_the_cap_admits_contracts_in_sorted_order_and_defers_the_rest() -> None:
-    loop = make_loop(cap=2)
-    loop.subs.add(["T.O:C", "T.O:A", "T.O:B", "Q.*"])  # another channel's wildcard counts zero
-    loop.subs.opened(1)
-    assert loop.sender.take() == [("subscribe", 1, ("Q.*", "T.O:A", "T.O:B"))]
-    assert loop.subs.deferred == {"T.O:C"}
-    assert loop.subs.explicit == 3
-    loop.subs.status(ack("Q.*", "T.O:A", "T.O:B"))
-    loop.subs.remove(["T.O:A"])  # room frees: the deferred contract is admitted
-    loop.subs.reconcile()
-    assert loop.subs.deferred == frozenset()
-    assert loop.sender.take() == [
-        ("subscribe", 1, ("T.O:C",)),
-        ("unsubscribe", 1, ("T.O:A",)),
-    ]
-
-
-def test_covered_contracts_count_only_while_on_the_wire() -> None:
-    loop = make_loop(cap=1)
-    loop.subs.add(["T.*", "T.O:A", "T.O:B"])
-    loop.subs.opened(1)
-    loop.subs.status(ack("T.*", "T.O:A"))  # T.* covers both: neither counts
-    assert loop.subs.deferred == frozenset()
-    assert loop.sender.take()[-1] == ("unsubscribe", 1, ("T.O:A",))
-    loop.subs.remove(["T.*"])
-    loop.subs.reconcile()
-    # They re-enter through the cap in sorted order.
-    assert loop.subs.deferred == {"T.O:B"}
-    assert loop.sender.take() == [("subscribe", 1, ("T.O:A",))]
 
 
 # --- The live harness: a session on the fake server --------------------------------------------
@@ -550,6 +152,7 @@ class Harness:
         self.server = server
         self.backoff = backoff
         self.decisions: list[tuple[AssetClass, ChannelFamily]] = []
+        self.verdicts: list[tuple[AssetClass, ChannelFamily, HostDecision]] = []
         self._decide = decide or (lambda *_: REALTIME)
         self.cond = threading.Condition()
         self.journal: list[tuple[object, ...]] = []
@@ -567,14 +170,28 @@ class Harness:
         )
         clients: Any = self.session._core._ports
         self.connections = ws.WsConnections(
-            self.session._core, resolve_host=self.resolve, client_factory=self.factory
+            self.session._core,
+            resolve_host=self.resolve,
+            record_verdict=self.record_verdict,
+            client_factory=self.factory,
         )
         clients._streams = self.connections
         self.session._core.on_close(self.connections.close)
 
     def resolve(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
+        # The REST transport's cache: a recorded verdict replaces the pair's decision.
         self.decisions.append((asset_class, family))
+        for verdict_class, verdict_family, decision in self.verdicts:
+            if (verdict_class, verdict_family) == (asset_class, family):
+                return decision
         return self._decide(asset_class, family)
+
+    def record_verdict(
+        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        with self.cond:
+            self.verdicts.append((asset_class, family, decision))
+            self.cond.notify_all()
 
     def factory(
         self,
@@ -1152,8 +769,20 @@ def test_the_real_time_verdict_moves_the_connection_once(
         assert row["Evidence"] == "server verdict: Real-time data requires an upgrade"
         [stream] = streams_of(harness, dh_to_pylist)
         assert stream["State"] == "RUNNING"
-        other = harness.query(FUTURES, ["NQZ5"]).blink()  # the verdict is cached
-        assert len(harness.decisions) == 1
+        assert harness.verdicts == [
+            (
+                AssetClass.FUTURES,
+                ChannelFamily.TICK,
+                HostDecision(
+                    "delayed.test",
+                    Recency.DELAYED,
+                    "server verdict: Real-time data requires an upgrade",
+                ),
+            )
+        ]
+        assert stream["Host"] == "delayed.test"  # the stream's row follows the move
+        other = harness.query(FUTURES, ["NQZ5"]).blink()  # the recorded verdict decides
+        assert harness.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
         harness.session.release(result)
         harness.session.release(other)
     finally:
@@ -1315,6 +944,7 @@ def test_changes_for_a_moved_stream_follow_it(harness: Harness) -> None:
     successor.start()
     with harness.session._core.registry_lock:
         harness.connections._streams[1] = successor
+        successor.awaiting.add(1)
     harness.on_loop(old, lambda: old.hand_over(successor))
     assert old.join(TIMEOUT)
     # The old loop has ended, so its methods run here, as a late callback would have there.
@@ -1323,6 +953,46 @@ def test_changes_for_a_moved_stream_follow_it(harness: Harness) -> None:
     old.release_stream(1)
     harness.unsubscribed("T.AAPL")
     successor.close()
+    del result
+
+
+def test_a_release_that_overtakes_the_adoption_waits_for_it(harness: Harness) -> None:
+    # The shutdown callback read the moved lease and posted before the old loop's hand-over.
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    old = harness.connection()
+    successor = spare_connection(harness, "next.test")
+    successor.start()
+    with harness.session._core.registry_lock:
+        harness.connections._streams[1] = successor
+        successor.awaiting.add(1)
+    successor.post(successor.release_stream, 1)
+    successor.post(successor.change_symbols, 2, frozenset(), frozenset())  # not awaited: dropped
+    harness.on_loop(old, lambda: old.hand_over(successor))
+    assert old.join(TIMEOUT)
+    harness.on_loop(successor, lambda: None)  # the adoption ran
+    assert harness.on_loop(successor, lambda: successor.subscriptions.wanted) is False
+    assert harness.on_loop(successor, lambda: dict(successor._streams)) == {}
+    successor.close()
+    assert successor.join(TIMEOUT)
+    del result
+
+
+def test_a_hand_over_to_a_failed_successor_fails_the_streams(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    old = harness.connection()
+    successor = spare_connection(harness, "next.test")
+    with harness.session._core.registry_lock:
+        successor.failure = dm.MassiveError("rejected the API key")
+    harness.on_loop(old, lambda: old.hand_over(successor))
+    assert old.join(TIMEOUT)  # its last flush failed the stream
+    [row] = streams_of(harness, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("FAILED", "rejected the API key")
+    successor.close()
+    assert successor.join(TIMEOUT)
     del result
 
 
@@ -1349,15 +1019,9 @@ def test_stress_concurrent_verbs_and_releases(harness: Harness) -> None:
 # --- Edge cases of the connection's callbacks -------------------------------------------------
 
 
-def test_a_refusal_of_topics_nobody_wants_reports_nothing() -> None:
-    loop = make_loop()
-    loop.subs.add(["T.AAPL"])
-    loop.subs.opened(1)
-    loop.subs.status(refusal("T.IBM"))
-    assert loop.refused == []
-
-
-def test_late_callbacks_of_an_unknown_stream_are_ignored(harness: Harness) -> None:
+def test_late_callbacks_of_an_unknown_stream_are_ignored(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
     result = harness.query(TRADES, ["AAPL"]).blink()
     connection = harness.connection()
     harness.subscribed("T.AAPL")
@@ -1365,10 +1029,12 @@ def test_late_callbacks_of_an_unknown_stream_are_ignored(harness: Harness) -> No
     harness.on_loop(connection, lambda: connection.change_symbols(999, frozenset(), frozenset()))
     harness.connections._symbols_changed(999, frozenset({"X"}), frozenset())
     harness.on_loop(connection, connection._idle_close)  # a stream is open: it stays
-    harness.on_loop(
-        connection, lambda: connection._on_status(999, ack("T.AAPL"))
-    )  # another generation's status
+    stale = Status(kind=StatusKind.REFUSED, topics=("T.AAPL",), message="not authorized")
+    harness.on_loop(connection, lambda: connection._on_status(999, stale))  # an older socket's
     assert harness.connection() is connection
+    harness.flush()
+    [row] = streams_of(harness, dh_to_pylist)
+    assert row["State"] == "RUNNING"
     harness.session.release(result)
 
 
@@ -1428,6 +1094,9 @@ def test_a_connection_whose_session_is_gone_writes_nothing(
     harness.on_loop(connection, connection._show_deferred)
     drift = _massive.DriftReport(extra=frozenset({"zz"}))
     harness.on_loop(connection, lambda: connection._record_drift("T", drift))
+    harness.on_loop(connection, lambda: connection._update_streams({1: StreamUpdate(deferred=1)}))
+    decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
+    harness.connections._move(connection, decision)  # the session is gone: nothing moves
     harness.connections._shut_down(1)
     assert harness.on_loop(connection, lambda: harness.connections.retire(connection, idle=False))
     assert harness.connections.reroute(connection, "real-time") is False
@@ -1450,23 +1119,44 @@ def test_retiring_a_replaced_connection_keeps_its_replacement(harness: Harness) 
 def test_a_verdict_is_taken_once(fake_ws_server: FakeMassiveServer) -> None:
     harness = Harness(fake_ws_server, decide=unknown_futures)
     try:
+        harness.connections._reconnect_backoff = 0.01
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         other = harness.query(TRADES, ["AAPL"]).blink()  # a stream the move leaves alone
         connection = harness.connection("wss://socket.test/futures")
-        harness.connections._verdicts[AssetClass.FUTURES, ChannelFamily.TICK] = REALTIME
-        assert harness.connections.reroute(connection, "real-time") is False
-        harness.connections._verdicts.clear()
-        with harness.session._core.registry_lock:
-            del harness.connections._connections[connection.url]  # already replaced
-        harness.connections._reconnect_backoff = 0.01
+        with harness.session._core.registry_lock:  # a fatal failure retired it meanwhile
+            del harness.connections._connections[connection.url]
         assert harness.on_loop(connection, lambda: harness.connections.reroute(connection, "x"))
+        assert harness.connections.reroute(connection, "x") is False  # once per connection
         harness.wait(lambda h: h.urls[-1] == "wss://delayed.test/futures")
+        wait_for(lambda: "wss://delayed.test/futures" in harness.connections._connections)
         with harness.session._core.registry_lock:
             owners = dict(harness.connections._streams)
         assert owners[1].url == "wss://delayed.test/futures"
         assert owners[2].url == "wss://socket.test/stocks"
+        assert len(harness.verdicts) == 1
         harness.session.release(result)
         harness.session.release(other)
+    finally:
+        harness.close()
+
+
+def test_a_verdict_that_cannot_be_recorded_still_moves(
+    fake_ws_server: FakeMassiveServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = Harness(fake_ws_server, decide=unknown_futures)
+
+    def broken(*_: object) -> None:
+        raise RuntimeError("no REST transport")
+
+    try:
+        harness.connections._reconnect_backoff = 0.01
+        harness.connections._record_verdict = broken
+        result = harness.query(FUTURES, ["ESZ5"]).blink()
+        connection = harness.connection("wss://socket.test/futures")
+        assert harness.on_loop(connection, lambda: harness.connections.reroute(connection, "x"))
+        harness.wait(lambda h: h.urls[-1] == "wss://delayed.test/futures")
+        assert "could not record the real-time verdict" in caplog.text
+        harness.session.release(result)
     finally:
         harness.close()
 
@@ -1572,16 +1262,18 @@ def test_the_documented_trade_frame_is_published(
     assert rows[0]["Timestamp"].value == 1_611_082_428_813_000_000
 
 
-def test_a_verdict_while_closing_fails_the_step(
+def test_a_verdict_while_closing_moves_nothing(
     fake_ws_server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(fake_ws_server, decide=unknown_futures)
     try:
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         connection = harness.connection("wss://socket.test/futures")
-        closed = iter([False, True])  # open at the first check, closed by the second
+        closed = iter([False, True])  # open when the verdict arrives, closed by the move
         monkeypatch.setattr(harness.connections, "_is_closed", lambda: next(closed))
-        assert harness.connections.reroute(connection, "real-time") is False
+        assert harness.on_loop(connection, lambda: harness.connections.reroute(connection, "x"))
+        assert connection.join(TIMEOUT)  # the move closed it instead of handing it over
+        assert len(harness.urls) == 2  # the successor was built, then closed unused
         del result
     finally:
         harness.close()
@@ -1598,14 +1290,128 @@ def test_a_verdict_joins_an_open_delayed_connection(fake_ws_server: FakeMassiveS
     try:
         harness.connections._reconnect_backoff = 0.01
         result = harness.query(FUTURES, ["ESZ5"]).blink()
-        harness.connections._verdicts.clear()
         delayed = harness.query(QUOTES_FUTURES, ["ESZ5"]).blink()
         moved = harness.connection("wss://socket.test/futures")
         existing = harness.connection("wss://delayed.test/futures")
         assert harness.on_loop(moved, lambda: harness.connections.reroute(moved, "real-time"))
+        wait_for(lambda: existing.leases == 2)
         assert harness.connection("wss://delayed.test/futures") is existing
-        assert existing.leases == 2
         harness.session.release(result)
         harness.session.release(delayed)
     finally:
         harness.close()
+
+
+# --- Regressions of the review --------------------------------------------------------------
+
+
+def test_a_retired_connection_is_never_leased(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The registry is read again after the new connection is built: a retired connection is
+    # gone from it, and the lease goes to the new one, never to None.
+    first = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    old = harness.connection()
+    harness.connections.retire(old, idle=False)
+    real = ws.WsConnections._check_cap
+    looks: list[ws.Connection | None] = []
+
+    def watching(
+        spec: DatasetSpec, connection: ws.Connection | None, topics: frozenset[str]
+    ) -> None:
+        looks.append(connection)
+        real(spec, connection, topics)
+
+    monkeypatch.setattr(ws.WsConnections, "_check_cap", staticmethod(watching))
+    second = harness.query(TRADES, ["MSFT"]).blink()
+    replacement = harness.connection()
+    assert replacement is not old
+    assert looks == [None, None]  # nothing the first time, then the new one is registered
+    harness.subscribed("T.MSFT")
+    old.close()
+    assert old.join(TIMEOUT)
+    harness.session.release(first)
+    harness.session.release(second)
+
+
+def test_a_stream_opening_as_its_connection_fails_fails_too(
+    harness: Harness,
+    fake_ws_server: FakeMassiveServer,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The connection fails fatally after the second stream leased it, before it is attached.
+    first = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    real: Callable[..., object] = open_stream_tables
+
+    def failing_meanwhile(*args: object, **kwargs: object) -> object:
+        fake_ws_server.auth_replies.append("auth_failed")
+        fake_ws_server.close(1011)
+        harness.wait(lambda h: WsState.FAILED in h.states)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ws, "open_stream_tables", failing_meanwhile)
+    with pytest.raises(dm.MassiveError, match=r"stream 2 failed: .*rejected the API key"):
+        harness.query(TRADES, ["MSFT"]).blink()
+    wait_for(lambda: [r["State"] for r in streams_of(harness, dh_to_pylist)] == ["FAILED"] * 2)
+    rows = streams_of(harness, dh_to_pylist)
+    assert all("rejected the API key" in r["Error"] for r in rows)
+    del first
+
+
+def test_a_verb_never_sees_a_failed_table_before_its_failure(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The failure is recorded before the table fails, so a verb in between builds its shape.
+    q = harness.query(TRADES, ["AAPL"])
+    first = q.blink()
+    harness.subscribed("T.AAPL")
+    core = harness.session._core
+    recording = threading.Event()
+    proceed = threading.Event()
+    real = core.fail_stream
+
+    def gated(stream_id: int, error: str) -> None:
+        recording.set()
+        assert proceed.wait(TIMEOUT)
+        real(stream_id, error)
+
+    monkeypatch.setattr(core, "fail_stream", gated)
+    harness.send(trade("AAPL", t=10))  # a timestamp out of bounds fails the stream
+    flushing = threading.Thread(target=harness.flush)
+    flushing.start()
+    assert recording.wait(TIMEOUT)
+    second = q.append_only()  # the table has not failed yet: no raw DHError
+    proceed.set()
+    flushing.join(TIMEOUT)
+    harness.session.release(second)
+    del first
+
+
+def test_a_new_channel_on_an_open_connection_declares_its_keys_first(harness: Harness) -> None:
+    trades = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    quotes = harness.query(QUOTES, ["AAPL"]).blink()
+    harness.subscribed("Q.AAPL")
+    required = ("set_required", "Q", frozenset({"Ticker", "SipTimestamp"}), "Ticker")
+    position = harness.journal.index(required)
+    assert harness.journal[position + 1] == ("subscribe", ("Q.AAPL",))
+    harness.session.release(trades)
+    harness.session.release(quotes)
+
+
+def test_a_reactive_streams_row_follows_its_watchlist(
+    harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["MSFT", "AAPL"])]))
+    result = harness.query(TRADES, watchlist).blink()
+    harness.subscribed("T.AAPL", "T.MSFT")
+    connection = harness.connection()
+    harness.on_loop(connection, lambda: None)
+    [row] = streams_of(harness, dh_to_pylist)
+    assert (row["SymbolCount"], row["Symbols"]) == (2, "AAPL, MSFT")
+    del result

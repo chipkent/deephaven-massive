@@ -270,9 +270,10 @@ _ingest/                 the only holder of wire clients
                          (single-flight)
   hosts.py               host resolution from REST evidence (section 13.2)
   poll.py                poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
-  ws.py                  connections over WsClient: reconcile, wildcards, watchdogs, the NO_ACK
-                         rule, the verdict rule, the options cap, rejects and drift routing
-                         (section 13.3)
+  subscriptions.py       topics and the reconcile loop of one connection: wildcards,
+                         watchdogs, the NO_ACK rule, the options cap's admission (section 13.3)
+  ws.py                  connections over WsClient: leases, the verdict rule, rejects and drift
+                         routing, the options cap's verb check (section 13.3)
 _massive/                the wire package (section 19)
 py.typed
 ```
@@ -627,11 +628,13 @@ return result
   waiters wake and open the stream themselves. `m.close()` wakes the waiters, which raise
   `MassiveError`; the opener releases the stream when its open returns. A failure reported
   during the open leaves the stream `FAILED`, and the open returns the stream as is, exactly as
-  if the failure had arrived just after it: every shape raises Deephaven's `DHError` ("Can not
-  listen to failed table") as it derives from the failed blink table, with the hold released.
-  `blink()` is no exception, because its described copy listens to the blink table
-  ([section 7.4](#74-column-descriptions)). The WebSocket layer wraps that error in a
-  `MassiveError` naming the stream's failure.
+  if the failure had arrived just after it: every shape, `blink()` included, raises
+  `MassiveError` naming the stream's failure, with the hold released. `SessionCore.stream_result`
+  checks the stream's recorded failure before it builds the shape, and wraps in the same
+  `MassiveError` the `DHError` ("Can not listen to failed table") Deephaven raises when the
+  failure lands while the shape derives from the blink table. A stream's failure is recorded
+  (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
+  meets the failed table always finds the failure to name.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
   either may come last. A stream's registry record is deleted only once both have happened:
@@ -1825,9 +1828,10 @@ fatal handshake error, or auth_failed
       HTTP status and the host, or AuthenticationError); State=FAILED
 shutdown callback (section 6.1)
    -> ref-count decrement; topics at zero leave D, and each cancels its watchdog
-a connection whose D stays empty for 30 s
+a connection with no stream attached for 30 s (no lease, so no stream opening either)
    -> closed by the connection loop (idle grace); the row is kept in m.connections() with
-      State=CLOSED
+      State=CLOSED. A reactive stream whose watchlist is empty keeps its connection open:
+      its next symbol must not reach a closed loop. The cost is an idle socket holding a slot
 ```
 
 A socket that the server stops answering is detected by websockets' keepalive pings and closed,
@@ -1850,9 +1854,12 @@ host only if all three hold:
 2. every topic of the in-flight step was refused;
 3. the host is not pinned by `ws_hosts`.
 
-Then: close, wait the backoff, reopen on `delayed.`, cache `DELAYED` with
-`evidence="server verdict: <message>"`, log a WARNING, and do not fail the streams. This happens
-at most once per (class, family) per session. In every other case the verdict is an
+Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` through
+`RestTransport.record_verdict(asset_class, family, decision)`, which replaces the one cached
+decision of the pair and rewrites its `Transport=REST` row; log a WARNING; move the connection's
+streams to the delayed host's connection, which starts after the backoff; close the old one;
+and do not fail the streams. The streams' `m.streams()` rows show the new host. Since the pair
+then resolves to `DELAYED`, this happens at most once per (class, family) per session. In every other case the verdict is an
 `EntitlementError` for that step's streams.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
@@ -1987,8 +1994,15 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `filter_table` is a cached static one-column table rebuilt only when the stream's symbol set
   changes. Target: Python work is O(rows) per channel per flush and independent of the number of
   streams; per-stream work is one Java filter and one `add`, O(rows) in Java with no Python
-  per-row cost. A non-gating benchmark test records rows per second for `T.*` with 1, 10, and
-  100 streams and compares `where_in` fan-out against per-stream Python grouping.
+  per-row cost. A symbol stream that holds none of the batch's distinct symbols gets nothing,
+  and one that holds all of them (and the batch has no row without a valid symbol) gets the
+  whole batch with no filter, so the common single-stream case costs one `add`. A non-gating
+  benchmark test records warmed median rows per second for 1, 10, and 100 streams at 200,
+  2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping.
+- Each flush applies the failures queued before it, then publishes, so a failed stream gets no
+  row after its failure; rows buffered for it in that flush are dropped. A batch that cannot
+  be converted or published fails that dataset's streams on the channel, with a `MassiveError`
+  naming the cause, and the flush goes on with the other channels.
 - `TablePublisher.add` is safe from the flush thread: the Java side snapshots the static batch
   and guarantees non-interleaved adds. `on_flush_callback` is not used (it blocks the update
   cycle).
@@ -2039,8 +2053,9 @@ sent:
 
 - **Static input.** `len(new topics) + in use > 1000` raises `ValueError` at verb time,
   synchronously.
-- **Reactive `Table` input.** Adds are subscribed in sorted order up to the cap. The rest are
-  deferred: not subscribed, not failed. `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
+- **Reactive `Table` input.** Static topics are admitted first (their verb checked them);
+  a reactive table's adds take the room left, in sorted order, and contracts admitted before
+  keep their place, across reconnects too. The rest are deferred: not subscribed, not failed. `m.streams()` shows `State=RUNNING`, `Deferred=<n>`, and
   `Error="over capacity: 1234/1000; 234 deferred"`, with a WARNING on each transition. When
   removals free capacity, deferred contracts subscribe in the same order. Rows for deferred
   contracts are absent, never stale.

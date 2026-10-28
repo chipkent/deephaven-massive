@@ -131,9 +131,12 @@ def test_host_decisions_go_through_the_rest_transport(
     monkeypatch.setattr(SessionClients, "rest", lambda _: cache)
     clients = clients_of(session)
     decision = clients._resolve_host(dm.AssetClass.STOCKS, ChannelFamily.TICK)
+    verdict = HostDecision("delayed.massive.com", Recency.DELAYED, "server verdict: x")
+    clients._record_verdict(dm.AssetClass.FUTURES, ChannelFamily.TICK, verdict)
     assert decision.host == "socket.massive.com"
     assert cache.calls == [
         ("resolve", dm.AssetClass.STOCKS, ChannelFamily.TICK),
+        ("record", dm.AssetClass.FUTURES, ChannelFamily.TICK, verdict),
     ]
 
 

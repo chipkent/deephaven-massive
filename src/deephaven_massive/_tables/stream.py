@@ -131,6 +131,24 @@ class RowFailure:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class Converted:
+    """One channel's rows of one flush, converted for one dataset by `ChannelPlan.convert`.
+
+    Attributes:
+        batch: The rows in the dataset's schema, without the rows that failed.
+        failures: The rows that failed, in row order.
+        symbols: The batch's distinct canonical symbols, so a stream that receives none of
+            them, or all of them, needs no filter.
+        null_symbols: True when some row of the batch has no valid symbol (a null `Symbol`).
+    """
+
+    batch: pa.Table
+    failures: list[RowFailure]
+    symbols: frozenset[str] = frozenset()
+    null_symbols: bool = False
+
+
 @dataclass(frozen=True, eq=False, slots=True)
 class ChannelPlan:
     """How one dataset reads the rows of one WebSocket channel.
@@ -212,7 +230,7 @@ class ChannelPlan:
 
     def convert(
         self, rows: Sequence[Mapping[str, object]], symbols: dict[str, str | None]
-    ) -> tuple[pa.Table, list[RowFailure]]:
+    ) -> Converted:
         """Turn one flush's rows of the channel into a batch of the dataset's schema.
 
         Pure Arrow apart from the symbol map: the rows become one Arrow table at once, each
@@ -228,8 +246,8 @@ class ChannelPlan:
                 one per flush thread and plan, so it needs no lock.
 
         Returns:
-            `(batch, failures)`: the batch without the failing rows, and one `RowFailure` per
-            failing row, in row order.
+            The batch without the failing rows, one `RowFailure` per failing row in row order,
+            and the batch's distinct symbols.
         """
         wire = pa.Table.from_pylist(list(rows), schema=self.wire_schema)
         count = wire.num_rows
@@ -254,13 +272,21 @@ class ChannelPlan:
                 values = nanos
             arrays.append(widen(values, column_type.arrow_type))
         batch = pa.Table.from_arrays(arrays, schema=self.arrow_schema)
-        if failed is None:
-            return batch, []
-        canonical_symbols = batch.column(_SYMBOL)
-        return batch.filter(pc.invert(failed)), [
-            RowFailure(canonical_symbols[index].as_py(), message)
-            for index, message in sorted(failures)
-        ]
+        rejected: list[RowFailure] = []
+        if failed is not None:
+            canonical_symbols = batch.column(_SYMBOL)
+            rejected = [
+                RowFailure(canonical_symbols[index].as_py(), message)
+                for index, message in sorted(failures)
+            ]
+            batch = batch.filter(pc.invert(failed))
+        distinct = pc.unique(batch.column(_SYMBOL)).to_pylist()
+        return Converted(
+            batch,
+            rejected,
+            symbols=frozenset(s for s in distinct if s is not None),
+            null_symbols=None in distinct,
+        )
 
     def _canonical(self, raw: pa.Array, symbols: dict[str, str | None]) -> pa.Array:
         """Map a column of wire symbols to canonical symbols, one Python call per new symbol.
@@ -312,11 +338,18 @@ class StreamSink:
     """One stream as its connection's flush thread publishes to it.
 
     Created by `open_stream_tables` on the caller thread and added to the connection's routing
-    table by the transport; removed when the stream's blink table has shut down. The publisher,
-    the plan, and the published-row count are the flush thread's: it is the only thread that
-    adds, fails, or counts. The symbol set may be replaced from another thread (the connection's
-    loop, when a reactive symbol table changes) through `set_symbols`, under the sink's own leaf
-    lock; the flush thread rebuilds its cached filter table when the version changes.
+    table by the transport; removed when the stream's blink table has shut down. Two locks keep
+    it consistent whichever thread reaches it:
+
+    - its leaf lock guards the symbol set, which the connection's loop replaces (`set_symbols`)
+      when a reactive symbol table changes;
+    - its publish lock serializes `publish` and `fail`, which call Deephaven. Usually only the
+      flush thread takes it, but a stream can briefly be reached from two flush threads (when
+      the server's verdict moves its connection), and is failed from the caller thread when
+      its connection failed while it was opening. The lock is never taken while another
+      library lock is held.
+
+    A failed stream publishes nothing more, and is failed once.
 
     Attributes:
         stream_id: The stream's id.
@@ -328,6 +361,7 @@ class StreamSink:
         "_filter",
         "_filter_version",
         "_lock",
+        "_publish_lock",
         "_symbols",
         "_version",
         "failed",
@@ -360,7 +394,8 @@ class StreamSink:
         self._lock = threading.Lock()
         self._symbols = symbols
         self._version = 0
-        # Flush-thread state.
+        # Publish-lock state.
+        self._publish_lock = threading.Lock()
         self._filter: Table | None = None
         self._filter_version = -1
         self.rows_published = 0
@@ -389,27 +424,76 @@ class StreamSink:
             symbols = self._symbols
         return symbols is None or (symbol is not None and symbol in symbols)
 
-    def select(self, batch: Table) -> Table | None:
-        """Return the part of a channel's batch this stream receives. Flush thread only.
+    def publish(self, batch: Table, converted: Converted) -> int:
+        """Add the part of a channel's batch this stream receives.
+
+        No Python work per row: a `dm.ALL` stream gets the whole batch; a symbol stream gets
+        nothing when it holds none of the batch's symbols, the whole batch when it holds all of
+        them (the common single-stream case), and otherwise a `where_in` against its cached
+        filter table, rebuilt only when its symbols changed.
 
         Args:
             batch: The channel's static batch in the dataset's schema.
+            converted: The batch's conversion, for its distinct symbols.
 
         Returns:
-            `batch` itself for a `dm.ALL` stream; its rows of the stream's symbols for a symbol
-            stream (a `where_in` against the cached filter table); None when the stream holds
-            no symbol.
+            The rows added; 0 once the stream has failed.
+        """
+        with self._publish_lock:
+            if self.failed:
+                return 0
+            selected = self._select(batch, converted)
+            added = 0 if selected is None else selected.size
+            if selected is not None and added:
+                self.publisher.add(selected)
+                self.rows_published += added
+            return added
+
+    def _select(self, batch: Table, converted: Converted) -> Table | None:
+        """Choose the rows of a batch the stream receives; the publish lock is held.
+
+        Args:
+            batch: The channel's batch.
+            converted: Its conversion.
+
+        Returns:
+            The rows, or None when the stream receives none.
         """
         with self._lock:
             symbols, version = self._symbols, self._version
         if symbols is None:
             return batch
-        if not symbols:
+        if symbols.isdisjoint(converted.symbols):
             return None
+        if converted.symbols <= symbols and not converted.null_symbols:
+            return batch
         if version != self._filter_version:
             self._filter = new_table([string_col(_SYMBOL, sorted(symbols))])
             self._filter_version = version
         return batch.where_in(cast("Table", self._filter), _SYMBOL)
+
+    def fail(self, core: SessionCore, error: MassiveError) -> bool:
+        """Fail the stream's table and record the failure, once.
+
+        The failure is recorded first (`SessionCore.fail_stream`) and the table failed after
+        (`publish_failure`), so a verb that finds the table failed always finds the failure
+        recorded too, and names it. Logged at ERROR. Never call it on an update-graph thread.
+
+        Args:
+            core: The session's core.
+            error: The error the table fails with.
+
+        Returns:
+            False when the stream had already failed, so nothing was done.
+        """
+        with self._publish_lock:
+            if self.failed:
+                return False
+            self.failed = True
+            logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
+            core.fail_stream(self.stream_id, str(error))
+            self.publisher.publish_failure(error)
+            return True
 
 
 class _Routes:
@@ -473,20 +557,23 @@ class _Routes:
             routes = self._routes
         return tuple(sink for sinks in routes.values() for sink in sinks)
 
-    def snapshot(
-        self,
-    ) -> tuple[
-        Mapping[str, tuple[StreamSink, ...]],
-        Mapping[str, queue.SimpleQueue[list[dict[str, object]]]],
-    ]:
-        """Return the current routes and buffers, to read without the lock.
+    def current(self) -> Mapping[str, tuple[StreamSink, ...]]:
+        """Return the current routes, to read without the lock.
 
         Returns:
-            `(routes, buffers)`: the streams by channel, and the row buffer of each channel
-            that has ever been routed.
+            The streams by channel.
         """
         with self._lock:
-            return self._routes, self._buffers
+            return self._routes
+
+    def buffers(self) -> tuple[tuple[str, queue.SimpleQueue[list[dict[str, object]]]], ...]:
+        """Return the row buffer of each channel that has ever been routed.
+
+        Returns:
+            `(channel, buffer)` pairs.
+        """
+        with self._lock:
+            return tuple(self._buffers.items())
 
     def buffer(self, channel: str) -> queue.SimpleQueue[list[dict[str, object]]] | None:
         """Return the row buffer of a channel.
@@ -665,14 +752,16 @@ class Flusher:
             return
         with self._flush_lock, entered(core.exec_ctx):
             controls = _drain(self._control)
-            routes, buffers = self.routes.snapshot()
+            drained = {channel: _drain(buffer) for channel, buffer in self.routes.buffers()}
+            # Routes after the rows: a stream routed meanwhile gets the rows that reached it.
+            routes = self.routes.current()
             for item in controls:
                 if isinstance(item, _Fail):
-                    failing = [s for s in self.routes.sinks() if s.stream_id in item.stream_ids]
-                    self._fail(core, failing, item.error)
+                    for sink in self.routes.sinks():
+                        if sink.stream_id in item.stream_ids:
+                            sink.fail(core, item.error)
             updates: dict[int, StreamUpdate] = {}
-            for channel, buffer in buffers.items():
-                frames = _drain(buffer)
+            for channel, frames in drained.items():
                 sinks = routes.get(channel, ())
                 if frames and sinks:
                     rows = [row for frame in frames for row in frame]
@@ -704,41 +793,46 @@ class Flusher:
             if not sink.failed:
                 by_plan.setdefault(sink.plan, []).append(sink)
         for plan, readers in by_plan.items():
-            batch, failures = plan.convert(rows, self._symbols.setdefault(plan, {}))
-            for failure in failures:
-                self._fail(
-                    core,
-                    [s for s in readers if s.receives(failure.symbol)],
-                    MassiveError(failure.message),
+            try:
+                self._publish_plan(core, plan, rows, readers=readers, updates=updates)
+            except Exception as error:  # one dataset's failure never costs the others their rows
+                logger.exception("%s: could not publish a %s batch", plan.dataset, plan.channel)
+                failure = MassiveError(
+                    f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
                 )
-            if not batch.num_rows:
-                continue
-            table = to_table(batch)
-            for sink in readers:
-                if sink.failed:
-                    continue
-                selected = sink.select(table)
-                if selected is None or not (added := selected.size):
-                    continue
-                sink.publisher.add(selected)
-                sink.rows_published += added
-                updates[sink.stream_id] = StreamUpdate(rows_published=sink.rows_published)
+                for sink in readers:
+                    sink.fail(core, failure)
 
-    def _fail(self, core: SessionCore, sinks: Iterable[StreamSink], error: MassiveError) -> None:
-        """Fail streams' tables once each, and record the failures.
+    def _publish_plan(
+        self,
+        core: SessionCore,
+        plan: ChannelPlan,
+        rows: list[dict[str, object]],
+        *,
+        readers: list[StreamSink],
+        updates: dict[int, StreamUpdate],
+    ) -> None:
+        """Convert a channel's rows for one dataset once and add them to its streams.
 
         Args:
             core: The session's core.
-            sinks: The streams; one already failed is skipped.
-            error: The error.
+            plan: The dataset's plan for the channel.
+            rows: The channel's rows of this flush.
+            readers: The dataset's streams on the channel.
+            updates: Receives each stream's new published-row total.
         """
-        for sink in sinks:
-            if sink.failed:
-                continue
-            sink.failed = True
-            logger.error("%s stream %d failed: %s", sink.plan.dataset, sink.stream_id, error)
-            sink.publisher.publish_failure(error)
-            core.fail_stream(sink.stream_id, str(error))
+        converted = plan.convert(rows, self._symbols.setdefault(plan, {}))
+        for failure in converted.failures:
+            error = MassiveError(failure.message)
+            for sink in readers:
+                if sink.receives(failure.symbol):
+                    sink.fail(core, error)
+        if not converted.batch.num_rows:
+            return
+        table = to_table(converted.batch)
+        for sink in readers:
+            if sink.publish(table, converted):
+                updates[sink.stream_id] = StreamUpdate(rows_published=sink.rows_published)
 
     @staticmethod
     def _report_drift(core: SessionCore, sinks: tuple[StreamSink, ...], drift: DriftReport) -> None:

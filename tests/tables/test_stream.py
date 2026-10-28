@@ -8,6 +8,7 @@ rows per second of the shared-batch fan-out against per-stream Python grouping.
 from __future__ import annotations
 
 import logging
+import statistics
 import sys
 import threading
 import time
@@ -139,10 +140,12 @@ def test_conversion_maps_symbols_and_converts_every_column(
         },
     ]
     with caplog.at_level(logging.WARNING):
-        batch, failures = plan.convert(rows, cache)
+        converted = plan.convert(rows, cache)
         plan.convert(rows, cache)  # cached: no second warning
-    assert failures == []
+    assert converted.failures == []
+    batch = converted.batch
     assert batch.column("Symbol").to_pylist() == ["C:EURUSD", None]
+    assert (converted.symbols, converted.null_symbols) == (frozenset({"C:EURUSD"}), True)
     assert batch.column("Timestamp").type == pa.timestamp("ns", tz="UTC")
     assert cache == {"EUR/USD": "C:EURUSD", "nonsense pair": None}
     assert caplog.text.count("which is not a valid symbol") == 1
@@ -157,9 +160,11 @@ def test_conversion_drops_and_reports_rows_with_bad_timestamps(
         trade("MSFT", SipTimestamp=5),
         trade("IBM", TrfTimestamp=2**62),
     ]
-    batch, failures = plan.convert(rows, {})
+    converted = plan.convert(rows, {})
+    batch = converted.batch
     assert batch.column("Symbol").to_pylist() == ["AAPL"]
-    assert failures == [
+    assert (converted.symbols, converted.null_symbols) == (frozenset({"AAPL"}), False)
+    assert converted.failures == [
         RowFailure(
             "MSFT",
             "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100",
@@ -181,7 +186,7 @@ def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) 
         columns=(*plan.columns, (ColumnType.STRING, "Venue", None, None)),
         arrow_schema=plan.arrow_schema.append(pa.field("Venue", pa.string())),
     )
-    batch, _ = wider.convert([trade("AAPL")], {})
+    batch = wider.convert([trade("AAPL")], {}).batch
     assert batch.column("Venue").to_pylist() == [None]
 
 
@@ -203,28 +208,52 @@ def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink
     return opened.sink, opened.handle.blink
 
 
-def test_a_sink_selects_its_symbols(massive_session: dm.MassiveSession) -> None:
+def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.MassiveSession) -> None:
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
-    batch = to_table(plan.convert([trade("AAPL"), trade("MSFT")], {})[0])
+    converted = plan.convert([trade("AAPL"), trade("MSFT")], {})
+    batch = to_table(converted.batch)
     every, _ = make_sink(core, ALL)
-    assert every.select(batch) is batch
+    assert every._select(batch, converted) is batch
     assert every.receives(None)
+    disjoint, _ = make_sink(core, ("IBM",))
+    assert disjoint._select(batch, converted) is None  # no filter: it holds no batch symbol
+    superset, _ = make_sink(core, ("AAPL", "IBM", "MSFT"))
+    assert superset._select(batch, converted) is batch  # no filter: it holds them all
     some, _ = make_sink(core, ("AAPL",))
-    selected = some.select(batch)
+    selected = some._select(batch, converted)
     assert selected is not None
     assert selected.size == 1
     cached = some._filter
-    assert some.select(batch) is not None
+    assert some._select(batch, converted) is not None
     assert some._filter is cached  # the symbols did not change: the filter is reused
     assert some.receives("AAPL")
     assert not some.receives(None)
     some.set_symbols(frozenset({"AAPL", "MSFT"}))
-    again = some.select(batch)
-    assert again is not None
-    assert again.size == 2
+    assert some._select(batch, converted) is batch
     some.set_symbols(frozenset())
-    assert some.select(batch) is None
+    assert some._select(batch, converted) is None
+    nameless = plan.convert([trade("AAPL"), trade("not a symbol")], {})
+    with_null = to_table(nameless.batch)
+    some.set_symbols(frozenset({"AAPL"}))
+    filtered = some._select(with_null, nameless)  # a null Symbol row needs the filter
+    assert filtered is not None
+    assert filtered.size == 1
+
+
+def test_a_failed_sink_publishes_nothing_and_fails_once(
+    massive_session: dm.MassiveSession,
+) -> None:
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    converted = plan.convert([trade("AAPL")], {})
+    batch = to_table(converted.batch)
+    sink, _ = make_sink(core, ALL)
+    assert sink.publish(batch, converted) == 1
+    assert sink.fail(core, MassiveError("refused"))
+    assert not sink.fail(core, MassiveError("again"))
+    assert sink.publish(batch, converted) == 0
+    assert sink.rows_published == 1
 
 
 def test_open_stream_tables_releases_its_scope_on_failure(
@@ -317,6 +346,38 @@ def test_a_batch_whose_every_row_failed_publishes_nothing(
     assert not msft.failed
 
 
+def test_a_failure_is_recorded_before_the_table_fails(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A verb that meets the failed table must find the failure recorded, to name it.
+    core = massive_session._core
+    sink, _ = make_sink(core, ALL)
+    order: list[str] = []
+    monkeypatch.setattr(core, "fail_stream", lambda *_: order.append("recorded"))
+    monkeypatch.setattr(sink.publisher, "publish_failure", lambda _: order.append("failed"))
+    sink.fail(core, MassiveError("refused"))
+    assert order == ["recorded", "failed"]
+
+
+def test_a_batch_that_cannot_be_converted_fails_only_its_readers(
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One channel's bad batch costs neither another channel its rows nor the flush its updates.
+    core = massive_session._core
+    broken, _ = make_sink(core, ALL)
+    healthy, healthy_blink = make_sink(core, ALL)
+    shown = blink_to_append_only(healthy_blink)
+    flusher.routes.add("T", broken)
+    flusher.routes.add("Q", healthy)  # the same plan, routed as another channel's reader
+    flusher.rows("T", [trade("AAPL", Price="not a number")])
+    flusher.rows("Q", [trade("AAPL")])
+    flusher.flush()
+    assert broken.failed
+    assert not healthy.failed
+    wait_for(lambda: shown.size == 1)
+    assert "test.trades: could not publish a T batch" in caplog.text
+
+
 def test_drift_is_reported_for_the_streams_of_the_channel(
     massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -375,30 +436,53 @@ def test_an_unstarted_flusher_joins_at_once(massive_session: dm.MassiveSession) 
 # --- Benchmark (records, never gates) ----------------------------------------------------------
 
 
+def _median_seconds(work: Callable[[], None], *, repeats: int = 7, warmups: int = 3) -> float:
+    # The median of warmed repetitions, so neither path pays the JIT's or a filter's first use.
+    for _ in range(warmups):
+        work()
+    times = []
+    for _ in range(repeats):
+        started = time.perf_counter()
+        work()
+        times.append(time.perf_counter() - started)
+    return statistics.median(times)
+
+
+@pytest.mark.parametrize("rows_per_flush", [200, 2_000, 20_000])
 @pytest.mark.parametrize("streams", [1, 10, 100])
 def test_benchmark_fan_out(
-    massive_session: dm.MassiveSession, streams: int, capsys: pytest.CaptureFixture[str]
+    massive_session: dm.MassiveSession,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    streams: int,
+    rows_per_flush: int,
 ) -> None:
+    # Records, never gates: the flush's shared batch against grouping the rows per stream in
+    # one Python pass (one conversion and one table per stream).
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
     symbols = [f"S{i}" for i in range(streams)]
-    rows = [trade(symbols[i % streams], float(i)) for i in range(20_000)]
+    rows = [trade(symbols[i % streams], float(i)) for i in range(rows_per_flush)]
     sinks = [make_sink(core, (symbol,))[0] for symbol in symbols]
-    started = time.perf_counter()
-    table = to_table(plan.convert(rows, {})[0])
-    for sink in sinks:
-        selected = sink.select(table)
-        assert selected is not None
-        sink.publisher.add(selected)
-    where_in = time.perf_counter() - started
-    started = time.perf_counter()
-    for symbol, sink in zip(symbols, sinks, strict=True):
-        mine = [row for row in rows if row["Ticker"] == symbol]
-        sink.publisher.add(to_table(plan.convert(mine, {})[0]))
-    grouped = time.perf_counter() - started
+
+    def shared() -> None:
+        converted = plan.convert(rows, {})
+        table = to_table(converted.batch)
+        for sink in sinks:
+            sink.publish(table, converted)
+
+    def grouped() -> None:
+        buckets: dict[object, list[dict[str, object]]] = {}
+        for row in rows:
+            buckets.setdefault(row["Ticker"], []).append(row)
+        for symbol, sink in zip(symbols, sinks, strict=True):
+            sink.publisher.add(to_table(plan.convert(buckets.get(symbol, []), {}).batch))
+
+    shared_rate = rows_per_flush / _median_seconds(shared)
+    grouped_rate = rows_per_flush / _median_seconds(grouped)
     with capsys.disabled():
         sys.stderr.write(
-            f"\nfan-out of {len(rows)} rows to {streams} streams: "
-            f"where_in {len(rows) / where_in:,.0f} rows/s, "
-            f"Python grouping {len(rows) / grouped:,.0f} rows/s\n"
+            f"\nfan-out of {rows_per_flush} rows to {streams} streams: "
+            f"shared batch {shared_rate:,.0f} rows/s, "
+            f"Python grouping {grouped_rate:,.0f} rows/s\n"
         )
