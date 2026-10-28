@@ -17,8 +17,8 @@ The REST list datasets (dividends through the filings) share one shape: `symbols
 and only filters the request, `dm.ALL` is refused in favour of `symbols=None`, `start` and
 `end` bound the dataset's date axis where it has one, and the `sort`, `order`, `limit`, and
 `filters` block works as described in the package documentation. The rows of the three financial
-statements, Forms 3 and 4, and the 8-K disclosures each list several tickers, so those datasets
-have no `Symbol` column and keep `Tickers`.
+statements, Forms 3 and 4, the insider activity and roster, and the 8-K disclosures each list
+several tickers, so those datasets have no `Symbol` column and keep `Tickers`.
 """
 
 from __future__ import annotations
@@ -372,6 +372,8 @@ _RISK_FACTORS: Final = "/stocks/filings/vX/risk-factors"
 _FORM_13F: Final = "/stocks/filings/vX/13-F"
 _FORM_3: Final = "/stocks/filings/vX/form-3"
 _FORM_4: Final = "/stocks/filings/vX/form-4"
+_INSIDER_ACTIVITY: Final = "/stocks/insiders/vX/activity"
+_INSIDER_ROSTER: Final = "/stocks/insiders/vX/holdings"
 _RISK_TAXONOMY: Final = "/stocks/taxonomies/vX/risk-factors"
 _DISCLOSURE_TAXONOMY: Final = "/stocks/taxonomies/vX/disclosures"
 _CATEGORIES: Final = ("PrimaryCategory", "SecondaryCategory", "TertiaryCategory")
@@ -571,6 +573,33 @@ INSIDER_TRANSACTIONS: Final = _filing(
     page_size=10_000,
     summary="Insider transactions (SEC Form 4), one row per reported transaction or holding.",
 )
+INSIDER_ACTIVITY: Final = DatasetSpec(
+    name="stocks.filings.insider_activity",
+    summary="Open-market insider purchases and sales, summed per company and transaction day.",
+    asset_class=_STOCKS,
+    fetch_path=_INSIDER_ACTIVITY,
+    keys={(_R, _INSIDER_ACTIVITY): _NO_KEYS},
+    time_axis=("transaction_date.gte", "transaction_date.lte"),
+    symbol_param="tickers.any_of",
+    # One row sums every insider of one issuer on one transaction day. A filing that arrives
+    # later for the same day revises that row's totals and `LastFilingDate`, so the row is
+    # replaced, not appended.
+    poll_keys=("IssuerCik", "TransactionDate"),
+    page_size=10_000,
+)
+INSIDER_ROSTER: Final = DatasetSpec(
+    name="stocks.filings.insider_roster",
+    summary="Each company's insiders and the shares each one holds now, one row per insider.",
+    asset_class=_STOCKS,
+    fetch_path=_INSIDER_ROSTER,
+    keys={(_R, _INSIDER_ROSTER): _NO_KEYS},
+    time_axis=("last_filing_date.gte", "last_filing_date.lte"),
+    symbol_param="tickers.any_of",
+    # One row is one reporting owner's current position in one issuer; each new filing by
+    # that owner updates the row in place.
+    poll_keys=("IssuerCik", "OwnerCik"),
+    page_size=10_000,
+)
 RISK_FACTOR_TAXONOMY: Final = DatasetSpec(
     name="stocks.filings.risk_factor_taxonomy",
     summary="The taxonomy that classifies filing risk factors, one row per category.",
@@ -614,6 +643,8 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     INSTITUTIONAL_HOLDINGS,
     INSIDER_HOLDINGS,
     INSIDER_TRANSACTIONS,
+    INSIDER_ACTIVITY,
+    INSIDER_ROSTER,
     RISK_FACTOR_TAXONOMY,
     DISCLOSURE_TAXONOMY,
 )
@@ -1012,12 +1043,12 @@ def _statement_query(
 
 
 class _StockFilings(Namespace):
-    """`m.stocks.filings`: SEC filings of US companies and their classification taxonomies.
+    """`m.stocks.filings`: SEC filings, the insider data built from them, and taxonomies.
 
     Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
     any thread. Each method builds a query and never blocks. By default `poll()` on a filings
-    dataset appends only the rows it has not seen before, while the two taxonomies replace
-    their table each cycle.
+    dataset appends only the rows it has not seen before, while the insider activity, the
+    insider roster, and the two taxonomies replace their table each cycle.
 
     Example:
         ::
@@ -1554,6 +1585,176 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    def insider_activity(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        issuer_cik: str | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Open-market insider purchases and sales, summed per company and transaction day.
+
+        An insider is a company's director, officer, or holder of more than 10% of its shares;
+        the SEC requires each to report every trade in the company's stock on Form 4 (or, for
+        some late or exempt trades, Form 5). Massive sums the open-market purchases and sales of
+        every insider of one issuer on one transaction day into one row: how many purchases and
+        sales, by how many distinct insiders, the shares and US-dollar values bought and sold,
+        their net (`NetShares`, `NetValue`, negative for net selling), the part traded under a
+        Rule 10b5-1 trading plan (a sale or purchase scheduled in advance, so it says less about
+        the insider's view), and the date of the latest filing that reported one of the trades.
+        Use it to gauge net insider buying or selling over a window without reading individual
+        filings; `insider_transactions()` returns the Form 4 lines themselves.
+
+        A company can have several share classes, so a row has no `Symbol`: its `Tickers`
+        column holds the JSON list of the issuer's tickers on the transaction day, the totals
+        cover the issuer rather than each ticker, and `symbols` only selects the issuers that
+        list any of them. Served by REST (`/stocks/insiders/vX/activity`) through `fetch()` and
+        `poll()`. By default `poll()` replaces its table each cycle, keyed by `IssuerCik` and
+        `TransactionDate`: a filing that arrives later for a day already shown revises that day's
+        totals in place. Massive updates the data daily.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_activity,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+        the wrong kind.
+
+        Args:
+            symbols: Tickers whose issuers to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every issuer.
+            issuer_cik: The SEC Central Index Key (CIK) of the issuing company, as text with
+                its leading zeros, such as `"0001045810"`; None for every issuer.
+            start: The first transaction date to include, inclusive; None for no lower bound.
+            end: The last transaction date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"net_value"`; None for the server default,
+                the newest transaction date first.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"issuer_cik_any_of": ["0001045810", "0000320193"]}`;
+                checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                t = m.stocks.filings.insider_activity("NVDA", start="2026-01-01").fetch()
+        """
+        return _list_query(
+            self._core,
+            INSIDER_ACTIVITY,
+            symbols=symbols,
+            start=start,
+            end=end,
+            params={"issuer_cik": optional_text("issuer_cik", issuer_cik)},
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    def insider_roster(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        issuer_cik: str | None = None,
+        owner_cik: str | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Each company's insiders and the shares each one holds now, one row per insider.
+
+        An insider is a company's director, officer, or holder of more than 10% of its shares,
+        who reports an initial position on SEC Form 3 and every later change on Forms 4 and 5.
+        Massive combines all of one insider's filings for one issuer into one current row: the
+        owner's name, CIK, roles (a JSON list of `director`, `officer`, `ten_percent_owner`,
+        `other`), and officer title; the dates of the first and latest filing and their count;
+        the shares owned directly, indirectly (through trusts, LLCs, family members, and other
+        vehicles), and in total, as filed and not adjusted for splits, with no options or other
+        derivative securities; and that total as a percentage of the shares outstanding.
+        `OldestPositionDate` far behind `LastFilingDate` warns that a summed position has not
+        been restated lately and may be stale. Use it to see who a company's insiders are and
+        how much they own, or, with `owner_cik`, every company one person is an insider of;
+        `insider_holdings()` (Form 3) and `insider_transactions()` (Form 4) return the filings
+        themselves.
+
+        A company can have several share classes, so a row has no `Symbol`: its `Tickers`
+        column holds the JSON list of the issuer's tickers, and `symbols` only selects the
+        issuers that list any of them. Served by REST (`/stocks/insiders/vX/holdings`) through
+        `fetch()` and `poll()`. By default `poll()` replaces its table each cycle, keyed by
+        `IssuerCik` and `OwnerCik`, so a new filing updates its insider's row in place. Massive
+        updates the data daily.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every issuer. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_roster,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
+        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+        the wrong kind.
+
+        Args:
+            symbols: Tickers whose issuers' insiders to return (one `str`, a sequence, or a
+                `Table` with a `Symbol` column, re-read each `poll()` cycle); None for every
+                issuer.
+            issuer_cik: The SEC Central Index Key (CIK) of the issuing company, as text with
+                its leading zeros, such as `"0001045810"`; None for every issuer.
+            owner_cik: The SEC CIK of the insider, as text with its leading zeros, such as
+                `"0001588670"`; the same for one person across every issuer. None for every
+                insider.
+            start: The earliest latest-filing date (`LastFilingDate`) to include, inclusive;
+                an insider who has not filed since is left out. None for no lower bound.
+            end: The last latest-filing date to include, inclusive; None for no upper bound.
+            sort: The field to sort by, such as `"shares_owned"`; None for the server default,
+                the most recent latest-filing date first.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"owner_cik_any_of": ["0001588670", "0001214156"]}`;
+                checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                insiders = m.stocks.filings.insider_roster("NVDA").fetch()
+                one_person = m.stocks.filings.insider_roster(owner_cik="0001588670").fetch()
+        """
+        return _insider_query(
+            self._core,
+            INSIDER_ROSTER,
+            symbols=symbols,
+            issuer_cik=issuer_cik,
+            owner_cik=owner_cik,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
     def risk_factor_taxonomy(
         self,
         *,
@@ -1669,7 +1870,9 @@ def _insider_query(
     limit: int | None,
     filters: Mapping[str, FilterValue] | None,
 ) -> Query:
-    """Build the query of Form 3 or Form 4, checking the two CIK arguments.
+    """Build the query of an insider dataset that takes an issuer and an owner CIK.
+
+    Form 3, Form 4, and the insider roster share the arguments and their checks.
 
     Args:
         core: The session core.
@@ -1677,8 +1880,8 @@ def _insider_query(
         symbols: The tickers that filter the request, or None.
         issuer_cik: The `issuer_cik` argument as passed.
         owner_cik: The `owner_cik` argument as passed.
-        start: The first filing date, or None.
-        end: The last filing date, or None.
+        start: The first day of the dataset's date axis, or None.
+        end: The last day of the dataset's date axis, or None.
         sort: The field to sort by, or None.
         order: The sort direction, or None.
         limit: The cap on the total number of rows, or None.

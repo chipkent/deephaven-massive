@@ -1159,7 +1159,8 @@ Notation:
   own name, such as `Date` or `ExDividendDate`, and declares no `time` key. Datasets whose
   rows each list several tickers (a JSON `tickers` field) describe a filing, a company, or
   an article, not one instrument: the three financial statements, `filings.insider_holdings`
-  and `filings.insider_transactions` (Forms 3 and 4), `filings.disclosures_8k`,
+  and `filings.insider_transactions` (Forms 3 and 4), `filings.insider_activity` and
+  `filings.insider_roster`, `filings.disclosures_8k`,
   `reference.news`, and `partners.benzinga.news` have no `Symbol`, keep their `Tickers`
   column, and use `symbols` only as a request filter ([section 10](#10-symbols-and-all)).
 
@@ -1188,6 +1189,8 @@ Notation:
 | `filings.sections_10k`, `filings.text_8k`, `filings.disclosures_8k`, `filings.risk_factors` — each `(symbols=None, …T)`, axis `filing_date` | Query | | `/stocks/filings/10-K/vX/sections`, `/stocks/filings/8-K/vX/text`, `/stocks/filings/8-K/vX/disclosures`, `/stocks/filings/vX/risk-factors` | |
 | `filings.institutional_holdings(*, filer_cik: str \| None = None, …T)`, axis `filing_date` (Form 13-F) | Query | | `/stocks/filings/vX/13-F` | |
 | `filings.insider_holdings(symbols=None, *, issuer_cik: str \| None = None, owner_cik: str \| None = None, …T)` (Form 3); `filings.insider_transactions(...)` with the same signature (Form 4); axis `filing_date` | Query | | `/stocks/filings/vX/form-3`, `/stocks/filings/vX/form-4` | |
+| `filings.insider_activity(symbols=None, *, issuer_cik: str \| None = None, …T)`, axis `transaction_date`: each issuer's open-market insider purchases and sales summed per transaction day, across every insider; `poll()` replaces its table, keyed by `IssuerCik` and `TransactionDate` (a later filing for the same day revises that day's totals) | Query | | `/stocks/insiders/vX/activity` | |
+| `filings.insider_roster(symbols=None, *, issuer_cik: str \| None = None, owner_cik: str \| None = None, …T)`, axis `last_filing_date`: each insider's current consolidated holding of one issuer, built by Massive from all of the owner's Forms 3, 4, and 5; `poll()` replaces its table, keyed by `IssuerCik` and `OwnerCik`. Named `insider_roster`, not Massive's "Insider Holdings", because `insider_holdings` is the Form 3 dataset | Query | | `/stocks/insiders/vX/holdings` | |
 | `filings.risk_factor_taxonomy(…F)`, `filings.disclosure_taxonomy(…F)` | Query | | `/stocks/taxonomies/vX/risk-factors`, `/stocks/taxonomies/vX/disclosures` | |
 
 ### 8.2 `m.options`
@@ -1387,7 +1390,6 @@ Excluded items fall into two lists.
 | WebSocket `LV`; Launchpad hosts and paths | Product retired. |
 | `/v1/historic/*`, `/v2/ticks/*` | Deprecated 2022 (marked deprecated in the OpenAPI spec); replaced by `/v3/trades` and `/v3/quotes`. |
 | Form 5, per-asset `/v1/exchanges` (`/stocks`, `/options`, `/forex`, `/crypto`), `/options/v3/*`, `/v1/reference/ipos`, `/stocks/dev/*`, `vX_0` paths | Present only in the OpenAPI spec; no page `llms.txt` links names them (`undocumented`). |
-| `/stocks/insiders/vX/activity`, `/stocks/insiders/vX/holdings` | Not yet declared. Documented since 2026-10-28: daily insider buying and selling totals per issuer, and each insider's current holding per issuer. No dataset serves either yet (the Form 3 and Form 4 datasets return individual filings); their datasets are a separate addition. |
 | `/v1/reference/sec/filings*` | Marked `x-polygon-draft` in the OpenAPI spec and undocumented. |
 | `/v1/indicators/{sma,ema,rsi,macd}/{optionsTicker,indicesTicker,fxTicker}` | The same URL, fields, and parameters as the `{stockTicker}` template, which serves every asset class by the ticker's prefix; a refresh test checks they still repeat it. The `{cryptoTicker}` templates document no `adjusted` parameter, so they are generated in their own right. |
 | Single-ticker v2 snapshots `/v2/snapshot/.../tickers/{t}` | Covered by `snapshots(symbols)` with the `tickers` filter. |

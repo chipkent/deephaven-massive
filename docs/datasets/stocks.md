@@ -860,6 +860,65 @@ Massive's documentation of this dataset:
 
 - <https://massive.com/docs/rest/stocks/filings/form-4.md>
 
+<a id="filings-insider_activity"></a>
+
+## `m.stocks.filings.insider_activity`
+
+Open-market insider purchases and sales, summed per company and transaction day.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST | `issuer_cik` |
+| `IssuerName` | String | Name of the issuer company as reported in the filings. | REST | `issuer_name` |
+| `LastFilingDate` | LocalDate | Filing date of the latest filing that reported one of these transactions (formatted as YYYY-MM-DD). Transactions are usually filed within two business days. | REST | `last_filing_date` |
+| `NetShares` | double | Shares purchased minus shares sold. | REST | `net_shares` |
+| `NetValue` | double | Value purchased minus value sold in USD. | REST | `net_value` |
+| `PlannedPurchaseValue` | double | Value of shares purchased under a Rule 10b5-1 trading plan in USD. Zero on filings before the plan checkbox was introduced in 2023. | REST | `planned_purchase_value` |
+| `PlannedSaleValue` | double | Value of shares sold under a Rule 10b5-1 trading plan in USD. Zero on filings before the plan checkbox was introduced in 2023. | REST | `planned_sale_value` |
+| `PurchaseCount` | long | Number of open-market purchase transactions. | REST | `purchase_count` |
+| `PurchaseShares` | double | Shares purchased. | REST | `purchase_shares` |
+| `PurchaseValue` | double | Value of shares purchased in USD. | REST | `purchase_value` |
+| `PurchaserCount` | long | Number of distinct insiders who purchased. | REST | `purchaser_count` |
+| `SaleCount` | long | Number of open-market sale transactions. | REST | `sale_count` |
+| `SaleShares` | double | Shares sold. | REST | `sale_shares` |
+| `SaleValue` | double | Value of shares sold in USD. | REST | `sale_value` |
+| `SellerCount` | long | Number of distinct insiders who sold. | REST | `seller_count` |
+| `Tickers` | String | Ticker symbols of the issuer as of the transaction date. Multiple symbols may indicate different share classes; the totals cover the issuer, not each ticker. | REST | `tickers` |
+| `TransactionDate` | LocalDate | Date of the transactions (formatted as YYYY-MM-DD). | REST | `transaction_date` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/insider-activity.md>
+
+<a id="filings-insider_roster"></a>
+
+## `m.stocks.filings.insider_roster`
+
+Each company's insiders and the shares each one holds now, one row per insider.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `FilingCount` | long | Number of Form 3, 4, and 5 filings by the owner for this issuer. | REST | `filing_count` |
+| `FirstFilingDate` | LocalDate | Date of the owner's first Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). Filings begin in 2003. | REST | `first_filing_date` |
+| `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST | `issuer_cik` |
+| `IssuerName` | String | Name of the issuer company as reported in the most recent filing. | REST | `issuer_name` |
+| `LastFilingDate` | LocalDate | Date of the owner's most recent Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). | REST | `last_filing_date` |
+| `OfficerTitle` | String | Title of the officer in the most recent filing, if the reporting owner is an officer. | REST | `officer_title` |
+| `OldestPositionDate` | LocalDate | Earliest as_of_date among the summed positions (formatted as YYYY-MM-DD). A date far behind last_filing_date means at least one position has not been restated recently and may be stale. | REST | `oldest_position_date` |
+| `OwnerCik` | String | SEC Central Index Key of the reporting owner (10 digits, zero-padded). Stable across issuers and years; use it to follow a person through the Form 3, 4, and 5 endpoints. | REST | `owner_cik` |
+| `OwnerName` | String | Name of the reporting owner (individual or entity) as reported in the most recent filing. | REST | `owner_name` |
+| `OwnershipPct` | double | shares_owned as a percentage of the issuer's shares outstanding (largest share class) as of last_filing_date. Absent when shares outstanding is not available for the issuer. | REST | `ownership_pct` |
+| `PositionCount` | long | Number of positions summed into shares_owned: one for direct holdings plus one per indirect vehicle. | REST | `position_count` |
+| `Roles` | String | Relationships of the reporting owner to the issuer in the most recent filing. Possible values: director, officer, ten_percent_owner, other. | REST | `roles` |
+| `SharesOwned` | double | Shares of the issuer's non-derivative securities the owner holds: the sum of the latest reported balance of each position (direct, and each indirect vehicle) across their Form 3, 4, and 5 filings. As filed, not adjusted for splits. Unexercised options and other derivative securities are not included. Absent when the owner has never reported a share balance. | REST | `shares_owned` |
+| `SharesOwnedDirect` | double | Shares held directly, in the owner's own name. | REST | `shares_owned_direct` |
+| `SharesOwnedIndirect` | double | Shares held indirectly through trusts, LLCs, family members, and other vehicles. | REST | `shares_owned_indirect` |
+| `Tickers` | String | Ticker symbols of the issuer as of the owner's most recent filing. Multiple symbols may indicate different share classes. | REST | `tickers` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/insider-holdings.md>
+
 <a id="filings-risk_factor_taxonomy"></a>
 
 ## `m.stocks.filings.risk_factor_taxonomy`

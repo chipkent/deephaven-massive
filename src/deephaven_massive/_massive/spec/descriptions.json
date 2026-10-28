@@ -129,6 +129,12 @@
    "/stocks/financials/v1/ratios": [
     "https://massive.com/docs/rest/stocks/fundamentals/ratios.md"
    ],
+   "/stocks/insiders/vX/activity": [
+    "https://massive.com/docs/rest/stocks/filings/insider-activity.md"
+   ],
+   "/stocks/insiders/vX/holdings": [
+    "https://massive.com/docs/rest/stocks/filings/insider-holdings.md"
+   ],
    "/stocks/taxonomies/vX/disclosures": [
     "https://massive.com/docs/rest/stocks/filings/disclosure-categories.md"
    ],
@@ -1357,6 +1363,43 @@
     "return_on_assets": "Return on assets ratio, calculated as net income divided by total assets, measuring how efficiently a company uses its assets to generate profit.",
     "return_on_equity": "Return on equity ratio, calculated as net income divided by total shareholders' equity, measuring profitability relative to shareholders' equity.",
     "ticker": "Stock ticker symbol for the company."
+   },
+   "/stocks/insiders/vX/activity": {
+    "issuer_cik": "SEC Central Index Key of the issuer company (10 digits, zero-padded).",
+    "issuer_name": "Name of the issuer company as reported in the filings.",
+    "last_filing_date": "Filing date of the latest filing that reported one of these transactions (formatted as YYYY-MM-DD). Transactions are usually filed within two business days.",
+    "net_shares": "Shares purchased minus shares sold.",
+    "net_value": "Value purchased minus value sold in USD.",
+    "planned_purchase_value": "Value of shares purchased under a Rule 10b5-1 trading plan in USD. Zero on filings before the plan checkbox was introduced in 2023.",
+    "planned_sale_value": "Value of shares sold under a Rule 10b5-1 trading plan in USD. Zero on filings before the plan checkbox was introduced in 2023.",
+    "purchase_count": "Number of open-market purchase transactions.",
+    "purchase_shares": "Shares purchased.",
+    "purchase_value": "Value of shares purchased in USD.",
+    "purchaser_count": "Number of distinct insiders who purchased.",
+    "sale_count": "Number of open-market sale transactions.",
+    "sale_shares": "Shares sold.",
+    "sale_value": "Value of shares sold in USD.",
+    "seller_count": "Number of distinct insiders who sold.",
+    "tickers": "Ticker symbols of the issuer as of the transaction date. Multiple symbols may indicate different share classes; the totals cover the issuer, not each ticker.",
+    "transaction_date": "Date of the transactions (formatted as YYYY-MM-DD)."
+   },
+   "/stocks/insiders/vX/holdings": {
+    "filing_count": "Number of Form 3, 4, and 5 filings by the owner for this issuer.",
+    "first_filing_date": "Date of the owner's first Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). Filings begin in 2003.",
+    "issuer_cik": "SEC Central Index Key of the issuer company (10 digits, zero-padded).",
+    "issuer_name": "Name of the issuer company as reported in the most recent filing.",
+    "last_filing_date": "Date of the owner's most recent Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD).",
+    "officer_title": "Title of the officer in the most recent filing, if the reporting owner is an officer.",
+    "oldest_position_date": "Earliest as_of_date among the summed positions (formatted as YYYY-MM-DD). A date far behind last_filing_date means at least one position has not been restated recently and may be stale.",
+    "owner_cik": "SEC Central Index Key of the reporting owner (10 digits, zero-padded). Stable across issuers and years; use it to follow a person through the Form 3, 4, and 5 endpoints.",
+    "owner_name": "Name of the reporting owner (individual or entity) as reported in the most recent filing.",
+    "ownership_pct": "shares_owned as a percentage of the issuer's shares outstanding (largest share class) as of last_filing_date. Absent when shares outstanding is not available for the issuer.",
+    "position_count": "Number of positions summed into shares_owned: one for direct holdings plus one per indirect vehicle.",
+    "roles": "Relationships of the reporting owner to the issuer in the most recent filing. Possible values: director, officer, ten_percent_owner, other.",
+    "shares_owned": "Shares of the issuer's non-derivative securities the owner holds: the sum of the latest reported balance of each position (direct, and each indirect vehicle) across their Form 3, 4, and 5 filings. As filed, not adjusted for splits. Unexercised options and other derivative securities are not included. Absent when the owner has never reported a share balance.",
+    "shares_owned_direct": "Shares held directly, in the owner's own name.",
+    "shares_owned_indirect": "Shares held indirectly through trusts, LLCs, family members, and other vehicles.",
+    "tickers": "Ticker symbols of the issuer as of the owner's most recent filing. Multiple symbols may indicate different share classes."
    },
    "/stocks/taxonomies/vX/disclosures": {
     "description": "Detailed explanation of what the disclosure category covers, including typical examples.",

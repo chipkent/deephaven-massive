@@ -1,0 +1,29 @@
+{
+  "count": 1,
+  "request_id": "047c7035a86042b1925118e5f68d81b0",
+  "results": [
+    {
+      "filing_count": 94,
+      "first_filing_date": "2013-10-09",
+      "issuer_cik": "0001045810",
+      "issuer_name": "NVIDIA CORP",
+      "last_filing_date": "2026-09-18",
+      "officer_title": "EVP & Chief Financial Officer",
+      "oldest_position_date": "2021-09-15",
+      "owner_cik": "0001588670",
+      "owner_name": "Kress Colette",
+      "ownership_pct": 0.0198,
+      "position_count": 11,
+      "roles": [
+        "officer"
+      ],
+      "shares_owned": 4776533,
+      "shares_owned_direct": 765103,
+      "shares_owned_indirect": 4011430,
+      "tickers": [
+        "NVDA"
+      ]
+    }
+  ],
+  "status": "OK"
+}

@@ -92,6 +92,8 @@ LIST_WITH_SYMBOLS = [
     "filings.risk_factors",
     "filings.insider_holdings",
     "filings.insider_transactions",
+    "filings.insider_activity",
+    "filings.insider_roster",
 ]
 LIST_WITHOUT_SYMBOLS = [
     "filings.institutional_holdings",
@@ -106,6 +108,8 @@ LIST_VALUED = [
     "filings.disclosures_8k",
     "filings.insider_holdings",
     "filings.insider_transactions",
+    "filings.insider_activity",
+    "filings.insider_roster",
 ]
 STREAMED = ["trades", "quotes", "bars", "luld", "imbalances", "fmv"]
 
@@ -127,6 +131,8 @@ AXES = {
     "filings.institutional_holdings": ("filing_date", "FilingDate"),
     "filings.insider_holdings": ("filing_date", "FilingDate"),
     "filings.insider_transactions": ("filing_date", "FilingDate"),
+    "filings.insider_activity": ("transaction_date", "TransactionDate"),
+    "filings.insider_roster": ("last_filing_date", "LastFilingDate"),
 }
 
 # Each REST source of the namespace, its fixture, and a value for each path placeholder.
@@ -178,6 +184,8 @@ SOURCES: dict[str, tuple[str, dict[str, object]]] = {
     "/stocks/filings/vX/13-F": ("filings_institutional_holdings.json", {}),
     "/stocks/filings/vX/form-3": ("filings_insider_holdings.json", {}),
     "/stocks/filings/vX/form-4": ("filings_insider_transactions.json", {}),
+    "/stocks/insiders/vX/activity": ("filings_insider_activity.json", {}),
+    "/stocks/insiders/vX/holdings": ("filings_insider_roster.json", {}),
     "/stocks/taxonomies/vX/risk-factors": ("filings_risk_factor_taxonomy.json", {}),
     "/stocks/taxonomies/vX/disclosures": ("filings_disclosure_taxonomy.json", {}),
 }
@@ -319,13 +327,13 @@ def test_share_float_keeps_its_effective_date_as_a_column() -> None:
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
-def test_poll_appends_filings_upserts_ipos_and_replaces_taxonomies_and_the_rest(
+def test_poll_appends_filings_upserts_ipos_and_replaces_the_rest(
     name: str,
 ) -> None:
     expected = dm.PollMode.REPLACE
     if name == "ipos":
         expected = dm.PollMode.UPSERT  # an offering's record is revised in place
-    elif name.startswith("filings.") and "taxonomy" not in name:
+    elif name.startswith("filings.") and name not in REPLACE_KEYS:
         expected = dm.PollMode.APPEND
     assert spec_of(name).poll_mode is expected
 
@@ -362,6 +370,10 @@ REPLACE_KEYS = {
     "financials.income_statements": ("Cik", "PeriodEnd", "Timeframe"),
     "financials.cash_flow_statements": ("Cik", "PeriodEnd", "Timeframe"),
     "financials.ratios": ("Symbol", "Date"),
+    # A later filing for the same day revises that day's totals.
+    "filings.insider_activity": ("IssuerCik", "TransactionDate"),
+    # A new filing by an insider updates that insider's current position.
+    "filings.insider_roster": ("IssuerCik", "OwnerCik"),
     "filings.risk_factor_taxonomy": ("Taxonomy", *CATEGORIES),
     "filings.disclosure_taxonomy": ("Taxonomy", *CATEGORIES),
 }
@@ -624,8 +636,12 @@ def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession)
         filings.institutional_holdings(filer_cik=cast("Any", 1067983))
 
 
-@pytest.mark.parametrize("name", ["filings.insider_holdings", "filings.insider_transactions"])
-def test_insider_forms_take_issuer_and_owner(massive_session: dm.MassiveSession, name: str) -> None:
+@pytest.mark.parametrize(
+    "name", ["filings.insider_holdings", "filings.insider_transactions", "filings.insider_roster"]
+)
+def test_insider_datasets_take_issuer_and_owner(
+    massive_session: dm.MassiveSession, name: str
+) -> None:
     make = factory(massive_session, name)
     query = make("AAPL", issuer_cik="0000320193", owner_cik="0001214156")
     assert dict(query._request.params) == {"issuer_cik": "0000320193", "owner_cik": "0001214156"}
@@ -633,6 +649,16 @@ def test_insider_forms_take_issuer_and_owner(massive_session: dm.MassiveSession,
         make(issuer_cik=320193)
     with pytest.raises(TypeError, match="owner_cik must be a str"):
         make(owner_cik=1214156)
+
+
+def test_insider_activity_takes_an_issuer_and_no_owner(massive_session: dm.MassiveSession) -> None:
+    # The totals sum every insider of the issuer, so the path documents no owner filter.
+    activity = massive_session.stocks.filings.insider_activity
+    query = activity("NVDA", issuer_cik="0001045810")
+    assert dict(query._request.params) == {"issuer_cik": "0001045810"}
+    assert "owner_cik" not in inspect.signature(activity).parameters
+    with pytest.raises(TypeError, match="issuer_cik must be a str"):
+        activity(issuer_cik=cast("Any", 1045810))
 
 
 # --- Fixtures ------------------------------------------------------------------------------------
@@ -1018,6 +1044,30 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         ("FilingDate", date(2026, 3, 30)),
     ),
     (
+        "filings.insider_activity",
+        {"symbols": "NVDA", "start": date(2026, 9, 1), "end": date(2026, 9, 30)},
+        "/stocks/insiders/vX/activity",
+        {
+            "tickers.any_of": "NVDA",
+            "transaction_date.gte": "2026-09-01",
+            "transaction_date.lte": "2026-09-30",
+            "limit": "10000",
+        },
+        ("TransactionDate", date(2026, 9, 17)),
+    ),
+    (
+        "filings.insider_roster",
+        {"owner_cik": "0001588670", "start": date(2026, 1, 1), "sort": "shares_owned"},
+        "/stocks/insiders/vX/holdings",
+        {
+            "owner_cik": "0001588670",
+            "last_filing_date.gte": "2026-01-01",
+            "sort": "shares_owned",
+            "limit": "10000",
+        },
+        ("OwnerCik", "0001588670"),
+    ),
+    (
         "filings.risk_factor_taxonomy",
         {},
         "/stocks/taxonomies/vX/risk-factors",
@@ -1066,6 +1116,61 @@ def test_limit_caps_the_rows_and_never_raises_the_page_size(
     # A cap below the page size asks for no more rows than it keeps.
     assert sent(fake_rest) == [(path, {"limit": "1"})]
     assert [r["Symbol"] for r in out] == ["AAPL"]
+
+
+# The vendor's documented sample row of each insider dataset, as the table holds it: one
+# column per documented field in the vendor's order, dates as `LocalDate`, and each list of
+# tickers or roles as JSON text.
+INSIDER_ROWS = {
+    "filings.insider_activity": {
+        "IssuerCik": "0001045810",
+        "IssuerName": "NVIDIA CORP",
+        "LastFilingDate": date(2026, 9, 18),
+        "NetShares": -34918.0,
+        "NetValue": -7648632.45,
+        "PlannedPurchaseValue": 0.0,
+        "PlannedSaleValue": 7648632.45,
+        "PurchaseCount": 0,
+        "PurchaseShares": 0.0,
+        "PurchaseValue": 0.0,
+        "PurchaserCount": 0,
+        "SaleCount": 3,
+        "SaleShares": 34918.0,
+        "SaleValue": 7648632.45,
+        "SellerCount": 1,
+        "Tickers": '["NVDA"]',
+        "TransactionDate": date(2026, 9, 17),
+    },
+    "filings.insider_roster": {
+        "FilingCount": 94,
+        "FirstFilingDate": date(2013, 10, 9),
+        "IssuerCik": "0001045810",
+        "IssuerName": "NVIDIA CORP",
+        "LastFilingDate": date(2026, 9, 18),
+        "OfficerTitle": "EVP & Chief Financial Officer",
+        "OldestPositionDate": date(2021, 9, 15),
+        "OwnerCik": "0001588670",
+        "OwnerName": "Kress Colette",
+        "OwnershipPct": 0.0198,
+        "PositionCount": 11,
+        "Roles": '["officer"]',
+        "SharesOwned": 4776533.0,
+        "SharesOwnedDirect": 765103.0,
+        "SharesOwnedIndirect": 4011430.0,
+        "Tickers": '["NVDA"]',
+    },
+}
+
+
+@pytest.mark.parametrize("name", list(INSIDER_ROWS))
+def test_insider_datasets_normalize_every_documented_field(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture, name: str
+) -> None:
+    path = cast("str", spec_of(name).fetch_path)
+    fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
+    table = cast("Query", factory(rest_session, name)()).fetch()
+    assert sent(fake_rest) == [(path, {"limit": "10000"})]
+    assert table_rows(table) == [INSIDER_ROWS[name]]
 
 
 def test_ipos_fan_out_one_request_per_ticker(
