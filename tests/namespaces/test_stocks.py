@@ -183,9 +183,6 @@ SOURCES: dict[str, tuple[str, dict[str, object]]] = {
     "/stocks/taxonomies/vX/disclosures": ("filings_disclosure_taxonomy.json", {}),
 }
 
-if TYPE_CHECKING:
-    from tests._fakes.ws_session import WsSession
-
 
 def spec_of(name: str) -> DatasetSpec:
     return CATALOG.by_name[f"stocks.{name}"]

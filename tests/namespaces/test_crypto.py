@@ -70,9 +70,6 @@ R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 OWNER = "namespaces/crypto"
 CRYPTO = Catalog(crypto.DATASETS)
 
-if TYPE_CHECKING:
-    from tests._fakes.ws_session import WsSession
-
 
 def request_of(query: QueryBase) -> Request:
     return query._request

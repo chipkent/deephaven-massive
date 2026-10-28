@@ -33,6 +33,8 @@ from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
+
+# Plain constants of the harness, which no fixture can hand over; sessions come from fixtures.
 from tests._fakes.ws_session import REALTIME, TIMEOUT
 
 if TYPE_CHECKING:
@@ -175,7 +177,9 @@ def test_a_stream_publishes_only_its_symbols(
     aapl = ws_session.query(TRADES, ["AAPL"]).append_only()
     every = ws_session.query(TRADES, dm.ALL).append_only()
     ws_session.subscribed("T.AAPL", "T.*")
-    ws_session.send(trade("AAPL", 1.5), trade("MSFT", 2.0))
+    # A status beside the data is not a data item, so `send` does not wait for it.
+    status: dict[str, object] = {"ev": "status", "status": "info", "message": "a notice"}
+    ws_session.send(trade("AAPL", 1.5), status, trade("MSFT", 2.0))
     ws_session.flush()
     assert [r["Price"] for r in rows_when(aapl, lambda rows: len(rows) == 1)] == [1.5]
     every_rows = rows_when(every, lambda rows: len(rows) == 2)
@@ -711,11 +715,13 @@ def test_a_lost_race_closes_the_spare_connection(
 ) -> None:
     barrier = threading.Barrier(2)
     built: list[ws.Connection] = []
+    built_lock = threading.Lock()
     real: Callable[..., ws.Connection] = ws.Connection
 
     def racing(*args: object, **kwargs: object) -> ws.Connection:
         connection = real(*args, **kwargs)
-        built.append(connection)
+        with built_lock:
+            built.append(connection)
         barrier.wait(TIMEOUT)
         return connection
 

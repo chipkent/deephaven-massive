@@ -81,9 +81,6 @@ FOREX_SOURCES = {
     (F, "global_forex/quotes_v1"),
 }
 
-if TYPE_CHECKING:
-    from tests._fakes.ws_session import WsSession
-
 
 def request(query: QueryBase) -> Request:
     return query._request
