@@ -329,6 +329,8 @@ ENUM_PARAMETERS = {
     "_Futures.contracts.order": _FUTURES_ENUMS,
     "_Futures.products.order": _FUTURES_ENUMS,
     "_Futures.schedules.order": _FUTURES_ENUMS,
+    "_Forex.bars.timespan": "namespaces/test_forex.py::test_bars_reject_bad_arguments",
+    "_Forex.movers.direction": "namespaces/test_forex.py::test_movers",
     "_Indices.bars.timespan": "namespaces/test_indices.py::test_bars_check_their_argument_types",
     "_Indices.snapshots.order": (
         "namespaces/test_indices.py::test_snapshots_check_their_list_parameters"
