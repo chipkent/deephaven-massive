@@ -1024,7 +1024,7 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
     rest = _client(fake_rest, governor=governor)
     cancel = Cancel()
     # A short pause makes the request queue, so its admission sends a change notice.
-    refused = governor.acquire("stocks", Cancel(), lane=object())
+    refused = governor.admission("stocks", lane=object()).acquire(Cancel())
     governor.refused(refused, retry_after=1.0, message="slow down", request_id=None)
 
     def admitted() -> None:  # the change notice of the admission sets the token

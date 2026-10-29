@@ -18,7 +18,6 @@ from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.rest.governor import (
     BASIC_REQUESTS_PER_MINUTE,
-    PROBE_TIMEOUT,
     RATE_WINDOW,
     Admission,
     BucketState,
@@ -53,7 +52,7 @@ def _state(governor: RequestGovernor, bucket: str = "stocks") -> BucketState:
 def _requests(governor: RequestGovernor, bucket: str, count: int) -> None:
     """Make `count` requests of a bucket, each answered at once."""
     for _ in range(count):
-        governor.done(governor.acquire(bucket, Cancel(), lane=object()), answered=True)
+        governor.done(governor.admission(bucket, lane=object()).acquire(Cancel()), answered=True)
 
 
 def _refuse(
@@ -89,7 +88,9 @@ class _Waiting:
 
     def _run(self) -> None:
         try:
-            self.permit = self._governor.acquire(self._bucket, self.cancel, lane=self.lane)
+            self.permit = self._governor.admission(self._bucket, lane=self.lane).acquire(
+                self.cancel
+            )
             self.started = self._governor.clock.monotonic()
         except WireError as error:
             self.error = error
@@ -112,7 +113,7 @@ def test_an_unknown_bucket_is_refused_everywhere() -> None:
     governor = _governor()
     assert governor.buckets == BUCKETS
     with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
-        governor.acquire("crypto", Cancel(), lane=object())
+        governor.admission("crypto", lane=object()).acquire(Cancel())
     with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
         governor.estimate("crypto", 1)
     with pytest.raises(ValueError, match=r"unknown buckets \['crypto'\]"):
@@ -167,7 +168,7 @@ def test_the_window_slides_with_each_answer() -> None:
 def test_a_request_in_flight_holds_its_slot_until_a_window_after_its_answer() -> None:
     clock = FakeClock(manual=True)
     governor = _governor(clock, basic={"stocks"})
-    permits = [governor.acquire("stocks", Cancel(), lane=object()) for _ in range(5)]
+    permits = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(5)]
     waiting = _Waiting(governor, "stocks", lane=object())
     # Every slot is in flight: nothing says when one frees, so it sleeps until woken.
     assert clock.wait_for_sleepers(1) == [math.inf]
@@ -257,7 +258,7 @@ def test_an_already_cancelled_token_never_waits() -> None:
     cancel = Cancel()
     cancel.set()
     with pytest.raises(WireError, match="cancelled"):
-        governor.acquire("stocks", cancel, lane=object())
+        governor.admission("stocks", lane=object()).acquire(cancel)
     assert _state(governor).waiting == 0
     assert clock.waits == []
 
@@ -269,7 +270,7 @@ def test_an_unpaced_refusal_pauses_only_its_bucket_15_30_60_then_60() -> None:
     clock = FakeClock()
     governor = _governor(clock)
     for _ in range(4):
-        _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+        _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
         _requests(governor, "options", 1)  # never held back
     _requests(governor, "stocks", 1)
     assert clock.waits == [15.0, 30.0, 60.0, 60.0]
@@ -278,9 +279,11 @@ def test_an_unpaced_refusal_pauses_only_its_bucket_15_30_60_then_60() -> None:
 def test_an_answer_after_the_pause_ends_the_run() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     _requests(governor, "stocks", 1)  # waits 15, then is answered
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # a new run: 15 again
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # a new run: 15 again
     _requests(governor, "stocks", 1)
     assert clock.waits == [15.0, 15.0]
 
@@ -288,9 +291,9 @@ def test_an_answer_after_the_pause_ends_the_run() -> None:
 def test_a_connection_failure_does_not_end_the_run() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
-    governor.done(governor.acquire("stocks", Cancel(), lane=object()), answered=False)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
+    governor.done(governor.admission("stocks", lane=object()).acquire(Cancel()), answered=False)
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     _requests(governor, "stocks", 1)
     assert clock.waits == [15.0, 30.0]
 
@@ -298,11 +301,13 @@ def test_a_connection_failure_does_not_end_the_run() -> None:
 def test_a_burst_of_refusals_in_flight_is_one_refusal_and_stale_answers_keep_the_run() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    burst = [governor.acquire("stocks", Cancel(), lane=object()) for _ in range(3)]
+    burst = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(3)]
     _refuse(governor, burst[0])  # pause 15
     _refuse(governor, burst[1])  # started before the pause: not counted
     governor.done(burst[2], answered=True)  # nor does its success end the run
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # the run's second: 30
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # the run's second: 30
     _requests(governor, "stocks", 1)
     assert clock.waits == [15.0, 30.0]
     assert _state(governor).refusals == 3
@@ -311,7 +316,7 @@ def test_a_burst_of_refusals_in_flight_is_one_refusal_and_stale_answers_keep_the
 def test_retry_after_sets_the_pause_and_a_stale_one_only_lengthens_it() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    burst = [governor.acquire("stocks", Cancel(), lane=object()) for _ in range(3)]
+    burst = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(3)]
     _refuse(governor, burst[0], retry_after=20.0)
     _refuse(governor, burst[1], retry_after=5.0)  # shorter: the pause stays 20
     _refuse(governor, burst[2], retry_after=40.0)  # longer: it grows to 40
@@ -322,7 +327,9 @@ def test_retry_after_sets_the_pause_and_a_stale_one_only_lengthens_it() -> None:
 def test_a_refusal_naming_the_per_minute_maximum_makes_the_bucket_learned_basic() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    assert _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), message=BASIC)
+    assert _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), message=BASIC
+    )
     state = _state(governor)
     assert (state.limit, state.learned, state.declared) == (5, True, False)
     _requests(governor, "stocks", 1)  # a paced bucket pauses a whole window
@@ -333,14 +340,14 @@ def test_a_refusal_naming_the_per_minute_maximum_makes_the_bucket_learned_basic(
 
 def test_a_refusal_without_those_words_only_pauses() -> None:
     governor = _governor()
-    assert not _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+    assert not _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     assert _state(governor).limit is None
 
 
 def test_a_paced_bucket_pauses_a_window_and_counts_the_refused_request() -> None:
     clock = FakeClock()
     governor = _governor(clock, basic={"stocks"})
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     assert _state(governor).recent == 1
     _requests(governor, "stocks", 1)
     assert clock.waits == [61.0]
@@ -349,8 +356,10 @@ def test_a_paced_bucket_pauses_a_window_and_counts_the_refused_request() -> None
 def test_a_refusal_wakes_a_head_whose_pause_it_lengthens() -> None:
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    in_flight = governor.acquire("stocks", Cancel(), lane=object())
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # pause until 15
+    in_flight = governor.admission("stocks", lane=object()).acquire(Cancel())
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # pause until 15
     waiting = _Waiting(governor, "stocks", lane=object())
     assert clock.wait_for_sleepers(1) == [15.0]
     _refuse(governor, in_flight, retry_after=40.0)  # stale, but lengthens the pause
@@ -367,7 +376,11 @@ def test_a_retry_after_beyond_ten_minutes_gives_up_at_once_but_still_pauses() ->
     clock = FakeClock()
     governor = _governor(clock)
     with pytest.raises(WireError) as caught:
-        _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=601.0)
+        _refuse(
+            governor,
+            governor.admission("stocks", lane=object()).acquire(Cancel()),
+            retry_after=601.0,
+        )
     assert (caught.value.status, caught.value.request_id) == (429, "r1")
     assert str(caught.value) == (
         "Massive has refused stocks requests with HTTP 429 for 0 s, and its pauses come to "
@@ -378,7 +391,7 @@ def test_a_retry_after_beyond_ten_minutes_gives_up_at_once_but_still_pauses() ->
     assert state.gave_up
     # Every new request of the bucket fails at once, without waiting, until the pause ends.
     with pytest.raises(WireError, match="fail at once for 601 s more") as again:
-        governor.acquire("stocks", Cancel(), lane=object())
+        governor.admission("stocks", lane=object()).acquire(Cancel())
     assert (again.value.status, again.value.request_id) == (429, None)
     assert clock.waits == []
     _requests(governor, "options", 1)
@@ -390,7 +403,9 @@ def test_a_retry_after_beyond_ten_minutes_gives_up_at_once_but_still_pauses() ->
 def test_a_retry_after_of_exactly_ten_minutes_is_waited_for() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=600.0)
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=600.0
+    )
     _requests(governor, "stocks", 1)
     assert clock.waits == [600.0]
 
@@ -402,7 +417,7 @@ def test_a_run_gives_up_once_its_pauses_add_up_to_more_than_ten_minutes() -> Non
 
     def refuse_forever() -> None:
         for _ in range(100):  # bounded: a give-up that never comes fails, not hangs
-            refusals.append(governor.acquire("stocks", Cancel(), lane=object()))
+            refusals.append(governor.admission("stocks", lane=object()).acquire(Cancel()))
             _refuse(governor, refusals[-1])
 
     with pytest.raises(WireError, match="for 585 s, and its pauses come to 645 s"):
@@ -416,8 +431,8 @@ def test_a_run_gives_up_once_its_pauses_add_up_to_more_than_ten_minutes() -> Non
 def test_a_waiting_request_gives_up_when_a_refusal_outlasts_the_patience() -> None:
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    in_flight = governor.acquire("stocks", Cancel(), lane=object())
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+    in_flight = governor.admission("stocks", lane=object()).acquire(Cancel())
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     waiting = _Waiting(governor, "stocks", lane=object())
     clock.wait_for_sleepers(1)
     with pytest.raises(WireError):
@@ -433,8 +448,10 @@ def test_a_waiting_request_gives_up_when_a_refusal_outlasts_the_patience() -> No
 def test_snapshot_reports_every_bucket() -> None:
     clock = FakeClock(wall=1_800_000_000.0)
     governor = _governor(clock, basic={"options"})
-    held = governor.acquire("stocks", Cancel(), lane=object())
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=30.0)
+    held = governor.admission("stocks", lane=object()).acquire(Cancel())
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=30.0
+    )
     clock.advance(10.0)
     stocks, options, other = governor.snapshot()
     assert stocks.bucket == "stocks"
@@ -457,8 +474,8 @@ def test_estimate_is_a_lower_bound_from_the_slots_held() -> None:
     assert governor.estimate("stocks", 5) == 0.0
     assert governor.estimate("stocks", 6) == 61.0
     assert governor.estimate("stocks", 250) == 49 * 61.0
-    in_flight = governor.acquire(
-        "stocks", Cancel(), lane=object()
+    in_flight = governor.admission("stocks", lane=object()).acquire(
+        Cancel()
     )  # frees no sooner than 61 from now
     _requests(governor, "stocks", 1)
     clock.advance(30.0)  # that slot frees at 61, 31 from now
@@ -471,7 +488,9 @@ def test_estimate_is_a_lower_bound_from_the_slots_held() -> None:
 def test_estimate_counts_the_pause() -> None:
     clock = FakeClock()
     governor = _governor(clock, basic={"stocks"})
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=100.0)
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=100.0
+    )
     assert governor.estimate("stocks", 1) == 100.0
 
 
@@ -479,13 +498,15 @@ def test_idle_once_nothing_is_held() -> None:
     clock = FakeClock()
     governor = _governor(clock, basic={"stocks"})
     assert governor.idle()
-    permit = governor.acquire("stocks", Cancel(), lane=object())
+    permit = governor.admission("stocks", lane=object()).acquire(Cancel())
     assert not governor.idle()  # in flight
     governor.done(permit, answered=True)
     assert not governor.idle()  # its slot is held
     clock.advance(61.0)
     assert governor.idle()
-    _refuse(governor, governor.acquire("options", Cancel(), lane=object()), retry_after=200.0)
+    _refuse(
+        governor, governor.admission("options", lane=object()).acquire(Cancel()), retry_after=200.0
+    )
     clock.advance(61.0)
     assert not governor.idle()  # paused
     clock.advance(200.0)
@@ -497,7 +518,7 @@ def test_a_waiting_request_keeps_the_governor_busy() -> None:
     governor = _governor(clock, basic={"stocks"})
     _requests(governor, "stocks", 5)
     clock.advance(61.0)
-    permits = [governor.acquire("stocks", Cancel(), lane=object()) for _ in range(5)]
+    permits = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(5)]
     for permit in permits:
         governor.done(permit, answered=True)
     waiting = _Waiting(governor, "stocks", lane=object())
@@ -553,7 +574,7 @@ def test_16_threads_never_start_more_than_five_requests_in_a_window() -> None:
     def worker() -> None:
         try:
             for _ in range(10):
-                permit = governor.acquire("stocks", Cancel(), lane=object())
+                permit = governor.admission("stocks", lane=object()).acquire(Cancel())
                 with lock:
                     starts.append(clock.monotonic())
                 governor.done(permit, answered=True)
@@ -584,11 +605,15 @@ def test_16_threads_never_start_more_than_five_requests_in_a_window() -> None:
 def test_a_counted_refusal_never_shortens_a_pause_a_stale_one_lengthened() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    slow = governor.acquire(
-        "stocks", Cancel(), lane=object()
+    slow = governor.admission("stocks", lane=object()).acquire(
+        Cancel()
     )  # still in flight through what follows
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # pause until 15
-    current = governor.acquire("stocks", Cancel(), lane=object())  # starts at 15, after the pause
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # pause until 15
+    current = governor.admission("stocks", lane=object()).acquire(
+        Cancel()
+    )  # starts at 15, after the pause
     _refuse(governor, slow, retry_after=100.0)  # stale: the pause grows to 115
     _refuse(governor, current)  # the run's second refusal asks for 30 s, to 45: not shorter
     _requests(governor, "stocks", 1)
@@ -607,7 +632,7 @@ def _spend_five_slots_ten_seconds_apart(clock: FakeClock, governor: RequestGover
     for index in range(5):
         if index:
             clock.advance(10.0)
-        governor.done(governor.acquire("stocks", Cancel(), lane=object()), answered=True)
+        governor.done(governor.admission("stocks", lane=object()).acquire(Cancel()), answered=True)
 
 
 class _Lanes:
@@ -630,7 +655,7 @@ class _Lanes:
         def run() -> None:
             try:
                 for _ in range(times):
-                    permit = self.governor.acquire("stocks", Cancel(), lane=lane)
+                    permit = self.governor.admission("stocks", lane=lane).acquire(Cancel())
                     with self._lock:
                         self.starts.append((name, self.clock.monotonic()))
                     self.governor.done(permit, answered=True)
@@ -716,7 +741,9 @@ def test_a_retry_after_of_zero_or_in_the_past_falls_back_to_the_schedule(
 ) -> None:
     clock = FakeClock()
     governor = _governor(clock, basic=basic)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=0.0)
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=0.0
+    )
     _requests(governor, "stocks", 1)
     assert clock.monotonic() == pause
 
@@ -728,7 +755,7 @@ def test_a_run_gives_up_after_ten_minutes_of_refusals_whatever_each_pause() -> N
 
     def refuse_forever() -> None:
         for _ in range(100):  # bounded: a give-up that never comes fails, not hangs
-            refusals.append(governor.acquire("stocks", Cancel(), lane=object()))
+            refusals.append(governor.admission("stocks", lane=object()).acquire(Cancel()))
             _refuse(governor, refusals[-1], retry_after=100.0)
 
     with pytest.raises(WireError, match="for 600 s, and its pauses come to 700 s"):
@@ -742,14 +769,18 @@ def test_a_run_gives_up_after_ten_minutes_of_refusals_whatever_each_pause() -> N
 def test_a_stale_refusal_that_lengthens_the_pause_starts_a_run_and_can_give_up() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    slow = governor.acquire("stocks", Cancel(), lane=object())  # in flight through everything below
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # pause until 15
+    slow = governor.admission("stocks", lane=object()).acquire(
+        Cancel()
+    )  # in flight through everything below
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # pause until 15
     _requests(governor, "stocks", 1)  # answered at 15: the run is over
     with pytest.raises(WireError, match="fail at once for 3600 s more") as caught:
         _refuse(governor, slow, retry_after=3600.0)  # stale, but it pauses past the patience
     assert caught.value.status == 429
     with pytest.raises(WireError, match="fail at once for 3600 s more"):
-        governor.acquire("stocks", Cancel(), lane=object())
+        governor.admission("stocks", lane=object()).acquire(Cancel())
     assert _state(governor).gave_up
 
 
@@ -757,11 +788,15 @@ def test_the_first_request_after_a_given_up_pause_starts_a_new_run() -> None:
     clock = FakeClock()
     governor = _governor(clock)
     with pytest.raises(WireError):
-        _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=900.0)
+        _refuse(
+            governor,
+            governor.admission("stocks", lane=object()).acquire(Cancel()),
+            retry_after=900.0,
+        )
     clock.advance(900.0)
     # A new run: a short pause is waited out, not given up at once.
     assert not _refuse(
-        governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=5.0
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=5.0
     )
     _requests(governor, "stocks", 1)
     assert clock.monotonic() == 905.0
@@ -773,14 +808,14 @@ def test_the_first_request_after_a_given_up_pause_starts_a_new_run() -> None:
 def test_a_permit_counts_its_first_report_only() -> None:
     clock = FakeClock()
     governor = _governor(clock, basic={"stocks"})
-    permit = governor.acquire("stocks", Cancel(), lane=object())
+    permit = governor.admission("stocks", lane=object()).acquire(Cancel())
     governor.release(permit)  # never sent: no slot held
     governor.done(permit, answered=True)
     governor.release(permit)
     assert not _refuse(governor, permit)
     state = _state(governor)
     assert (state.in_flight, state.recent, state.refusals) == (0, 0, 0)
-    sent = governor.acquire("stocks", Cancel(), lane=object())
+    sent = governor.admission("stocks", lane=object()).acquire(Cancel())
     governor.done(sent, answered=False)
     governor.release(sent)  # too late: it may have reached Massive
     assert _state(governor).recent == 1
@@ -789,7 +824,7 @@ def test_a_permit_counts_its_first_report_only() -> None:
 def test_a_release_wakes_the_head_at_once() -> None:
     clock = FakeClock(manual=True)
     governor = _governor(clock, basic={"stocks"})
-    permits = [governor.acquire("stocks", Cancel(), lane=object()) for _ in range(5)]
+    permits = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(5)]
     waiting = _Waiting(governor, "stocks", lane=object())
     clock.wait_for_deadlines([math.inf])  # every slot in flight
     governor.release(permits[0])
@@ -805,7 +840,9 @@ def test_learning_paces_a_bucket_and_wakes_its_head() -> None:
     with pytest.raises(ValueError, match=r"unknown buckets \['crypto'\]"):
         governor.learn({"crypto"})
     _requests(governor, "stocks", 5)  # unpaced: five slots held until 61, but no limit
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # pause until 15
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # pause until 15
     waiting = _Waiting(governor, "stocks", lane=object())
     clock.wait_for_deadlines([15.0])
     governor.learn({"stocks"})
@@ -822,7 +859,9 @@ def test_next_change_is_the_earliest_pause_end_or_slot_release() -> None:
     assert governor.next_change() is None
     _requests(governor, "stocks", 1)  # frees at 61
     assert governor.next_change() == 61.0
-    _refuse(governor, governor.acquire("options", Cancel(), lane=object()), retry_after=20.0)
+    _refuse(
+        governor, governor.admission("options", lane=object()).acquire(Cancel()), retry_after=20.0
+    )
     assert governor.next_change() == 20.0
     clock.advance(30.0)
     assert governor.next_change() == 31.0  # both slots free at 61
@@ -834,14 +873,18 @@ def test_a_listener_that_raises_is_logged_and_the_permit_still_granted(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     governor = _governor()
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=1.0)
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=1.0
+    )
 
     def broken() -> None:
         raise RuntimeError("listener broke")
 
     governor.subscribe(broken)
     with caplog.at_level(logging.ERROR):
-        permit = governor.acquire("stocks", Cancel(), lane=object())  # queued for the pause
+        permit = governor.admission("stocks", lane=object()).acquire(
+            Cancel()
+        )  # queued for the pause
     assert "a rate-limit listener failed" in caplog.text
     governor.done(permit, answered=True)
     assert _state(governor).in_flight == 0
@@ -850,7 +893,9 @@ def test_a_listener_that_raises_is_logged_and_the_permit_still_granted(
 def test_an_interrupt_after_the_grant_hands_the_permit_back() -> None:
     governor = _governor()
     # A pause makes the request queue, so its admission sends a change notice.
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=1.0)
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=1.0
+    )
     calls: list[int] = []
 
     def interrupting() -> None:
@@ -860,7 +905,7 @@ def test_an_interrupt_after_the_grant_hands_the_permit_back() -> None:
 
     governor.subscribe(interrupting)
     with pytest.raises(KeyboardInterrupt):
-        governor.acquire("stocks", Cancel(), lane=object())
+        governor.admission("stocks", lane=object()).acquire(Cancel())
     state = _state(governor)
     # Only the refused attempt holds a slot: the interrupted grant was handed back.
     assert (state.in_flight, state.waiting, state.recent) == (0, 0, 1)
@@ -871,9 +916,17 @@ def test_messages_name_the_buckets_requests() -> None:
         ("stocks", "other"), clock=FakeClock(), labels={"other": "requests elsewhere"}
     )
     with pytest.raises(WireError, match=r"^Massive has refused requests elsewhere with HTTP 429"):
-        _refuse(governor, governor.acquire("other", Cancel(), lane=object()), retry_after=700.0)
+        _refuse(
+            governor,
+            governor.admission("other", lane=object()).acquire(Cancel()),
+            retry_after=700.0,
+        )
     with pytest.raises(WireError, match=r"^Massive has refused stocks requests with HTTP 429"):
-        _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=700.0)
+        _refuse(
+            governor,
+            governor.admission("stocks", lane=object()).acquire(Cancel()),
+            retry_after=700.0,
+        )
 
 
 def test_a_request_leaving_its_lane_keeps_the_lane_and_its_turn() -> None:
@@ -897,8 +950,12 @@ def test_a_request_leaving_its_lane_keeps_the_lane_and_its_turn() -> None:
 def test_a_late_shorter_refusal_leaves_a_longer_pause_alone() -> None:
     clock = FakeClock(wall=1_800_000_000.0)
     governor = _governor(clock)
-    slow = governor.acquire("stocks", Cancel(), lane=object())  # in flight before the pause
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=100.0)
+    slow = governor.admission("stocks", lane=object()).acquire(
+        Cancel()
+    )  # in flight before the pause
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=100.0
+    )
     clock.advance(10.0)
     _refuse(governor, slow, retry_after=5.0)  # stale, and ends sooner: changes nothing
     assert _state(governor).paused_until == 1_800_000_100.0
@@ -956,9 +1013,11 @@ def test_a_refusal_after_a_quiet_hour_starts_a_new_run() -> None:
     # later is the first of a new run, so it pauses instead of giving up.
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # paused until 15
     clock.advance(3600.0)
-    assert not _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+    assert not _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     state = _state(governor)
     assert not state.gave_up
     assert state.paused_until == 1_800_000_000.0 + 3600.0 + 15.0
@@ -968,18 +1027,24 @@ def test_a_refusal_within_a_window_of_the_pause_continues_its_run() -> None:
     # A refusal soon after its pause ended is part of the same run: its pause grows to 30 s.
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # paused until 15
     clock.advance(15.0 + RATE_WINDOW)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     assert _state(governor).paused_until == 1_800_000_000.0 + 76.0 + 30.0
 
 
 def test_a_stale_refusal_after_a_given_up_pause_has_ended_starts_a_new_run() -> None:
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    stale = governor.acquire("stocks", Cancel(), lane=object())  # in flight from before
+    stale = governor.admission("stocks", lane=object()).acquire(Cancel())  # in flight from before
     with pytest.raises(WireError, match="fail at once for 700 s more"):
-        _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=700.0)
+        _refuse(
+            governor,
+            governor.admission("stocks", lane=object()).acquire(Cancel()),
+            retry_after=700.0,
+        )
     clock.advance(701.0)  # the given-up pause is over, and no request has looked since
     assert not _refuse(governor, stale, retry_after=30.0)  # a new run: it only pauses
     assert not _state(governor).gave_up
@@ -990,19 +1055,21 @@ def test_a_pause_ends_with_one_probe_while_the_others_wait_for_its_answer() -> N
     # every waiting request would start when the pause ends and be refused again.
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # paused until 15
     waiting = [_Waiting(governor, "stocks", lane=object()) for _ in range(5)]
     assert clock.wait_for_sleepers(5) == [15.0, *[math.inf] * 4]
     clock.advance(15.0)
     probe = next(w for w in waiting if _joined(w))  # one starts, alone
     assert probe.permit is not None
-    assert clock.wait_for_sleepers(4) == [15.0 + PROBE_TIMEOUT, *[math.inf] * 3]
+    assert clock.wait_for_sleepers(4) == [math.inf] * 4
     _refuse(governor, probe.permit)  # refused: the run's second pause, 30 s
     assert clock.wait_for_sleepers(4) == [45.0, *[math.inf] * 3]
     clock.advance(30.0)
     second = next(w for w in waiting if w is not probe and _joined(w))
     assert second.permit is not None
-    assert clock.wait_for_sleepers(3) == [45.0 + PROBE_TIMEOUT, *[math.inf] * 2]
+    assert clock.wait_for_sleepers(3) == [math.inf] * 3
     governor.done(second.permit, answered=True)  # answered: the others go at once
     for each in waiting:
         each.join()
@@ -1020,16 +1087,18 @@ def _joined(waiting: _Waiting) -> bool:
 def test_a_probe_that_is_never_answered_lets_the_next_request_probe() -> None:
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # paused until 15
     clock.advance(15.0)
-    probe = governor.acquire("stocks", Cancel(), lane=object())
+    probe = governor.admission("stocks", lane=object()).acquire(Cancel())
     waiting = _Waiting(governor, "stocks", lane=object())
-    assert clock.wait_for_sleepers(1) == [15.0 + PROBE_TIMEOUT]  # behind the probe
+    assert clock.wait_for_sleepers(1) == [math.inf]  # behind the probe
     governor.release(probe)  # never sent: the waiting request probes instead
     waiting.join()
     assert waiting.permit is not None
     third = _Waiting(governor, "stocks", lane=object())
-    assert clock.wait_for_sleepers(1) == [15.0 + PROBE_TIMEOUT]  # behind the new probe
+    assert clock.wait_for_sleepers(1) == [math.inf]  # behind the new probe
     governor.done(waiting.permit, answered=True)
     third.join()
     assert third.permit is not None
@@ -1039,7 +1108,9 @@ def test_a_probe_that_is_never_answered_lets_the_next_request_probe() -> None:
 def test_a_never_paced_bucket_pauses_on_a_basic_refusal_but_is_not_paced() -> None:
     clock = FakeClock(manual=True)
     governor = RequestGovernor(BUCKETS, unpaced={"other"}, clock=clock)
-    assert not _refuse(governor, governor.acquire("other", Cancel(), lane=object()), message=BASIC)
+    assert not _refuse(
+        governor, governor.admission("other", lane=object()).acquire(Cancel()), message=BASIC
+    )
     other = _state(governor, "other")
     assert (other.limit, other.learned) == (None, False)
     assert other.paused_until is not None  # it still pauses
@@ -1067,7 +1138,7 @@ def test_an_interrupt_while_it_stops_listening_hands_the_permit_back() -> None:
     for _ in range(5):
         _requests(governor, "stocks", 5)  # every slot held: the next request queues
         with pytest.raises(KeyboardInterrupt):
-            governor.acquire("stocks", Interrupting(), lane=object())
+            governor.admission("stocks", lane=object()).acquire(Interrupting())
         state = _state(governor)
         assert (state.in_flight, state.waiting) == (0, 0)
     _requests(governor, "stocks", 1)  # nothing leaked: the bucket still admits requests
@@ -1095,7 +1166,7 @@ def test_concurrent_paced_requests_on_the_automatic_clock_do_not_race_virtual_ti
 
     def work() -> None:
         for _ in range(5):
-            permit = governor.acquire("stocks", Cancel(), lane=lane)
+            permit = governor.admission("stocks", lane=lane).acquire(Cancel())
             with lock:
                 starts.append(clock.monotonic())
             governor.done(permit, answered=True)
@@ -1118,7 +1189,7 @@ def test_refusals_without_the_basic_words_never_pace_a_bucket_however_many() -> 
     clock = FakeClock()
     governor = _governor(clock)
     for _ in range(3):
-        _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
+        _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
     state = _state(governor)
     assert (state.limit, state.learned, state.refusals) == (None, False, 3)
 
@@ -1126,14 +1197,16 @@ def test_refusals_without_the_basic_words_never_pace_a_bucket_however_many() -> 
 def test_an_interrupt_before_the_grant_leaves_its_place_and_holds_nothing() -> None:
     governor = _governor()
     # A pause makes the request queue; the notice of its queuing is interrupted.
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=1.0)
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=1.0
+    )
 
     def interrupting() -> None:
         raise KeyboardInterrupt
 
     governor.subscribe(interrupting)
     with pytest.raises(KeyboardInterrupt):
-        governor.acquire("stocks", Cancel(), lane=object())
+        governor.admission("stocks", lane=object()).acquire(Cancel())
     governor.unsubscribe(interrupting)
     state = _state(governor)
     assert (state.in_flight, state.waiting, state.attempts) == (0, 0, 1)
@@ -1144,8 +1217,10 @@ def test_a_stale_refusal_counts_only_the_pause_it_adds() -> None:
     # the extension, so 590 s and then 10 s more come to 600 s, which is still waited for.
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    stale = governor.acquire("stocks", Cancel(), lane=object())  # in flight from before
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=590.0)
+    stale = governor.admission("stocks", lane=object()).acquire(Cancel())  # in flight from before
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=590.0
+    )
     clock.advance(100.0)
     _refuse(governor, stale, retry_after=500.0)  # until 600: 10 s more of pause
     state = _state(governor)
@@ -1169,7 +1244,7 @@ def test_a_request_never_jumps_a_queue_that_may_start() -> None:
     governor.done(waiting.permit, answered=True)
 
 
-# --- Claims and lost reports ---------------------------------------------------------------------
+# --- Claims --------------------------------------------------------------------------------------
 
 
 def test_a_claim_reports_its_permit_whatever_interrupts_after_the_grant() -> None:
@@ -1177,7 +1252,9 @@ def test_a_claim_reports_its_permit_whatever_interrupts_after_the_grant() -> Non
     # before the grant, and its exit reports the permit.
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # paused until 15
     clock.advance(15.0)
     claims: list[Admission] = []
 
@@ -1193,7 +1270,7 @@ def test_a_claim_reports_its_permit_whatever_interrupts_after_the_grant() -> Non
     state = _state(governor)
     assert (state.in_flight, state.waiting) == (0, 0)
     # The probe's report came, so the next request probes in its place at once.
-    governor.done(governor.acquire("stocks", Cancel(), lane=object()), answered=True)
+    governor.done(governor.admission("stocks", lane=object()).acquire(Cancel()), answered=True)
     assert _state(governor).in_flight == 0
 
 
@@ -1210,29 +1287,16 @@ def test_a_claim_reports_nothing_twice_and_refuses_an_unknown_bucket() -> None:
         governor.admission("crypto", lane=object())
 
 
-def test_a_probe_whose_report_is_lost_stops_holding_the_bucket() -> None:
-    clock = FakeClock(manual=True)
-    governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
-    clock.advance(15.0)
-    governor.acquire("stocks", Cancel(), lane=object())  # the probe, never reported
-    waiting = _Waiting(governor, "stocks", lane=object())
-    assert clock.wait_for_sleepers(1) == [15.0 + PROBE_TIMEOUT]
-    clock.advance(PROBE_TIMEOUT)
-    waiting.join()  # it probes in the lost one's place
-    assert waiting.started == 15.0 + PROBE_TIMEOUT
-    assert waiting.permit is not None
-    governor.done(waiting.permit, answered=True)
-
-
 def test_a_slow_probe_refused_after_a_window_continues_its_run() -> None:
     # The probe is still in flight more than a window after the pause ended: its 429 belongs
     # to the run, so the run's patience is not reset and its next pause grows to 30 s.
     clock = FakeClock(manual=True)
     governor = _governor(clock)
-    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel())
+    )  # paused until 15
     clock.advance(15.0)
-    probe = governor.acquire("stocks", Cancel(), lane=object())
+    probe = governor.admission("stocks", lane=object()).acquire(Cancel())
     clock.advance(RATE_WINDOW + 10.0)  # answered 71 s after the pause ended
     _refuse(governor, probe)
     assert _state(governor).paused_until == 1_800_000_000.0 + 86.0 + 30.0
