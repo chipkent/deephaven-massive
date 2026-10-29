@@ -157,6 +157,16 @@ is not a holiday, with the variables above exported:
    uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
    ```
 
+6. **On the trading day after a half day**, the three REST stamp tests again. The half days
+   are the Friday after Thanksgiving, and December 24 and July 3 when they fall Monday to
+   Thursday. `/prev` serves only the most recent completed trading day, so only then does it
+   show a short-day stamp; the evidence marks that day `half day: yes`. Run alone, the three
+   tests leave their questions "partly run" in the summary, since the file tests did not run:
+
+   ```bash
+   uv run pytest -m integration -k "day_and_week_bar_stamps_from_rest or day_and_longer_bar_stamps_from_rest" 2>&1 | tee -a live-checks.log
+   ```
+
 ## Reading the results
 
 A test fails when a request it needs fails or returns nothing, when it is refused although
