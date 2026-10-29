@@ -1,17 +1,19 @@
 """The REST client: one connection pool per session, shared by every thread that calls Massive.
 
 `RestClient` sends GET requests to Massive's REST API and returns decoded `Page`s. It owns the
-transport (urllib3, with TLS and proxy settings from `net.http`), bearer authentication,
-the retry schedule of `net.retry`, `next_url` paging, and the client-wide back-off after a
-rate limit. Encoding lives in `rest.query`, decoding and error mapping in `rest.response`, and
-conversion to Arrow in `rest.batch`.
+transport (urllib3, with TLS and proxy settings from `net.http`), bearer authentication, the
+retry schedule of `net.retry` for transient failures, and `next_url` paging. When each attempt
+may start is the `RequestGovernor`'s decision (`rest.governor`): the client takes a permit of the
+request's bucket (its Massive subscription) before every attempt and reports how it ended, so
+a Basic subscription is paced and a refused one pauses, together with every other client that
+shares the governor. Encoding lives in `rest.query`, decoding and error mapping in
+`rest.response`, and conversion to Arrow in `rest.batch`.
 
 **Thread-safety.** One client serves a whole session: the caller thread, every poller, and
 every fan-out worker call it at once. Its shared mutable state is urllib3's pool, which locks
-internally, and the **not-before instant** under a leaf lock: after a 429, the client sets an
-instant before which no thread sends, so concurrent workers back off together instead of
-multiplying 429s. The lock is held only to read or raise that instant, never across a wait or
-a request. No call modifies its arguments.
+internally, the governor, which locks its own state, and the closed `Cancel` token. Every
+request listens to a token of its own, made from the client's and the caller's, so closing
+the client ends its waits and nobody else's. No call modifies its arguments.
 
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
@@ -22,50 +24,52 @@ import ipaddress
 import logging
 import random
 import re
-import threading
 from dataclasses import dataclass, replace
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Protocol, cast
 from urllib.parse import urlsplit
 
 import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
-from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.cancel import Cancel
+from deephaven_massive._massive.net.errors import (
+    WireError,
+    is_proxy_auth_failure,
+    is_tls_failure,
+    linked_errors,
+)
 from deephaven_massive._massive.net.http import (
     TlsConsumer,
     https_proxy,
     proxy_credentials,
     ssl_context,
 )
+from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
-    MAX_RETRY_AFTER,
-    SYSTEM_CLOCK,
     TRANSIENT_STATUSES,
-    is_proxy_auth_failure,
-    is_tls_failure,
-    rate_limit_wait,
     retry_after_seconds,
     transient_wait,
 )
-from deephaven_massive._massive.rest.query import (
-    next_target,
-    origin_of,
-    request_target,
-)
+from deephaven_massive._massive.rest.governor import is_basic_refusal
+from deephaven_massive._massive.rest.query import next_target, request_target
 from deephaven_massive._massive.rest.response import Request, decode_page, http_error
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
-    from deephaven_massive._massive.net.retry import Clock
-    from deephaven_massive._massive.rest.query import Origin
+    from urllib3 import BaseHTTPResponse
+
+    from deephaven_massive._massive.net.origins import Origin
+    from deephaven_massive._massive.rest.governor import Permit, RequestGovernor
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec.types import RestPath
 
-__all__ = ["CONNECT_TIMEOUT", "READ_TIMEOUT", "RestClient"]
+__all__ = ["CONNECT_TIMEOUT", "READ_TIMEOUT", "RefusalHook", "RestClient"]
 
 _log = logging.getLogger(__name__)
 
@@ -154,38 +158,71 @@ def _check_base_url(base_url: str) -> Origin:
     return origin
 
 
+class RefusalHook(Protocol):
+    """What a `RestClient` calls for every HTTP 429, before its governor pauses the bucket."""
+
+    def __call__(self, bucket: str, error: WireError, *, basic: bool) -> None:
+        """Note a refusal; called on the requesting thread, it must not block or raise.
+
+        Args:
+            bucket: The refused request's bucket.
+            error: The refusal: status 429, the path, the request id, and Massive's message.
+            basic: Whether the message named the per-minute maximum, the mark of a Basic
+                subscription (`rest.governor.is_basic_refusal`).
+        """
+
+
 @dataclass(frozen=True)
 class _Retryable:
-    """An attempt that failed in a way a retry may fix.
+    """An attempt that failed in a way a retry may fix: a transient status or connection failure.
 
     Attributes:
         error: The error to raise if no retry is left.
-        rate_limited: True for a 429, whose wait becomes the client-wide not-before instant;
-            False for a transient failure, whose wait is this request's own.
-        retry_after: For a 429, the wait its `Retry-After` asked for (at most 60 s), or
-            `None` when it gave none.
     """
 
     error: WireError
-    rate_limited: bool = False
-    retry_after: float | None = None
+
+
+@dataclass(frozen=True, eq=False)
+class _Job:
+    """What every page and attempt of one `get` or `pages` call shares.
+
+    Compared by identity: a call without a cancellation token is a governor lane of its own.
+
+    Attributes:
+        rest_path: The path, for decoding.
+        bucket: The governor's bucket every attempt is charged to.
+        cancel: The caller's cancellation, or None.
+    """
+
+    rest_path: RestPath
+    bucket: str
+    cancel: Cancel | None
+
+
+_REFUSED: Final = object()
+"""The outcome of an attempt Massive refused with HTTP 429: try again, once the governor lets
+the request start, without counting a retry."""
 
 
 class RestClient:
     """A client for Massive's REST API, safe to share between any number of threads.
 
-    The session creates one on first use, with plain arguments, and closes it when the
-    session closes. Every request is a GET with `Authorization: Bearer <key>`; the key never
-    appears in a URL or a log, and a response body that echoes it has it replaced with `***`
-    before it is decoded (`net.redaction`), so no row, error, or log line can quote it.
-    Requests go to the base URL's host only: a `next_url` that points elsewhere is refused.
-    Failures are retried per `net.retry` and then raised as `WireError`, `WireAuthError`, or
-    `WireEntitlementError`; no urllib3 or JSON exception escapes.
+    The session creates one on first use, with plain arguments and the governor its API key
+    shares, and closes it when the session closes. Every request is a GET with
+    `Authorization: Bearer <key>`; the key never appears in a URL or a log, and a response body
+    that echoes it has it replaced with `***` before it is decoded (`net.redaction`), so no row,
+    error, or log line can quote it. Requests go to the base URL's host only: a `next_url` that
+    points elsewhere is refused. Every attempt first takes a permit of its subscription's bucket
+    from the `RequestGovernor` (which paces a Basic subscription and pauses one Massive
+    refused); transient failures are retried per `net.retry`, and failures are raised as
+    `WireError`, `WireAuthError`, or `WireEntitlementError`; no urllib3 or JSON exception
+    escapes.
 
     Example:
         ::
 
-            from deephaven_massive._massive import RestClient
+            from deephaven_massive._massive import RequestGovernor, RestClient
             from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath
 
             trades = RestPath(
@@ -193,16 +230,26 @@ class RestClient:
                 fields=(),
                 params=(Param(name="stockTicker", kind=ParamKind.STRING, in_path=True),),
             )
-            client = RestClient("my-key", base_url="https://api.massive.com", max_concurrency=8)
+            governor = RequestGovernor(("stocks", "other"))
+            client = RestClient(
+                "my-key", base_url="https://api.massive.com", max_concurrency=8, governor=governor
+            )
             try:
-                for page in client.pages(trades, {"stockTicker": "AAPL"}, {}, limit=10_000):
+                pages = client.pages(trades, {"stockTicker": "AAPL"}, {}, bucket="stocks")
+                for page in pages:
                     print(page.status, len(page.rows))
             finally:
                 client.close()
     """
 
     def __init__(
-        self, api_key: str, *, base_url: str, max_concurrency: int, clock: Clock = SYSTEM_CLOCK
+        self,
+        api_key: str,
+        *,
+        base_url: str,
+        max_concurrency: int,
+        governor: RequestGovernor,
+        on_refused: RefusalHook | None = None,
     ) -> None:
         """Create the client and its connection pool; no request is sent.
 
@@ -220,8 +267,11 @@ class RestClient:
             max_concurrency: The most requests the caller sends at once (a fan-out's
                 workers). The pool keeps that many connections to the host, so none is
                 discarded and reopened under load. At least 1.
-            clock: The time source for retry waits and the not-before instant. Tests pass a
-                fake; the default is the real clock.
+            governor: Admits every attempt and pauses a bucket Massive refused. It may be
+                shared with other clients of the same API key; its clock is the time source of
+                this client's retry waits too.
+            on_refused: Called on the requesting thread for every HTTP 429, before the
+                governor pauses the bucket (see `RefusalHook`); None to call nothing.
 
         Raises:
             ValueError: If `max_concurrency` is less than 1. A bad `api_key` or `base_url`
@@ -236,7 +286,9 @@ class RestClient:
         self._origin = origin
         self._base = f"{origin[0]}://{urlsplit(base_url).netloc}"
         self._host = origin[1]
-        self._clock = clock
+        self._governor = governor
+        self._clock = governor.clock
+        self._on_refused = on_refused
         # Cleans every response body of a key the server echoes (`net.redaction`).
         self._redactor = Redactor(api_key)
         self._headers = {
@@ -265,38 +317,47 @@ class RestClient:
                 timeout=timeout,
                 ssl_context=ssl_context(TlsConsumer.URLLIB3),
             )
-        self._lock = threading.Lock()
-        self._not_before = float("-inf")
-        self._closed = threading.Event()
+        self._closed = Cancel()
 
     def get(
         self,
         rest_path: RestPath,
         path_params: Mapping[str, object],
         query_params: Mapping[str, object],
+        *,
+        bucket: str,
+        cancel: Cancel | None = None,
     ) -> Page:
         """Request one page of a REST path.
 
-        Blocks the calling thread for the request and any retry waits: up to three retries,
-        0.5 to 2.4 s each for a 5xx or connection failure, and up to 60 s each for a 429.
+        Blocks the calling thread for the request and its waits: for the governor's permit
+        (a paced bucket's slot, or a pause after a 429, until a run's pauses add up to 10
+        minutes), and for up to three retries of a 5xx or connection failure, 0.5 to
+        2.4 s each. A 429 is not a retry: the attempt is made again once the governor allows.
 
-        Errors: `WireError` when the request fails after its retries, a 429 asks for more
-        than 60 s, TLS verification fails, the proxy refuses its credentials (status 407,
-        never retried), the body is not a valid page, or the client is closed;
-        `WireAuthError` for 401; `WireEntitlementError` for 403 or a `NOT_AUTHORIZED`
-        envelope. Parameters that do not fit the path raise `ValueError`, and a value of a
-        type its kind does not accept raises `TypeError` (see `rest.query`).
+        Errors: `WireError` when the request fails after its retries, Massive keeps refusing
+        it for longer than the governor waits (status 429), TLS verification fails, the proxy
+        refuses its credentials (status 407, never retried), the body is not a valid page,
+        the client is closed, or `cancel` is set; `WireAuthError` for 401;
+        `WireEntitlementError` for 403 or a `NOT_AUTHORIZED` envelope. Parameters that do not
+        fit the path raise `ValueError`, and a value of a type its kind does not accept raises
+        `TypeError` (see `rest.query`). An unknown `bucket` raises `ValueError` when the
+        request would start.
 
         Args:
             rest_path: The path, from the spec.
             path_params: A value for each placeholder of the template, by wire name.
             query_params: Query values by wire name; `None` values are left out. See
                 `rest.query` for how each kind of value is sent.
+            bucket: The governor's bucket the request is charged to: its subscription.
+            cancel: Ends every wait of the request when set (the request then raises
+                `WireError`); None when only `close()` should.
 
         Returns:
             The decoded page.
         """
-        return self._fetch(rest_path, request_target(rest_path, path_params, query_params))
+        target = request_target(rest_path, path_params, query_params)
+        return self._fetch(_Job(rest_path, bucket, cancel), target)
 
     def pages(
         self,
@@ -304,20 +365,25 @@ class RestClient:
         path_params: Mapping[str, object],
         query_params: Mapping[str, object],
         *,
+        bucket: str,
+        cancel: Cancel | None = None,
         limit: int | None = None,
     ) -> Iterator[Page]:
         """Request a REST path and follow its `next_url` pages, one page at a time.
 
         The parameters are checked and encoded now, so a mistake raises here rather than at
         the first iteration. Each page is requested only when the iterator reaches it, so
-        only one page of rows is held at a time. A failure while paging (a connection reset,
-        a 5xx, a 429) retries that page's `next_url`, never the first page.
+        only one page of rows is held at a time. Each page is a request of its own to the
+        governor. A failure while paging (a connection reset, a 5xx, a 429) tries that page's
+        `next_url` again, never the first page.
 
         Args:
             rest_path: The path, from the spec.
             path_params: A value for each placeholder of the template, by wire name.
             query_params: Query values of the first request, by wire name; later pages carry
                 the query in their `next_url`.
+            bucket: The governor's bucket every page is charged to: its subscription.
+            cancel: Ends every wait of every page when set; None when only `close()` should.
             limit: The most rows to yield in total, or `None` for every page. Paging stops
                 once that many rows are yielded, and the last page is cut to fit.
 
@@ -332,23 +398,30 @@ class RestClient:
         """
         if limit is not None and limit < 1:
             raise ValueError(f"limit must be at least 1, not {limit}")
-        return self._pages(rest_path, request_target(rest_path, path_params, query_params), limit)
+        target = request_target(rest_path, path_params, query_params)
+        return self._pages(_Job(rest_path, bucket, cancel), target, limit)
+
+    @property
+    def governor(self) -> RequestGovernor:
+        """The governor that admits this client's requests, shared with other clients."""
+        return self._governor
 
     def close(self) -> None:
         """Close the pool's connections; every later request raises `WireError`.
 
-        Safe from any thread and idempotent. A thread waiting for the not-before instant or
-        a retry stops waiting at once and raises `WireError`; a request already on the wire
-        finishes or fails on its own (within the read timeout).
+        Safe from any thread and idempotent. A thread waiting for the governor or a retry
+        stops waiting at once and raises `WireError`; a request already on the wire finishes
+        or fails on its own (within the read timeout). The governor and the other clients
+        that share it are not affected.
         """
         self._closed.set()
         self._pool.clear()
 
-    def _pages(self, rest_path: RestPath, target: str, limit: int | None) -> Iterator[Page]:
+    def _pages(self, job: _Job, target: str, limit: int | None) -> Iterator[Page]:
         """Yield the pages of a request, following `next_url`.
 
         Args:
-            rest_path: The path.
+            job: The call's path, bucket, and cancellation.
             target: The first request's target.
             limit: The most rows to yield, or `None`.
 
@@ -361,7 +434,7 @@ class RestClient:
         """
         remaining = limit
         while True:
-            page = self._fetch(rest_path, target)
+            page = self._fetch(job, target)
             if remaining is not None and len(page.rows) >= remaining:
                 yield replace(page, rows=page.rows[:remaining])
                 return
@@ -375,26 +448,25 @@ class RestClient:
                 following = next_target(next_url, self._origin)
             except ValueError as error:
                 raise WireError(
-                    f"{rest_path.template}: refusing to follow {error}", host=self._host
+                    f"{job.rest_path.template}: refusing to follow {error}", host=self._host
                 ) from error
             if following == target:
                 raise WireError(
-                    f"{rest_path.template}: next_url repeats the page just fetched "
+                    f"{job.rest_path.template}: next_url repeats the page just fetched "
                     f"({target}); refusing to loop",
                     host=self._host,
                     path=target,
                 )
             target = following
 
-    def _fetch(self, rest_path: RestPath, target: str) -> Page:
-        """Request one target, retrying per the schedule.
+    def _fetch(self, job: _Job, target: str) -> Page:
+        """Request one target: each attempt after the governor's permit, retrying per schedule.
 
-        A transient failure sleeps this thread; a 429 moves the not-before instant, which the
-        next attempt (and every other thread's) waits for. A 429 on the last attempt still
-        moves the instant (by its `Retry-After`, else 60 s) before its error is raised.
+        A transient failure waits on this thread and counts a retry; a 429 waits in the
+        governor and counts none.
 
         Args:
-            rest_path: The path, for decoding.
+            job: The call's path, bucket, and cancellation.
             target: The path and query to request.
 
         Returns:
@@ -402,46 +474,66 @@ class RestClient:
             `get`.
         """
         request = Request(self._host, target)
-        retry = 0
-        while True:
-            outcome = self._attempt(rest_path, request)
-            if not isinstance(outcome, _Retryable):
-                return outcome
-            # The last attempt's wait goes unused, except that a 429 still moves the shared
-            # instant, so the client's other requests back off even when this one gives up.
-            step = min(retry, MAX_RETRIES - 1)
-            if outcome.rate_limited:
-                wait = rate_limit_wait(step, outcome.retry_after)
-                self._defer(wait)
-            else:
-                wait = transient_wait(step, _JITTER.random())
-            if retry == MAX_RETRIES:
-                _log.error("%s; giving up after %d attempts", outcome.error, retry + 1)
-                raise outcome.error
-            _log.info("%s; retry %d of %d in %.2f s", outcome.error, retry + 1, MAX_RETRIES, wait)
-            if not outcome.rate_limited:
-                self._clock.wait(self._closed, wait)
-            retry += 1
+        parents = (self._closed,) if job.cancel is None else (self._closed, job.cancel)
+        with Cancel(*parents) as stop:
+            retry = 0
+            while True:
+                outcome = self._attempt(job, request, stop)
+                if outcome is _REFUSED:
+                    continue
+                if not isinstance(outcome, _Retryable):
+                    return cast("Page", outcome)
+                if retry == MAX_RETRIES:
+                    _log.error("%s; giving up after %d attempts", outcome.error, retry + 1)
+                    raise outcome.error
+                wait = transient_wait(retry, _JITTER.random())
+                _log.info(
+                    "%s; retry %d of %d in %.2f s", outcome.error, retry + 1, MAX_RETRIES, wait
+                )
+                self._clock.wait(stop, wait)
+                retry += 1
 
-    def _attempt(self, rest_path: RestPath, request: Request) -> Page | _Retryable:
-        """Send one attempt of a request, after the not-before instant.
+    def _attempt(self, job: _Job, request: Request, stop: Cancel) -> Page | _Retryable | object:
+        """Send one attempt of a request, once the governor admits it.
 
         Args:
-            rest_path: The path, for decoding.
+            job: The call's path, bucket, and cancellation.
             request: The request.
+            stop: Set when the client closes or the caller cancels.
 
         Returns:
-            The page, or the failure to retry.
+            The page; a `_Retryable` for a transient failure; or `_REFUSED` for a 429, which
+            the governor has recorded.
 
-        Raises:
-            WireError: When the failure is not retryable: the client is closed, TLS
-                verification failed, the proxy refused its credentials (HTTP 407), a 429
-                asked for more than 60 s, or the status is neither 200, 429, nor a transient
-                5xx (`http_error` chooses the subclass).
+        A failure that is not retryable raises `WireError`: a status that is neither 200, 429,
+        nor a transient 5xx (`http_error` chooses the subclass), and from `_permit`,
+        `_unanswered`, and `_refused` a closed client or a cancelled caller, a failed TLS
+        verification, a proxy that refused its credentials (HTTP 407), or a bucket Massive
+        kept refusing for longer than the governor waits (status 429).
         """
-        self._wait_not_before()
-        if self._closed.is_set():
-            raise WireError(f"GET {request.target}: the REST client is closed", host=self._host)
+        permit = self._permit(request, job, stop)
+        try:
+            if stop.is_set():  # cancelled just as it was admitted: it is never sent
+                self._governor.release(permit)
+                raise self._stopped(request)
+            return self._send(job, request, permit)
+        finally:  # whatever escaped, the permit is reported; a report already made stands
+            self._governor.done(permit, answered=False)
+
+    def _send(self, job: _Job, request: Request, permit: Permit) -> Page | _Retryable | object:
+        """Send an admitted attempt and report its end to the governor.
+
+        Args:
+            job: The call's path, bucket, and cancellation.
+            request: The request.
+            permit: The attempt's permit: released when the request never left (the
+                connection could not be made), refused for a 429, and done otherwise.
+
+        Returns:
+            What `_attempt` returns.
+
+        A failure that is not retryable raises `WireError`, as `_attempt` describes.
+        """
         started = self._clock.monotonic()
         try:
             response = self._pool.request(
@@ -451,36 +543,18 @@ class RestClient:
                 redirect=False,
             )
         except urllib3.exceptions.HTTPError as error:
-            if is_tls_failure(error):
-                raise WireError(
-                    f"GET {request.target}: TLS certificate verification failed for "
-                    f"{self._host} ({error}); if a proxy or private CA signs it, set "
-                    "SSL_CERT_FILE to a bundle that trusts it",
-                    host=self._host,
-                    path=request.target,
-                ) from error
-            if is_proxy_auth_failure(error):
-                # The same credentials would be refused again, and a corporate proxy may lock
-                # the account after a few refusals.
-                raise WireError(
-                    f"GET {request.target}: the proxy refused its credentials (HTTP 407 for a "
-                    f"tunnel to {self._host}); check the user and password in HTTPS_PROXY",
-                    status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
-                    host=self._host,
-                    path=request.target,
-                ) from error
-            return _Retryable(
-                WireError(
-                    f"GET {request.target} on {self._host} failed: {error}",
-                    host=self._host,
-                    path=request.target,
-                )
-            )
+            if _never_sent(error):
+                self._governor.release(permit)  # no connection, so nothing reached Massive
+            return self._unanswered(request, error)
         elapsed = self._clock.monotonic() - started
         # Cleaned before anything reads it, so no row, error, or log line can quote the key.
         data = self._redactor.received(response.data)
+        if response.status == HTTPStatus.TOO_MANY_REQUESTS:
+            self._refused(permit, http_error(response.status, data, request), response)
+            return _REFUSED
+        self._governor.done(permit, answered=True)
         if response.status == HTTPStatus.OK:
-            page = decode_page(data, rest_path, request)
+            page = decode_page(data, job.rest_path, request)
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
                 request.target,
@@ -497,65 +571,198 @@ class RestClient:
             failure.request_id,
             elapsed,
         )
-        if response.status == HTTPStatus.TOO_MANY_REQUESTS:
-            return self._rate_limited(failure, response.headers.get("Retry-After"))
         if response.status in TRANSIENT_STATUSES:
             return _Retryable(failure)
         raise failure
 
-    def _rate_limited(self, error: WireError, retry_after: str | None) -> _Retryable:
-        """Read a 429's `Retry-After`, refusing a wait longer than the client honours.
+    def _permit(self, request: Request, job: _Job, stop: Cancel) -> Permit:
+        """Wait for the governor to admit an attempt, in the call's lane.
+
+        The lane is the caller's cancellation token, which a read shares among its calls, or
+        the call itself when it has none, so the governor takes the bucket's lanes in turn.
 
         Args:
-            error: The 429's error, raised if no retry is left.
-            retry_after: The response's `Retry-After` header, or `None`.
+            request: The request, for messages.
+            job: The call: its bucket, and its lane.
+            stop: Set when the client closes or the caller cancels.
 
         Returns:
-            The failure to retry, with the wait the header asked for.
+            The attempt's permit.
 
         Raises:
-            WireError: If `Retry-After` asks for more than 60 s; status 429, naming the wait.
-                The not-before instant still moves 60 s ahead first.
+            WireError: If `stop` is set before or during the wait: "the REST client is
+                closed" when the client closed, "cancelled" otherwise (`_attempt` releases a
+                permit granted just as `stop` was set). With status 429 when the bucket has
+                given up on a run of refusals, quoting the latest refusal.
         """
-        asked = retry_after_seconds(retry_after, self._clock.time())
-        if asked is not None and asked > MAX_RETRY_AFTER:
-            # This request gives up, but the client's other requests still back off as long
-            # as the client ever waits, so they do not each collect a 429 of their own.
-            self._defer(MAX_RETRY_AFTER)
+        if stop.is_set():
+            raise self._stopped(request)
+        lane = job if job.cancel is None else job.cancel
+        try:
+            return self._governor.acquire(job.bucket, stop, lane=lane)
+        except WireError as error:
+            if error.status is None:  # the wait was cancelled
+                raise self._stopped(request) from None
             raise WireError(
-                f"{error.message} (Massive asked to wait {asked:.0f} s, more than the "
-                f"{MAX_RETRY_AFTER:.0f} s the client waits)",
-                status=429,
-                host=error.host,
-                path=error.path,
+                error.message,
+                status=error.status,
+                host=self._host,
+                path=request.target,
                 request_id=error.request_id,
-            )
-        return _Retryable(error, rate_limited=True, retry_after=asked)
+            ) from None
 
-    def _defer(self, wait: float) -> None:
-        """Move the not-before instant to at least `wait` seconds from now.
-
-        The instant only moves later: a shorter wait from another thread never shortens one
-        already set. The lock is held only for the comparison.
+    def _stopped(self, request: Request) -> WireError:
+        """Return the error of a request whose client closed or whose caller cancelled.
 
         Args:
-            wait: The seconds every thread must wait before its next request.
-        """
-        until = self._clock.monotonic() + wait
-        with self._lock:
-            self._not_before = max(self._not_before, until)
+            request: The request.
 
-    def _wait_not_before(self) -> None:
-        """Block until the not-before instant has passed; return at once if it has.
-
-        The instant may move later while a thread waits (another 429), so the wait repeats
-        until the instant read is in the past. The lock is held only to read it. `close()`
-        ends the wait at once; the caller then sees the client closed.
+        Returns:
+            A `WireError` without a status.
         """
-        while not self._closed.is_set():
-            with self._lock:
-                not_before = self._not_before
-            delay = not_before - self._clock.monotonic()
-            if delay <= 0:
-                return
-            self._clock.wait(self._closed, delay)
+        reason = "the REST client is closed" if self._closed.is_set() else "cancelled"
+        return WireError(f"GET {request.target}: {reason}", host=self._host, path=request.target)
+
+    def _unanswered(self, request: Request, error: urllib3.exceptions.HTTPError) -> _Retryable:
+        """Classify an attempt that got no response.
+
+        Args:
+            request: The request.
+            error: What urllib3 raised.
+
+        Returns:
+            The transient failure to retry.
+
+        Raises:
+            WireError: At once, for a failed TLS certificate verification or a proxy's
+                refusal of its credentials (HTTP 407 to the tunnel request): neither changes
+                on a retry, and repeating refused credentials can lock a corporate account.
+        """
+        if is_tls_failure(error):
+            raise WireError(
+                f"GET {request.target}: TLS certificate verification failed for "
+                f"{self._host} ({error}); if a proxy or private CA signs it, set "
+                "SSL_CERT_FILE to a bundle that trusts it",
+                host=self._host,
+                path=request.target,
+            ) from error
+        if is_proxy_auth_failure(error):
+            raise WireError(
+                f"GET {request.target}: the proxy refused its credentials (HTTP 407 for a "
+                f"tunnel to {self._host}); check the user and password in HTTPS_PROXY",
+                status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
+                host=self._host,
+                path=request.target,
+            ) from error
+        return _Retryable(
+            WireError(
+                f"GET {request.target} on {self._host} failed: {error}",
+                host=self._host,
+                path=request.target,
+            )
+        )
+
+    def _refused(self, permit: Permit, failure: WireError, response: BaseHTTPResponse) -> None:
+        """Hand a 429 to the hook and the governor, which pauses the bucket.
+
+        `Retry-After` is read in either form; an HTTP date is measured against the response's
+        own `Date` header when it has a usable one, so the wait does not depend on this
+        machine's clock, and against the local wall clock otherwise.
+
+        Args:
+            permit: The refused attempt's permit.
+            failure: The 429's error.
+            response: The response, for its headers.
+
+        The governor hears of the refusal even when the hook or the log raises (an interrupt
+        while the WARNING is written), so the bucket pauses and the permit is reported. When
+        the bucket gives up on its run of refusals, the `WireError` of `_pause` is raised:
+        status 429, quoting the latest refusal and naming this request.
+        """
+        basic = is_basic_refusal(failure.message)
+        try:
+            _log.info("%s; pausing %s requests", failure, permit.bucket)
+            if self._on_refused is not None:
+                self._on_refused(permit.bucket, failure, basic=basic)
+        finally:
+            give_up = self._pause(permit, failure, response)
+        if give_up is not None:
+            _log.error("%s", give_up)
+            raise give_up
+
+    def _pause(
+        self, permit: Permit, failure: WireError, response: BaseHTTPResponse
+    ) -> WireError | None:
+        """Report a 429 to the governor, which pauses the bucket.
+
+        Args:
+            permit: The refused attempt's permit.
+            failure: The 429's error.
+            response: The response, for its `Date` and `Retry-After` headers.
+
+        Returns:
+            None, or the error to raise when the bucket gives up: status 429, this request's
+            host and path, the refusal's request id, and the governor's message.
+        """
+        now = _http_time(response.headers.get("Date"))
+        asked = retry_after_seconds(
+            response.headers.get("Retry-After"), self._clock.time() if now is None else now
+        )
+        try:
+            self._governor.refused(
+                permit, retry_after=asked, message=failure.message, request_id=failure.request_id
+            )
+        except WireError as error:
+            given_up = WireError(
+                error.message,
+                status=error.status,
+                host=self._host,
+                path=failure.path,
+                request_id=error.request_id,
+            )
+            given_up.__cause__ = failure
+            return given_up
+        return None
+
+
+_UNSENT: Final = (urllib3.exceptions.ConnectTimeoutError, urllib3.exceptions.ProxyError)
+"""What urllib3 raises when the request never left for Massive: a connection that could not be
+opened or timed out (`NewConnectionError` is one), or any failure to reach the proxy or set up
+its tunnel (a `ProxyError`: a refused connection, a TLS handshake with the proxy, or HTTP 407 to
+the tunnel request)."""
+
+
+def _never_sent(error: BaseException) -> bool:
+    """Tell whether a failed attempt never reached Massive, so its slot can be freed at once.
+
+    The cause may be wrapped, so the whole chain is searched (`net.errors.linked_errors`). A TLS
+    error on its own does not count: without a proxy it may come after the request was sent,
+    and only one inside a `ProxyError` happened before the tunnel existed.
+
+    Args:
+        error: What urllib3 raised.
+
+    Returns:
+        True when a connection could not be made, or the proxy or its tunnel failed.
+    """
+    return any(isinstance(item, _UNSENT) for item in linked_errors(error))
+
+
+def _http_time(value: str | None) -> float | None:
+    """Return the time an HTTP `Date` header names, or None when it is absent or unusable.
+
+    Args:
+        value: The header's text, such as `"Wed, 21 Oct 2026 07:28:00 GMT"`, or None.
+
+    Returns:
+        Seconds since the Unix epoch (a date without a zone is read as GMT), or None.
+    """
+    if value is None:
+        return None
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.timestamp()

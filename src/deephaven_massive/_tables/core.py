@@ -214,6 +214,11 @@ class RestTransport(Protocol):
 
     Every method runs synchronously on the calling thread and raises `EntitlementError` on
     HTTP 403 and `MassiveError` on other failures; `poll()` instead fails its live table.
+
+    The raw-row read the futures calendar uses (`RestEndpoints.fetch_rows`) is not part of this
+    port: it takes the rate governor's bucket and the wire layer's `Cancel` token, which no
+    module of `_tables` may name. The ingest layer, which wires the calendar to the REST
+    transport, reaches it on the concrete `RestEndpoints` (`SessionClients.rest`).
     """
 
     def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
@@ -265,18 +270,6 @@ class RestTransport(Protocol):
             asset_class: The asset class of the connection.
             family: The channel family.
             decision: The new decision.
-        """
-        ...
-
-    def fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
-        """Return every raw JSON row of a REST path for a query, following its pages.
-
-        For the library's own lookups (the futures schedule calendar of the WebSocket
-        streams), which read a few fields and build no table.
-
-        Args:
-            template: The path template; it takes no path parameter.
-            query: The query parameters, by wire name.
         """
         ...
 
@@ -1355,17 +1348,18 @@ class SessionCore:
     def diagnostics_view(self, table: Table) -> Table:
         """Return a new view of a diagnostics table, tracked like a live result.
 
-        `m.connections()` and `m.streams()` call this. The view is built in its own result
-        scope on the caller thread, inside the session's execution context, and counts as a
-        held diagnostics view until it is released or collected, which keeps the session in the
-        live set: a view a user holds stays current. After `close()` it keeps the diagnostics
-        table, and so its final rows, alive. If building or tracking the view raises anything,
-        even `KeyboardInterrupt`, the scope and the count are released first; a `DHError` from a
-        `close()` that released the diagnostics tables meanwhile becomes the closed session's
-        `MassiveError`.
+        `m.connections()`, `m.streams()`, and `m.rate_limits()` call this. The view is built in
+        its own result scope on the caller thread, inside the session's execution context, and
+        counts as a held diagnostics view until it is released or collected, which keeps the
+        session in the live set: a view a user holds stays current. After `close()` it keeps
+        the diagnostics table, and so its final rows, alive. If building or tracking the view
+        raises anything, even `KeyboardInterrupt`, the scope and the count are released first;
+        a `DHError` from a `close()` that released the diagnostics tables meanwhile becomes the
+        closed session's `MassiveError`.
 
         Args:
-            table: `diagnostics.connections` or `diagnostics.streams`.
+            table: `diagnostics.connections`, `diagnostics.streams`, or
+                `diagnostics.rate_limits`.
 
         Returns:
             The view: every column of `table`, the same rows.

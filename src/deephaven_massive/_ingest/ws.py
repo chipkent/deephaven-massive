@@ -74,7 +74,7 @@ from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
-from deephaven_massive._ingest.futures_calendar import FuturesCalendar
+from deephaven_massive._ingest.futures_calendar import FuturesCalendar, RowFetch
 from deephaven_massive._ingest.subscriptions import (
     Sender,
     Subscriptions,
@@ -84,7 +84,7 @@ from deephaven_massive._ingest.subscriptions import (
     stream_topics,
     wildcard,
 )
-from deephaven_massive._massive import Transport, WireAuthError, WsState
+from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
@@ -1430,7 +1430,9 @@ class ConnectionGroup:
             raise MassiveError("every session of the WebSocket connection group has closed")
         return found
 
-    def _fetch_rows(self, path: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+    def _fetch_rows(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+    ) -> list[dict[str, object]]:
         """Read every row of a REST path through an open session of the group.
 
         The futures schedule calendar's worker calls it. A session that closes while it reads
@@ -1438,8 +1440,10 @@ class ConnectionGroup:
         through another session.
 
         Args:
-            path: The REST path.
+            template: The REST path template; it takes no path parameter.
             query: Its query.
+            bucket: The rate governor bucket the requests are charged to.
+            cancel: The lookup's token: its lane, and the end of its waits once set.
 
         Returns:
             The rows.
@@ -1451,7 +1455,7 @@ class ConnectionGroup:
             open_ = [o for o in self.sessions if not o.closed and o.core() is not None]
         if not open_:
             raise MassiveError("every session of the WebSocket connection group has closed")
-        return open_[0].fetch_rows(path, query)
+        return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
 
     def first_no_ack(self, path: str, topic: str) -> bool:
         """Record a topic's `NO_ACK`; tell whether it is the topic's first on the cluster.
@@ -1687,7 +1691,7 @@ class WsConnections:
         *,
         resolve_host: Callable[[AssetClass, ChannelFamily], HostDecision],
         record_verdict: Callable[[AssetClass, ChannelFamily, HostDecision], None],
-        fetch_rows: Callable[[str, Mapping[str, object]], list[dict[str, object]]],
+        fetch_rows: RowFetch,
         crypto_pair: Callable[[str], tuple[str, str]],
         client_factory: ClientFactory | None = None,
     ) -> None:

@@ -625,7 +625,7 @@ def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Ev
     echoes = [
         page.adjusted
         for page, _ in zip(
-            live_rest.pages(range_path, params, {"adjusted": True, "limit": 5000}),
+            live_rest.pages(range_path, params, {"adjusted": True, "limit": 5000}, bucket="stocks"),
             range(3),
             strict=False,
         )
@@ -633,7 +633,7 @@ def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Ev
     evidence(f"range pages' adjusted echoes: {echoes}")
     grouped = source(Transport.REST, _GROUPED)
     for day in (date(2026, 3, 2), date(2026, 3, 3)):
-        page = live_rest.get(grouped, {"date": day}, {"adjusted": False})
+        page = live_rest.get(grouped, {"date": day}, {"adjusted": False}, bucket="stocks")
         evidence(f"grouped daily {day}: adjusted echo {page.adjusted}")
     assert echoes
 
@@ -764,8 +764,10 @@ def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -
     )
     answered = 0
     for template, params in requests:
+        # Ticker details are reference data of no subscription; the rest are stocks data.
+        bucket = "other" if template.startswith("/v3/reference/") else "stocks"
         try:
-            page = live_rest.get(source(Transport.REST, template), params, {})
+            page = live_rest.get(source(Transport.REST, template), params, {}, bucket=bucket)
         except WireError as error:
             evidence(f"{template}: HTTP {error.status} {error.message[:120]}")
         else:

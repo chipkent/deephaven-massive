@@ -2,13 +2,15 @@
 
 import dataclasses
 import functools
+import gc
 import logging
 import re
 import threading
-from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -34,15 +36,17 @@ from deephaven_massive._enums import (
     ClassFromPrefix,
     Direction,
     HistorySource,
+    Market,
     Order,
     PollMode,
     Recency,
     Timespan,
 )
 from deephaven_massive._errors import BoundedWarnings
-from deephaven_massive._ingest import hosts, rest
+from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
-from deephaven_massive._massive import RestPath, Transport
+from deephaven_massive._massive import Cancel, RestPath, Transport
+from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
@@ -58,6 +62,8 @@ R = Transport.REST
 LOGGER = "deephaven_massive._ingest.rest"
 ToPylist = Callable[[Table], list[dict[str, Any]]]
 NS = 10**9
+TIMEOUT = 10.0
+"""Seconds of real time a test waits for an event before it fails."""
 
 DIVIDENDS_PATH = "/stocks/v1/dividends"
 DIVIDENDS = DatasetSpec(
@@ -322,23 +328,6 @@ AAPL_DIVIDEND = {
     "frequency": 4,
     "id": "E1",
 }
-
-
-@pytest.fixture(autouse=True)
-def retry_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
-    """Give every session's REST client a fake clock, so retry waits never sleep.
-
-    The session reads `_massive.RestClient` when it creates its client, so the patch reaches
-    it. `setitem` keeps the lazily resolved name out of the module's attributes at teardown.
-
-    Returns:
-        The clock.
-    """
-    clock = FakeClock()
-    monkeypatch.setitem(
-        vars(_massive), "RestClient", functools.partial(_massive.RestClient, clock=clock)
-    )
-    return clock
 
 
 @pytest.fixture
@@ -715,6 +704,37 @@ def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
         ("/v3/reference/tickers", LIST_QUERY),
         ("/v3/reference/tickers", DELISTED_QUERY),
     ]
+
+
+def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The list is crypto reference data: its pages count against the currencies subscription,
+    # and they take one turn at a time among the bucket's other reads, as one read does.
+    admitted: list[tuple[str, object]] = []
+    acquire = _massive.RequestGovernor.acquire
+
+    def recording(
+        governor: _massive.RequestGovernor, bucket: str, cancel: _massive.Cancel, *, lane: object
+    ) -> object:
+        admitted.append((bucket, lane))
+        return acquire(governor, bucket, cancel, lane=lane)
+
+    monkeypatch.setattr(_massive.RequestGovernor, "acquire", recording)
+    second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
+    first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
+    fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
+    fake_rest.reply("/v3/reference/tickers?cursor=two", Reply(envelope([])))
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
+    reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
+    assert requests_by_bucket(session) == {"currencies": 3}
+    assert [bucket for bucket, _ in admitted] == ["currencies"] * 3
+    lanes = {id(lane) for _, lane in admitted}
+    assert len(lanes) == 1  # every page, listed and delisted, in the read's one lane
+    assert isinstance(admitted[0][1], _massive.Cancel)  # the read's own token
 
 
 @pytest.mark.parametrize(
@@ -1331,13 +1351,26 @@ def test_refusals_raise_their_public_errors(
 def test_a_lasting_rate_limit_names_itself_and_warns_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake_rest.reply(DIVIDENDS_PATH, Reply(b"{}", status=429, headers={"Retry-After": "1"}))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    # Massive asks for a pause beyond the ten minutes the library waits: it gives up at once.
+    refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
+    given_up = (
+        r"^rate limited: Massive has refused stocks requests .*; "
+        r"m\.rate_limits\(\) shows when requests resume$"
+    )
+    with caplog.at_level(logging.WARNING):
         for _ in range(2):
-            with pytest.raises(dm.MassiveError, match=r"^rate limited: ") as info:
+            with pytest.raises(dm.MassiveError, match=given_up):
                 fetch(session, DIVIDENDS, symbols=["AAPL"])
-            assert info.value.status == 429
-    assert caplog.text.count("Basic keys allow 5 requests per minute") == 1
+    # The second call failed without a request: the bucket's pause still stands.
+    assert len(sent(fake_rest)) == 1
+    warnings = [r.getMessage() for r in caplog.records if "with HTTP 429 (" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].startswith(
+        f"{session._core.label}: Massive refused a stocks request with HTTP 429 (HTTP 429 from GET "
+    )
+    assert warnings[0].endswith("send the request id to Massive's support")
+    assert "test-key" not in caplog.text
 
 
 def test_a_failed_symbol_fails_the_whole_fan_out(
@@ -1541,7 +1574,7 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
                 else [futures_trade(datetime(2024, 3, 28, hour, tzinfo=CHICAGO), day, ticker)]
             )
             fake_rest.reply(session_target(ticker, day), Reply(envelope(trades)))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         out = history(
             session,
             FUTURES_TRADES,
@@ -1559,9 +1592,9 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
         ("NQH5", "2024-04-01"),
     ]
     assert (
-        "futures.trades history: at least 6 requests, one per session and symbol, more where a "
-        "session spans several pages; at a Basic key's 5 requests a minute that takes at least "
-        "1 minute"
+        "futures.trades history: 6 requests, one per session and symbol, more where a session "
+        "spans several pages; if the futures subscription is on the Basic tier (5 requests a "
+        "minute), they take at least 1 min"
     ) in caplog.messages
 
 
@@ -1571,10 +1604,10 @@ def test_a_short_session_download_is_not_announced(
     # A weekend holds no session, and five requests are not announced.
     for day in ("2025-03-03", "2025-03-04", "2025-03-05", "2025-03-06", "2025-03-07"):
         fake_rest.reply(session_target("ESH5", day), Reply(envelope([])))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         history(session, FUTURES_TRADES, start="2025-03-01", end="2025-03-09", symbols=["ESH5"])
     assert len(sent(fake_rest)) == 5
-    assert "requests a minute that takes" not in caplog.text
+    assert "requests a minute" not in caplog.text
 
 
 def test_a_session_end_date_filter_needs_datetimes(
@@ -2308,7 +2341,7 @@ def test_a_long_grouped_daily_download_is_announced(
 ) -> None:
     for day in range(3, 18):
         fake_rest.reply(GROUPED_PATH.format(date=f"2025-03-{day:02d}"), Reply(envelope([])))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         history(
             session,
             BARS,
@@ -2323,8 +2356,8 @@ def test_a_long_grouped_daily_download_is_announced(
     assert len(days) == 11
     assert all(date.fromisoformat(day).weekday() < 5 for day in days)
     assert (
-        "stocks.bars history: 11 requests, one per day; at a Basic key's 5 requests a minute "
-        "that takes about 2 minutes"
+        "stocks.bars history: 11 requests, one per day; if the stocks subscription is on the "
+        "Basic tier (5 requests a minute), they take at least 2 min"
     ) in caplog.text
 
 
@@ -2394,10 +2427,10 @@ def test_a_history_by_instants_is_not_announced_however_many_symbols(
     tickers = ["A", "B", "C", "D", "E", "F"]
     for ticker in tickers:
         fake_rest.reply(TRADES_PATH.format(stockTicker=ticker), Reply(envelope([])))
-    with caplog.at_level(logging.INFO, LOGGER):
+    with caplog.at_level(logging.INFO):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=tickers)
     assert len(sent(fake_rest)) == 6
-    assert "requests a minute that takes" not in caplog.text
+    assert "requests a minute" not in caplog.text
 
 
 def crypto_bars(
@@ -2488,6 +2521,323 @@ def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(
         "2025-03-07",
         "2025-03-09",
     ]
+
+
+# --- Rate limits ---------------------------------------------------------------------------------
+
+
+def governor_of(m: dm.MassiveSession) -> _massive.RequestGovernor:
+    return cast("rest.RestEndpoints", m._core.rest_transport())._state.client.governor
+
+
+def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
+    return {state.bucket: state.attempts for state in governor_of(m).snapshot() if state.attempts}
+
+
+def test_each_request_is_charged_to_its_subscription() -> None:
+    assert rest.call_bucket(DIVIDENDS, rest.Call({}, {"ticker.any_of": ("AAPL",)})) == "stocks"
+    assert rest.call_bucket(CRYPTO_LAST, rest.Call({}, {}, "X:BTCUSD")) == "currencies"
+    assert rest.call_bucket(CONVERSION, rest.Call({}, {}, "C:EURUSD")) == "currencies"
+    assert rest.call_bucket(NEWS, rest.Call({}, {})) == "other"  # no subscription: unpaced
+    # A dataset with a path per symbol class follows the class its request's symbols share.
+    assert rest.call_bucket(NEWS_BY_CLASS, rest.Call({}, {}, "C:EURUSD")) == "currencies"
+    assert rest.call_bucket(SMA, rest.Call({}, {}, "AAPL")) == "stocks"
+
+
+@pytest.mark.parametrize(
+    ("market", "bucket"),
+    [
+        (Market.CRYPTO, "currencies"),
+        (Market.FX, "currencies"),
+        (Market.STOCKS, "stocks"),
+        (Market.OTC, "stocks"),
+        (Market.INDICES, "indices"),
+    ],
+)
+def test_a_request_of_no_class_is_charged_to_the_market_it_filters(
+    market: Market, bucket: str
+) -> None:
+    # A user's crypto ticker listing and the session's own read of it share one bucket.
+    call = rest.Call({}, {"market": market, "active": True})
+    assert rest.call_bucket(reference.TICKERS, call) == bucket
+    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": str(market)})) == bucket
+
+
+def test_a_request_of_no_class_and_no_market_is_charged_to_other() -> None:
+    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"active": True})) == "other"
+    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": None})) == "other"
+    # A dataset of one class keeps its class, whatever a market filter says.
+    call = rest.Call({}, {"ticker.any_of": ("AAPL",), "market": Market.CRYPTO})
+    assert rest.call_bucket(DIVIDENDS, call) == "stocks"
+
+
+def test_a_session_charges_reads_and_host_decisions_to_their_buckets(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer
+) -> None:
+    snapshots.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    snapshots.reply(NEWS_PATH, Reply(envelope([])))
+    fetch(session, DIVIDENDS, symbols=["AAPL"])
+    fetch(session, NEWS)
+    # The stocks host is decided from the unified snapshot, but for the stocks subscription.
+    session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    assert requests_by_bucket(session) == {"stocks": 2, "other": 1}
+
+
+def test_a_learned_basic_subscription_is_paced_and_shown(
+    *,
+    fake_rest: FakeRestServer,
+    rest_clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    basic = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
+    fake_rest.reply(DIVIDENDS_PATH, basic, Reply(envelope([AAPL_DIVIDEND])))
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
+        assert rest_clock.waits == [61.0]
+        assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text
+        assert m._core.diagnostics.barrier().wait(30)
+        stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Bucket"] == "stocks")
+        assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (5, "LEARNED")
+        assert (stocks["Attempts"], stocks["Refusals"]) == (2, 1)
+    finally:
+        m.close()
+
+
+def test_a_paced_fetch_announces_how_long_it_takes(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+    )
+    m = dm.MassiveSession(config)
+    pairs = ["C:EURUSD", "C:GBPUSD", "C:AUDUSD", "C:USDJPY", "C:USDCHF", "C:NZDUSD"]
+    for pair in pairs:
+        base, quote = pair[2:5], pair[5:]
+        body = {"status": "success", "from": base, "to": quote, "symbol": f"{base}/{quote}"}
+        fake_rest.reply(f"/v1/conversion/{base}/{quote}", Reply(body))
+    try:
+        with caplog.at_level(logging.INFO):
+            fetch(m, CONVERSION, symbols=pairs)
+    finally:
+        m.close()
+    assert (
+        "forex.conversion fetch: 6 requests; paced at 5 requests a minute (currencies); at that "
+        "pace they take at least 1 min"
+    ) in caplog.messages
+
+
+def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A manual clock: a call waiting for a slot can only stop by being cancelled.
+    clock = FakeClock(manual=True)
+    create = functools.partial(
+        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+    )
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        max_concurrency=3,
+        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+    )
+    m = dm.MassiveSession(config)
+    governor = governor_of(m)
+    for _ in range(4):  # one slot is left
+        governor.done(
+            governor.acquire("currencies", _massive.Cancel(), lane=object()), answered=True
+        )
+    refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    for pair in ("EUR/USD", "GBP/USD", "AUD/USD"):
+        fake_rest.reply(f"/v1/conversion/{pair}", refused)
+    try:
+        with pytest.raises(dm.EntitlementError, match="upgrade"):
+            fetch(m, CONVERSION, symbols=["C:EURUSD", "C:GBPUSD", "C:AUDUSD"])
+        assert len(fake_rest.requests) == 1  # the others gave up their places unsent
+        assert next(s for s in governor.snapshot() if s.bucket == "currencies").waiting == 0
+    finally:
+        m.close()
+
+
+def test_a_poll_whose_cycles_outlast_their_interval_warns(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        rest_basic_subscriptions={dm.Subscription.STOCKS},
+    )
+    m = dm.MassiveSession(config)
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
+    q = query(m, DIVIDENDS, symbols=["A", "B", "C", "D", "E", "F"])
+    assert isinstance(q, Query)
+    warned = threading.Event()
+
+    class _Late(logging.Handler):
+        @override
+        def emit(self, record: logging.LogRecord) -> None:
+            if "cycles run late" in record.getMessage():
+                warned.set()
+
+    late = _Late()
+    logging.getLogger(rate_limits.__name__).addHandler(late)
+    try:
+        with caplog.at_level(logging.WARNING):
+            table = q.poll(30)
+            assert warned.wait(TIMEOUT)  # logged by the poller's first cycle
+        m.release(table)
+    finally:
+        logging.getLogger(rate_limits.__name__).removeHandler(late)
+        m.close()
+    assert (
+        "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
+        "per minute, so a cycle takes at least 37 s, longer than the 30 s interval; cycles run "
+        "late"
+    ) in caplog.messages
+
+
+def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
+    session: dm.MassiveSession,
+) -> None:
+    # The first call only fails because the second one's failure cancelled its wait.
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    stop = _massive.Cancel()
+
+    def run(call: rest.Call) -> NoReturn:
+        if call.symbol == "A":
+            assert stop.wait(10)
+            raise dm.MassiveError("cancelled")
+        raise dm.EntitlementError("not entitled")
+
+    calls = [rest.Call({}, {}, "A"), rest.Call({}, {}, "B")]
+    with ThreadPoolExecutor(2) as pool, pytest.raises(dm.EntitlementError):
+        reader._fan_out(run, calls, executor=pool, stop=stop)
+    assert stop.is_set()
+
+
+def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = FakeClock(manual=True)  # a waiting cycle can only stop through its poller's token
+    create = functools.partial(
+        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+    )
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        rest_basic_subscriptions={dm.Subscription.STOCKS},
+    )
+    m = dm.MassiveSession(config)
+    governor = governor_of(m)
+    for _ in range(5):
+        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+    q = query(m, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    left = threading.Event()
+
+    def on_change() -> None:  # the governor's notice once the cycle gives up its place
+        if not next(s for s in governor.snapshot() if s.bucket == "stocks").waiting:
+            left.set()
+
+    try:
+        table = q.poll(60)
+        assert clock.wait_for_sleepers(1) == [61.0]  # the first cycle waits for a slot
+        governor.subscribe(on_change)
+        m.release(table)
+        del table  # nothing uses the poll any more: its blink table shuts down
+        gc.collect()
+        assert left.wait(TIMEOUT)
+        assert fake_rest.requests == []
+        # The cancelled wait also reached the session's rows.
+        assert m._core.diagnostics.barrier().wait(TIMEOUT)
+        limits = dh_arrow.to_arrow(m.rate_limits()).to_pylist()
+        stocks = next(r for r in limits if r["Bucket"] == "stocks")
+        assert stocks["Waiting"] == 0
+    finally:
+        governor.unsubscribe(on_change)
+        m.close()
+
+
+class _HeldFanOut:
+    """A fan-out of AAPL and MSFT trades whose first MSFT page waits for the read's token.
+
+    AAPL is answered only once MSFT's first page is on the wire, and that page only once the
+    token is set. The read's own `wait` is wrapped: its second call, the one that waits for
+    every call after a failure or an interrupt, comes after the token is set, and only then is
+    MSFT's first page let go. So whether MSFT asks for a second page depends on the token
+    alone, never on timing.
+    """
+
+    def __init__(
+        self, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, *, interrupt: bool
+    ) -> None:
+        msft = TRADES_PATH.format(stockTicker="MSFT")
+        start = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC))
+        row = {"sip_timestamp": start + 1, "price": 1.0, "size": 1}
+        for index in range(15):  # fifteen pages, if nothing stopped them
+            target = msft if index == 0 else f"{msft}?cursor={index}"
+            following = None if index == 14 else f"{fake_rest.url}{msft}?cursor={index + 1}"
+            fake_rest.reply(target, Reply(envelope([row], next_url=following)))
+        self.paging = threading.Event()  # MSFT's first page was asked for
+        self.stopped = threading.Event()  # the read's token is set
+        fake_rest.on_request(self._hold)
+        real = futures_wait
+
+        def wait(futures: Sequence[Future[object]], return_when: str = ALL_COMPLETED) -> object:
+            if return_when == FIRST_EXCEPTION and interrupt:
+                assert self.paging.wait(TIMEOUT)
+                raise KeyboardInterrupt
+            if return_when == ALL_COMPLETED:  # called in the read's `finally`, token set
+                self.stopped.set()
+            return real(futures, return_when=return_when)
+
+        monkeypatch.setattr(rest, "wait", wait)
+
+    def _hold(self, received: Received) -> None:
+        if "AAPL" in received.target:
+            assert self.paging.wait(TIMEOUT)
+        else:
+            self.paging.set()
+            assert self.stopped.wait(TIMEOUT)
+
+
+def test_a_failed_symbol_stops_the_others_paging_after_the_page_on_the_wire(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _HeldFanOut(fake_rest, monkeypatch, interrupt=False)
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"{}", status=401))
+    with pytest.raises(dm.AuthenticationError):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
+    # The read's token is checked before every page: MSFT finishes the page on the wire and
+    # asks for no other.
+    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) == 1
+
+
+def test_an_interrupted_fan_out_stops_its_running_calls(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _HeldFanOut(fake_rest, monkeypatch, interrupt=True)
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope([])))
+    with pytest.raises(KeyboardInterrupt):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "MSFT"])
+    assert sum(1 for path, _ in sent(fake_rest) if "MSFT" in path) == 1
 
 
 # --- Time columns, adjustment, and missing data ------------------------------------------------
@@ -2725,11 +3075,21 @@ def test_fetch_rows_reads_every_page_raw(
         "/futures/v1/schedules",
         Reply(envelope([{"product_code": "GC"}], next_url=f"{fake_rest.url}{target}")),
     )
-    transport = session._core.rest_transport()
-    out = transport.fetch_rows("/futures/v1/schedules", {"product_code.any_of": ("ES", "GC")})
+    transport = cast("rest.RestEndpoints", session._core.rest_transport())
+    query = {"product_code.any_of": ("ES", "GC")}
+    out = transport.fetch_rows("/futures/v1/schedules", query, bucket="futures", cancel=Cancel())
     assert out == [{"product_code": "GC"}, {"product_code": "ES", "extra": 2}]
     assert sent(fake_rest)[0][1]["product_code.any_of"] == ["ES,GC"]
+    assert requests_by_bucket(session) == {"futures": 2}  # both pages, charged as asked
     # A failed request raises its public error.
     fake_rest.reply("/futures/v1/schedules?product_code=ZZ", Reply(b"{}", status=403))
     with pytest.raises(dm.EntitlementError):
-        transport.fetch_rows("/futures/v1/schedules", {"product_code": "ZZ"})
+        transport.fetch_rows(
+            "/futures/v1/schedules", {"product_code": "ZZ"}, bucket="futures", cancel=Cancel()
+        )
+    # A set token ends the read before it is sent: the session's own lookups stop at once.
+    stopped = Cancel()
+    stopped.set()
+    with pytest.raises(dm.MassiveError, match="cancelled"):
+        transport.fetch_rows("/futures/v1/schedules", query, bucket="futures", cancel=stopped)
+    assert len(fake_rest.requests) == 3

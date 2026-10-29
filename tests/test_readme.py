@@ -116,7 +116,7 @@ def readme_server(
         session._core,
         resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "test"),
         record_verdict=lambda *_: None,
-        fetch_rows=lambda *_: [],
+        fetch_rows=lambda *_, **__: [],
         crypto_pair=_no_crypto_pair,
         client_factory=client,
     )

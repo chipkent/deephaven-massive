@@ -5,8 +5,11 @@ fields from `spec`, and returns plain pages and Arrow batches; datasets, tables,
 are the library's. It may import only `net` and `spec` from `_massive`.
 
 - `RestClient` (`rest.client`): one per session, shared by every thread. It sends GET requests
-  with bearer authentication, retries per `net.retry`, backs every thread off together after a
-  429, and follows `next_url` pages on its own host only.
+  with bearer authentication, retries transient failures per `net.retry`, takes a permit of
+  the governor before every attempt, and follows `next_url` pages on its own host only.
+- `RequestGovernor` (`rest.governor`): one per API key and REST origin, shared by the clients
+  that use them. It paces each Basic subscription at 5 requests per minute and pauses a
+  subscription Massive refused with HTTP 429; `BucketState` is one subscription's snapshot.
 - `Page` (`rest.response`): one decoded 200 response: its envelope `status` and `request_id`,
   its rows, and its body. Decoding is strict; a malformed body raises `WireError`.
 - `to_batch` (`rest.batch`): a page's rows as one Arrow batch of the path's generated fields,
@@ -17,10 +20,13 @@ are the library's. It may import only `net` and `spec` from `_massive`.
 Example:
     ::
 
-        from deephaven_massive._massive import RestClient, to_batch
+        from deephaven_massive._massive import RequestGovernor, RestClient, to_batch
 
-        client = RestClient("my-key", base_url="https://api.massive.com", max_concurrency=8)
-        page = client.get(trades, {"stockTicker": "AAPL"}, {"limit": 1000})
+        governor = RequestGovernor(("stocks", "other"))
+        client = RestClient(
+            "my-key", base_url="https://api.massive.com", max_concurrency=8, governor=governor
+        )
+        page = client.get(trades, {"stockTicker": "AAPL"}, {"limit": 1000}, bucket="stocks")
         batch, drift = to_batch(page.rows, trades, required={"SipTimestamp"})
         client.close()
 
@@ -29,6 +35,7 @@ Example:
 
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
+from deephaven_massive._massive.rest.governor import BucketState, RequestGovernor
 from deephaven_massive._massive.rest.response import Page
 
-__all__ = ["Page", "RestClient", "to_batch"]
+__all__ = ["BucketState", "Page", "RequestGovernor", "RestClient", "to_batch"]

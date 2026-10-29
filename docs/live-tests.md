@@ -42,10 +42,12 @@ Basic is REST only, without WebSocket access or flat files ([S3], [S7]). Two mor
 consequences:
 
 - **Pacing.** Basic allows 5 REST requests a minute per class; paid plans have no limit.
-  Every REST request of a live test to a class declared Basic (the library's own and the
-  tests' raw ones) waits for a place in that class's run-wide budget of 5 a minute, and the
-  test's timeout grows with its declared request count (`@pytest.mark.requests(n)`), so a run
-  on a free key is slow but never refused for its own pace. A live run also lifts the 120 s
+  The library paces these itself: the classes you leave on Basic become the live sessions'
+  `MassiveConfig.rest_basic_subscriptions`, and every live test shares one rate governor per
+  key for the whole run, on the real clock, so a REST request to a Basic class (the library's
+  own and the tests' raw ones) waits for its class's place within 5 a minute. Each test's
+  timeout grows with its declared request count (`@pytest.mark.requests(n)`), so a run on a
+  free key is slow but never refused for its own pace. A live run also lifts the 120 s
   limit after which faulthandler would end the process; each test's own timeout bounds it.
 - **Indices.** Indices Basic excludes SPX, DJI, RUT, and VIX ([S6]): with Indices on Basic,
   the index tests use `I:NDX` instead of `I:SPX`.
@@ -78,7 +80,7 @@ access to the month's end ([S4], [S5]).
 
 | Plans | Per month | What it settles |
 |---|---|---|
-| Every class on Basic | $0 | about 12 questions: the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (NVDA around its 2024 split, the adjusted echo on every page, COST's dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; plus the 429 text and the rate buckets |
+| Every class on Basic | $0 | about 12 questions: the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (NVDA around its 2024 split, the adjusted echo on every page, COST's dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; plus the 429 text, the rate buckets, and how a spent minute frees its requests |
 | Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
 | Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (with full contracts history), the option half-day stamps, and the stamps of SPY and SPXW 1-day and week bars on every source (with `s3` for the day file) |
 | Stocks Starter | $29 | adds the delayed-key refusal text, the flat-file publication time, and that a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com and NVDA's as-traded day file (with `s3`; if it answers anything else, the library raises on every flat-file range that holds a weekend), and the stamps of AAPL's 1-day, week, and month bars on every source (with `s3` for the day file) |

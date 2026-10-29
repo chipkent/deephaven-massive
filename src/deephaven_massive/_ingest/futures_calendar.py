@@ -37,12 +37,18 @@ misses, and the worker carries on. A miss past the loaded sessions asks for a re
 product, at most once per `RELOAD_SPACING`, and the sessions are reloaded once a day as the
 dates move on.
 
+**Rate limits.** Every lookup is charged to the futures subscription's rate governor bucket,
+in a lane of its own, so on a Basic subscription it waits its turn with the session's other
+futures reads. Each lookup listens to a cancellation token that follows the calendar's, which
+`close` sets: a lookup still waiting for the governor then stops at once.
+
 **Threads and locks.** One daemon worker thread makes every request, through the session's
 REST transport (`fetch`), and swaps in each new map whole under the calendar's leaf lock;
 `correct` and `watch` only read the maps and queue work under it, so the flush thread and the
 update-graph thread that reports a watchlist change never block on the network. The worker
-makes no Deephaven call. `close` stops it; a request on the wire finishes first, and a lookup
-that fails because the session closed under it is not logged.
+makes no Deephaven call. `close` stops it; a request on the wire finishes first, one waiting
+for the rate governor stops at once, and a lookup that fails because the session or the
+calendar closed under it is not logged.
 """
 
 from __future__ import annotations
@@ -55,13 +61,16 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 
 from deephaven_massive._datasets.dates import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
+from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._ingest.rate_limits import bucket_of
+from deephaven_massive._massive import Cancel
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -70,10 +79,41 @@ __all__ = [
     "LOAD_PATIENCE",
     "RELOAD_SPACING",
     "FuturesCalendar",
+    "RowFetch",
     "ScheduledSession",
 ]
 
 logger = logging.getLogger(__name__)
+
+_BUCKET: Final = bucket_of(Subscription.FUTURES)
+"""The rate governor bucket every lookup is charged to: the futures subscription's."""
+
+
+class RowFetch(Protocol):
+    """Reads every raw row of a REST path for a query, following its pages.
+
+    The session's REST transport implements it (`RestEndpoints.fetch_rows`), and the
+    WebSocket connection group passes it on to the calendar.
+    """
+
+    def __call__(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+    ) -> list[dict[str, object]]:
+        """Return the rows of every page.
+
+        Args:
+            template: The path template; it takes no path parameter.
+            query: The query parameters, by wire name.
+            bucket: The rate governor bucket the requests are charged to.
+            cancel: Ends the requests' waits for the rate governor when set; also their lane.
+
+        Returns:
+            The rows of every page, every key kept.
+
+        A failed or cancelled read raises its public `MassiveError`.
+        """
+        ...
+
 
 RELOAD_SPACING: Final = timedelta(minutes=10)
 """The least time between two loads of one product's schedule, or two lookups of one
@@ -191,7 +231,7 @@ class FuturesCalendar:
 
     def __init__(
         self,
-        fetch: Callable[[str, Mapping[str, object]], list[dict[str, object]]],
+        fetch: RowFetch,
         *,
         contracts_path: str,
         schedules_path: str,
@@ -202,7 +242,8 @@ class FuturesCalendar:
 
         Args:
             fetch: Returns every row of a REST path for a query, following its pages, on the
-                session's REST client; it raises `MassiveError` on a failure.
+                session's REST client; it raises `MassiveError` on a failure. Each lookup
+                passes the futures bucket and a token that the calendar's close sets.
             contracts_path: The REST path that maps a contract ticker to its product, the
                 `futures.contracts` dataset's (`/futures/v1/contracts`).
             schedules_path: The REST path of each product's timed session events, the
@@ -230,6 +271,8 @@ class FuturesCalendar:
         self._queued = 0  # requests put on the queue
         self._served = 0  # requests the worker has finished
         self._closed = False
+        # Set by `close`: every lookup's token follows it, so none waits on after the close.
+        self._stop = Cancel()
         self._queue: queue.SimpleQueue[object] = queue.SimpleQueue()
         self._thread = threading.Thread(
             target=self._run, name=f"{label} futures schedules", daemon=True
@@ -320,12 +363,16 @@ class FuturesCalendar:
         return pa.array(fixed, pa.string()), self._report(batch)
 
     def close(self) -> None:
-        """Stop the worker after its current request and wait a bounded time; idempotent."""
+        """Stop the worker after its current request and wait a bounded time; idempotent.
+
+        A lookup still waiting for the rate governor stops at once; one on the wire finishes.
+        """
         with self._idle:
             if self._closed:
                 return
             self._closed = True
             self._idle.notify_all()  # `wait_idle` returns once closed
+        self._stop.set()
         self._queue.put(_STOP)
         self._thread.join(_JOIN_TIMEOUT)
 
@@ -545,13 +592,16 @@ class FuturesCalendar:
         found: dict[str, str | None] = dict.fromkeys(contracts)
         ordered = sorted(contracts)
         try:
-            for start in range(0, len(ordered), _TICKERS_PER_REQUEST):
-                chunk = ordered[start : start + _TICKERS_PER_REQUEST]
-                query = {"ticker.any_of": tuple(chunk), "limit": _PAGE}
-                for row in self._fetch(self._contracts_path, query):
-                    ticker, product = row.get("ticker"), row.get("product_code")
-                    if isinstance(ticker, str) and isinstance(product, str) and ticker in found:
-                        found[ticker] = found[ticker] or product
+            with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
+                for start in range(0, len(ordered), _TICKERS_PER_REQUEST):
+                    chunk = ordered[start : start + _TICKERS_PER_REQUEST]
+                    query = {"ticker.any_of": tuple(chunk), "limit": _PAGE}
+                    for row in self._fetch(
+                        self._contracts_path, query, bucket=_BUCKET, cancel=lane
+                    ):
+                        ticker, product = row.get("ticker"), row.get("product_code")
+                        if isinstance(ticker, str) and isinstance(product, str) and ticker in found:
+                            found[ticker] = found[ticker] or product
         except MassiveError as error:
             self._failure(contracts, f"looking up its product failed: {error}")
             with self._lock:
@@ -585,7 +635,8 @@ class FuturesCalendar:
             "limit": _PAGE,
         }
         try:
-            rows = self._fetch(self._schedules_path, query)
+            with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
+                rows = self._fetch(self._schedules_path, query, bucket=_BUCKET, cancel=lane)
         except MassiveError as error:
             self._failure(products, f"loading its schedule failed: {error}")
             return
