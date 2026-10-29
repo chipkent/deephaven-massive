@@ -289,10 +289,12 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
     no_proxy_env.setenv("HTTPS_PROXY", f"http://alice:wr0ng@{host}")
     fake_rest.refuse_tunnels(407)
     clock = FakeClock()
-    rest = _client(tunnelled, clock)
+    governor = _governor(clock)
+    rest = _client(tunnelled, governor=governor)
     with pytest.raises(WireError, match="the proxy refused its credentials") as caught:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     rest.close()
+    assert governor.snapshot()[0].recent == 0  # the tunnel never opened: no slot held
     assert caught.value.message == (
         "GET /v3/trades/AAPL: the proxy refused its credentials (HTTP 407 for a tunnel to "
         "127.0.0.1); check the user and password in HTTPS_PROXY"
@@ -1169,17 +1171,34 @@ def test_a_call_without_a_token_is_a_lane_of_its_own_and_a_token_shares_one(
     rest.close()
 
 
+def _caused_by(cause: Exception) -> urllib3.exceptions.HTTPError:
+    """Return an urllib3 error raised from `cause`, so only the chain names the failure."""
+    error = urllib3.exceptions.HTTPError("request failed")
+    error.__cause__ = cause
+    return error
+
+
 @pytest.mark.parametrize(
-    "error",
+    ("error", "held"),
     [
-        urllib3.exceptions.ProxyError(
-            "Unable to connect to proxy",
-            urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"),
+        (
+            urllib3.exceptions.ProxyError(
+                "Unable to connect to proxy",
+                urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"),
+            ),
+            0,
         ),
-        urllib3.exceptions.ProxyError(
-            "Unable to connect to proxy", urllib3.exceptions.SSLError("handshake failed")
+        (
+            urllib3.exceptions.ProxyError(
+                "Unable to connect to proxy", urllib3.exceptions.SSLError("handshake failed")
+            ),
+            0,
         ),
-        urllib3.exceptions.SSLError(ssl.SSLError("handshake failed")),
+        (urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"), 0),
+        (_caused_by(urllib3.exceptions.NewConnectionError(cast("Any", None), "refused")), 0),
+        # Without a proxy a TLS error may come after the request left: each of its four
+        # attempts (it is retried as a transient failure) keeps its slot.
+        (urllib3.exceptions.SSLError(ssl.SSLError("handshake failed")), 4),
     ],
 )
 def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
@@ -1187,6 +1206,7 @@ def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
     fake_rest: FakeRestServer,
     clock: FakeClock,
     error: Exception,
+    held: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     governor = _governor(clock)
@@ -1200,7 +1220,7 @@ def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
     with pytest.raises(WireError):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     state = governor.snapshot()[0]
-    assert (state.in_flight, state.recent) == (0, 0)  # nothing reached Massive: no slot held
+    assert (state.in_flight, state.recent) == (0, held)
     rest.close()
 
 

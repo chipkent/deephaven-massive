@@ -2261,9 +2261,10 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   and origin for the life of the process, so a governor created again starts paced.
 - **Pacing.** A paced bucket lets a request start only while fewer than 5 slots are held; a
   slot is held by a request in flight, and by a finished one until 61 s (the minute plus one
-  second of margin) after its response arrived. A request that never reached Massive (the
-  connection or its TLS handshake failed, also behind a proxy, the proxy refused the tunnel,
-  or its read was cancelled just as it was admitted) frees its slot at once. Waiting for a slot never times out: a 250-request history at 5 per minute takes about
+  second of margin) after its response arrived. A request that never reached Massive (a connection
+  could not be made, the proxy or its tunnel failed, including a TLS handshake with the proxy
+  and HTTP 407, or its read was cancelled just as it was admitted) frees its slot at once; a
+  TLS error without a proxy keeps it, since it may come after the request left. Waiting for a slot never times out: a 250-request history at 5 per minute takes about
   50 minutes, and the caller's interrupt, a failed sibling call of a fan-out, a stopped poller,
   or `close()` ends the wait (each read has a `Cancel` token of its own, set when a fan-out
   ends, following its poller's).
@@ -2689,7 +2690,7 @@ governor signals a change, at most once per batch, instead of applying queued ro
 never be overtaken by an older one, and every sharing session shows the same rows. The state
 also changes with time alone (a pause ends, a slot frees), so each pull names when the rows
 next change, and the writer waits on its queue no longer than that before it pulls them
-again. No other thread or timer is involved, so nothing outlives `release()` or `stop()`.
+again; a batch handled after that moment pulls them too, so a busy queue cannot hold them back. No other thread or timer is involved, so nothing outlives `release()` or `stop()`.
 
 | Column | Meaning |
 |---|---|
@@ -3083,9 +3084,9 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
 - **The governor.** Every attempt, every page included, first takes a permit of its `bucket`
   from the `RequestGovernor` (`rest/governor.py`), in its lane (the caller's `cancel` token,
   or the call itself when it has none), and reports how it ended, exactly once, in a
-  `finally`: answered, not answered (a failure on the wire), never sent (released: the
-  connection or TLS handshake failed, found anywhere in the error's chain, as a `ProxyError`
-  wraps it), or refused with HTTP 429; the governor ignores any report after the first. A slot
+  `finally`: answered, not answered (a failure on the wire), never sent (released: a
+  `ConnectTimeoutError` or a `ProxyError` anywhere in the error's chain, so a connection that
+  could not be made or a proxy or tunnel that failed), or refused with HTTP 429; the governor ignores any report after the first. A slot
   is released on cancellation, failure, and interrupts at wait points; an asynchronous
   interrupt delivered inside a `with` block of a lock is beyond what Python can make safe. The refusal hook runs before the governor hears of a 429, and the
   governor hears of it even when the hook raises. The governor's rules are those of

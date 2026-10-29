@@ -792,13 +792,19 @@ class Diagnostics:
     def _apply(self, items: list[_Item]) -> None:
         """Apply one batch: the latest row per key, one `add` per table, then the barriers.
 
+        The rate-limit rows are pulled when a marker is in the batch, or when their
+        time-driven change has come, so a queue that never goes quiet cannot hold them back.
+
         Args:
             items: Rows, barrier events, and rate-limit markers, in queue order.
         """
         streams: dict[int, StreamRow] = {}
         connections: dict[tuple[str, str, str], ConnectionRow] = {}
         barriers: list[threading.Event] = []
-        pull = False
+        # The rows' time-driven change is due: a queue too busy for the timed wait to expire
+        # must not starve that pull.
+        due = self._rate_due
+        pull = due is not None and time.monotonic() >= due
         for item in items:
             if isinstance(item, threading.Event):
                 barriers.append(item)

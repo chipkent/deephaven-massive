@@ -642,14 +642,17 @@ class _RateSource:
         self.change: float | None = None
         # Answers given before `rows` and `change`, in order, so a test can script pulls the
         # writer makes on its own, before the test could change anything.
-        self.script: list[tuple[list[RateLimitRow], float | None]] = []
+        self.script: list[tuple[list[RateLimitRow], float | None] | Exception] = []
         self.pulled = threading.Semaphore(0)  # released once per pull
 
     def __call__(self) -> tuple[list[RateLimitRow], float | None]:
         self.pulls += 1
         self.pulled.release()
         if self.script:
-            return self.script.pop(0)
+            answer = self.script.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         return list(self.rows), self.change
 
 
@@ -768,3 +771,48 @@ def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> Non
     assert not diagnostics.thread.is_alive()
     assert source.pulls == 1
     assert diagnostics.barrier().is_set()  # nothing is queued for a writer that is gone
+
+
+def test_a_busy_queue_does_not_hold_back_a_due_rate_limit_pull(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RateSource()
+    source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.05)]  # due in 50 ms
+    flooding = threading.Event()
+    done = threading.Event()
+
+    def flood() -> None:  # stream rows keep the writer's queue from ever going quiet
+        while not done.is_set():
+            diagnostics.write(STREAM)
+            flooding.set()
+
+    flooder = threading.Thread(target=flood, daemon=True)
+    try:
+        diagnostics.watch_rate_limits(source)
+        flooder.start()
+        assert flooding.wait(TIMEOUT)
+        assert source.pulled.acquire(timeout=TIMEOUT)  # the first pull
+        assert source.pulled.acquire(timeout=TIMEOUT)  # and the due one, despite the flood
+    finally:
+        done.set()
+        flooder.join(TIMEOUT)
+        diagnostics.release()
+    assert not flooder.is_alive()
+
+
+def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RateSource()
+    source.script = [([], 0.0), RuntimeError("source broke")]  # due at once, then it fails
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
+        diagnostics.watch_rate_limits(source)
+        assert source.pulled.acquire(timeout=TIMEOUT)
+        assert source.pulled.acquire(timeout=TIMEOUT)  # the timed pull, which fails
+        # Its due time is spent: the writer waits for the next notice, not in a tight loop.
+        assert not source.pulled.acquire(timeout=0.2)
+    diagnostics.release()
+    assert source.pulls == 2
+    assert "failed to update the rate_limits table" in caplog.text

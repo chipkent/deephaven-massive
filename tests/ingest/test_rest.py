@@ -4,7 +4,6 @@ import dataclasses
 import functools
 import logging
 import threading
-import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
@@ -2245,17 +2244,25 @@ def test_a_released_poll_stops_waiting_for_a_slot(
         governor.done(governor.acquire("stocks", _massive.Cancel()), answered=True)
     q = query(m, DIVIDENDS, symbols=["AAPL"])
     assert isinstance(q, Query)
+    left = threading.Event()
+
+    def on_change() -> None:  # the governor's notice once the cycle gives up its place
+        if not next(s for s in governor.snapshot() if s.bucket == "stocks").waiting:
+            left.set()
+
     try:
         table = q.poll(60)
         assert clock.wait_for_sleepers(1) == [61.0]  # the first cycle waits for a slot
+        governor.subscribe(on_change)
         m.release(table)
-        assert clock.wait_for_sleepers(0) == []
-        deadline = time.monotonic() + 10
-        while next(s for s in governor.snapshot() if s.bucket == "stocks").waiting:
-            assert time.monotonic() < deadline, "the cycle still waits for a slot"
-            time.sleep(0.01)
+        assert left.wait(TIMEOUT)
         assert fake_rest.requests == []
+        # The cancelled wait also reached the session's rows.
+        assert m._core.diagnostics.barrier().wait(TIMEOUT)
+        stocks = next(r for r in rows(m.rate_limits()) if r["Bucket"] == "stocks")
+        assert stocks["Waiting"] == 0
     finally:
+        governor.unsubscribe(on_change)
         m.close()
 
 

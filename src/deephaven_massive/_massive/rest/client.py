@@ -714,27 +714,27 @@ class RestClient:
         return None
 
 
-_UNSENT: Final = (urllib3.exceptions.ConnectTimeoutError, urllib3.exceptions.SSLError)
-"""What urllib3 raises when no connection to Massive was made: a connection that could not be
-opened or timed out (`NewConnectionError` is one), or a TLS handshake that failed."""
+_UNSENT: Final = (urllib3.exceptions.ConnectTimeoutError, urllib3.exceptions.ProxyError)
+"""What urllib3 raises when the request never left for Massive: a connection that could not be
+opened or timed out (`NewConnectionError` is one), or any failure to reach the proxy or set up
+its tunnel (a `ProxyError`: a refused connection, a TLS handshake with the proxy, or HTTP 407 to
+the tunnel request)."""
 
 
 def _never_sent(error: BaseException) -> bool:
     """Tell whether a failed attempt never reached Massive, so its slot can be freed at once.
 
-    The cause may be wrapped, as a `ProxyError` wraps the failure to reach or tunnel through
-    the proxy, so the whole chain is searched (`net.retry.linked_errors`). A proxy's refusal
-    of its credentials (HTTP 407 to the tunnel request) never reached Massive either.
+    The cause may be wrapped, so the whole chain is searched (`net.retry.linked_errors`). A TLS
+    error on its own does not count: without a proxy it may come after the request was sent,
+    and only one inside a `ProxyError` happened before the tunnel existed.
 
     Args:
         error: What urllib3 raised.
 
     Returns:
-        True when the connection or its TLS handshake failed, or the proxy refused the tunnel.
+        True when a connection could not be made, or the proxy or its tunnel failed.
     """
-    return is_proxy_auth_failure(error) or any(
-        isinstance(item, _UNSENT) for item in linked_errors(error)
-    )
+    return any(isinstance(item, _UNSENT) for item in linked_errors(error))
 
 
 def _http_time(value: str | None) -> float | None:

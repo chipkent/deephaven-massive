@@ -256,7 +256,9 @@ def test_rows_show_each_buckets_state() -> None:
     governor.declare({"stocks"})
     for _ in range(5):
         governor.done(governor.acquire("stocks", _massive.Cancel()), answered=True)
-    waiting = threading.Thread(target=governor.acquire, args=("stocks", _massive.Cancel()))
+    waiting = threading.Thread(
+        target=governor.acquire, args=("stocks", _massive.Cancel()), daemon=True
+    )
     waiting.start()
     clock.wait_for_sleepers(1)
     _refuse(governor, "options", BASIC, retry_after=30.0)
@@ -279,6 +281,7 @@ def test_rows_show_each_buckets_state() -> None:
     assert rows["currencies"].updated_at > 0
     clock.advance(61.0)
     waiting.join(10)
+    assert not waiting.is_alive()
 
 
 # --- Notices -------------------------------------------------------------------------------------

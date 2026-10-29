@@ -275,21 +275,25 @@ class _Bucket:
             self.turns.append(waiter.lane)
         self.lanes.setdefault(waiter.lane, deque()).append(waiter)
 
-    def leave(self, waiter: _Waiter) -> None:
+    def leave(self, waiter: _Waiter) -> bool:
         """Take a request out of its lane (it gave up), and wake the head if that changed.
 
         An emptied lane loses its turn when `head` next reaches it.
 
         Args:
             waiter: The request; one no longer queued (it started) is ignored.
+
+        Returns:
+            True when the request was still queued and has left.
         """
         lane = self.lanes.get(waiter.lane)
         if lane is None or waiter not in lane:
-            return
+            return False
         was_head = self.head() is waiter
         lane.remove(waiter)
         if was_head:
             self.wake_head()
+        return True
 
     def start_head(self) -> None:
         """Remove the head, which starts now, and wake the next head.
@@ -501,8 +505,9 @@ class RequestGovernor:
         with `done`, `refused`, or `release`. A cancellation, a failure, or an interrupt at a
         wait point (`KeyboardInterrupt` while the thread sleeps, or in a listener) releases a
         permit already granted before the exception propagates. An interrupt delivered at an
-        arbitrary instruction, inside the governor's own `with` blocks, is beyond what any
-        Python lock can make safe. An unknown `bucket` raises `ValueError`.
+        arbitrary instruction, inside the governor's own `with` blocks or between the grant
+        and the caller's `try`, is beyond what any Python lock can make safe: it can leave the
+        permit unreported. An unknown `bucket` raises `ValueError`.
 
         Args:
             bucket: The bucket the request is charged to.
@@ -535,7 +540,9 @@ class RequestGovernor:
         finally:
             stop_listening()
             with self._lock:
-                state.leave(waiter)
+                left = state.leave(waiter)
+            if left:  # it gave up its place: the bucket's waiting count changed
+                self._notify()
         return permit
 
     def _wait(self, bucket: str, waiter: _Waiter, cancel: Cancel) -> Permit:

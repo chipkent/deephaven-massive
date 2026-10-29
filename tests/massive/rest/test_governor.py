@@ -909,3 +909,25 @@ def test_an_interrupted_lane_change_leaves_a_state_the_bucket_repairs() -> None:
     bucket.join(third)
     assert bucket.head() is second
     assert bucket.waiting == 2
+
+
+def test_a_request_that_gives_up_its_place_sends_a_change_notice() -> None:
+    clock = FakeClock(manual=True)
+    governor = _governor(clock, basic={"stocks"})
+    _requests(governor, "stocks", 5)
+    heard = threading.Semaphore(0)
+    waiting = _Waiting(governor, "stocks")
+    clock.wait_for_sleepers(1)
+    governor.subscribe(heard.release)
+    waiting.cancel.set()
+    waiting.join()
+    assert heard.acquire(timeout=TIMEOUT)  # the waiting count changed: listeners hear it
+    assert _state(governor).waiting == 0
+
+
+def test_a_queued_request_alone_keeps_the_governor_busy() -> None:
+    # A request just woken to start, its slot freed and nothing in flight or paused: a
+    # registry pruning the governor now would strand it on a governor nobody else shares.
+    governor = _governor()
+    governor._buckets["stocks"].join(_Waiter(None))
+    assert not governor.idle()
