@@ -3611,7 +3611,9 @@ takes over the key of a stream still opening on another thread instead of waitin
 neither the diagnostics writer nor the cycle that applies the final rows. It does not join the
 connections it closes or the futures-schedule worker either, though none of those threads
 needs the lock: while it waits no live table updates, and against an unresponsive server each
-join could last its full `JOIN_TIMEOUT`. They are daemons and end on their own; a caller
+join could last its full `JOIN_TIMEOUT`. They are daemons and end on their own, and the
+closing thread writes each closing connection's final `CLOSED` row itself
+([section 6.1](#61-how-a-live-table-is-kept-alive-and-released), `close()` step 4); a caller
 without the lock still joins them, each for a bounded time. No library lock is ever held by a
 thread that waits for the UG lock, so a caller holding the UG lock may take any of them in the
 usual order.

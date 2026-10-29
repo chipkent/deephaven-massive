@@ -117,7 +117,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.liveness import StreamHandle
 
 __all__ = [
-    "LOCKED_CALL_WARNING",
+    "PAUSED_TABLES_WARNING_SECONDS",
     "FlatFileTransport",
     "IngestPorts",
     "RestTransport",
@@ -227,7 +227,7 @@ def holds_update_graph_lock(exec_ctx: ExecutionContext) -> bool:
     return has_exclusive_lock(update_graph) or has_shared_lock(update_graph)
 
 
-LOCKED_CALL_WARNING: Final = 5.0
+PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
 """Seconds a verb may run on a thread that holds the update graph's lock before the session
 logs, once, that the worker's live tables are paused (`SessionCore.run_verb`)."""
 
@@ -635,7 +635,7 @@ class SessionCore:
         self._closers: list[Callable[[], None]] = []
         self._closed = False
         # Whether a long verb under the update graph's lock has been reported.
-        self._reported_locked_call = False
+        self._warned_paused_tables = False
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
         finalizer = weakref.finalize(
@@ -700,7 +700,7 @@ class SessionCore:
         then the session, before the body checks a single argument. A thread that holds the
         update graph's lock, such as a console command's, passes, and the body is timed there:
         while it runs no live table of the worker updates, so a verb that ran
-        `LOCKED_CALL_WARNING` seconds or longer, such as a `history()` of many requests on a
+        `PAUSED_TABLES_WARNING_SECONDS` or longer, such as a `history()` of many requests on a
         rate-limited key, logs one WARNING saying so, the first time only, whether it returned
         or raised.
 
@@ -723,20 +723,20 @@ class SessionCore:
         try:
             return body()
         finally:
-            self._report_locked_call(call, time.monotonic() - began)
+            self._warn_paused_tables(call, time.monotonic() - began)
 
-    def _report_locked_call(self, call: str, seconds: float) -> None:
+    def _warn_paused_tables(self, call: str, seconds: float) -> None:
         """Warn, once per session, that a verb held the update graph's lock for a long time.
 
         Args:
             call: The verb, as the warning names it.
-            seconds: How long it ran; under `LOCKED_CALL_WARNING` logs nothing.
+            seconds: How long it ran; under `PAUSED_TABLES_WARNING_SECONDS` logs nothing.
         """
-        if seconds < LOCKED_CALL_WARNING:
+        if seconds < PAUSED_TABLES_WARNING_SECONDS:
             return
         with self.registry_lock:
-            first = not self._reported_locked_call
-            self._reported_locked_call = True
+            first = not self._warned_paused_tables
+            self._warned_paused_tables = True
         if first:
             logger.warning(
                 "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "

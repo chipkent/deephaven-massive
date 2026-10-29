@@ -529,7 +529,7 @@ def announce(
     buckets: Iterable[str],
     *,
     shape: ReadShape = ReadShape.PAGED,
-    pausing: bool = False,
+    pauses_live_tables: bool = False,
 ) -> None:
     """Log at INFO, before a long static read, how many requests it makes and how long they take.
 
@@ -547,11 +547,11 @@ def announce(
     Both are lower bounds: pages beyond the first, slow responses, and other sessions'
     requests only add time.
 
-    A read made on a thread that holds the update graph's lock (`pausing`), as every Deephaven
-    console command does, holds every live table of the worker still while it runs, so its
-    paced line is a WARNING instead, which says so and names the remedy: "stocks.bars history:
-    250 requests; paced at 5 requests a minute (stocks); this command will pause every live
-    table in the worker for at least 49 min: run long downloads from a thread of your own,
+    A read made on a thread that holds the update graph's lock (`pauses_live_tables`), as every
+    Deephaven console command does, holds every live table of the worker still while it runs,
+    so its paced line is a WARNING instead, which says so and names the remedy: "stocks.bars
+    history: 250 requests; paced at 5 requests a minute (stocks); this command will pause every
+    live table in the worker for at least 49 min: run long downloads from a thread of your own,
     outside a console command".
 
     Args:
@@ -560,7 +560,7 @@ def announce(
         buckets: The bucket of each planned request, one entry per request.
         shape: How the read counts its requests. The default, `ReadShape.PAGED`, announces
             a read only when it is paced.
-        pausing: True when the read runs on a thread that holds the update graph's lock.
+        pauses_live_tables: True when the read runs on a thread that holds the update graph's lock.
     """
     rate = _massive.BASIC_REQUESTS_PER_MINUTE
     for bucket, count in Counter(buckets).items():
@@ -568,7 +568,7 @@ def announce(
         words = _SHAPE_WORDS.get(shape)
         what = f"{count} requests" if words is None else f"{count} requests, {words}"
         if seconds is not None:
-            if seconds >= _MINUTE and pausing:
+            if seconds >= _MINUTE and pauses_live_tables:
                 logger.warning(
                     "%s: %s; paced at %d requests a minute (%s); this command will pause every "
                     "live table in the worker for at least %d min: run long downloads from a "

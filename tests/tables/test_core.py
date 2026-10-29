@@ -1146,7 +1146,7 @@ def test_a_long_verb_in_a_console_command_is_reported_once(
     # runs long there says so, once per session. Every verb counts as long here.
     q = stream_query(massive_session)
     made: list[Table] = []
-    monkeypatch.setattr(_core, "LOCKED_CALL_WARNING", 0.0)
+    monkeypatch.setattr(_core, "PAUSED_TABLES_WARNING_SECONDS", 0.0)
     made.append(q.blink())  # without the lock: nothing is paused, nothing is reported
     assert caplog.messages == []
 

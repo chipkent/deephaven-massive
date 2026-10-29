@@ -336,8 +336,9 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
     governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.INFO, LOGGER):
-        announce(governor, "stocks.bars history", ["stocks"] * 250, pausing=True)
-        announce(governor, "stocks.bars history", ["stocks"] * 5, pausing=True)  # quick: quiet
+        announce(governor, "stocks.bars history", ["stocks"] * 250, pauses_live_tables=True)
+        quick = ["stocks"] * 5  # every request starts at once: quiet
+        announce(governor, "stocks.bars history", quick, pauses_live_tables=True)
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
             logging.WARNING,

@@ -1708,7 +1708,7 @@ class RestReader:
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
-        pausing: bool = False,
+        pauses_live_tables: bool = False,
     ) -> tuple[pa.Table, int]:
         """Read a dataset's fetch paths for the symbols: `fetch()`.
 
@@ -1722,8 +1722,9 @@ class RestReader:
             symbols: The static symbols.
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
-            pausing: True when the calling thread holds the update graph's lock (a console
-                command), so the read pauses every live table of the worker while it runs.
+            pauses_live_tables: True when the calling thread holds the update graph's lock (a
+                console command), so the read pauses every live table of the worker while it
+                runs.
 
         Returns:
             The rows of every path, in path order, capped at `Request.limit`, and the request
@@ -1737,7 +1738,7 @@ class RestReader:
             self.state.client.governor,
             f"{spec.name} fetch",
             _buckets(spec, planned),
-            pausing=pausing,
+            pauses_live_tables=pauses_live_tables,
         )
         return self._read_planned(
             spec, request, planned, record=record, executor=executor, cancel=None
@@ -2022,7 +2023,7 @@ class RestEndpoints:
                 spec,
                 request,
                 symbols=request.symbols,
-                pausing=holds_update_graph_lock(self._core.exec_ctx),
+                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
             )
         except MassiveError as error:
             _report(error)
@@ -2085,7 +2086,7 @@ class RestEndpoints:
             f"{spec.name} history",
             [call_bucket(spec, call) for call in calls],
             shape=shape,
-            pausing=holds_update_graph_lock(self._core.exec_ctx),
+            pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
         try:
             table, requests = reader.read(
