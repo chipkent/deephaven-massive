@@ -24,7 +24,7 @@ from deephaven_massive import _massive
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
-from deephaven_massive._ingest.ws import WsConnections, WsTransport
+from deephaven_massive._ingest.ws import CONNECTION_SETTINGS, WsConnections, WsTransport
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
         StreamTransport,
     )
 
-__all__ = ["SessionClients"]
+__all__ = ["CONNECTION_SETTINGS", "SessionClients"]
 
 logger = logging.getLogger(__name__)
 
@@ -137,13 +137,17 @@ class SessionClients:
         """Return a WebSocket transport over the session's connections.
 
         Each call gets a new, lightweight `WsTransport` bound to the session's core and to the
-        session's one `WsConnections`. The first call creates the `WsConnections` under the
-        core's `registry_lock` (its constructor only stores settings: no connection is opened
-        until a stream needs one) and registers its `close` with `SessionCore.on_close` after
-        releasing the lock, so the connections close with the session, or at once if the
-        session closed meanwhile. The `WsConnections` holds the core weakly, since it lives as
-        long as the session, and decides each class's host through this object's `rest()`
-        transport (`RestTransport.resolve_host`), reached when the decision is made.
+        session's one `WsConnections`. The first call creates the `WsConnections` outside every
+        lock (its constructor joins the connection group of the session's key and settings,
+        which other sessions of the process may share, under the group's lock, and opens no
+        connection) and installs it under the core's `registry_lock`, unless a racing call
+        installed one first, whose loser leaves its group at once. The winner's `close` is
+        registered with `SessionCore.on_close` after the lock is released, so the session's
+        streams leave their connections, and the connections no other session uses close,
+        with the session, or at once if the session closed meanwhile. The `WsConnections`
+        holds the core weakly, since it lives as long as the session, and decides each class's
+        host through this object's `rest()` transport (`RestTransport.resolve_host`), reached
+        when the decision is made.
 
         Returns:
             The transport.
@@ -153,17 +157,24 @@ class SessionClients:
         core = self._live_core()
         with core.registry_lock:
             connections = self._streams
-            created = connections is None
-            if connections is None:
-                connections = self._streams = WsConnections(
-                    core,
-                    resolve_host=self._resolve_host,
-                    record_verdict=self._record_verdict,
-                    fetch_rows=self._fetch_rows,
-                    crypto_pair=self._crypto_pair,
-                )
-        if created:
-            core.on_close(connections.close)
+        if connections is None:
+            # Outside the lock: joining a group takes the group's lock, never held with it.
+            candidate = WsConnections(
+                core,
+                resolve_host=self._resolve_host,
+                record_verdict=self._record_verdict,
+                fetch_rows=self._fetch_rows,
+                crypto_pair=self._crypto_pair,
+            )
+            with core.registry_lock:
+                connections = self._streams
+                created = connections is None
+                if connections is None:
+                    connections = self._streams = candidate
+            if created:
+                core.on_close(connections.close)
+            else:  # a racing first call installed its own: leave the group again
+                candidate.close()
         return WsTransport(core, connections)
 
     def _resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:

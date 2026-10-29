@@ -4,7 +4,7 @@
 # Usage: scripts/check.sh [fast|full] [--no-fix]
 #
 #   fast      uv sync --upgrade (newest versions), ruff check --fix, ruff format, mypy
-#   full      fast, then pytest with coverage (the default)
+#   full      fast, then pytest with coverage on up to 4 workers (the default)
 #   --no-fix  report instead of rewrite: ruff check and ruff format --check (CI and git hooks)
 #
 # With CI=true, ruff reports in GitHub annotation format. The script stops at the first
@@ -70,7 +70,8 @@ fi
 step "mypy" uv run mypy src tests scripts
 
 if [[ "$tier" == "full" ]]; then
-    step "pytest with coverage" uv run pytest --cov --cov-report=term-missing:skip-covered
+    # -n stays out of addopts, so a plain `uv run pytest` runs in one process for debuggers.
+    step "pytest with coverage" uv run pytest -n auto --maxprocesses=4 --cov --cov-report=term-missing:skip-covered
 fi
 
 echo "==> check.sh $tier: all steps passed"

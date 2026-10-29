@@ -13,12 +13,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
+from deephaven.dherror import DHError
 from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _namespaces, _session
@@ -40,18 +43,23 @@ from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Query, StreamQuery
+from deephaven_massive._tables import core as _core
 from deephaven_massive._tables.liveness import (
     StreamHandle,
     new_scope,
 )
+from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from deephaven.table import Table
+    from deephaven.update_graph import UpdateGraph
 
     from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.diagnostics import Diagnostics
     from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0
@@ -69,6 +77,22 @@ def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> Str
     q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
     assert isinstance(q, StreamQuery)
     return q
+
+
+def one_row(session: dm.MassiveSession) -> Table:
+    # One row of SPEC for a fake stream's publisher: an AAPL symbol, every other column null.
+    schema = session._core.catalog.dataset_schema(SPEC).arrow_schema()
+    return dh_arrow.to_table(pa.Table.from_pylist([{"Symbol": "AAPL"}], schema=schema))
+
+
+def wait_until(condition: Callable[[], bool]) -> None:
+    # A bounded wait for an update-graph cycle to apply a change.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(int(TIMEOUT / 0.02)):
+        if condition():
+            return
+        pause.wait(0.02)
+    assert condition()
 
 
 def label(session: dm.MassiveSession) -> str:
@@ -180,26 +204,35 @@ def test_construction_on_the_update_graph_thread_fails() -> None:
     assert "update-graph thread" in str(errors[0])
 
 
-def test_a_second_session_with_the_same_key_warns(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_same_key_session_warns_only_when_it_cannot_share(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Equal connection settings share the connections, so only differing settings warn.
     config = dm.MassiveConfig(api_key="shared-key")
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         first = dm.MassiveSession(config)
-        second = dm.MassiveSession(config)
-        second.close()
+        sharing = dm.MassiveSession(config)
         other = dm.MassiveSession(dm.MassiveConfig(api_key="other-key"))
+        assert caplog.records == []
+        sharing.close()
+        apart = dm.MassiveSession(
+            dm.MassiveConfig(api_key="shared-key", flush_interval=0.5, ack_timeout=9.0)
+        )
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
     assert warnings == [
         (
-            f"{label(second)} uses the same API key as {label(first)}; individual plans allow "
-            "one WebSocket connection per cluster per account, so the sessions will compete for "
-            "connection slots"
+            f"{label(apart)} uses the same API key as {label(first)} with different connection "
+            "settings (ack_timeout, flush_interval), so the two cannot share WebSocket "
+            "connections; on an individual plan, which allows one connection per cluster, they "
+            "compete for it"
         )
     ]
     caplog.clear()
     first.close()
+    apart.close()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
-        third = dm.MassiveSession(config)  # the others are closed
-    assert "same API key" not in caplog.text
+        third = dm.MassiveSession(dm.MassiveConfig(api_key="shared-key", flush_interval=0.5))
+    assert "same API key" not in caplog.text  # the others are closed
     third.close()
     other.close()
 
@@ -334,44 +367,81 @@ def test_close_marks_streams_closed_and_warns_once(
     massive_session.release(released)
     assert [r["State"] for r in stream_rows()] == ["RUNNING", "RELEASED"]
     assert fake_streams.shutdown[2].wait(TIMEOUT)  # the released stream left the registry
-    keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
-    streams = massive_session.streams()
-    keeper.manage(streams)
+    streams = massive_session.streams()  # a view keeps the final rows after close()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
         massive_session.close()
         massive_session.close()
-    assert caplog.messages == ["session closed; 1 live tables are now static"]
+    assert caplog.messages == [f"{massive_session._core.label} closed; 1 live tables failed"]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
-    assert [r["State"] for r in rows] == ["CLOSED", "RELEASED"]
-    keeper.release()
+    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
+    assert fake_streams.failed == {1: closed}
     massive_session.release(live)  # release() keeps working after close()
 
 
-def test_close_marks_a_released_but_held_stream_closed(
+def test_a_held_view_reads_the_final_rows_as_close_returns(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The final rows reach the diagnostics table in an update cycle, and a view of it updates
+    # later in that cycle: close() waits for that cycle to end, after it released the
+    # diagnostics, so the view reads CLOSED the moment close() returns, with no polling.
+    core = massive_session._core
+    result = stream_query(massive_session).append_only()
+    view = massive_session.streams()
+    steps: list[str] = []
+    diagnostics = type(core.diagnostics)
+    release = diagnostics.release
+
+    def released(self: Diagnostics) -> None:
+        release(self)
+        steps.append("released")
+
+    def waited(update_graph: UpdateGraph) -> AbstractContextManager[None]:
+        steps.append("waited for the cycle")
+        return cast("AbstractContextManager[None]", shared_lock(update_graph))
+
+    monkeypatch.setattr(diagnostics, "release", released)
+    monkeypatch.setattr(_core, "shared_lock", waited)
+    massive_session.close()
+    (row,) = dh_arrow.to_arrow(view).to_pylist()
+    assert row["State"] == "CLOSED"
+    assert steps == ["released", "waited for the cycle"]
+    del result, view
+
+
+def test_close_fails_derived_tables_and_marks_their_stream_closed(
+    *,
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     # A derived table keeps a released stream's blink table alive, so the stream is still in
-    # the registry when the session closes, and its row becomes CLOSED.
+    # the registry when the session closes: its row becomes CLOSED, and the derived table
+    # fails with the close, keeping its rows for a snapshot.
     result = stream_query(massive_session).append_only()
     user_scope = new_scope()
     with user_scope.open():
-        derived = result.tail(1)
+        derived = result.tail(5)
+    fake_streams.publishers[1].add(one_row(massive_session))
+    wait_until(lambda: derived.size == 1)
     massive_session.release(result)
     assert [(r["State"], r["HeldResults"]) for r in stream_rows()] == [("RELEASED", 0)]
-    keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
     streams = massive_session.streams()
-    keeper.manage(streams)
     massive_session.close()
     rows = dh_arrow.to_arrow(streams).to_pylist()
-    assert [(r["State"], r["HeldResults"]) for r in rows] == [("CLOSED", 0)]
-    assert derived.is_refreshing
-    assert not fake_streams.shutdown[1].is_set()
-    keeper.release()
+    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    assert [(r["State"], r["HeldResults"], r["Error"]) for r in rows] == [("CLOSED", 0, closed)]
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
+    wait_until(lambda: bool(derived.j_table.isFailed()))
+    assert derived.snapshot().size == 1  # the failed table keeps its rows
+    assert len(dh_to_pylist(derived)) == 1
+    with pytest.raises(DHError, match="failed table"):
+        derived.tail(1)  # not a formula: that would capture this frame's locals in the JVM
     user_scope.release()
-    assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
 def test_close_with_no_live_tables_logs_info(
@@ -380,7 +450,7 @@ def test_close_with_no_live_tables_logs_info(
     with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.core"):
         massive_session.close()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, "session closed; 0 live tables are now static")
+        (logging.INFO, f"{massive_session._core.label} closed; 0 live tables failed")
     ]
 
 
@@ -402,12 +472,15 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
 def test_close_on_the_update_graph_thread_fails(massive_session: dm.MassiveSession) -> None:
     errors: list[BaseException] = []
     seen = threading.Event()
+    # The JVM holds the listener, and so its closure, until it collects it: the closure reaches
+    # the session through a list emptied below.
+    closes = [massive_session.close]
 
     def on_update(_update: object, _replay: bool) -> None:
         if seen.is_set():
             return
         try:
-            massive_session.close()
+            closes[0]()
         except ValueError as e:
             errors.append(e)
         seen.set()
@@ -420,6 +493,8 @@ def test_close_on_the_update_graph_thread_fails(massive_session: dm.MassiveSessi
     scope.release()
     assert len(errors) == 1
     assert not massive_session._core.closed
+    closes.clear()
+    errors.clear()  # its traceback holds the session too
 
 
 def test_context_manager_closes() -> None:
@@ -440,15 +515,14 @@ def test_a_session_closed_while_a_stream_opens(
     fake_streams: FakeStreamTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Closing:
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-            massive_session.close()
-            return handle
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        massive_session.close()
+        return handle
 
-    closing = Closing()
+    closing = transport_of(open_stream)()
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: closing)
     with pytest.raises(dm.MassiveError, match="was closed while a stream was opening"):
         stream_query(massive_session).blink()

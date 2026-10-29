@@ -12,7 +12,7 @@ Run everything from the repository root, through `uv run`. The tests need JDK 17
 ```bash
 uv sync --upgrade                        # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
-./scripts/check.sh                       # full gate: ruff, format, mypy, pytest, 100% coverage
+./scripts/check.sh                       # full gate: ruff, format, mypy, pytest (up to 4 workers), 100% coverage
 ./scripts/check.sh fast                  # ruff (fixing what it can) and mypy only
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
 PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded
@@ -135,9 +135,11 @@ These prevent deadlocks and leaks.
 ## Tests and the embedded JVM
 
 - `tests/conftest.py` starts one embedded Deephaven server per pytest process before collection,
-  so test modules may import `deephaven` at module level. Never start or stop another `Server`
-  in that process (a subprocess may). Read the comments on its `trylast` hook and JVM shutdown
-  block before touching either. An `hs_err_pid*.log` file is a JVM crash: investigate it.
+  so test modules may import `deephaven` at module level. Under `-n`, each xdist worker starts
+  one and the controller starts none; `-n` with the live tests is refused. Never start or stop
+  another `Server` in that process (a subprocess may). Read the comments on its `trylast` hook
+  and JVM shutdown block before touching either. An `hs_err_pid*.log` file is a JVM crash:
+  investigate it.
 - The JVM raises SIGSEGV on purpose: never call `faulthandler.enable()` once it runs. Any process
   that starts a `Server` leaves through `os._exit`, as `scripts/render_reference.py` does.
 - Take the execution context, table helpers, and fakes from fixtures (`dh_exec_ctx`,

@@ -2495,7 +2495,10 @@ def test_every_row_of_a_page_shares_the_instant_the_page_arrived(
 
 
 def test_a_tick_dataset_dates_each_row_in_its_day_zone(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    string_objects: Callable[[Table, str], int],
 ) -> None:
     # 03:00 UTC on March 4 is still March 3 in New York.
     late = epoch_ns(datetime(2025, 3, 4, 3, tzinfo=UTC))
@@ -2507,11 +2510,7 @@ def test_a_tick_dataset_dates_each_row_in_its_day_zone(
     table = q.fetch()
     row = rows(table)[0]
     assert (row["Symbol"], row["Date"], row["Timestamp"]) == ("I:SPX", "2025-03-03", late)
-    # The two rows share one stored `Date` string (counted inside Deephaven).
-    ids = table.update("DateRef = java.lang.System.identityHashCode(Date)").select_distinct(
-        "DateRef"
-    )
-    assert ids.size == 1
+    assert string_objects(table, "Date") == 1  # the two rows share one stored string
 
 
 def test_a_symbol_with_no_data_returns_no_rows(

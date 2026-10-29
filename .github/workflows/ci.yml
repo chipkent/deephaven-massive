@@ -244,7 +244,7 @@ jobs:
       - name: Show the resolved floor versions
         run: >-
           uv pip list | grep -iE
-          '^(deephaven-core|deephaven-server|pyarrow|numpy|pandas|boto3|botocore|urllib3|certifi|websockets|orjson|pytest) '
+          '^(deephaven-core|deephaven-server|pyarrow|numpy|pandas|boto3|botocore|urllib3|certifi|websockets|orjson|pytest|pytest-xdist) '
       - name: Pytest
         # Coverage is the newest-versions jobs' gate; this job checks only that the floors work.
         run: uv run --no-sync pytest
