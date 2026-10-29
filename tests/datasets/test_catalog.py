@@ -1,8 +1,8 @@
 """Tests for the dataset catalog: the specs, the merge cache, the catalog gates, and coverage.
 
 The catalog gates run on the process's catalog and, with a negative test each, on synthetic
-specs over the real generated sources. The coverage test reads the undeclared-source lists in
-`tests/data/datasets/catalog/undeclared/`, one per namespace.
+specs over the real generated sources. The coverage test proves that every generated source
+is read by some dataset, or deferred with a reason and an issue in `DEFERRED`.
 """
 
 import dataclasses
@@ -10,7 +10,6 @@ import threading
 from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -29,10 +28,9 @@ from deephaven_massive._massive import (
     WireUnit,
     sources,
 )
-from deephaven_massive._session import CATALOG, NAMESPACE_MODULES
+from deephaven_massive._session import CATALOG
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
-UNDECLARED = Path(__file__).parents[1] / "data" / "datasets" / "catalog" / "undeclared"
 
 
 def keys(
@@ -1033,63 +1031,150 @@ def test_a_bad_member_is_reported_once() -> None:
 # --- Coverage --------------------------------------------------------------------------------
 
 
-def read_undeclared(directory: Path) -> dict[str, set[tuple[Transport, str]]]:
-    listed: dict[str, set[tuple[Transport, str]]] = {}
-    for path in sorted(directory.glob("*.txt")):
-        lines = [line.strip() for line in path.read_text().splitlines()]
-        entries = [line.split(" ", 1) for line in lines if line and not line.startswith("#")]
-        listed[path.stem] = {(Transport(t), key) for t, key in entries}
-    return listed
+@dataclasses.dataclass(frozen=True)
+class Deferral:
+    """Why a generated source has no dataset yet, and the GitHub issue that will add one.
+
+    Attributes:
+        reason: Why the dataset waits, for the reviewer.
+        issue: The number of the open issue that tracks adding the dataset.
+    """
+
+    reason: str
+    issue: int
+
+
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
+"""Generated sources no dataset reads yet, by `(transport, source key)`.
+
+A source key is the generated key the catalog uses: a REST path template, a WebSocket
+`"<cluster>/<channel>"`, or a flat-file prefix. Every entry needs a reason and the number of an
+open issue that will add the dataset, for example:
+
+    (Transport.REST, "/v1/example"): Deferral("Pages by cursor only; needs a new verb.", 123),
+
+The coverage test accepts a deferred source, and fails on an entry that names a source the
+refresh does not generate or one a dataset already reads, so the list cannot go stale: the pull
+request that adds the dataset deletes the entry. Defer only what the library will serve later;
+an item it never supports is an `EXCLUSIONS` entry of the refresh instead.
+"""
 
 
 def coverage_problems(
     specs: Iterable[DatasetSpec],
-    undeclared: Mapping[str, set[tuple[Transport, str]]],
     generated: set[tuple[Transport, str]],
+    deferred: Mapping[tuple[Transport, str], Deferral],
 ) -> list[str]:
-    used: dict[str, set[tuple[Transport, str]]] = {}
-    for spec in specs:
-        used.setdefault(spec.name.partition(".")[0], set()).update(spec.sources)
-    found = []
-    every_used = set().union(*used.values()) if used else set()
-    every_listed = set().union(*undeclared.values()) if undeclared else set()
-    for t, key in sorted(generated - every_used - every_listed):
-        found.append(f"coverage: {t.value} {key} is neither used nor listed as undeclared")
-    for namespace, listed in sorted(undeclared.items()):
-        for t, key in sorted(listed & used.get(namespace, set())):
-            found.append(f"coverage: {namespace} already uses {t.value} {key}")
-        for t, key in sorted(listed - generated):
-            found.append(f"coverage: {namespace} lists {t.value} {key}, which is not generated")
-    return found
+    # Every generated source must be read by some dataset, or be deferred with an issue. The
+    # refresh generates every item of the vendored snapshot that it neither excludes (with a
+    # reason) nor finds deprecated or draft, so together the two checks leave no documented
+    # item unaccounted for. The opposite direction, a dataset reading a source nobody
+    # generated, is the generated-sources gate.
+    used: set[tuple[Transport, str]] = set().union(*(spec.sources for spec in specs))
+    problems = [
+        f"coverage: {t.value} {key} is generated, but no dataset reads it; add a dataset, an "
+        "EXCLUSIONS entry, or a DEFERRED entry"
+        for t, key in sorted(generated - used - deferred.keys())
+    ]
+    for (t, key), deferral in sorted(deferred.items()):
+        if (t, key) not in generated:
+            problems.append(f"coverage: DEFERRED names {t.value} {key}, which is not generated")
+        elif (t, key) in used:
+            problems.append(
+                f"coverage: DEFERRED names {t.value} {key}, which a dataset reads; remove it"
+            )
+        if not deferral.reason.strip() or deferral.issue <= 0:
+            problems.append(f"coverage: DEFERRED {t.value} {key} needs a reason and an issue")
+    return problems
 
 
 GENERATED = {(t, key) for t in Transport for key in sources(t)}
 
-
-def test_every_generated_source_is_used_or_undeclared() -> None:
-    assert coverage_problems(CATALOG.by_name.values(), read_undeclared(UNDECLARED), GENERATED) == []
-
-
-def test_the_undeclared_files_belong_to_namespaces() -> None:
-    namespaces = {module.__name__.rpartition(".")[2] for module in NAMESPACE_MODULES}
-    assert set(read_undeclared(UNDECLARED)) <= namespaces
+SourceKey = tuple[Transport, str]
+Base = tuple[list[DatasetSpec], dict[SourceKey, Deferral]]
 
 
-def test_coverage_finds_unlisted_used_and_stale_sources() -> None:
-    generated = {(R, "/a"), (R, "/b"), (W, "stocks/T")}
-    spec = DatasetSpec(
-        name="stocks.x",
-        summary="A dataset for the tests.",
-        asset_class=AssetClass.STOCKS,
-        channels={None: "T"},
-    )
-    undeclared = {"stocks": {(W, "stocks/T"), (R, "/gone")}, "options": {(R, "/a")}}
-    assert coverage_problems([spec], undeclared, generated) == [
-        "coverage: REST /b is neither used nor listed as undeclared",
-        "coverage: stocks already uses WS stocks/T",
-        "coverage: stocks lists REST /gone, which is not generated",
+def test_every_generated_source_is_read_by_a_dataset_or_deferred() -> None:
+    assert coverage_problems(CATALOG.by_name.values(), GENERATED, DEFERRED) == []
+
+
+def sole_readers(specs: list[DatasetSpec]) -> list[tuple[DatasetSpec, list[SourceKey]]]:
+    # Each dataset that is the only reader of some source, with the sources only it reads.
+    readers: dict[SourceKey, int] = {}
+    for spec in specs:
+        for source in spec.sources:
+            readers[source] = readers.get(source, 0) + 1
+    found = [(spec, sorted(s for s in spec.sources if readers[s] == 1)) for spec in specs]
+    return [(spec, orphaned) for spec, orphaned in found if orphaned]
+
+
+@pytest.fixture(params=["real", "one-more-deferred"])
+def base(request: pytest.FixtureRequest) -> Base:
+    # The catalog and the deferrals each negative test starts from: the real ones, and the
+    # real ones plus one deferred dataset's sources, so the tests hold whatever DEFERRED holds.
+    specs = list(CATALOG.by_name.values())
+    if request.param == "real":
+        return specs, dict(DEFERRED)
+    spec, orphaned = sole_readers(specs)[-1]
+    deferred = {**DEFERRED, **dict.fromkeys(orphaned, Deferral("Waits for a new verb.", 1))}
+    return [s for s in specs if s is not spec], deferred
+
+
+def without_a_sole_reader(specs: list[DatasetSpec]) -> tuple[list[DatasetSpec], list[SourceKey]]:
+    # The catalog without one dataset that is the only reader of some source, and the sources
+    # only it read. Which dataset is chosen does not matter, so a new reader of today's
+    # choice moves the test to another dataset instead of breaking it.
+    removed, orphaned = sole_readers(specs)[0]
+    return [spec for spec in specs if spec is not removed], orphaned
+
+
+def test_the_bases_pass_the_coverage_test(base: Base) -> None:
+    specs, deferred = base
+    assert coverage_problems(specs, GENERATED, deferred) == []
+
+
+def test_coverage_names_a_source_no_dataset_reads(base: Base) -> None:
+    specs, orphaned = without_a_sole_reader(base[0])
+    assert orphaned
+    assert coverage_problems(specs, GENERATED, base[1]) == [
+        f"coverage: {t.value} {key} is generated, but no dataset reads it; add a dataset, an "
+        "EXCLUSIONS entry, or a DEFERRED entry"
+        for t, key in orphaned
     ]
-    assert coverage_problems([], {}, set()) == []
+    assert coverage_problems([], set(), {}) == []
+
+
+def test_coverage_accepts_a_deferred_source(base: Base) -> None:
+    specs, orphaned = without_a_sole_reader(base[0])
+    deferred = {**base[1], **dict.fromkeys(orphaned, Deferral("Waits for a new verb.", 1))}
+    assert coverage_problems(specs, GENERATED, deferred) == []
+
+
+def test_coverage_refuses_a_deferral_of_a_source_not_generated(base: Base) -> None:
+    deferred = {**base[1], (R, "/v1/gone"): Deferral("Waits for a new verb.", 1)}
+    assert coverage_problems(base[0], GENERATED, deferred) == [
+        "coverage: DEFERRED names REST /v1/gone, which is not generated"
+    ]
+
+
+def test_coverage_refuses_a_deferral_of_a_source_a_dataset_reads(base: Base) -> None:
+    _, orphaned = without_a_sole_reader(base[0])
+    deferred = {**base[1], orphaned[0]: Deferral("Waits for a new verb.", 1)}
+    t, key = orphaned[0]
+    assert coverage_problems(base[0], GENERATED, deferred) == [
+        f"coverage: DEFERRED names {t.value} {key}, which a dataset reads; remove it"
+    ]
+
+
+@pytest.mark.parametrize(("reason", "issue"), [("", 1), ("  ", 1), ("Waits.", 0)])
+def test_coverage_refuses_a_deferral_without_a_reason_or_an_issue(
+    base: Base, reason: str, issue: int
+) -> None:
+    specs, orphaned = without_a_sole_reader(base[0])
+    deferred = {**base[1], **dict.fromkeys(orphaned, Deferral(reason, issue))}
+    assert coverage_problems(specs, GENERATED, deferred) == [
+        f"coverage: DEFERRED {t.value} {key} needs a reason and an issue" for t, key in orphaned
+    ]
 
 
 # --- Filters ---------------------------------------------------------------------------------
