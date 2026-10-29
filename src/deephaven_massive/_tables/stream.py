@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.core import SessionCore
 
 __all__ = [
+    "BACKLOG_WARNING_ROWS",
     "ChannelPlan",
     "Flusher",
     "FuturesSessionDates",
@@ -118,6 +119,16 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+BACKLOG_WARNING_ROWS: Final = 1_000_000
+"""Rows a connection may hold waiting for its flush thread before a WARNING is logged.
+
+Rows wait between two flushes (`MassiveConfig.flush_interval`), so a connection normally holds
+only a few flush intervals' worth. A backlog this large means the flushes are falling behind the
+wire: the update graph is stalled or too slow for the stream (a `dm.ALL` burst at the open, for
+example). Nothing is dropped, so memory grows with the backlog; the WARNING says so, once each
+time the backlog crosses this level, and again only after it has fallen below half of it.
+"""
 
 _SYMBOL: Final = "Symbol"
 
@@ -759,11 +770,18 @@ class Flusher:
     nothing. Each flush enters the session's execution context through a fresh wrapper. An
     exception in a flush is logged at ERROR and the thread keeps flushing.
 
+    It counts the rows buffered and not taken by a flush yet (`backlog`), under a leaf lock of its
+    own, and logs a WARNING when the count passes `BACKLOG_WARNING_ROWS`. The buffers are
+    unbounded on purpose: a slow flush delays rows but never drops them.
+
     Attributes:
         routes: The connection's streams by channel, and its row buffers.
     """
 
     __slots__ = (
+        "_backlog",
+        "_backlog_lock",
+        "_backlog_warned",
         "_control",
         "_core",
         "_final",
@@ -806,7 +824,17 @@ class Flusher:
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
         # Flush-lock state: the futures session miss each stream's `Error` shows, by stream.
         self._shown: dict[int, str] = {}
+        # Guarded by the backlog lock, a leaf lock.
+        self._backlog_lock = threading.Lock()
+        self._backlog = 0
+        self._backlog_warned = False
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+
+    @property
+    def backlog(self) -> int:
+        """Rows buffered and not taken by a flush yet: received, and waiting for the next one."""
+        with self._backlog_lock:
+            return self._backlog
 
     def start(self) -> None:
         """Start the flush thread. Call it once."""
@@ -843,15 +871,32 @@ class Flusher:
 
         The instant, `time.time_ns()` now, on the connection's loop thread as the frame is
         handed over, becomes every row's `TimestampInsert`. Rows of a channel no stream was
-        ever routed to are dropped.
+        ever routed to are dropped. The rows count in the backlog until a flush takes them; a
+        backlog that passes `BACKLOG_WARNING_ROWS` is logged at WARNING (see that constant for
+        when it is logged again).
 
         Args:
             channel: The channel.
             rows: The decoded rows, keyed by long-form column; the flusher keeps the list.
         """
         buffer = self.routes.buffer(channel)
-        if buffer is not None:
-            buffer.put((time.time_ns(), rows))
+        if buffer is None:
+            return
+        with self._backlog_lock:  # counted before the put, so a flush never counts below zero
+            self._backlog += len(rows)
+            backlog = self._backlog
+            warn = backlog > BACKLOG_WARNING_ROWS and not self._backlog_warned
+            self._backlog_warned |= warn
+        buffer.put((time.time_ns(), rows))
+        if warn:
+            logger.warning(
+                "%s: %d rows are waiting to be published, more than %d; the flushes are "
+                "falling behind (a stalled or slow update graph), so memory grows until they "
+                "catch up",
+                self._thread.name,
+                backlog,
+                BACKLOG_WARNING_ROWS,
+            )
 
     def fail(self, stream_ids: Iterable[int], error: MassiveError) -> None:
         """Ask the flush thread to fail streams. Never blocks.
@@ -901,6 +946,8 @@ class Flusher:
         with self._flush_lock, entered(core.exec_ctx):
             controls = _drain(self._control)
             drained = {channel: _drain(buffer) for channel, buffer in self.routes.buffers()}
+            # Each frame is `(arrived, rows)`: the backlog counts the rows, not the pairs.
+            self._drained(sum(len(rows) for frames in drained.values() for _, rows in frames))
             # Routes after the rows: a stream routed meanwhile gets the rows that reached it.
             routes = self.routes.current()
             for item in controls:
@@ -923,6 +970,17 @@ class Flusher:
             if self._shown:  # forget the misses of streams no longer routed
                 live = {sink.stream_id for sinks in routes.values() for sink in sinks}
                 self._shown = {i: m for i, m in self._shown.items() if i in live}
+
+    def _drained(self, count: int) -> None:
+        """Take rows a flush drained off the backlog; re-arm the WARNING below half the level.
+
+        Args:
+            count: How many rows the flush took from the buffers.
+        """
+        with self._backlog_lock:
+            self._backlog -= count
+            if self._backlog < BACKLOG_WARNING_ROWS // 2:
+                self._backlog_warned = False
 
     def _publish(
         self,

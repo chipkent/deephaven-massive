@@ -815,3 +815,45 @@ def test_streamed_rows_of_one_day_share_one_stored_date(massive_session: dm.Mass
     # Counted inside Deephaven: a string crossing to Python is copied.
     refs = shown.update("DateRef = java.lang.System.identityHashCode(Date)")
     assert refs.select_distinct("DateRef").size == 1
+
+
+def test_the_backlog_counts_buffered_rows_and_warns_when_it_grows(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=stream.__name__)
+    monkeypatch.setattr(stream, "BACKLOG_WARNING_ROWS", 4)
+    sink, _ = make_sink(massive_session._core, ("AAPL",))
+    flusher.routes.add("T", sink)
+
+    def warnings() -> int:
+        return sum("rows are waiting to be published" in r.getMessage() for r in caplog.records)
+
+    flusher.rows("Q", [trade("AAPL")])  # no stream ever read Q: dropped, never buffered
+    flusher.rows("T", [trade("AAPL")] * 4)
+    assert (flusher.backlog, warnings()) == (4, 0)  # at the level, not above it
+    flusher.rows("T", [trade("AAPL")])
+    # Each buffered frame holds its arrival time with its rows: the backlog counts the rows.
+    flusher.rows("T", [trade("AAPL")] * 3)
+    assert (flusher.backlog, warnings()) == (8, 1)  # logged once while it stays above
+    flusher.flush()
+    assert flusher.backlog == 0  # nothing was dropped: the flush took every row
+    flusher.rows("T", [trade("AAPL")] * 5)
+    assert warnings() == 2  # below half the level in between, so it is logged again
+
+
+def test_the_backlog_warning_waits_until_the_backlog_falls_below_half(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(stream, "BACKLOG_WARNING_ROWS", 4)
+    sink, _ = make_sink(massive_session._core, ("AAPL",))
+    flusher.routes.add("T", sink)
+    flusher.rows("T", [trade("AAPL")] * 5)
+    assert flusher._backlog_warned
+    flusher._drained(3)  # as a flush that took three of the five would
+    assert flusher._backlog_warned  # two rows are not below half of four
+    flusher._drained(1)
+    assert not flusher._backlog_warned

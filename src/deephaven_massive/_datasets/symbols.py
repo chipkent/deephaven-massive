@@ -184,10 +184,14 @@ _CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES
 
 @dataclass(frozen=True, slots=True)
 class SymbolTable:
-    """A reactive symbol table, compared and hashed by the identity of its Python wrapper.
+    """A table passed as `symbols`, compared and hashed by the identity of its Python wrapper.
 
-    Deephaven `Table` wrappers compare equal when they wrap the same Java table, but a
-    reactive stream is keyed by `id(table)`: two wrappers of one Java table are two streams.
+    A refreshing table makes a reactive stream, which follows the table's rows as they change;
+    the stream verbs read a static table once, as a fixed symbol list, and `fetch()` and
+    `history()` read either kind once.
+
+    Deephaven `Table` wrappers compare equal when they wrap the same Java table, but a reactive
+    stream is keyed by `id(table)`: two wrappers of one Java table are two streams.
     Two boxes are equal exactly when they hold the same wrapper, which keeps query equality and
     the stream key in agreement. The box holds the wrapper strongly, so its `id` stays valid
     for as long as a query or stream key holds the box.
@@ -207,7 +211,7 @@ class SymbolTable:
 
 NormalizedSymbols: TypeAlias = tuple[str, ...] | _All | SymbolTable
 """A `Symbols` argument after `normalize`: a sorted tuple of canonical symbols, `ALL`, or a
-reactive table."""
+boxed symbol table."""
 
 
 # --- the grammar ---------------------------------------------------------------------------------

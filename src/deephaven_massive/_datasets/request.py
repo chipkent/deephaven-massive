@@ -38,8 +38,9 @@ for a list of dates (`date.any_of`); the filter check writes them as ISO-8601 te
 
 StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols]"
 """The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
-tuple of canonical symbols, `ALL`, or a `SymbolTable` box, which compares by the identity of the
-reactive table's wrapper and holds it strongly while the key exists."""
+tuple of canonical symbols, `ALL`, or the `SymbolTable` box of a refreshing table, which compares
+by the identity of the table's wrapper and holds it strongly while the key exists. A static
+table never reaches a key: it is read first, and its symbols become the tuple."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +100,7 @@ class Request:
 
         Returns:
             Space-separated `name=value` pairs, such as `symbols=('AAPL', 'MSFT')`; `ALL`
-            renders as `ALL`, a reactive table as `<reactive table>`, enums by member name,
+            renders as `ALL`, a symbol table as `<symbol table>`, enums by member name,
             dates in ISO form, and parameters and filters as dictionaries.
         """
         parts = []
@@ -122,7 +123,7 @@ def _render(value: object) -> str:
     if value is ALL:
         return "ALL"
     if isinstance(value, SymbolTable):
-        return "<reactive table>"
+        return "<symbol table>"
     if isinstance(value, Enum):
         return f"{type(value).__name__}.{value.name}"
     if isinstance(value, date):

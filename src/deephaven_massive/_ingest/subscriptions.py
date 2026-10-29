@@ -333,17 +333,28 @@ class Subscriptions:
     # --- the reconcile loop --------------------------------------------------------------------
 
     def reconcile(self) -> None:
-        """Apply the cap, then send the next step if a generation is open and none is in flight.
+        """Apply the cap, send the next step if a generation is open and none is in flight.
 
         The cap is applied even with no generation open, so `admitted` always counts the
-        topics the streams have asked for.
+        topics the streams have asked for. `on_change` is called every time, also while a
+        step is in flight, so the connection's row shows each partial acknowledgement,
+        refusal, and `NO_ACK` as it happens rather than when the whole step resolves.
         """
         self._defer()
-        if self.generation is None or self._pending:
-            return
+        if self.generation is not None and not self._pending:
+            self._send_step(self.generation)
+        self._on_change()
+
+    def _send_step(self, generation: int) -> None:
+        """Send one step: subscribe what W adds to the sent topics, unsubscribe what it drops.
+
+        Called by `reconcile` with no step in flight.
+
+        Args:
+            generation: The open generation.
+        """
         wire = self._wire()
         adds, removes = wire - self._sent, self._sent - wire
-        generation = self.generation
         if adds:
             ordered = sorted(adds)
             self._sender.subscribe(generation, ordered)
@@ -359,7 +370,6 @@ class Subscriptions:
             self._noack -= removes
             for topic in removes:
                 self._cancel(topic)
-        self._on_change()
 
     def status(self, status: Status) -> None:
         """Apply one status object of the current generation, then reconcile.

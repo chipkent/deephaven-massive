@@ -150,9 +150,22 @@ def wait_for(condition: Callable[[], bool]) -> None:
     assert condition()
 
 
+def settle(ws_session: WsSession) -> None:
+    # Run what each live connection's loop has queued: a status's row write runs at the end of
+    # its loop turn, after the status callback a test waits on, so a diagnostics read settles
+    # first to see it. A connection whose loop has ended has nothing queued and is skipped.
+    with ws_session.session._core.registry_lock:
+        connections = list(ws_session.connections._connections.values())
+    for connection in connections:
+        done = threading.Event()
+        if connection.post(done.set):
+            assert done.wait(TIMEOUT)
+
+
 def streams_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
+    settle(ws_session)
     assert ws_session.session._core.diagnostics.barrier().wait(TIMEOUT)
     return sorted(dh_to_pylist(ws_session.session.streams()), key=lambda r: r["StreamId"])
 
@@ -160,6 +173,7 @@ def streams_of(
 def connections_of(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
+    settle(ws_session)
     assert ws_session.session._core.diagnostics.barrier().wait(TIMEOUT)
     return [r for r in dh_to_pylist(ws_session.session.connections()) if r["Transport"] == "WS"]
 
@@ -1026,13 +1040,78 @@ def test_last_message_rows_are_throttled(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
-    ws_session.subscribed("T.AAPL")
+    ws_session.wait(lambda s: any(t.message == "subscribed to: T.AAPL" for t in s.statuses))
     connection = ws_session.connection()
+    ws_session.on_loop(connection, lambda: None)  # the acknowledgement's row write runs first
+    # An interval no test outlasts, and a last write one interval before the epoch: the first
+    # message is due a rewrite and the second, however late it arrives, is not.
+    interval = 10**18
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", interval)
+    monkeypatch.setattr(ws, "_BACKLOG_ROW_DELAY", 10**9)  # the buffered rows' rewrite never fires
     written: list[int] = []
-    monkeypatch.setattr(connection, "_write_row", lambda: written.append(1))
+
+    def write() -> None:
+        written.append(1)
+        connection._message_row_at = time.time_ns()  # what the real writer records
+
+    def reset() -> None:
+        connection._message_row_at = -interval
+
+    monkeypatch.setattr(connection, "_write_row", write)
+    ws_session.on_loop(connection, reset)
     ws_session.send(trade("AAPL"))
     ws_session.send(trade("AAPL"))
-    assert len(written) <= 1
+    assert written == [1]
+    ws_session.session.release(result)
+
+
+def test_rows_buffered_while_row_writes_are_throttled_still_show(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The message right after a row write does not rewrite the row, so the rows it buffers
+    # must still schedule the backlog rewrite: with no further message, nothing else would.
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.wait(lambda s: any(t.message == "subscribed to: T.AAPL" for t in s.statuses))
+    connection = ws_session.connection()
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", 10**18)  # every message row write is throttled
+
+    def quiet() -> bool:
+        if connection._backlog_timer is not None:
+            connection._backlog_timer.cancel()
+            connection._backlog_timer = None
+        return connection.flusher.backlog == 0
+
+    assert ws_session.on_loop(connection, quiet)  # nothing buffered, no rewrite scheduled
+    ws_session.send(trade("AAPL"))
+    assert ws_session.on_loop(connection, lambda: connection._backlog_timer is not None)
+    ws_session.flush()
+    ws_session.session.release(result)
+
+
+def test_one_acknowledgement_frame_rewrites_the_row_once(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Massive answers a subscribe frame with one status per topic, all in one frame. Each
+    # status changes the counts, but the row reads every topic, so it is rewritten once for
+    # the frame, not once per status: per status, a large subscription costs O(topics²) and
+    # stalls the loop for seconds.
+    written: list[int] = []
+    write = ws.Connection._write_row
+
+    def counting(connection: ws.Connection) -> None:
+        written.append(1)
+        write(connection)
+
+    monkeypatch.setattr(ws.Connection, "_write_row", counting)
+    symbols = [f"S{i:04}" for i in range(1000)]
+    result = ws_session.query(TRADES, symbols).blink()
+    ws_session.wait(
+        lambda s: sum(t.message.startswith("subscribed to:") for t in s.statuses) == 1000
+    )
+    connection = ws_session.connection()
+    counts = ws_session.on_loop(connection, connection.subscriptions.counts)  # after the publish
+    assert counts == (1000, 1000, 0, 0)
+    assert len(written) <= 4  # the connecting, connected, and subscribing rows, then the frame
     ws_session.session.release(result)
 
 
@@ -1824,4 +1903,149 @@ def test_a_removal_never_overtakes_a_slow_lookup_of_the_same_pair(
     assert cast("int", position(added_dot)) < cast("int", position(removed_dot))
     ws_session.subscribed("XT.ETH-USD")
     ws_session.unsubscribed("XT.DOT-USD")
+    ws_session.session.release(result)
+
+
+def test_a_verdict_on_every_frame_of_a_step_moves_the_streams_without_failing_them(
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # A step of more than 1,000 topics goes out in two subscribe frames, and the server refuses
+    # each. The second verdict must find the move under way, not fail the streams being moved.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections._reconnect_backoff = 0.01
+    message = "Real-time data requires an upgrade"
+    fake_ws_server.step_refusals.extend([message] * 2)
+    record = custom_session.connections._record_verdict
+
+    def record_after_both(
+        asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        # The hand-over waits for the verdict to be recorded: hold it until both refusals
+        # have reached the old connection, so they arrive while its streams are moving.
+        custom_session.wait(lambda s: sum(t.kind is StatusKind.REFUSED for t in s.statuses) == 2)
+        record(asset_class, family, decision)
+
+    custom_session.connections._record_verdict = record_after_both
+    symbols = [f"S{i:04}" for i in range(1001)]
+    result = custom_session.query(FUTURES, symbols).blink()
+    custom_session.wait(lambda s: s.opens == 2)
+    assert custom_session.urls == ["wss://socket.test/futures", "wss://delayed.test/futures"]
+    custom_session.subscribed("T.S0000", "T.S1000")
+    # The old connection's last flush applies whatever failure it had queued.
+    wait_for(
+        lambda: (
+            not any(t.name == "massive-flush socket.test/futures" for t in threading.enumerate())
+        )
+    )
+    assert len(custom_session.verdicts) == 1
+    [stream] = streams_of(custom_session, dh_to_pylist)
+    assert (stream["State"], stream["Error"], stream["Host"]) == (
+        "RUNNING",
+        None,
+        "delayed.test",
+    )
+    custom_session.session.release(result)
+
+
+def test_a_static_symbol_table_subscribes_its_symbols_once(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    fixed = new_table([string_col("Symbol", ["AAPL", "MSFT"])])
+    results = [ws_session.query(TRADES, fixed).blink(), ws_session.query(TRADES, fixed).last_by()]
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    [stream] = streams_of(ws_session, dh_to_pylist)
+    assert (stream["SymbolCount"], stream["State"]) == (2, "RUNNING")
+    for result in results:
+        ws_session.session.release(result)
+
+
+def test_the_next_reconnect_time_is_shown_only_while_waiting(ws_session: WsSession) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+
+    def after(*states: tuple[WsState, float | None]) -> int | None:
+        for state, detail in states:
+            connection._on_state(state, detail)
+        return connection._next_reconnect_at
+
+    assert ws_session.on_loop(connection, lambda: after((WsState.RECONNECTING, 2.0))) == 2 * 10**9
+    assert ws_session.on_loop(connection, lambda: after((WsState.CONNECTING, None))) is None
+    ws_session.session.release(result)
+
+
+def test_a_connections_drift_key_is_fixed_when_it_is_created(ws_session: WsSession) -> None:
+    forex = ws_session.query(FOREX, ["C:EURUSD"]).blink()
+    ws_session.subscribed("C.EUR-USD")
+    connection = ws_session.connection("wss://socket.test/forex")
+    key = ("WS", "forex", ChannelFamily.TICK.value)
+    assert connection.key == key
+    fmv = ws_session.query(FOREX_FMV, ["C:EURUSD"]).blink()  # joins the same connection
+    ws_session.subscribed("FMV.EUR-USD")
+    with ws_session.session._core.registry_lock:
+        assert connection.families == {ChannelFamily.TICK, ChannelFamily.FMV}
+    assert connection.key == key
+    ws_session.session.release(forex)
+    ws_session.session.release(fmv)
+
+
+def test_the_backlog_rewrite_repeats_until_the_rows_are_published(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One message, then silence: the rewrite its rows scheduled must schedule the next one
+    # while rows remain, so BufferedRows reaches 0 however long the flush stays behind.
+    monkeypatch.setattr(ws, "_BACKLOG_ROW_DELAY", 0.01)
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.wait(lambda s: any(t.message == "subscribed to: T.AAPL" for t in s.statuses))
+    connection = ws_session.connection()
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", 10**18)  # messages never rewrite the row
+    fired: list[int] = []
+    twice = threading.Event()
+    rewrite = connection._backlog_row
+
+    def counted() -> None:
+        rewrite()
+        fired.append(connection.flusher.backlog)
+        if len(fired) == 2:
+            twice.set()
+
+    monkeypatch.setattr(connection, "_backlog_row", counted)
+    ws_session.send(trade("AAPL"))
+    assert twice.wait(TIMEOUT)  # a second rewrite, with no message since the first
+    assert fired[:2] == [1, 1]
+    ws_session.flush()
+
+    def shown() -> int:
+        [row] = connections_of(ws_session, dh_to_pylist)
+        return cast("int", row["BufferedRows"])
+
+    wait_for(lambda: shown() == 0)
+    ws_session.session.release(result)
+
+
+def test_buffered_rows_are_shown_until_they_are_published(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws, "_BACKLOG_ROW_DELAY", 0.05)
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", 0)  # every message rewrites the row
+    ws_session.send(trade("AAPL"), trade("AAPL"))
+    assert ws_session.on_loop(connection, lambda: connection.flusher.backlog) == 2
+    [row] = connections_of(ws_session, dh_to_pylist)
+    assert row["BufferedRows"] == 2
+    ws_session.flush()  # no message follows: the row is rewritten by itself once the rows went
+
+    def shown() -> int:
+        [row] = connections_of(ws_session, dh_to_pylist)
+        return cast("int", row["BufferedRows"])
+
+    wait_for(lambda: shown() == 0)
     ws_session.session.release(result)
