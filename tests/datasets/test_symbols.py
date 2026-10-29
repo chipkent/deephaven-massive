@@ -16,6 +16,7 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.symbols import (
+    NO_PAIRS,
     SymbolTable,
     WireSymbols,
     canonical_from_wire,
@@ -275,9 +276,22 @@ def test_a_convention_refuses_another_class_prefix() -> None:
         dm.canonical_symbol("X:BTC-USD", STK, convention=SymbolConvention.YAHOO)
 
 
-def test_a_convention_applies_to_stocks_only() -> None:
-    with pytest.raises(ValueError, match=r"^a convention applies to stocks only, not forex$"):
-        dm.canonical_symbol("EUR/USD", FX, convention=SymbolConvention.YAHOO)
+def test_a_stock_convention_applies_to_stocks_only() -> None:
+    for convention in (SymbolConvention.YAHOO, SymbolConvention.NASDAQ, SymbolConvention.CMS):
+        message = rf"^the {convention.name} convention applies to stocks only, not forex$"
+        with pytest.raises(ValueError, match=message):
+            dm.canonical_symbol("EUR/USD", FX, convention=convention)
+
+
+def test_the_massive_convention_is_the_default_for_every_class() -> None:
+    # Massive's own spelling: canonical text unchanged, and a class's unambiguous spellings.
+    massive = SymbolConvention.MASSIVE
+    assert dm.canonical_symbol("EUR/USD", FX, convention=massive) == "C:EURUSD"
+    assert dm.canonical_symbol("EUR/USD", FX) == "C:EURUSD"
+    assert dm.canonical_symbol("KIMpL", STK, convention=massive) == "KIMpL"
+    assert dm.canonical_symbol("SPX", IDX, convention=massive) == "I:SPX"
+    with pytest.raises(ValueError, match="another convention"):
+        dm.canonical_symbol("BRK-B", STK, convention=massive)  # Yahoo's or Nasdaq's dash
 
 
 def test_converter_enums_reject_text() -> None:
@@ -480,10 +494,9 @@ def test_forex_currencies_are_three_letters() -> None:
 )
 def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
     # A crypto split comes from Massive's crypto ticker list, given here as `pairs`.
-    pairs = {symbol: tuple(expected.split("-"))} if asset_class is CRY else None
-    assert (
-        ws_symbol(asset_class, symbol, cast("dict[str, tuple[str, str]] | None", pairs)) == expected
-    )
+    split = cast("tuple[str, str]", tuple(expected.split("-")))
+    pairs = {symbol: split} if asset_class is CRY else NO_PAIRS
+    assert ws_symbol(asset_class, symbol, pairs) == expected
 
 
 @pytest.mark.parametrize(
@@ -677,7 +690,7 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
     cache: dict[str, str | None] = {}
     with caplog.at_level(logging.WARNING, logger=symbols.__name__):
         read = reader.read(raw, cache)
-        reader.read(raw)  # a fresh read warns no spelling twice
+        reader.read(raw, {})  # a fresh read warns no spelling twice
     assert read.symbols.to_pylist() == ["C:EURUSD", None, None, "C:EURUSD", None, None, None]
     assert read.raw.to_pylist() == [None, None, "??", None, "??", "!!", "##"]
     assert read.unknown == ("!!", "##", "??")
@@ -707,7 +720,7 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
 def test_wire_symbols_log_nothing_under_fail(caplog: pytest.LogCaptureFixture) -> None:
     reader = WireSymbols("forex.quotes", FX, UnknownSymbols.FAIL)
     with caplog.at_level(logging.WARNING, logger=symbols.__name__):
-        read = reader.read(pa.array(["??", "C:EURUSD"]))
+        read = reader.read(pa.array(["??", "C:EURUSD"]), {})
     assert read.unknown == ("??",)
     assert read.symbols.to_pylist() == [None, "C:EURUSD"]
     assert caplog.records == []
@@ -721,9 +734,9 @@ def test_a_crypto_topic_takes_its_split_only_from_the_pairs_given() -> None:
     assert ws_symbol(CRY, "X:DOTUSD", pairs) == "DOT-USD"
     assert ws_symbol(CRY, "X:BTCUSD", pairs) == "BTC-USD"
     with pytest.raises(KeyError, match="X:BTCUSD"):
-        ws_symbol(CRY, "X:BTCUSD")  # no split given: none is guessed
-    assert ws_symbol(FX, "C:EURUSD") == "EUR-USD"
-    assert ws_symbol(STK, "AAPL") == "AAPL"
+        ws_symbol(CRY, "X:BTCUSD", NO_PAIRS)  # no split given: none is guessed
+    assert ws_symbol(FX, "C:EURUSD", NO_PAIRS) == "EUR-USD"
+    assert ws_symbol(STK, "AAPL", NO_PAIRS) == "AAPL"
     # A file may split a pair anywhere: every cut is looked for, and each reads back.
     for symbol in ("X:BTCXYZ", "X:BTCPYUSD", "X:BTCUSD"):
         spellings = wire_spellings(CRY, symbol)
@@ -744,7 +757,7 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
         with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
             check_symbol(STK, bad, as_written=True)
     reader = WireSymbols("partners.tmx.corporate_events", STK, UnknownSymbols.FAIL, as_written=True)
-    read = reader.read(pa.array(["ERIC B", None, " x"]))
+    read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]
     assert read.unknown == (" x",)
 

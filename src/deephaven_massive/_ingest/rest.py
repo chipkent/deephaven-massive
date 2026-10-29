@@ -82,6 +82,7 @@ from deephaven_massive._datasets.schema import (
     widen,
 )
 from deephaven_massive._datasets.symbols import (
+    NO_PAIRS,
     SymbolTable,
     WireSymbols,
     option_roots,
@@ -362,7 +363,7 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
         raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
     if asset_class is AssetClass.CRYPTO:
         return split(symbol)
-    base, _, quote = ws_symbol(asset_class, symbol).partition("-")
+    base, _, quote = ws_symbol(asset_class, symbol, NO_PAIRS).partition("-")
     return base, quote
 
 
@@ -829,7 +830,7 @@ class _Converter:
             else:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
-                    read = self.symbols.read(values)
+                    read = self.symbols.read(values, {})
                     if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
                         raise RowDataError(unknown_symbol_message(self.dataset, read.unknown))
                     values, raw = read.symbols, read.raw

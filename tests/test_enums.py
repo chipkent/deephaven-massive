@@ -66,7 +66,7 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
         "BASKET",
         "LT",
     ],
-    dm.SymbolConvention: ["yahoo", "nasdaq", "cms"],
+    dm.SymbolConvention: ["massive", "yahoo", "nasdaq", "cms"],
     dm.OnError: ["raise", "null"],
     dm.UnknownSymbols: ["fail", "warn"],
 }
@@ -292,7 +292,7 @@ def test_literal_detection_ignores_enum_members() -> None:
 _FUTURES_ENUMS = "namespaces/test_futures.py::test_enum_parameters_reject_plain_strings"
 
 _CONVERTER_ENUMS = "datasets/test_symbols.py::test_converter_enums_reject_text"
-_CANONICALIZE_ENUMS = "tables/test_watchlist.py::test_canonicalize_symbols_rejects_bad_arguments"
+_CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
 
 ENUM_PARAMETERS = {
     "MassiveConfig.__init__.ws_hosts": "test_config.py::test_ws_hosts_types",

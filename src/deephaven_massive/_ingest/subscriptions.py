@@ -84,7 +84,7 @@ def stream_topics(
     channel: str,
     symbols: Iterable[str],
     *,
-    pairs: Mapping[str, tuple[str, str]] | None = None,
+    pairs: Mapping[str, tuple[str, str]],
 ) -> frozenset[str]:
     """Return the topics of canonical symbols on a channel, in the wire's spelling.
 
@@ -94,7 +94,7 @@ def stream_topics(
         channel: The channel, such as `"T"`.
         symbols: Canonical symbols.
         pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list;
-            None for a class other than crypto.
+            `NO_PAIRS` for a class other than crypto.
 
     Returns:
         The topics, such as `{"T.AAPL", "T.MSFT"}`.

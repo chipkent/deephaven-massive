@@ -368,20 +368,27 @@ class Sip(StrEnum):
 
 
 class SymbolConvention(StrEnum):
-    """A US stock ticker convention another source writes, which `canonical_symbol` converts.
+    """The convention a symbol is written in, which `canonical_symbol` converts from.
 
     Massive writes a share class as `.B` (`BRK.B`) and a preferred as a lower-case `p` and its
-    series (`KIMpL`), as the CTA's CQS convention does, so CQS text needs no conversion. Each
-    member names the exact grammar of one other convention; only plain tickers, share classes,
-    and preferreds convert, because Massive documents no spelling for warrants, units, rights,
-    or when-issued shares.
+    series (`KIMpL`), as the CTA's CQS convention does, so CQS text needs no conversion. The
+    other members name the exact grammar of one other US stock convention; only plain
+    tickers, share classes, and preferreds convert, because Massive documents no spelling for
+    warrants, units, rights, or when-issued shares.
 
+    - `MASSIVE`: Massive's own spelling, the default. A canonical ticker comes back unchanged;
+      a forex, crypto, index, or option symbol in another unambiguous spelling of its class
+      converts (`EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX` for the indices class); a stock
+      ticker in another convention's spelling raises, since `-` means a class to Yahoo and a
+      preferred to Nasdaq. It is the only member every class takes.
     - `YAHOO`: Yahoo Finance; a class is `-B` (`BRK-B`), a preferred `-P` and its series
       (`BAC-PL`).
     - `NASDAQ`: the Nasdaq Integrated Platform symbology (the "NASDAQ Symbol" column of
       `nasdaqtraded.txt`); a class is `.B`, a preferred `-` and its optional series (`KIM-L`).
     - `CMS`: the root, a space, and a suffix, as many broker and FIX systems write it; a class
       is ` B` (`BRK B`), a preferred ` PR` and its optional series (`BAC PRL`).
+
+    `YAHOO`, `NASDAQ`, and `CMS` apply to stocks only.
 
     Example:
         ::
@@ -393,6 +400,7 @@ class SymbolConvention(StrEnum):
             )  # 'BACpL'
     """
 
+    MASSIVE = "massive"
     YAHOO = "yahoo"
     NASDAQ = "nasdaq"
     CMS = "cms"

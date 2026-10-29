@@ -33,11 +33,11 @@ Public API:
     - The symbol converters. Every dataset takes, and every `Symbol` column holds, Massive's
       exact REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`,
       `C:EURUSD`, `X:BTCUSD`); these turn other spellings into it:
-      `canonical_symbol(text, asset_class, convention=None)`, one function per class for query
-      strings (`canonical_symbol_stock`, `canonical_symbol_option`, `canonical_symbol_future`,
-      `canonical_symbol_future_spread`,
-      `canonical_symbol_index`, `canonical_symbol_forex`, `canonical_symbol_crypto`), one per
-      stock convention (`canonical_symbol_stock_yahoo`, `canonical_symbol_stock_nasdaq`,
+      `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function
+      per class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
+      `canonical_symbol_future`, `canonical_symbol_future_spread`, `canonical_symbol_index`,
+      `canonical_symbol_forex`, `canonical_symbol_crypto`), one per stock convention
+      (`canonical_symbol_stock_yahoo`, `canonical_symbol_stock_nasdaq`,
       `canonical_symbol_stock_cms`), and the table form `canonicalize_symbols`. In a query
       string, import a converter by bare name for a `String` column
       (`from deephaven_massive import canonical_symbol_forex`); called as `dm.…` it makes an
@@ -151,7 +151,7 @@ _EXPORTS: dict[str, str] = {
     "canonical_symbol_stock_cms": "deephaven_massive._datasets.symbols",
     "canonical_symbol_stock_nasdaq": "deephaven_massive._datasets.symbols",
     "canonical_symbol_stock_yahoo": "deephaven_massive._datasets.symbols",
-    "canonicalize_symbols": "deephaven_massive._tables.watchlist",
+    "canonicalize_symbols": "deephaven_massive._tables.symbols",
     "OnError": "deephaven_massive._enums",
     "SymbolConvention": "deephaven_massive._enums",
     "UnknownSymbols": "deephaven_massive._enums",
@@ -196,7 +196,7 @@ if TYPE_CHECKING:
     )
     from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
     from deephaven_massive._session import MassiveSession
-    from deephaven_massive._tables.watchlist import canonicalize_symbols
+    from deephaven_massive._tables.symbols import canonicalize_symbols
     from deephaven_massive._types import ALL
 else:
 

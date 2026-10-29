@@ -163,7 +163,8 @@ dm.EntitlementError        # subclass of MassiveError: the plan lacks the datase
 dm.ALL                     # every symbol on the stream, in the flat file, or in the snapshot
 
 # Symbol converters: other spellings to Massive's exact REST ticker (section 10)
-dm.canonical_symbol              # (text, asset_class, *, convention=None) -> str | None
+dm.canonical_symbol              # (text, asset_class, *,
+                                 #  convention=SymbolConvention.MASSIVE) -> str | None
 dm.canonical_symbol_stock        # (text) -> str | None, one per class, for query strings
 dm.canonical_symbol_option
 dm.canonical_symbol_future        # a single futures contract
@@ -174,7 +175,8 @@ dm.canonical_symbol_crypto
 dm.canonical_symbol_stock_yahoo  # (text) -> str | None, one per stock convention
 dm.canonical_symbol_stock_nasdaq
 dm.canonical_symbol_stock_cms
-dm.canonicalize_symbols          # (table, asset_class, *, column="Symbol", convention=None,
+dm.canonicalize_symbols          # (table, asset_class, *, column="Symbol",
+                                 #  convention=SymbolConvention.MASSIVE,
                                  #  on_error=OnError.RAISE) -> Table
 
 # Enums (all StrEnum; values are Massive's wire strings where the enum reaches the wire)
@@ -277,7 +279,10 @@ _tables/                 the Deephaven side: tables, liveness, library threads
   liveness.py            result and stream scopes, records, reaper queue (section 6.1)
   diagnostics.py         connections() and streams() with SchemaDrift; DriftRegistry (section 17)
   columns.py             ColumnType -> Deephaven type, column definitions; describe() (section 7.4)
-  watchlist.py           read_symbols(), SymbolWatch, canonicalize_symbols() (section 10)
+  watchlist.py           read_symbols(), SymbolWatch: the check and watch of symbol tables
+                         (section 10)
+  symbols.py             canonicalize_symbols(), the table form of the symbol converters
+                         (section 10)
   stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
                          (section 14)
 _ingest/                 the only holder of wire clients
@@ -1647,7 +1652,7 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   grammar is unverified, so a builder waits for a live check
   ([section 23](#23-open-verification-items)).
 - **The converters** are the public way to another spelling. `dm.canonical_symbol(text,
-  asset_class, *, convention=None)` takes a required `AssetClass`: the class is never guessed,
+  asset_class, *, convention=SymbolConvention.MASSIVE)` takes a required `AssetClass`: the class is never guessed,
   so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes any
   ticker as Massive writes it. One function per class
   (`canonical_symbol_stock`, `_option`, `_future`, `_index`, `_forex`, `_crypto`), the spread
@@ -1667,9 +1672,13 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   index, and futures text is never re-cased, and nothing is guessed: `aapl` raises saying that
   tickers are case-sensitive, with an upper-case root and possibly a lower-case suffix. The
   converters are pure and thread-safe.
-- **Stock conventions.** A stock spelling converts only from a named `SymbolConvention`,
-  because `-` means a class in Yahoo's and a preferred in Nasdaq's; without one, `-`, `/`, and
-  a space raise a hint naming the conventions. Each converts exactly its plain tickers, share
+- **Stock conventions.** `SymbolConvention.MASSIVE`, the default of every `convention`
+  parameter and the only member every class takes, is Massive's own spelling: canonical text
+  passes unchanged and a class's unambiguous spellings convert (`EUR/USD`, `SPX` for the
+  indices class). A stock spelling converts only from a named stock convention (`YAHOO`,
+  `NASDAQ`, `CMS`), because `-` means a class in Yahoo's and a preferred in Nasdaq's; under
+  `MASSIVE`, `-`, `/`, and a space raise a hint naming the conventions, and a stock convention
+  for another class raises `ValueError`. No `convention` parameter takes None. Each converts exactly its plain tickers, share
   classes, and preferreds, and refuses the rest, since Massive documents no spelling for
   warrants, units, rights, when-issued, when-distributed, called, or test issues:
 
@@ -1687,8 +1696,9 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   convention (CQS and CMS write units as `U`). CQS is not a member: it is Massive's own
   spelling of classes and preferreds. Nasdaq's ACT symbology is not
   supported: it writes `.W` for warrants and `.V` for both a class and when-issued.
-- **`dm.canonicalize_symbols(table, asset_class, *, column="Symbol", convention=None,
-  on_error=dm.OnError.RAISE)`** is the table form and the only lenient path. The table's
+- **`dm.canonicalize_symbols(table, asset_class, *, column="Symbol",
+  convention=dm.SymbolConvention.MASSIVE, on_error=dm.OnError.RAISE)`**, in
+  `_tables/symbols.py`, is the table form and the only lenient path. The table's
   current rows are converted in Python first (one call per distinct value), static or
   refreshing, so `RAISE` gives a clean `ValueError` listing up to five values; every table is
   then converted by `update`, so under `RAISE` a later bad row of a refreshing table fails the
@@ -1801,7 +1811,7 @@ has the same value set as that parameter.
 | `Locale` | US, GLOBAL | `us`, `global` | `reference.ticker_types`, `reference.exchanges` |
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
-| `SymbolConvention` | YAHOO, NASDAQ, CMS | `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
+| `SymbolConvention` | MASSIVE, YAHOO, NASDAQ, CMS | `massive`, `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
 | `OnError` | RAISE, NULL | `raise`, `null` | `canonicalize_symbols` (`on_error`) |
 | `UnknownSymbols` | FAIL, WARN | `fail`, `warn` | `MassiveConfig.unknown_symbols` and `MASSIVE_UNKNOWN_SYMBOLS` |
 
@@ -4569,7 +4579,8 @@ document already reflects them.
     class and per stock convention for query strings, and `canonicalize_symbols`, the only
     lenient path (`OnError.NULL`). Stock separators convert only from a named
     `SymbolConvention` (`YAHOO`, `NASDAQ`, `CMS`), each exactly for plain tickers, classes,
-    and preferreds. A later watchlist row that is not canonical fails that result, naming
+    and preferreds; `SymbolConvention.MASSIVE`, Massive's own spelling, is the default, and
+    no convention parameter takes None. A later watchlist row that is not canonical fails that result, naming
     `canonicalize_symbols(..., on_error=OnError.NULL)`. A symbol Massive sends in a spelling the
     library cannot read fails by default; `MassiveConfig.unknown_symbols` (`MASSIVE_UNKNOWN_SYMBOLS`)
     set to `WARN` keeps the row with a null `Symbol` and the text in `RawSymbol`. The index

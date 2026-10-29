@@ -453,7 +453,7 @@ class _Transform:
             elif name == RAW_SYMBOL:
                 values = raw
             elif name == "Symbol":
-                read = self.symbols.read(batch["Symbol"])
+                read = self.symbols.read(batch["Symbol"], {})
                 if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
                     raise MassiveError(unknown_symbol_message(self.dataset, read.unknown))
                 values, raw = read.symbols, read.raw

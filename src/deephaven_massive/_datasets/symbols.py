@@ -57,6 +57,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
 __all__ = [
+    "NO_PAIRS",
     "NormalizedSymbols",
     "ReadSymbols",
     "SymbolTable",
@@ -172,6 +174,8 @@ _CLASS_NAMES: Final[dict[AssetClass, str]] = {
 """The singular noun of each class, as the per-class converters are named."""
 _CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES: "futures"}
 """The noun of each class as messages write it before "ticker" (`a futures ticker`)."""
+NO_PAIRS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType({})
+"""The crypto splits of a topic or path that has no crypto symbol (`ws_symbol`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -722,16 +726,19 @@ def _require_text(text: object) -> str | None:
 
 
 def canonical_symbol(
-    text: str | None, asset_class: AssetClass, *, convention: SymbolConvention | None = None
+    text: str | None,
+    asset_class: AssetClass,
+    *,
+    convention: SymbolConvention = SymbolConvention.MASSIVE,
 ) -> str | None:
     """Convert a symbol of a named asset class to Massive's exact REST ticker.
 
     Use it to turn symbols from another source into the form every dataset takes and every
-    `Symbol` column holds, before passing them as `symbols=`. Without a convention, canonical
-    text comes back unchanged; another spelling of the class converts (`EUR/USD` to
-    `C:EURUSD`, `SPX` to `I:SPX`); anything else raises. With a convention, only that
-    convention's grammar applies, so text it does not spell raises even when it happens to be
-    a Massive ticker. The class is never guessed: `SPX` is an index only because
+    `Symbol` column holds, before passing them as `symbols=`. Under `SymbolConvention.MASSIVE`,
+    the default, canonical text comes back unchanged; another spelling of the class converts
+    (`EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX`); anything else raises. Under another convention,
+    only that convention's grammar applies, so text it does not spell raises even when it
+    happens to be a Massive ticker. The class is never guessed: `SPX` is an index only because
     the caller says so. In a Deephaven query string, call the per-class functions instead
     (`canonical_symbol_forex`), which need no enum argument; a function called through the
     module (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
@@ -750,33 +757,36 @@ def canonical_symbol(
     Args:
         text: The symbol, or None.
         asset_class: The symbol's class, whose rules apply. Required: nothing is inferred.
-        convention: For stocks only, the convention the text comes from
-            (`SymbolConvention.YAHOO`, `NASDAQ`, or `CMS`). None, the default, accepts only
-            Massive's own spelling: a stock ticker converts only from a named convention,
-            because `-` means a class in Yahoo's and a preferred in Nasdaq's.
+        convention: The convention the text comes from. `SymbolConvention.MASSIVE`, the
+            default, accepts Massive's own spelling and the unambiguous spellings of the class;
+            `YAHOO`, `NASDAQ`, and `CMS`, for stocks only, convert from that convention's
+            grammar alone. A stock ticker converts only from a named convention, because `-`
+            means a class in Yahoo's and a preferred in Nasdaq's.
 
     Returns:
         The canonical ticker, or None for None.
 
     Raises:
-        ValueError: If `convention` is given for a class other than stocks, or the text is
+        ValueError: If `convention` is a stock convention and the class is not stocks, or the
+            text is
             not a symbol of the class in any accepted spelling. The message gives the reason
             and, where one exists, the fix: a ticker with another class's prefix names that
             class's function.
 
-    An `asset_class` that is not a `dm.AssetClass`, a `convention` that is neither None nor a
+    An `asset_class` that is not a `dm.AssetClass`, a `convention` that is not a
     `dm.SymbolConvention`, or a `text` that is neither a `str` nor None raises `TypeError`.
     """
     resolved = _require_enum(asset_class, AssetClass, "asset_class")
-    if convention is not None:
-        convention = _require_enum(convention, SymbolConvention, "convention")
-        if resolved is not AssetClass.STOCKS:
-            raise ValueError(f"a convention applies to stocks only, not {resolved.value}")
+    chosen = _require_enum(convention, SymbolConvention, "convention")
+    if chosen is not SymbolConvention.MASSIVE and resolved is not AssetClass.STOCKS:
+        raise ValueError(
+            f"the {chosen.name} convention applies to stocks only, not {resolved.value}"
+        )
     value = _require_text(text)
     if value is None:
         return None
-    if convention is not None:
-        return _convert_stock_from(value, convention)
+    if chosen is not SymbolConvention.MASSIVE:
+        return _convert_stock_from(value, chosen)
     if _CANONICAL[resolved](value):
         return value
     return _CONVERTERS[resolved](value)
@@ -1233,9 +1243,7 @@ def wire_spellings(asset_class: AssetClass | None, symbol: str) -> tuple[str, ..
     return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
 
 
-def ws_symbol(
-    asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[str, str]] | None = None
-) -> str:
+def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[str, str]]) -> str:
     """Return the WebSocket spelling of a canonical symbol, as topics use it.
 
     Forex and crypto become `BASE-QUOTE` (`C:EURUSD` to `EUR-USD`, `X:BTCUSD` to `BTC-USD`);
@@ -1252,7 +1260,8 @@ def ws_symbol(
         asset_class: The symbol's class.
         symbol: A canonical symbol.
         pairs: The base and quote of crypto symbols by canonical symbol, from Massive's crypto
-            ticker list; every crypto symbol must be in it. None for no crypto symbol.
+            ticker list; every crypto symbol must be in it. `NO_PAIRS` for a class other than
+            crypto, which needs none.
 
     Returns:
         The WebSocket form.
@@ -1267,7 +1276,7 @@ def ws_symbol(
         body = symbol.removeprefix("C:")
         return f"{body[:_CURRENCY_CODE_LENGTH]}-{body[_CURRENCY_CODE_LENGTH:]}"
     if asset_class is AssetClass.CRYPTO:
-        base, quote = (pairs or {})[symbol]
+        base, quote = pairs[symbol]
         return f"{base}-{quote}"
     return symbol
 
@@ -1359,20 +1368,20 @@ class WireSymbols:
     unknown: UnknownSymbols
     as_written: bool = False
 
-    def read(self, raw: pa.Array, cache: dict[str, str | None] | None = None) -> ReadSymbols:
+    def read(self, raw: pa.Array, cache: dict[str, str | None]) -> ReadSymbols:
         """Read a column of wire symbols, calling `canonical_from_wire` once per distinct text.
 
         Args:
             raw: The rows' symbols as sent; nulls allowed.
-            cache: A map from wire text to canonical symbol (None for unreadable) that the
-                caller keeps between batches and owns on one thread, read and extended here;
-                None reads each batch afresh.
+            cache: A map from wire text to canonical symbol (None for unreadable), read and
+                extended here: one the caller keeps between batches and owns on one thread, or
+                an empty one to read a batch afresh.
 
         Returns:
             The canonical symbols, the unreadable texts, and the distinct unreadable spellings.
             Under `WARN` each new unreadable spelling is logged once at WARNING.
         """
-        known = {} if cache is None else cache
+        known = cache
         distinct = pc.call_function("unique", [raw])
         texts = distinct.to_pylist()
         for text in texts:
