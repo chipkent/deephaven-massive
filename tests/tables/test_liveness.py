@@ -320,7 +320,8 @@ def test_close_fails_results_and_keeps_diagnostics_views(
     # waits for that cycle to end.
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     with shared_lock(result):
-        assert bool(result.j_table.isFailed())
+        failed = bool(result.j_table.isFailed())  # pytest cannot describe a Java method
+        assert failed
     assert result.snapshot().size == 0
     with pytest.raises(DHError, match="failed table"):
         result.tail(1)

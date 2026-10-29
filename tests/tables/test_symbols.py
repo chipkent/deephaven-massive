@@ -121,7 +121,8 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
         wait_for(lambda: result.size == 4)
     assert values(result) == ["X:BTCUSD", None, None, None]
     assert caplog.text.count("cannot read 'no pe!'") == 1
-    assert not result.j_table.isFailed()
+    failed = bool(result.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
     scope.release()
 
 

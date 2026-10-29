@@ -276,13 +276,21 @@ def dh_exec_ctx() -> ExecutionContext:
 def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     """Return a function that snapshots a Deephaven table into a list of row dictionaries.
 
+    The conversion holds the update graph's shared lock, so no update cycle runs while it
+    reads a live table. Deephaven's Arrow conversion snapshots the rows consistently, but
+    first reads the table's flatness without a lock. On a table Deephaven marks flat (a
+    `select_distinct`, for one), that read asserts the row set is flat by comparing its last
+    key with its size, two separate reads that a cycle growing the row set can fall between.
+
     Returns:
         A function mapping a table to one `{column: value}` dictionary per row.
     """
     dh_arrow = importlib.import_module("deephaven.arrow")
+    update_graph = importlib.import_module("deephaven.update_graph")
 
     def to_pylist(table: Table) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = dh_arrow.to_arrow(table).to_pylist()
+        with update_graph.shared_lock(table):
+            rows: list[dict[str, Any]] = dh_arrow.to_arrow(table).to_pylist()
         return rows
 
     return to_pylist

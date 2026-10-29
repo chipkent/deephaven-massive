@@ -36,7 +36,8 @@ everything else the library decides belongs here:
   and leaves the registry. A fatal failure (a rejected key, a handshake error retrying cannot
   fix) fails every stream on it, a stream opening at that moment included. `m.close()` removes
   the session's streams from their connections, closes every connection no other session
-  leases, and waits a bounded time for its threads. While a connection waits for a slot
+  leases, and waits a bounded time for its threads; a connection the real-time verdict is
+  moving closes itself once it has handed its streams over. While a connection waits for a slot
   (`WAITING_SLOT`), each of its streams says so in its `Error`.
 
 **Threads and locks.** Each connection's subscription state is confined to its client's loop
@@ -2279,6 +2280,9 @@ class WsConnections:
         unused connections are closed (which interrupts a backoff wait at once) and each is
         joined for at most `JOIN_TIMEOUT` seconds, with a WARNING for one that has not ended.
         A connection whose loop has ended keeps no stream (`Connection._on_state`).
+        A connection the server's real-time verdict is moving, between the move and its
+        hand-over, is neither closed nor joined here: it is out of the registry and its leases
+        are on its successor, and its hand-over closes it (`Connection.hand_over`).
         Last, the session leaves the group.
         """
         with self._lock:
