@@ -2875,8 +2875,9 @@ without the GIL.
     the reader threads. The session's `SessionClients` creates the `FlatFileClient` on the
     session's first flat-file read, under `registry_lock` (the constructor only stores
     settings), and registers its close after releasing the lock;
-  - the `net.http` TLS-context cache, one per process, which builds each certificate
-    setting's context once (reading the bundle from local disk) and looks it up afterwards;
+  - the `net.http` TLS-context cache, one per process, which builds each consumer's context
+    for a certificate setting once (reading the bundle from local disk) and looks it up
+    afterwards; the certificate file and directory are examined before the lock is taken;
   - the `_massive.spec` loaders, which load each generated file once;
   - `RestClient`'s not-before instant (section 19.1);
   - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;
@@ -2964,7 +2965,7 @@ net/                 shared by every client; imports nothing else in _massive
   __init__.py        USER_AGENT; re-exports
   errors.py          WireError, WireAuthError, WireEntitlementError
   http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); one shared TLS context
-                     per process and certificate setting; proxy from HTTPS_PROXY/NO_PROXY
+                     per process, consumer, and certificate setting; proxy from HTTPS_PROXY/NO_PROXY
   retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; 15/30/60 s for 429),
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
@@ -3138,13 +3139,19 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   with the same `net.http.ssl_context()` as Massive. The CA bundle is the
   system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
   `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise. One context is
-  built per process for each pair of `SSL_CERT_FILE` and `SSL_CERT_DIR` values, under a lock,
-  and shared by every REST and WebSocket client and every connection: building one parses the
-  bundle, a few milliseconds each, and a configured `SSLContext` is safe to share between
-  threads. The proxy settings do not shape the context, so they are not part of its key. The
-  shared context offers ALPN `http/1.1`, the list urllib3 sets on it before every connection
-  anyway, so the WebSocket client's handshake does not depend on which client connected first.
-  A bundle edited in place at the same path is read again only by a new process.
+  built per process for each consumer (urllib3 or `websockets`) and certificate setting, under
+  a lock, and shared by every client of that consumer and every connection: building one parses
+  the bundle, a few milliseconds each, and a configured `SSLContext` is safe to share between
+  threads (CPython guards each context's OpenSSL state with its own lock). The certificate
+  setting is the values of `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `SSLKEYLOGFILE`, plus the
+  modification time, size, and inode of the file and directory the first two name (nothing
+  when the path does not exist), so a bundle created, replaced, or edited at runtime, the
+  recovery the certificate error messages advise, takes effect for the next client without a
+  restart. urllib3 and `websockets` never share a context because urllib3 writes its
+  verification mode and ALPN list onto the context it is given before every connection. The
+  proxy settings do not shape the context, so they are not part of its key. Every context
+  offers ALPN `http/1.1`: REST and the WebSocket upgrade are both HTTP/1.1, and live handshakes
+  with Massive's REST, real-time, and delayed hosts select it over verified TLS 1.3.
 - **Query encoding.** Path parameters are encoded like query values, then percent-encoded
   whole into the template. Values, by the parameter's `ParamKind`: an enum by its value (one of
   `Param.values`), `bool` as `true`/`false` (never for an integer or number), a `date` as

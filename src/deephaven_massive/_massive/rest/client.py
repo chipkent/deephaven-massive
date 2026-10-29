@@ -32,7 +32,12 @@ import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.net.http import https_proxy, proxy_credentials, ssl_context
+from deephaven_massive._massive.net.http import (
+    TlsConsumer,
+    https_proxy,
+    proxy_credentials,
+    ssl_context,
+)
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     MAX_RETRY_AFTER,
@@ -243,18 +248,18 @@ class RestClient:
             self._pool = urllib3.ProxyManager(
                 proxy_url,
                 proxy_headers=proxy_headers,
-                proxy_ssl_context=ssl_context(),
+                proxy_ssl_context=ssl_context(TlsConsumer.URLLIB3),
                 maxsize=max_concurrency,
                 retries=_NO_RETRIES,
                 timeout=timeout,
-                ssl_context=ssl_context(),
+                ssl_context=ssl_context(TlsConsumer.URLLIB3),
             )
         else:
             self._pool = urllib3.PoolManager(
                 maxsize=max_concurrency,
                 retries=_NO_RETRIES,
                 timeout=timeout,
-                ssl_context=ssl_context(),
+                ssl_context=ssl_context(TlsConsumer.URLLIB3),
             )
         self._lock = threading.Lock()
         self._not_before = float("-inf")
