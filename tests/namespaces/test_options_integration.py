@@ -1,4 +1,4 @@
-"""Live checks of options reference data against Massive: underlyings and deliverables.
+"""Live checks of options data against Massive: underlyings, deliverables, and bar stamps.
 
 Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
 the evidence, not a pass, answers the question. Raw rows come from the wire REST client,
@@ -9,7 +9,7 @@ read them; the library's own answer is recorded beside them. How to run these te
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +25,7 @@ from deephaven_massive._massive import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -38,6 +38,25 @@ pytestmark = pytest.mark.integration
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
 HalfDayReport: TypeAlias = "Callable[[str, str], list[str]]"
+RestRows: TypeAlias = (
+    "Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]]"
+)
+FlatFileTickers: TypeAlias = (
+    "Callable[[str, date, Collection[str] | None], "
+    "tuple[list[dict[str, str | None]], frozenset[str]] | None]"
+)
+StampedBar: TypeAlias = "tuple[int, tuple[float | None, ...]]"
+StampDays: TypeAlias = "dict[str, tuple[date, date]]"
+RangeBars: TypeAlias = "Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]"
+ToStampedBar: TypeAlias = "Callable[[Mapping[str, Any]], StampedBar]"
+DayBarReport: TypeAlias = (
+    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]"
+)
+PrevBarReport: TypeAlias = "Callable[[str], int]"
+PeriodBarReport: TypeAlias = (
+    "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
+)
+LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 
 _CONTRACTS = "/v3/reference/options/contracts"
 _CHAIN = "/v3/snapshot/options/{underlyingAsset}"
@@ -327,6 +346,271 @@ def test_half_day_option_bars_and_their_stamps(
     for line in lines:
         evidence(line)
     assert lines
+
+
+_DAY_FILE = "us_options_opra/day_aggs_v1"
+_SPY_PREV = "/v2/aggs/ticker/{stocksTicker}/prev"
+_SPX_SPELLINGS = ("SPX", "I:SPX", "SPXW")
+"""The `underlying_ticker` spellings tried for SPXW contracts, which the reference may file
+under any of them."""
+
+
+def _december_expiry(year: int) -> date:
+    """Return the third Friday of December: a monthly expiration, never a market holiday.
+
+    Returns:
+        The date, between December 15 and 21.
+    """
+    first = date(year, 12, 1)
+    return first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+
+
+def _stamp_candidates(range_bars: RangeBars, full_day: date) -> dict[str, list[str]]:
+    """Return SPY and SPXW calls that were listed on the stamp days, nearest strike first.
+
+    The calls expire on the third Friday of December of the stamp days' year, after the half
+    day. SPY strikes are taken every $5 around SPY's close of the full day, and SPXW strikes
+    every 25 points around ten times it (SPX trades near ten times SPY); each list ends with
+    the two neighbouring strikes, in case the nearest did not trade.
+
+    Returns:
+        The candidates, by root.
+    """
+    bars = range_bars("SPY", "day", (full_day, full_day))
+    assert len(bars) == 1, f"SPY range 1-day bars of {full_day}: {bars}"
+    close = float(bars[0]["c"])
+    code = f"{_december_expiry(full_day.year):%y%m%d}"
+
+    def candidates(root: str, level: float, step: int) -> list[str]:
+        strike = round(level / step) * step
+        return [f"O:{root}{code}C{s * 1000:08d}" for s in (strike, strike + step, strike - step)]
+
+    return {"SPY": candidates("SPY", close, 5), "SPXW": candidates("SPXW", close * 10, 25)}
+
+
+def _listed_calls(
+    live_rest: RestClient, rest_rows: RestRows, evidence: Evidence
+) -> dict[str, str | None]:
+    """Return a SPY and an SPXW call listed today, at or just above the money, for `/prev`.
+
+    `/prev` serves only the most recent completed trading day, so its stamp is checked on
+    contracts listed now. Each is the lowest-strike call at or above the money (SPY's `/prev`
+    close, ten times it for SPXW) expiring 14 to 45 days from today, from one page of the
+    contracts reference; SPXW is looked up under each spelling of its underlying in turn, and
+    the spelling that answered is recorded.
+
+    Returns:
+        The ticker by root, or None for a root with no such contract.
+    """
+    prevs = rest_rows(_SPY_PREV, {"stocksTicker": "SPY"}, {})
+    assert len(prevs) == 1, f"SPY /prev returned {prevs}"
+    close = float(prevs[0]["c"])
+    today = datetime.now(UTC).date()
+    query = {
+        "contract_type": "call",
+        "expiration_date.gte": today + timedelta(days=14),
+        "expiration_date.lte": today + timedelta(days=45),
+        "sort": "strike_price",
+        "order": "asc",
+    }
+    contracts = source(Transport.REST, _CONTRACTS)
+    spy = live_rest.get(
+        contracts, {}, query | {"underlying_ticker": "SPY", "strike_price.gte": close, "limit": 1}
+    ).rows
+    found: dict[str, str | None] = {"SPY": str(spy[0]["ticker"]) if spy else None, "SPXW": None}
+    for spelling in _SPX_SPELLINGS:
+        rows = live_rest.get(
+            contracts,
+            {},
+            query
+            | {
+                "underlying_ticker": spelling,
+                "strike_price.gte": close * 10,
+                "limit": _CONTRACT_PAGE,
+            },
+        ).rows
+        spxw = [str(r["ticker"]) for r in rows if str(r["ticker"]).startswith("O:SPXW")]
+        evidence(
+            f"contracts reference underlying_ticker={spelling}: {len(rows)} calls, SPXW {spxw[:1]}"
+        )
+        if spxw:
+            found["SPXW"] = spxw[0]
+            break
+    return found
+
+
+def _stamp_contract_weeks(
+    session: dm.MassiveSession,
+    ticker: str,
+    *,
+    stamp_days: StampDays,
+    report: PeriodBarReport,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> bool:
+    """Record one stamp contract's week bars, raw and through the library, and its library days.
+
+    Returns:
+        Whether the range returned one week bar for each of the two weeks.
+    """
+    complete = report(ticker, {"week": stamp_days["week"]}, {"week": (2, 2)})
+    rest = dm.HistorySource.REST
+    daily = session.options.bars(ticker, dm.Timespan.DAY)
+    evidence(
+        f"library {ticker} history(REST): "
+        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
+    )
+    weekly = session.options.bars(ticker, dm.Timespan.WEEK)
+    evidence(
+        f"library {ticker} week history: "
+        + library_stamps(partial(weekly.history, *stamp_days["week"], source=rest))
+    )
+    return complete
+
+
+def _prev_answered(
+    session: dm.MassiveSession,
+    ticker: str,
+    *,
+    report: PrevBarReport,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> bool:
+    """Record one listed contract's `/prev` bar, raw and through the library.
+
+    A refusal propagates; any other error of the raw request is recorded instead.
+
+    Returns:
+        Whether `/prev` returned a bar.
+
+    Raises:
+        WireEntitlementError: When the key's plan refuses the request.
+    """
+    try:
+        found = report(ticker)
+    except WireEntitlementError:
+        raise
+    except WireError as error:
+        evidence(f"{ticker} /prev: {type(error).__name__}: {error}")
+        return False
+    bars = session.options.bars(ticker, dm.Timespan.DAY)
+    evidence(f"library {ticker} fetch() (/prev): {library_stamps(bars.fetch)}")
+    return found > 0
+
+
+@pytest.mark.needs("options:starter", "stocks:basic")
+@pytest.mark.settles("51")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_option_day_and_week_bar_stamps_from_rest(
+    live_session: dm.MassiveSession,
+    live_rest: RestClient,
+    *,
+    stamp_days: StampDays,
+    rest_rows: RestRows,
+    range_bars: RangeBars,
+    day_bar_report: DayBarReport,
+    prev_bar_report: PrevBarReport,
+    period_bar_report: PeriodBarReport,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> None:
+    """How REST stamps a SPY and an SPXW contract's 1-day and week bars.
+
+    The days are those of the most recent finished Thanksgiving week: its Wednesday, a full
+    trading day, and its Friday, a half day (13:00 close; 13:15 for SPXW). For a SPY and an
+    SPXW call expiring that December, struck near SPY's Wednesday close (the first strike
+    with a range bar on both days), it records each stamp in UTC and New York time: the range
+    endpoint's 1-day bars around both days and the week bars of Thanksgiving week and the week
+    before. `/prev` serves only the most recent completed trading day, so it is read for a SPY
+    and an SPXW call listed now (from the contracts reference), beside the range bars of that
+    day, with whether it is a half day and which day's bar it matches. The library's windows
+    for the same requests follow. Reading it: range stamps at 00:00 New York time and a
+    `/prev` stamp at 16:00 (16:15 for SPXW; 13:00 or 13:15 after a half day) confirm the
+    library's day label; any other stamp is refused with a `MassiveError`, shown in the
+    library lines.
+    """
+    days = stamp_days["day"]
+    candidates = _stamp_candidates(range_bars, days[0])
+    complete: dict[str, bool] = {}
+    for root, tickers in candidates.items():
+        for ticker in tickers:
+            if day_bar_report(ticker, days, {}):
+                continue
+            complete[root] = _stamp_contract_weeks(
+                live_session,
+                ticker,
+                stamp_days=stamp_days,
+                report=period_bar_report,
+                library_stamps=library_stamps,
+                evidence=evidence,
+            )
+            break
+    listed = _listed_calls(live_rest, rest_rows, evidence)
+    answered = [
+        ticker
+        for ticker in filter(None, listed.values())
+        if _prev_answered(
+            live_session,
+            ticker,
+            report=prev_bar_report,
+            library_stamps=library_stamps,
+            evidence=evidence,
+        )
+    ]
+    unpriced = [root for root in candidates if root not in complete]
+    assert not unpriced, f"no {unpriced} candidate has a range bar on both days: {candidates}"
+    assert all(complete.values()), f"a stamp contract lacks a week bar of one week: {complete}"
+    assert len(answered) == len(listed), (
+        f"/prev answered for {answered}; listed calls by root (None: none found): {listed}"
+    )
+
+
+@pytest.mark.needs("options:starter", "s3", "stocks:basic")
+@pytest.mark.settles("51")
+@pytest.mark.requests(1)
+@pytest.mark.timeout(100)
+def test_option_day_bar_stamps_of_the_day_file(
+    live_session: dm.MassiveSession,
+    *,
+    stamp_days: StampDays,
+    range_bars: RangeBars,
+    flat_file_tickers: FlatFileTickers,
+    stamped_bar: ToStampedBar,
+    day_bar_report: DayBarReport,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> None:
+    """How `us_options_opra/day_aggs_v1` stamps a SPY and an SPXW contract's 1-day bars.
+
+    Uses the candidates of the REST stamp test (calls expiring that December, struck near
+    SPY's Wednesday close) and, for each root, the first strike the file holds on both the
+    Wednesday (a full day) and the Friday (a half day) of the most recent finished
+    Thanksgiving week. Records its file rows, each `window_start` in UTC and New York time,
+    beside the range endpoint's bars around those days and which day's bar each matches with
+    the largest relative error, and the library's `history(source=FLAT_FILES)` windows.
+    Reading it: a stamp at 00:00 New York time and a match on the same day confirm one day
+    label for the files and REST.
+    """
+    days = stamp_days["day"]
+    roots = _stamp_candidates(range_bars, days[0])
+    files: dict[str, dict[date, list[StampedBar]]] = {t: {} for c in roots.values() for t in c}
+    for day in days:
+        result = flat_file_tickers(_DAY_FILE, day, list(files))
+        for row in [] if result is None else result[0]:
+            files[str(row["ticker"])].setdefault(day, []).append(stamped_bar(row))
+    chosen = {
+        root: next((t for t in tickers if len(files[t]) == len(days)), None)
+        for root, tickers in roots.items()
+    }
+    for ticker in filter(None, chosen.values()):
+        day_bar_report(ticker, days, {_DAY_FILE: files[ticker]})
+        as_traded = live_session.options.bars(ticker, dm.Timespan.DAY, adjusted=False)
+        outcome = library_stamps(
+            partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES)
+        )
+        evidence(f"library {ticker} history(FLAT_FILES): {outcome}")
+    assert all(chosen.values()), f"the day files hold no candidate on both days: {roots}"
 
 
 _NVDA_CONTRACT = "O:NVDA240621C00120000"
