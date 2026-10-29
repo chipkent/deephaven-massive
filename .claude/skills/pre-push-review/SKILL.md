@@ -139,10 +139,12 @@ rediscover it.
 
 ## 6. After the push: post the replies and prove they landed
 
-1. Post each drafted reply in its thread, naming the commit (short SHA) that fixes it.
-2. `git fetch`, then check that each named commit is on the remote branch and fixes what its
-   reply claims: `git branch -r --contains <sha>` and `git show <sha>`. A merge of `main`
-   fixes nothing.
+1. Post each drafted reply in its thread. A reply that claims a fix names the commit (short
+   SHA) that makes it; a reply that changes nothing says why.
+2. `git fetch`, then check that each commit a reply names is on the remote branch and fixes
+   what the reply claims: `git branch -r --contains <sha>` and `git show <sha>`. A merge of
+   `main` fixes nothing. For a reply that changes nothing, reread the code it cites and confirm
+   the reason still holds.
 3. When CI and the review bots have finished on the pushed commit, rerun the thread query from
    section 4: every thread's last comment is your reply. Answer any new one the same way. Only
    then report the PR as addressed or ready.

@@ -86,10 +86,10 @@ background.
 design because of it unless they say so. The owner, after a question was treated as a design
 change: "I asked a simple question … and you ran with that to make design decisions!!!"
 
-**If you can do it, do it.** Rebase, close the issues your PR resolves, or collect the links
-yourself; don't hand the owner a task you could finish. This covers work whose outcome is
-already decided. When the task itself involves a choice that is the owner's, or one you are
-unsure of, ask first.
+**If you can do it, do it.** Rebase, check that your PR's issue link will close its issue on
+merge, or collect the links yourself; don't hand the owner a task you could finish. This covers
+work whose outcome is already decided. When the task itself involves a choice that is the
+owner's, or one you are unsure of, ask first.
 
 ## 2. Check every fact now
 
