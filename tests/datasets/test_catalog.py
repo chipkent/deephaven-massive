@@ -1033,15 +1033,19 @@ class Deferral:
     issue: int
 
 
-DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
-    # (Transport.REST, "/v1/example"): Deferral("Pages by cursor only; needs a new verb.", 123),
-}
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
 A source key is the generated key the catalog uses: a REST path template, a WebSocket
-`"<cluster>/<channel>"`, or a flat-file prefix. Every entry needs a reason and an issue number.
+`"<cluster>/<channel>"`, or a flat-file prefix. Every entry needs a reason and the number of an
+open issue that will add the dataset, for example:
+
+    (Transport.REST, "/v1/example"): Deferral("Pages by cursor only; needs a new verb.", 123),
+
 The coverage test accepts a deferred source, and fails on an entry that names a source the
-refresh does not generate or one a dataset already reads, so the list cannot go stale.
+refresh does not generate or one a dataset already reads, so the list cannot go stale: the pull
+request that adds the dataset deletes the entry. Defer only what the library will serve later;
+an item it never supports is an `EXCLUSIONS` entry of the refresh instead.
 """
 
 

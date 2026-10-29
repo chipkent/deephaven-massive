@@ -6,6 +6,11 @@ checkout's `src/`:
 
     <venv>/bin/python -I scripts/check_wheel.py docs/datasets
 
+To run it locally, install `dist/*.whl` and `deephaven-server` into a new environment with
+`uv venv` and `uv pip install`, then run, from the repository root:
+
+    uv run --no-project --python <venv>/bin/python python -I scripts/check_wheel.py docs/datasets
+
 `import deephaven_massive` alone proves little, since the package imports its modules lazily.
 So the script starts an embedded Deephaven server (the library imports Deephaven, and the
 library itself never starts a server) and then:

@@ -7,11 +7,17 @@ pinned snapshot; one that names an item the snapshot lacks fails the refresh as 
 list can never silently outlive the vendor's own sources. Endpoints that are absent from every
 vendor source are not listed here; the design documents them so nobody re-adds them.
 
-An exclusion never means "not yet". It is only for an item the library deliberately never
-supports, and its reason is permanent: deprecated in practice, retired, undocumented, or a
-duplicate of another source. An item that should get a dataset later is generated, not
-excluded, and waits in the coverage test's `DEFERRED` list, whose entry names the issue that
-will add the dataset.
+Every generated source must be read by a dataset; the coverage test in
+`tests/datasets/test_catalog.py` fails on one that is not. So when a refresh brings a new
+endpoint, channel, or flat-file prefix, the same pull request does one of three things:
+
+- adds a dataset that reads it;
+- excludes it here, only when the library deliberately never supports it; or
+- defers it: opens an issue, then adds a `DEFERRED` entry next to the coverage test with the
+  reason and the issue number. The refresh keeps generating a deferred item.
+
+An exclusion never means "not yet". Its reason is permanent: deprecated in practice, retired,
+undocumented, or a duplicate of another source.
 
 A path or channel the specification marks deprecated (`x-polygon-deprecation`) or draft
 (`x-polygon-draft`) is never generated and never listed here: the specification already
