@@ -1289,3 +1289,13 @@ def test_the_give_up_message_offers_no_declaration_for_a_learn_only_bucket() -> 
         governor.admission("other", lane=object(), patience=Patience(0.0)).acquire(Cancel())
     assert str(caught.value).endswith("To go on: retry after that time, or stop the other program")
     assert "declare" not in str(caught.value)
+
+
+def test_a_shorter_pause_of_another_bucket_never_lets_a_read_count_a_longer_one_twice() -> None:
+    # A read spanning two buckets waits out stocks until 100, then other until 50, then
+    # stocks again: the stretch up to 100 is counted once.
+    patience = Patience(150.0)
+    assert patience.charge(0.0, 100.0)
+    assert patience.charge(0.0, 50.0)
+    assert patience.charge(0.0, 100.0)
+    assert patience.spent == 100.0
