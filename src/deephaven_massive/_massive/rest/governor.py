@@ -858,7 +858,7 @@ class RequestGovernor:
                 when no response came (a connection failure, an interruption), which changes
                 nothing else.
         """
-        state = self._bucket(permit.bucket)
+        state = self._buckets[permit.bucket]
         with self._lock:
             if not state.finish(permit, self._clock.monotonic(), hold=True):
                 return
@@ -875,7 +875,7 @@ class RequestGovernor:
         Args:
             permit: The attempt's permit.
         """
-        state = self._bucket(permit.bucket)
+        state = self._buckets[permit.bucket]
         with self._lock:
             if not state.finish(permit, self._clock.monotonic(), hold=False):
                 return
@@ -916,7 +916,7 @@ class RequestGovernor:
                 pauses add up to more than `RATE_LIMIT_PATIENCE`); the pause is set first, so
                 the bucket's other requests stop too.
         """
-        state = self._bucket(permit.bucket)
+        state = self._buckets[permit.bucket]
         basic = is_basic_refusal(message) and state.pace
         asked = retry_after if retry_after is not None and retry_after > 0 else None
         give_up = None
@@ -1074,23 +1074,6 @@ class RequestGovernor:
         """
         with self._lock:
             self._listeners = tuple(each for each in self._listeners if each != listener)
-
-    def _bucket(self, bucket: str) -> _Bucket:
-        """Return a bucket's state.
-
-        Args:
-            bucket: The bucket's name.
-
-        Returns:
-            Its state.
-
-        Raises:
-            ValueError: If the bucket is unknown.
-        """
-        state = self._buckets.get(bucket)
-        if state is None:
-            raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
-        return state
 
     def _step(
         self, admission: Admission, waiter: _Waiter, cancel: Cancel

@@ -711,15 +711,13 @@ def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
     # The list is crypto reference data: its pages count against the currencies subscription,
     # and they take one turn at a time among the bucket's other reads, as one read does.
     admitted: list[tuple[str, object]] = []
-    acquire = _massive.RequestGovernor.acquire
+    admission = _massive.RequestGovernor.admission
 
-    def recording(
-        governor: _massive.RequestGovernor, bucket: str, cancel: _massive.Cancel, *, lane: object
-    ) -> object:
+    def recording(governor: _massive.RequestGovernor, bucket: str, *, lane: object) -> object:
         admitted.append((bucket, lane))
-        return acquire(governor, bucket, cancel, lane=lane)
+        return admission(governor, bucket, lane=lane)
 
-    monkeypatch.setattr(_massive.RequestGovernor, "acquire", recording)
+    monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
     second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
     first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
     fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
