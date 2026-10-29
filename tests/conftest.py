@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import types
+import weakref
 from collections import Counter, deque
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
@@ -514,10 +515,19 @@ def _held_by_cycles(garbage: list[object]) -> set[int]:
         The ids of the objects reference counting alone would never free.
     """
     ids = {id(item) for item in garbage}
+    # pytest before 9.2 restores a patched method as an attribute of its own instance, a bound
+    # method in the instance's `__dict__`: a cycle of the test tool's, which is not counted.
+    owners = {id(vars(item)): id(item) for item in garbage if _has_dict(item)}
     holds: dict[int, list[int]] = {}
     held = dict.fromkeys(ids, 0)
     for item in garbage:
-        referents = [id(each) for each in gc.get_referents(item) if id(each) in ids]
+        owner = owners.get(id(item))
+        referents = [
+            id(each)
+            for each in gc.get_referents(item)
+            if id(each) in ids
+            and not (type(each) is types.MethodType and id(each.__self__) == owner)
+        ]
         holds[id(item)] = referents
         for key in referents:
             held[key] += 1
@@ -528,6 +538,24 @@ def _held_by_cycles(garbage: list[object]) -> set[int]:
             if not held[key]:
                 free.append(key)
     return {key for key, count in held.items() if count}
+
+
+def _has_dict(item: object) -> bool:
+    """Tell whether an object has an instance `__dict__`, without touching a dead proxy.
+
+    Args:
+        item: The object.
+
+    Returns:
+        True if `vars(item)` returns its attributes.
+    """
+    if issubclass(type(item), (type, types.ModuleType, weakref.ProxyTypes)):
+        return False
+    try:
+        vars(item)
+    except TypeError:
+        return False
+    return True
 
 
 def _held_by_tracebacks(garbage: list[object], wanted: set[int]) -> set[int]:
