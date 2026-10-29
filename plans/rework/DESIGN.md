@@ -3336,9 +3336,18 @@ without the GIL.
   - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
     boto3 S3 client (creation reads local AWS configuration but makes no request, since the
     credentials are given); its closed flag is a `threading.Event`, read without the lock by
-    the reader threads. The session's `SessionClients` creates the `FlatFileClient` on the
+    the reader threads. The only lock taken under it is the model-loader lock below, while the
+    client is built. The session's `SessionClients` creates the `FlatFileClient` on the
     session's first flat-file read, under `registry_lock` (the constructor only stores
     settings), and registers its close after releasing the lock;
+  - the flat-file model-loader lock, one per process, held while an S3 client is built. Every
+    S3 client shares one botocore model loader, created when the module is imported, filled by
+    the first build, and kept for the life of the process (about 12 MB of parsed S3, endpoint,
+    and retry models), so the files are parsed once rather than once per client (about 100 ms
+    each). botocore's loader fills its cache without a lock, merges S3's extra definitions
+    into a cached model in place, and has boto3 append its data directory to the search paths
+    on every session, so no two clients are built at once, and each build removes the
+    duplicate search path it added;
   - the `net.http` TLS-context cache, one per process, which builds each consumer's context
     for a certificate setting once (reading the bundle from local disk) and looks it up
     afterwards; the certificate file and directory are examined before the lock is taken;
@@ -3503,9 +3512,9 @@ ws/                  imports net, spec
 flatfiles/           imports net, spec
   __init__.py        docstring only: _massive's interface maps each name to its submodule,
                      so no flat-file name but FlatFileClient imports boto3
-  client.py          FlatFileClient: lazy boto3 client under a leaf lock, closed flag,
-                     open(key) -> FlatFile | None, S3 error mapping, prefixes(), close();
-                     botocore's body read errors become OSError
+  client.py          FlatFileClient: lazy boto3 client under its lock, shared model loader,
+                     closed flag, open(key) -> FlatFile | None, S3 error mapping, prefixes(),
+                     close(); botocore's body read errors become OSError
   layout.py          object_key(prefix, day, venue): <prefix>/<YYYY>/<MM>/<date>.csv.gz; {venue} template
   reader.py          FlatFile.batches(plan) -> (RecordBatch, DriftReport) per block; header peek
 refresh/             build time only; excluded from the wheel; may import any of the above
@@ -3840,9 +3849,12 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
 clock=SYSTEM_CLOCK)` is one object per session, created by the session's first flat-file read
 (only after the source choice has required both credentials, which are therefore `str`) and
 closed by `m.close()`; `clock` is the `net.retry.Clock` its retry waits use. It creates its
-boto3 S3 client lazily, under a leaf lock, and keeps a closed flag (a `threading.Event`); once
-closed, it makes no request. A request in flight at the close closes the client again as it
-returns.
+boto3 S3 client lazily, under its own lock, and keeps a closed flag (a `threading.Event`);
+once closed, it makes no request. A request in flight at the close closes the client again as
+it returns. Every S3 client in the process is built on one shared botocore model loader, so
+botocore parses its S3 model files once per process instead of once per client; the loader
+stays in memory for the life of the process, and its lock serializes client builds (section
+18).
 
 - **`open(key) -> FlatFile | None`.** `None` for a missing key: HTTP 404 whose body is S3's
   XML error with the code `NoSuchKey`. Any other 404 (another S3 code, no code, or a body that
