@@ -29,15 +29,14 @@ def origin_of(url: str) -> Origin:
         url: An absolute `http` or `https` URL, such as `"https://api.massive.com"`.
 
     Returns:
-        `(scheme, host, port)`, with the scheme and host lower-cased and the scheme's default
-        port filled in.
+        `(scheme, host, port)`: the scheme and host lower-cased, as `urlsplit` gives them,
+        and the scheme's default port filled in.
 
     Raises:
         ValueError: If `url` is not an absolute `http` or `https` URL with a host, or its port
             is not a number.
     """
     parts = urlsplit(url)
-    scheme = parts.scheme.lower()
-    if scheme not in _DEFAULT_PORTS or not parts.hostname:
+    if parts.scheme not in _DEFAULT_PORTS or not parts.hostname:
         raise ValueError(f"{url!r} is not an absolute http or https URL")
-    return scheme, parts.hostname, parts.port or _DEFAULT_PORTS[scheme]
+    return parts.scheme, parts.hostname, parts.port or _DEFAULT_PORTS[parts.scheme]

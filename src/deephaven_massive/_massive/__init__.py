@@ -36,8 +36,8 @@ Interface:
       start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
       API key, and a snapshot of one subscription's state for diagnostics.
     - `Cancel`: the cancellation token that ends a request's waits.
-    - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, the key the library
-      shares a governor by.
+    - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, which keys the
+      governor the library shares. It is part of `net` and loads no client.
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
       part of `spec` and loads no client: the REST client encodes every request with it, and
       the library's filter check calls it so a value it accepts always encodes.

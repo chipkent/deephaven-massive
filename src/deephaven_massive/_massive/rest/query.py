@@ -8,7 +8,7 @@ wrong type is refused here instead of reaching Massive as surprising text.
 
 Names arrive in wire form (`"timestamp.gte"`); the library's filter spelling is translated
 before the client. The functions are pure and never modify their arguments, so they are safe
-from any thread. This module imports only the standard library and `spec`.
+from any thread. This module imports only the standard library, `net.origins`, and `spec`.
 """
 
 from __future__ import annotations
