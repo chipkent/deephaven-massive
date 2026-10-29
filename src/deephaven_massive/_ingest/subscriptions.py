@@ -339,7 +339,7 @@ class Subscriptions:
         wire = self._wire()
         adds, removes = wire - self._sent, self._sent - wire
         generation = self.generation
-        if adds or removes:
+        if (adds or removes) and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "generation %d: subscribe %s, unsubscribe %s (desired %d, acknowledged %d, "
                 "deferred by the options cap %d)",

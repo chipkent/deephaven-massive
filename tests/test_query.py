@@ -338,6 +338,29 @@ def test_a_failed_call_logs_its_error(
         f"call 1 start: {every!r}.fetch()",
         f"call 1 failed after <s> s: ValueError: {info.value}",
     ]
+    # A caller's mistake is DEBUG, with its traceback for the log.
+    [failed] = [r for r in caplog.records if "failed after" in r.getMessage()]
+    assert (failed.levelno, failed.exc_info is not None) == (logging.DEBUG, True)
+
+
+def test_a_failed_request_is_logged_once_at_error(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def refused(*_: object, **__: object) -> Table:
+        raise dm.EntitlementError("HTTP 403 from GET /v3/x (request_id r1): not entitled")
+
+    monkeypatch.setattr(rest, "fetch", refused)
+    with pytest.raises(dm.EntitlementError):
+        news(massive_session).fetch()
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [_ELAPSED.sub("<s> s", r.getMessage()) for r in errors] == [
+        "call 1 failed after <s> s: HTTP 403 from GET /v3/x (request_id r1): not entitled"
+    ]
+    assert errors[0].exc_info is None  # the traceback travels with the exception instead
 
 
 def test_a_history_call_through_flat_files_passes_its_id(

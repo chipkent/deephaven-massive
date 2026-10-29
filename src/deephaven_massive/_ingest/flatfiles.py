@@ -521,10 +521,6 @@ class FlatFileHistory:
         the session is closed during the call. Errors that come from S3 carry its
         `x-amz-request-id` as `request_id`. An extra or missing documented header is not an
         error: it logs a WARNING once per header and session.
-
-        Raises:
-            MassiveError: Each error above (`AuthenticationError` and `EntitlementError` are
-                its subclasses), first logged at ERROR as `call <id> failed: <message>`.
         """
         prefix = spec.flat_file_prefixes[request.timespan]
         transform = _Transform.build(
@@ -538,11 +534,7 @@ class FlatFileHistory:
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
         threads = f"{self._core.thread_prefix} call-{call} files"
-        try:
-            return self._read(spec, transform, keys, last=dates[-1], roll=roll, threads=threads)
-        except MassiveError as error:
-            _report(error, call)
-            raise
+        return self._read(spec, transform, keys, last=dates[-1], roll=roll, threads=threads)
 
     def _read(
         self,
@@ -916,20 +908,6 @@ class FlatFileHistory:
             logger.warning(
                 "%s: %s does not exist; skipping %s (a market holiday?)", spec.name, key.key, day
             )
-
-
-def _report(error: MassiveError, call: int) -> None:
-    """Log a failed call at ERROR with its id and exactly the text its exception carries.
-
-    The exception itself propagates to the caller, whose traceback shows where it came from;
-    the call's id ties the record to its `call <id> start` line and to its reader threads'
-    lines.
-
-    Args:
-        error: The failure.
-        call: The id of the `history()` call that failed.
-    """
-    logger.error("call %d failed: %s", call, error)
 
 
 def _warn_if_none_exist(spec: DatasetSpec, keys: Sequence[_Key], missing: Sequence[_Key]) -> None:

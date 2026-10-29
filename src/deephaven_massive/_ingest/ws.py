@@ -470,12 +470,13 @@ class Connection:
         topics = stream_topics(self.asset_class, stream.channel, symbols)
         self.subscriptions.add(topics - stream.topics)
         self.subscriptions.remove(stream.topics - topics)
-        logger.debug(
-            "stream %d: its symbol table added %s and removed %s",
-            stream_id,
-            sorted(added),
-            sorted(removed),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "stream %d: its symbol table added %s and removed %s",
+                stream_id,
+                sorted(added),
+                sorted(removed),
+            )
         stream.symbols, stream.topics = symbols, topics
         stream.sink.set_symbols(symbols)
         count, text = describe_symbols(tuple(sorted(symbols)))

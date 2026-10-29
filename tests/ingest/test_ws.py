@@ -1582,3 +1582,17 @@ def test_every_library_thread_is_named_after_its_session(
     assert polls[1] == f"{polls[0]} rest_0"
     custom_session.session.release(result)
     custom_session.session.release(table)
+
+
+def test_a_reconnect_keeps_the_one_summary_timer(
+    ws_session: WsSession, fake_ws_server: FakeMassiveServer
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    first = ws_session.on_loop(connection, lambda: connection._summary)
+    assert first is not None
+    fake_ws_server.close()  # the client reconnects: a second generation opens
+    ws_session.wait(lambda s: s.opens == 2)
+    assert ws_session.on_loop(connection, lambda: connection._summary) is first
+    del result

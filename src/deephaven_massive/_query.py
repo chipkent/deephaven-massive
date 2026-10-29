@@ -68,6 +68,7 @@ from deephaven_massive._enums import (
     PollMode,
     _require_enum,
 )
+from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.core import ON_UPDATE_GRAPH, on_update_graph
 from deephaven_massive._tables.liveness import entered
@@ -178,6 +179,33 @@ def _read_symbol_table(
     return found
 
 
+def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
+    """Log a failed static call: the library's failures at ERROR, anything else at DEBUG.
+
+    A `MassiveError` (a request, a row, a rate limit, a closed session) is the failure a user
+    must see, so it is logged at ERROR with its text, which names the status, the path, and
+    the `request_id`; its traceback stays with the exception the caller receives. Anything
+    else (a bad argument's `ValueError`, an interrupt) is the caller's to handle, so it is
+    logged at DEBUG with its traceback.
+
+    Args:
+        call: The call's id.
+        elapsed: Seconds since the call started.
+        error: What the call raised.
+    """
+    if isinstance(error, MassiveError):
+        logger.error("call %d failed after %.3f s: %s", call, elapsed, error)
+    else:
+        logger.debug(
+            "call %d failed after %.3f s: %s: %s",
+            call,
+            elapsed,
+            type(error).__name__,
+            error,
+            exc_info=error,
+        )
+
+
 @dataclass(frozen=True, repr=False, slots=True)
 class QueryBase:
     """The state every query class shares: the session, the dataset, and the arguments.
@@ -265,8 +293,9 @@ class QueryBase:
         Returns:
             What `run` returns.
 
-        Whatever `run` raises propagates after a `call <id> failed` line. A call on an
-        update-graph thread raises `ValueError` before it takes an id, so it logs nothing.
+        Whatever `run` raises propagates after a `call <id> failed` line (`_log_failure`). A
+        call on an update-graph thread raises `ValueError` before it takes an id, so it logs
+        nothing.
         """
         self._core.require_verb_thread()
         call = self._core.next_stream_id()
@@ -275,15 +304,7 @@ class QueryBase:
         try:
             table = run(call)
         except BaseException as error:
-            elapsed = time.monotonic() - started
-            logger.debug(
-                "call %d failed after %.3f s: %s: %s",
-                call,
-                elapsed,
-                type(error).__name__,
-                error,
-                exc_info=True,
-            )
+            _log_failure(call, time.monotonic() - started, error)
             raise
         if logger.isEnabledFor(logging.DEBUG):
             elapsed = time.monotonic() - started

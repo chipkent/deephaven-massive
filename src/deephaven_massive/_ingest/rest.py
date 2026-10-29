@@ -1543,21 +1543,16 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Raises:
-            MassiveError: Logged at ERROR first: `AuthenticationError` (HTTP 401),
-                `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row
-                that breaks the schema, and `MassiveError` itself for any other failure (a
-                rate limit as `"rate limited: ..."`, a closed session as `"... is closed"`).
+        Errors, which the verb's call logs at ERROR: `AuthenticationError` (HTTP 401),
+        `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row that breaks
+        the schema, and `MassiveError` itself for any other failure (a rate limit as `"rate
+        limited: ..."`, a closed session as `"... is closed"`).
 
         A parameter a path does not take raises the `ValueError` of `_base` before any request:
         every path is planned before the first one is read.
         """
         reader = self._reader(f"call-{call}")
-        try:
-            table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
-        except MassiveError as error:
-            _report(error, call)
-            raise
+        table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
         return self._static(table)
 
     def history(
@@ -1587,9 +1582,8 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Raises:
-            MassiveError: As `fetch` raises it, logged at ERROR first, and for a crypto 1-day
-                bar stamped elsewhere in its UTC day than its first or last millisecond.
+        Errors: as `fetch` raises them, and `MassiveError` for a crypto 1-day bar stamped
+        elsewhere in its UTC day than its first or last millisecond.
         """
         reader = self._reader(f"call-{call}")
         if isinstance(request.symbols, _All):
@@ -1608,18 +1602,14 @@ class RestEndpoints:
             calls = _history_calls(spec, rest_path, request, window=window)
             if window.requested is None:
                 _announce(spec, len(calls), sessions=True)
-        try:
-            table, requests = reader.read(
-                spec,
-                rest_path,
-                calls,
-                limit=None,
-                window=window,
-                stamps=stamp_rule(spec, request),
-            )
-        except MassiveError as error:
-            _report(error, call)
-            raise
+        table, requests = reader.read(
+            spec,
+            rest_path,
+            calls,
+            limit=None,
+            window=window,
+            stamps=stamp_rule(spec, request),
+        )
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
         return self._static(table)
 
@@ -1668,21 +1658,6 @@ class RestEndpoints:
             path=paths,
             clock=poll.CLOCK,
         )
-
-
-def _report(error: MassiveError, call: int) -> None:
-    """Log a failed call at ERROR with its id and exactly the text its exception carries.
-
-    The exception itself propagates to the caller, whose traceback shows where it came from,
-    so the record holds the call and the message alone: `call 3 failed: HTTP 400 from GET
-    /v3/reference/tickers?... on api.massive.com (request_id ab12): <Massive's message>`. The
-    call's id ties the line to its `call 3 start` line and to its worker threads' lines.
-
-    Args:
-        error: The failure.
-        call: The id of the verb call that failed.
-    """
-    logger.error("call %d failed: %s", call, error)
 
 
 def _report_host_failure(error: MassiveError) -> None:
