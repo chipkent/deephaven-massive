@@ -78,7 +78,8 @@ uv build                                 # sdist and wheel
     `exclusions.py`, each entry with a reason; `vendor/massive/` only through `refresh --fetch`;
     `docs/datasets/` only through `render_reference.py`, committed in the same PR as its cause.
     The procedure, including wrong vendor descriptions, is in `docs/dev/spec-refresh.md`.
-18. **Placement.** Code goes in the module whose name describes it, in the layer that owns it.
+18. **Placement.** A module holds one subject, named in the first line of its docstring.
+    `DESIGN.md` § 4.1 says where new code goes; read it before adding a module or a helper.
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.
 20. **Dates are ISO strings.** Every calendar-date column, vendor dates included, stores
     `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read, even where `DESIGN.md` or
@@ -148,6 +149,7 @@ These prevent deadlocks and leaks.
 | Task | Read first |
 |---|---|
 | Your planned PR | `plans/rework/PLAN.md`, then its GitHub issue |
+| Where new code goes; the layout cleanup and its feature pause | `plans/rework/DESIGN.md` § 4.1, `plans/rework/LAYOUT.md` |
 | Design, by topic | `plans/rework/DESIGN.md`: § 3 exports, § 4 layout and layers, § 6 session and liveness, § 7 and § 11 API and enums, § 8 datasets, § 13 connections, § 14 fan-out, § 18 threads and locks, § 19 wire and schemas, § 20 tooling |
 | PR descriptions | `docs/dev/pull-requests.md` |
 | Vendor changes and drift | `docs/dev/spec-refresh.md` |

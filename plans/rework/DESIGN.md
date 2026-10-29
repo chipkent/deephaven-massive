@@ -217,6 +217,18 @@ Inside the private modules, a name used by other modules is bare (`QueryBase`, `
 names this document fixes with an underscore: `_All`, `_require_enum`, and the namespace classes
 (`_Stocks`, `_Partners`, ...), whose underscore keeps them out of users' completion lists.
 
+**One subject per module.** A module is named for its content and holds one subject, named in
+the first line of its docstring. New code goes in the module whose first line already names its
+subject; if none does, it gets a new module named for that subject, never a widened summary ("…,
+and X") on a neighbor. Module names are subject nouns, never pattern words such as `base`,
+`core`, `common`, `helpers` or `util`. A rule or helper has one body, in the module that owns
+its concept. An exception is defined in the module that raises it, or in the layer's errors
+module when several modules raise it, or when a module in a lower layer must name it:
+`_errors.py`, or `_massive/net/errors.py` for the wire clients. A module above about 1,000
+lines, or one whose first line lists more than two subjects, is split or says in its docstring
+why it is one subject. Review enforces these rules, not a test: checks of placement over source
+text would be brittle and costly to keep for little protection.
+
 ```
 src/deephaven_massive/
 __init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
@@ -287,8 +299,9 @@ only code that holds wire clients. The `__init__.py` of each of the three, and o
 `_namespaces/`, holds only a docstring. [Section 4.3](#43-layers) orders these groups into
 layers.
 
-`_namespaces/` holds plain modules, one namespace class each; it is not a PEP 420 namespace
-package. Each namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
+`_namespaces/` holds plain modules, one namespace and its sub-namespaces each (`m.partners` and
+its partner sub-namespaces share a module); it is not a PEP 420 namespace package. Each
+namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
 `_datasets/history_source.py` decides where `history()` reads from; `_ingest/flatfiles.py` does
 flat-file I/O through `_massive` and never chooses a source.
 
@@ -387,7 +400,7 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | Rank | Layer | Home | What justifies the boundary |
 |---|---|---|---|
 | 0 | wire | `_massive/` | The only network I/O, and no Deephaven ([section 19](#19-wire-clients-and-the-spec-snapshot)). |
-| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
+| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types`, `_log_limits` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
 | 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
