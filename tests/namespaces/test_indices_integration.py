@@ -48,12 +48,11 @@ StampDays: TypeAlias = "dict[str, tuple[date, date]]"
 RangeBars: TypeAlias = "Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]"
 ToStampedBar: TypeAlias = "Callable[[Mapping[str, Any]], StampedBar]"
 DayBarReport: TypeAlias = (
-    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], "
-    "tuple[list[str], list[date]]]"
+    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]"
 )
-PrevBarReport: TypeAlias = "Callable[[str], tuple[list[str], int]]"
+PrevBarReport: TypeAlias = "Callable[[str], int]"
 PeriodBarReport: TypeAlias = (
-    "Callable[[str, Mapping[str, tuple[date, date]]], tuple[list[str], bool]]"
+    "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
 )
 LargestError: TypeAlias = (
     "Callable[[tuple[float | None, ...], tuple[float | None, ...]], float | None]"
@@ -217,7 +216,9 @@ _CHICAGO = ZoneInfo("America/Chicago")
 _ZONES = (("New York", _NEW_YORK), ("Chicago", _CHICAGO))
 _MATCH = 1e-6
 """The largest relative error at which a rebuilt bar is the bar."""
-_LONGER = ("month", "quarter", "year")
+_LONGER = {"month": (2, 2), "quarter": (2, 2), "year": (1, 2)}
+"""The fewest and most bars expected of each longer unit: two whole months and quarters, and
+last year's bar with this year's unfinished one, if Massive serves it."""
 
 
 def _rebuilt(minutes: list[dict[str, Any]], start: datetime, end: datetime) -> StampedBar | None:
@@ -343,27 +344,33 @@ def _week_lines(
     return lines, len(bars)
 
 
-def _library_index_stamps(
-    session: dm.MassiveSession, index: str, *, stamp_days: StampDays, library_stamps: LibraryStamps
-) -> list[str]:
-    """Describe the library's windows of an index's 1-day and longer bars.
+def _record_library_index_stamps(
+    session: dm.MassiveSession,
+    index: str,
+    *,
+    stamp_days: StampDays,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> None:
+    """Record the library's windows of an index's 1-day and longer bars, call by call.
 
-    Returns:
-        One evidence line per call: `history()` of the two days, `fetch()`, and the week,
-        month, quarter, and year history.
+    A longer unit's history that the plan refuses (a range beyond the plan's history) is
+    recorded rather than raised, so the evidence of the other calls is kept.
     """
     rest = dm.HistorySource.REST
     daily = session.indices.bars(index, dm.Timespan.DAY)
-    lines = [
+    evidence(
         f"library {index} history(REST): "
-        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest)),
-        f"library {index} fetch() (/prev): {library_stamps(daily.fetch)}",
-    ]
+        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
+    )
+    evidence(f"library {index} fetch() (/prev): {library_stamps(daily.fetch)}")
     for span in (dm.Timespan.WEEK, dm.Timespan.MONTH, dm.Timespan.QUARTER, dm.Timespan.YEAR):
         query = session.indices.bars(index, span)
-        outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
-        lines.append(f"library {index} {span.value} history: {outcome}")
-    return lines
+        try:
+            outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
+        except dm.EntitlementError as error:
+            outcome = f"refused, beyond the plan's history? ({error})"
+        evidence(f"library {index} {span.value} history: {outcome}")
 
 
 @pytest.mark.needs("indices:starter")
@@ -383,50 +390,52 @@ def test_index_day_and_longer_bar_stamps_from_rest(
 ) -> None:
     """How REST stamps index 1-day and longer bars, and which day and week they cover.
 
-    The days are those of the most recent finished Thanksgiving week: its Wednesday, a full
-    trading day, and its Friday, a half day. For `I:SPX` and `I:AAVE100` (which updates around
-    the clock) it records, each stamp in UTC and New York time: the range endpoint's 1-day bars
-    around both days beside each day rebuilt from minute bars over the New York day and over
-    the Chicago day (an hour later), with which day's bar each rebuild matches and its largest
-    relative error; `/prev`, which serves only the most recent completed trading day (a
-    short-day stamp shows only on a run the trading day after a half day), beside the range
-    bars of that day; the week bars of Thanksgiving week and the week before, each against its
-    weekdays, its whole calendar week, and the seven days from its stamp, rebuilt in both
-    zones; the month, quarter, and year bars of two whole periods each; and the library's
-    windows for the same requests. Reading it: a day bar matching the Chicago rebuild means
-    index days are Chicago days, and the library's 01:00 New York `TimestampEnd` is right;
-    matching the New York rebuild means the extra hour can go. A week bar matching the
-    whole-week rebuild of `I:AAVE100` means weekend values count, as the library assumes;
-    longer bars stamped 00:00 or 01:00 New York time on their period's first day are ones the
-    library accepts. For `I:SPX` both day rebuilds can agree, since it is computed only during
+    The days are those of the most recent finished Thanksgiving week: its Wednesday, a full trading
+    day, and its Friday, a half day. For `I:SPX` and `I:AAVE100` (which updates around the clock) it
+    records, each stamp in UTC and New York time: the range endpoint's 1-day bars around both days
+    beside each day rebuilt from minute bars over the New York day and over the Chicago day (an hour
+    later), with which day's bar each rebuild matches and its largest relative error; `/prev`, which
+    serves only the most recent completed trading day (a short-day stamp shows only on a run the
+    trading day after a half day), beside the range bars of that day; the week bars of Thanksgiving
+    week and the week before, each against its weekdays, its whole calendar week, and the seven days
+    from its stamp, rebuilt in both zones; the bars of the two whole months and quarters before the
+    current ones and of the years from January 1 of last year, each read refused for the plan's
+    history recorded as such; and the library's windows for the same requests. Reading it: a day bar
+    matching the Chicago rebuild means index days are Chicago days, and the library's 01:00 New York
+    `TimestampEnd` is right; matching the New York rebuild means the extra hour can go. A week bar
+    matching the whole-week rebuild of `I:AAVE100` means weekend values count, as the library
+    assumes; longer bars stamped 00:00 or 01:00 New York time on their period's first day are ones
+    the library accepts. For `I:SPX` both day rebuilds can agree, since it is computed only during
     the stock session.
     """
     days = stamp_days["day"]
     complete = {}
     for index in _STAMP_INDICES:
         rebuilds = _day_rebuilds(range_bars, index, days)
-        lines, missing = day_bar_report(index, days, rebuilds)
-        prev_lines, prevs = prev_bar_report(index)
+        missing = day_bar_report(index, days, rebuilds)
+        prevs = prev_bar_report(index)
         week_lines, weeks = _week_lines(
             index, stamp_days["week"], range_bars=range_bars, largest_error=largest_error
         )
-        period_lines, periods = period_bar_report(index, {s: stamp_days[s] for s in _LONGER})
-        for line in (*lines, *prev_lines, *week_lines, *period_lines):
+        for line in week_lines:
             evidence(line)
-        for line in _library_index_stamps(
-            live_session, index, stamp_days=stamp_days, library_stamps=library_stamps
-        ):
-            evidence(line)
-        rebuilt = all(all(by_day.values()) for by_day in rebuilds.values())
+        periods = period_bar_report(index, {s: stamp_days[s] for s in _LONGER}, _LONGER)
+        _record_library_index_stamps(
+            live_session,
+            index,
+            stamp_days=stamp_days,
+            library_stamps=library_stamps,
+            evidence=evidence,
+        )
         complete[index] = {
-            "range days": not missing,
-            "rebuilds": rebuilt,
-            "/prev": prevs > 0,
-            "two weeks": weeks == 2,
-            "two of each longer period": periods,
+            "a range bar on both days": not missing,
+            "every minute-bar rebuild": all(all(d.values()) for d in rebuilds.values()),
+            "a /prev bar": prevs > 0,
+            "one bar for each of two weeks": weeks == 2,
+            "the expected month, quarter, and year bars": periods,
         }
     gaps = {index: [k for k, ok in found.items() if not ok] for index, found in complete.items()}
-    assert not any(gaps.values()), f"missing evidence: {gaps}"
+    assert not any(gaps.values()), f"missing evidence, by index: {gaps}"
 
 
 @pytest.mark.needs("indices:starter", "s3")
@@ -459,9 +468,7 @@ def test_index_day_bar_stamps_of_the_day_file(
         for row in [] if result is None else result[0]:
             files[str(row["ticker"])].setdefault(day, []).append(stamped_bar(row))
     for index, by_day in files.items():
-        lines, _ = day_bar_report(index, days, {_DAY_FILE: by_day})
-        for line in lines:
-            evidence(line)
+        day_bar_report(index, days, {_DAY_FILE: by_day})
         daily = live_session.indices.bars(index, dm.Timespan.DAY)
         outcome = library_stamps(partial(daily.history, *days, source=dm.HistorySource.FLAT_FILES))
         evidence(f"library {index} history(FLAT_FILES): {outcome}")

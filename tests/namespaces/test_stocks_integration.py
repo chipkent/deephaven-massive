@@ -48,12 +48,11 @@ StampDays: TypeAlias = "dict[str, tuple[date, date]]"
 RangeBars: TypeAlias = "Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]"
 ToStampedBar: TypeAlias = "Callable[[Mapping[str, Any]], StampedBar]"
 DayBarReport: TypeAlias = (
-    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], "
-    "tuple[list[str], list[date]]]"
+    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]"
 )
-PrevBarReport: TypeAlias = "Callable[[str], tuple[list[str], int]]"
+PrevBarReport: TypeAlias = "Callable[[str], int]"
 PeriodBarReport: TypeAlias = (
-    "Callable[[str, Mapping[str, tuple[date, date]]], tuple[list[str], bool]]"
+    "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
 )
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 
@@ -474,12 +473,12 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     grouped-daily row, with which day's range bar it matches and the largest relative error;
     `/prev`, which serves only the most recent completed trading day (a short-day stamp shows
     only on a run the trading day after a half day), beside the range bars of that day; the
-    week bars of Thanksgiving week and the week before, and the month bars of September and
-    October; and the library's `TimestampStart`, `TimestampEnd`, and `Date` for the same
-    requests. Reading it: 1-day stamps at 00:00, 13:00, or 16:00 New York time, longer bars at
-    00:00 New York time on their period's first day (or the weekend before a week's Monday),
-    and matching values confirm the library's day label; a `MassiveError` in the library lines
-    shows a stamp it refuses.
+    week bars of Thanksgiving week and the week before, and the month bars of the two whole
+    months before the current one; and the library's `TimestampStart`, `TimestampEnd`, and
+    `Date` for the same requests. Reading it: 1-day stamps at 00:00, 13:00, or 16:00 New
+    York time, longer bars at 00:00 New York time on their period's first day (or the weekend
+    before a week's Monday), and matching values confirm the library's day label; a
+    `MassiveError` in the library lines shows a stamp it refuses.
     """
     days = stamp_days["day"]
     grouped = {
@@ -488,12 +487,10 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
         ]
         for day in days
     }
-    day_lines, missing = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
-    prev_lines, prevs = prev_bar_report(_SYMBOL)
+    missing = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
+    prevs = prev_bar_report(_SYMBOL)
     spans = {span: stamp_days[span] for span in ("week", "month")}
-    period_lines, periods = period_bar_report(_SYMBOL, spans)
-    for line in (*day_lines, *prev_lines, *period_lines):
-        evidence(line)
+    periods = period_bar_report(_SYMBOL, spans, {"week": (2, 2), "month": (2, 2)})
     for line in _library_stock_stamps(live_session, stamp_days, library_stamps):
         evidence(line)
     assert not missing, f"no range bar on {missing}"
@@ -529,9 +526,7 @@ def test_stock_day_bar_stamps_of_the_day_file(
     for day in days:
         result = flat_file_tickers(_DAY_FILE, day, [_SYMBOL])
         files[day] = [] if result is None else [stamped_bar(r) for r in result[0]]
-    lines, missing = day_bar_report(_SYMBOL, days, {_DAY_FILE: files})
-    for line in lines:
-        evidence(line)
+    missing = day_bar_report(_SYMBOL, days, {_DAY_FILE: files})
     as_traded = live_session.stocks.bars(_SYMBOL, dm.Timespan.DAY, adjusted=False)
     outcome = library_stamps(partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES))
     evidence(f"library history(FLAT_FILES): {outcome}")

@@ -1189,7 +1189,10 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
     An item (a `settles` argument) is verified when every test that settles it ran and
     passed. One that some of its tests never ran for (a `-k` or path selection left them
     out) is "partly run", never verified, since part of its question went unchecked; one
-    whose tests were skipped for a plan is listed under the cheapest plan text it needs.
+    whose tests were skipped for a plan is listed under the cheapest plan text it needs. A run
+    whose paths narrow collection (a `::` test id, or a path other than the configured test
+    paths) may not have collected every test of a question, so its passed items are reported
+    as "passed in this selection", not verified.
 
     Args:
         terminalreporter: The terminal reporter, whose statistics hold the outcomes.
@@ -1233,15 +1236,32 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
             other.append(item)
     _write_settled(
         terminalreporter,
+        narrowed=_narrowed(config),
         verified=verified,
         needing=needing,
         unverified={"failed or skipped": other, "partly run": partly},
     )
 
 
+def _narrowed(config: pytest.Config) -> bool:
+    """Return whether the run's paths may leave some live tests uncollected.
+
+    Args:
+        config: The pytest configuration, for the run's paths and the configured test paths.
+
+    Returns:
+        True when a path names a test id (`::`) or is not one of the configured test paths;
+        False for a run of the configured paths, which pytest uses when none is given.
+    """
+    configured = {(config.rootpath / p).resolve() for p in config.getini("testpaths")}
+    here = config.invocation_params.dir
+    return any("::" in arg or (here / arg).resolve() not in configured for arg in config.args)
+
+
 def _write_settled(
     terminalreporter: pytest.TerminalReporter,
     *,
+    narrowed: bool,
     verified: list[str],
     needing: dict[str, list[str]],
     unverified: dict[str, list[str]],
@@ -1250,7 +1270,9 @@ def _write_settled(
 
     Args:
         terminalreporter: The terminal reporter that writes the summary.
-        verified: The items every test of which ran and passed.
+        narrowed: Whether the run's paths may have left some live tests uncollected; its
+            passed items are then "passed in this selection", not "verified".
+        verified: The items every collected test of which ran and passed.
         needing: The items skipped for a plan, by the plan's text.
         unverified: The other items, by why they are not verified.
     """
@@ -1260,7 +1282,12 @@ def _write_settled(
         + sum(len(items) for items in unverified.values())
     )
     terminalreporter.write_sep("=", "open questions")
-    terminalreporter.write_line(f"verified {len(verified)} of {total}: {', '.join(verified)}")
+    passed = f"{len(verified)} of {total}: {', '.join(verified)}"
+    terminalreporter.write_line(
+        f"passed in this selection {passed} (run the full live suite to verify)"
+        if narrowed
+        else f"verified {passed}"
+    )
     for plan, items in needing.items():
         terminalreporter.write_line(f"{len(items)} need {plan}: {', '.join(items)}")
     for why, items in unverified.items():
@@ -1865,7 +1892,7 @@ volume (None where the source has none, such as an index's volume)."""
 
 StampDays = dict[str, tuple[date, date]]
 """The day-stamp checks' dates, by unit: `"day"` the full and the half trading day; `"week"`,
-`"month"`, `"quarter"`, and `"year"` the first and last day of two whole periods."""
+`"month"`, `"quarter"`, and `"year"` the first and last day to read of that unit's bars."""
 
 _TICKER_PARAMS: Final = {"I:": "indicesTicker", "O:": "optionsTicker"}
 """The range and `/prev` path placeholder of a ticker's class, by its prefix; stocks have none."""
@@ -1908,13 +1935,30 @@ def _is_half_day(day: date) -> bool:
     return (day.month, day.day) in {(7, 3), (12, 24)} and day.weekday() < 4
 
 
+def _months_before(day: date, months: int) -> date:
+    """Return the first day of the month `months` before the month of `day`.
+
+    Args:
+        day: Any day of the month counted from.
+        months: How many months back, 0 for `day`'s own month.
+
+    Returns:
+        The first of that month.
+    """
+    index = day.year * 12 + day.month - 1 - months
+    return date(index // 12, index % 12 + 1, 1)
+
+
 def _stamp_days(today: date) -> StampDays:
-    """Return the day-stamp checks' dates around the most recent finished Thanksgiving week.
+    """Return the day-stamp checks' dates: a recent Thanksgiving week and recent longer periods.
 
     The half day is the Friday after the most recent Thanksgiving with `half + 3 days <=
     today`: that week's Sunday is over, so every bar it holds, an index week updated around
-    the clock included, is complete and its flat files are published. The dates are always
-    within the last year and a half, inside every plan's history.
+    the clock included, is complete and its flat files are published. Its days are at most
+    about a year and two weeks old, inside every stock and option plan's history; an index
+    plan that keeps one year can lack them in the two weeks before the next Thanksgiving week
+    ends. The longer periods are anchored to `today` instead, so they are as recent as whole
+    periods can be.
 
     Args:
         today: The run's day, in New York time.
@@ -1922,20 +1966,21 @@ def _stamp_days(today: date) -> StampDays:
     Returns:
         By unit: `"day"` the Wednesday before Thanksgiving (a full trading day) and the Friday
         after (a half day); `"week"` the Monday of the week before and the Sunday ending
-        Thanksgiving week; `"month"` September and October, `"quarter"` the second and third
-        quarters, and `"year"` the two calendar years before, all whole periods that ended
-        before the week.
+        Thanksgiving week; `"month"` the two whole months before the current month;
+        `"quarter"` the two whole quarters before the current quarter; and `"year"` January 1
+        of last year to `today`, which holds last year's bar and this year's unfinished one.
     """
     half = _thanksgiving(today.year) + timedelta(days=1)
     if half + timedelta(days=3) > today:
         half = _thanksgiving(today.year - 1) + timedelta(days=1)
-    year = half.year
+    this_month = today.replace(day=1)
+    this_quarter = date(today.year, (today.month - 1) // 3 * 3 + 1, 1)
     return {
         "day": (half - timedelta(days=2), half),
         "week": (half - timedelta(days=11), half + timedelta(days=2)),
-        "month": (date(year, 9, 1), date(year, 10, 31)),
-        "quarter": (date(year, 4, 1), date(year, 9, 30)),
-        "year": (date(year - 2, 1, 1), date(year - 1, 12, 31)),
+        "month": (_months_before(today, 2), this_month - timedelta(days=1)),
+        "quarter": (_months_before(this_quarter, 6), this_quarter - timedelta(days=1)),
+        "year": (date(today.year - 1, 1, 1), today),
     }
 
 
@@ -2143,10 +2188,8 @@ def largest_error() -> Callable[[tuple[float | None, ...], tuple[float | None, .
 @pytest.fixture
 def day_bar_report(
     rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
-) -> Callable[
-    [str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]],
-    tuple[list[str], list[date]],
-]:
+    evidence: Callable[[str], None],
+) -> Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]:
     """Return a function that compares one ticker's 1-day bars across sources.
 
     It reads the ticker's 1-day bars once from the aggregates range endpoint, unfiltered,
@@ -2159,18 +2202,19 @@ def day_bar_report(
 
     Args:
         rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as the report has it.
 
     Returns:
         A function `(ticker, days, others)`: the ticker (its prefix selects the class), the
-        days, and the other sources' bars, by source name and day. It returns the evidence
-        lines and the days without a range bar.
+        days, and the other sources' bars, by source name and day. It records the evidence
+        and returns the days without a range bar.
     """
 
     def report(
         ticker: str,
         days: tuple[date, ...],
         others: Mapping[str, Mapping[date, list[StampedBar]]],
-    ) -> tuple[list[str], list[date]]:
+    ) -> list[date]:
         bounds = (_weekday_after(min(days), -1), _weekday_after(max(days), 1))
         ranged = [
             _stamped(bar) for bar in _read_range(rest_rows, ticker, span="day", bounds=bounds)
@@ -2191,7 +2235,9 @@ def day_bar_report(
                     f"{ticker} {day} {name}: {_bar_text(bar)}; {_match_text(bar[1], ranged)}"
                     for bar in found
                 )
-        return lines, missing
+        for line in lines:
+            evidence(line)
+        return missing
 
     return report
 
@@ -2199,7 +2245,8 @@ def day_bar_report(
 @pytest.fixture
 def prev_bar_report(
     rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
-) -> Callable[[str], tuple[list[str], int]]:
+    evidence: Callable[[str], None],
+) -> Callable[[str], int]:
     """Return a function that compares `/prev` with the range bar of the same day.
 
     `/prev` serves only the most recent completed trading day, so its stamp is checked on
@@ -2211,30 +2258,32 @@ def prev_bar_report(
 
     Args:
         rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as the report has it.
 
     Returns:
-        A function taking the ticker (its prefix selects the class). It returns the evidence
-        lines and how many `/prev` bars it read.
+        A function taking the ticker (its prefix selects the class). It records the evidence
+        and returns how many `/prev` bars it read.
     """
 
-    def report(ticker: str) -> tuple[list[str], int]:
+    def report(ticker: str) -> int:
         param = _ticker_param(ticker)
         prevs = rest_rows(f"/v2/aggs/ticker/{{{param}}}/prev", {param: ticker}, {})
         if not prevs:
-            return [f"{ticker} /prev: no bar"], 0
-        lines: list[str] = []
+            evidence(f"{ticker} /prev: no bar")
+            return 0
         for prev in prevs:
             bar = _stamped(prev)
             day = _new_york_day(bar[0])
             half = "yes" if _is_half_day(day) else "no"
-            lines.append(f"{ticker} /prev ({day}, half day: {half}): {_bar_text(bar)}")
+            evidence(f"{ticker} /prev ({day}, half day: {half}): {_bar_text(bar)}")
             bounds = (_weekday_after(day, -1), _weekday_after(day, 1))
             ranged = [
                 _stamped(r) for r in _read_range(rest_rows, ticker, span="day", bounds=bounds)
             ]
-            lines.extend(f"{ticker} range 1-day bar: {_bar_text(r)}" for r in ranged)
-            lines.append(f"{ticker} /prev {_match_text(bar[1], ranged)}")
-        return lines, len(prevs)
+            for r in ranged:
+                evidence(f"{ticker} range 1-day bar: {_bar_text(r)}")
+            evidence(f"{ticker} /prev {_match_text(bar[1], ranged)}")
+        return len(prevs)
 
     return report
 
@@ -2242,40 +2291,58 @@ def prev_bar_report(
 @pytest.fixture
 def period_bar_report(
     rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
-) -> Callable[[str, Mapping[str, tuple[date, date]]], tuple[list[str], bool]]:
+    evidence: Callable[[str], None],
+) -> Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]:
     """Return a function that shows the stamps of one ticker's week or longer bars.
 
-    For each unit asked for it reads the bars of two whole periods from the aggregates range
+    For each unit asked for it reads the bars over a range of days from the aggregates range
     endpoint, unfiltered, and reports each stamp in UTC and New York time with its values.
     Weeks are read from the Saturday before the first Monday to the last Saturday, so a week
-    stamped on its Monday or on the weekend before is read once and the next week is not.
-    Reading it: a bar stamped 00:00 New York time (01:00 for an index) on its period's first
-    day, or on the Saturday or Sunday before a week's Monday, is one the library accepts.
+    stamped on its Monday or on the weekend before is read once and the next week is not. A
+    read the plan refuses (a range beyond the plan's history) is recorded as evidence and
+    counts as no bars, so the other units' evidence is kept. Reading it: a bar stamped 00:00
+    New York time (01:00 for an index) on its period's first day, or on the Saturday or
+    Sunday before a week's Monday, is one the library accepts.
 
     Args:
         rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as the report has it.
 
     Returns:
-        A function `(ticker, spans)`: the ticker (its prefix selects the class) and the first
-        and last day of each unit's two periods (`"week"`, `"month"`, `"quarter"`, `"year"`).
-        It returns the evidence lines and whether every unit returned exactly one bar for
-        each of its two periods.
+        A function `(ticker, spans, expected)`: the ticker (its prefix selects the class), the
+        first and last day to read of each unit (`"week"`, `"month"`, `"quarter"`, `"year"`),
+        and the fewest and most bars expected of each. It records the evidence and returns
+        whether every unit returned an expected number of bars.
     """
 
-    def report(ticker: str, spans: Mapping[str, tuple[date, date]]) -> tuple[list[str], bool]:
-        lines: list[str] = []
+    def report(
+        ticker: str,
+        spans: Mapping[str, tuple[date, date]],
+        expected: Mapping[str, tuple[int, int]],
+    ) -> bool:
         complete = True
         for span, (start, end) in spans.items():
             week = span == "week"
             first = start - timedelta(days=2) if week else start
             last = end - timedelta(days=1) if week else end
-            bars = [
-                _stamped(b) for b in _read_range(rest_rows, ticker, span=span, bounds=(first, last))
-            ]
-            complete &= len(bars) == 2
-            lines.append(f"{ticker} {span} bars {first} to {last}: {len(bars)}")
-            lines.extend(f"{ticker} {span} bar: {_bar_text(bar)}" for bar in bars)
-        return lines, complete
+            try:
+                raw = _read_range(rest_rows, ticker, span=span, bounds=(first, last))
+            except WireEntitlementError as error:
+                evidence(
+                    f"{ticker} {span} bars {first} to {last}: refused, beyond the plan's "
+                    f"history? ({error})"
+                )
+                complete = False
+                continue
+            bars = [_stamped(b) for b in raw]
+            least, most = expected[span]
+            complete &= least <= len(bars) <= most
+            evidence(
+                f"{ticker} {span} bars {first} to {last}: {len(bars)} (expected {least} to {most})"
+            )
+            for bar in bars:
+                evidence(f"{ticker} {span} bar: {_bar_text(bar)}")
+        return complete
 
     return report
 

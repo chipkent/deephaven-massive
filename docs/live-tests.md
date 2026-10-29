@@ -84,9 +84,16 @@ access to the month's end ([S4], [S5]).
 | Stocks Starter | $29 | adds the delayed-key refusal text, the flat-file publication time, and that a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com and NVDA's as-traded day file (with `s3`; if it answers anything else, the library raises on every flat-file range that holds a weekend), and the stamps of AAPL's 1-day, week, and month bars on every source (with `s3` for the day file) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
 | the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields, its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
-| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day and week bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
+| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; the options topic cap |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only |
+
+The bar-stamp checks read the most recent Thanksgiving week that has ended, so their day and
+week reads are at most about a year and two weeks old. In the two weeks before the next
+Thanksgiving week ends, the index day and week reads sit just past one year old, and a plan
+that keeps one year of index history refuses them; the refusal is recorded, and the index
+tests fail until the new week ends. Their month, quarter, and year reads are anchored to the
+run's day instead.
 
 Partner datasets (Benzinga, ETF Global, TMX, consumer spending) are $99 a month each; NOI is
 a $49 expansion ([S9]); economy data and each class's reference data are free on Basic.
