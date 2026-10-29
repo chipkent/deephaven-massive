@@ -3519,7 +3519,8 @@ and pool named, no logging call under a leaf lock).
 - The REST client logs every attempt at DEBUG with the full URL, the status, the `request_id`,
   and the time it took: `GET https://api.massive.com/v3/trades/AAPL?limit=50000 -> 200
   (request_id 6a1f): 1950 rows in 0.410 s`. Any other status adds the body, up to 2,000
-  characters with the key replaced. A retry logs at INFO and giving up at ERROR.
+  characters with the key replaced. A retry logs at INFO and giving up at WARNING; the call
+  that fails logs the ERROR.
 - A row that cannot be read is logged whole at DEBUG (its JSON, up to 2,000 characters) by the
   decoder that read it, beside the error: `rest.batch` for a REST page, `ws.protocol` for a
   WebSocket frame, whose `Reject` also carries the row as `raw`. Every error quotes the

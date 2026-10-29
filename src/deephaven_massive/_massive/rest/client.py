@@ -18,7 +18,8 @@ the client ends its waits and nobody else's. No call modifies its arguments.
 **Logging.** Each attempt logs one DEBUG line on this module's logger: the full URL, the status,
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
 the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
-up at ERROR. Nothing logs a header.
+up at WARNING: the call that fails logs the one ERROR, so a failure shows once in the
+console. Nothing logs a header.
 
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
@@ -489,7 +490,7 @@ class RestClient:
                 if not isinstance(outcome, _Retryable):
                     return cast("Page", outcome)
                 if retry == MAX_RETRIES:
-                    _log.error("%s; giving up after %d attempts", outcome.error, retry + 1)
+                    _log.warning("%s; giving up after %d attempts", outcome.error, retry + 1)
                     raise outcome.error
                 wait = transient_wait(retry, _JITTER.random())
                 _log.info(
@@ -697,7 +698,7 @@ class RestClient:
         finally:
             give_up = self._pause(permit, failure, response)
         if give_up is not None:
-            _log.error("%s", give_up)
+            _log.warning("%s", give_up)
             raise give_up
 
     def _pause(

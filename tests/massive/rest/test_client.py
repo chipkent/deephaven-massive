@@ -1095,7 +1095,7 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     ) in messages
     # The error quotes only the envelope's message, cut to 200 characters.
     assert (
-        logging.ERROR,
+        logging.WARNING,
         f"HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: {'e' * 200}; giving up after 4 attempts",
     ) in messages
     every = [r.getMessage() + repr(r.args) for r in caplog.records]
