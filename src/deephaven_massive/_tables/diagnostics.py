@@ -9,7 +9,10 @@ Both are keyed Deephaven `input_table`s that the library writes and users read:
   table. Keyed by `StreamId`.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
-thread and released by `m.close()`. One daemon writer thread per session applies every row: the
+thread and released by `m.close()`. Users never get the tables themselves: `m.connections()` and
+`m.streams()` return a view of one, tracked like a live result (`SessionCore.diagnostics_view`),
+which keeps the session alive and current while it is held and keeps the table, with its final
+rows, after the scope is released. One daemon writer thread per session applies every row: the
 rest of the library hands it immutable row snapshots through a queue, so no caller, reaper,
 or flush thread ever waits on the update graph for bookkeeping, and nothing is written from a
 Deephaven listener callback. The writer applies whatever is queued in one batch per table,
@@ -47,7 +50,7 @@ from deephaven_massive._tables.liveness import QueueWorker, new_scope
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
+    from collections.abc import Callable, Hashable
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
@@ -108,6 +111,9 @@ class StreamState(StrEnum):
     RELEASED = "RELEASED"
     CLOSED = "CLOSED"
 
+
+_STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
+"""The states whose `Error` names why the stream stopped, which no later update replaces."""
 
 _S, _I, _L, _T = ColumnType.STRING, ColumnType.INT, ColumnType.LONG, ColumnType.INSTANT
 
@@ -303,6 +309,10 @@ class StreamUpdate:
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
 
+        The `Error` of a `FAILED` or `CLOSED` row names why the stream stopped, so `error` and
+        `clear_error` leave it alone: a flush or a poll cycle that races the stop never replaces
+        the cause.
+
         Args:
             row: The stream's current row.
 
@@ -322,8 +332,22 @@ class StreamUpdate:
             symbols=row.symbols if self.symbols is None else self.symbols,
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
-            error=None if self.clear_error else row.error if self.error is None else self.error,
+            error=self._error(row),
         )
+
+    def _error(self, row: StreamRow) -> str | None:
+        """Return the row's new `Error`.
+
+        Args:
+            row: The stream's current row.
+
+        Returns:
+            The current text for a stopped stream or an update that sets none, null for
+            `clear_error`, and the update's text otherwise.
+        """
+        if row.state in _STOPPED or (self.error is None and not self.clear_error):
+            return row.error
+        return None if self.clear_error else self.error
 
 
 def as_row(row: ConnectionRow | StreamRow) -> dict[str, object]:
@@ -522,12 +546,19 @@ class Diagnostics:
 
     `release()` lets the writer apply the rows already queued, release the scope, and exit, and
     waits for it; `stop()` does the same without waiting and without taking any lock, for use
-    from a finalizer.
+    from a finalizer. A writer that dies on something it cannot carry on after calls `on_death`
+    first (the session fails its live tables there).
     """
 
     __slots__ = ("_connections", "_release_lock", "_released", "_scope", "_streams", "_writer")
 
-    def __init__(self, exec_ctx: ExecutionContext, name: str) -> None:
+    def __init__(
+        self,
+        exec_ctx: ExecutionContext,
+        name: str,
+        *,
+        on_death: Callable[[BaseException], None] | None = None,
+    ) -> None:
         """Create both input tables inside a new session-owned scope and start the writer.
 
         If creating a table or starting the writer fails, the scope (with any table already
@@ -536,6 +567,8 @@ class Diagnostics:
         Args:
             exec_ctx: The session's execution context, entered by the writer thread.
             name: The writer thread's name, for thread dumps.
+            on_death: Runs if the writer dies on something it cannot carry on after
+                (`QueueWorker`).
         """
         self._release_lock = threading.Lock()
         self._released = False
@@ -549,7 +582,7 @@ class Diagnostics:
                     col_defs(STREAMS), key_cols=list(STREAM_KEYS)
                 )
             self._writer: QueueWorker[_Item] = QueueWorker(
-                exec_ctx, name, handle=self._apply, on_exit=self._scope.release
+                exec_ctx, name, handle=self._apply, on_exit=self._scope.release, on_death=on_death
             )
         except BaseException:  # also KeyboardInterrupt: the scope must not leak
             self._scope.release()

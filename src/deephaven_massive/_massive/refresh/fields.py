@@ -284,12 +284,12 @@ class SourceFields:
                         description=text(raw.schema, "description"),
                     )
                 coined = naming.column_name([override.long_name])
-                if coined in naming.KEY_COLUMNS:
+                if naming.is_key_column(coined):
                     self.problem(
                         Gate.COLUMN_COLLISION,
                         raw.wire_key,
-                        f"NAMES coins the dataset key column {coined!r}; only the dataset key "
-                        "rename produces it",
+                        f"NAMES coins the library column {coined!r}; only the dataset key "
+                        "rename and the library's time columns produce it",
                     )
                 names.append(override.long_name)
             elif segment in entries:

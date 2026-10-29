@@ -6,9 +6,10 @@ funding conditions, one REST list endpoint each under `/fed/v1/`.
 Each dataset is one factory method on `_Economy` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. Every row is one
 calendar date of the series, so the datasets have no `Symbol` and no `Timestamp`: they keep
-their `Date` column (a `LocalDate`), and `start` and `end` bound it through `date.gte` and
-`date.lte`. This module owns the namespace's `DatasetSpec`s, exported as `DATASETS` and composed
-into the dataset catalog (`CATALOG` in `_session.py`).
+their `Date` column (ISO `yyyy-MM-dd` text, as every date the library returns), and `start` and
+`end` bound it through `date.gte` and `date.lte`. This module owns the namespace's
+`DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG` in
+`_session.py`).
 """
 
 from __future__ import annotations

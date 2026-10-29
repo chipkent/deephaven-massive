@@ -19,25 +19,30 @@ from __future__ import annotations
 import atexit
 import contextlib
 import faulthandler
+import gc
 import gzip
 import importlib
+import itertools
 import os
 import sys
 import threading
 import time
+import types
+import weakref
 from collections import Counter, deque
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias, cast
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
+from _pytest.mark.expression import Expression
 from deephaven_server import Server
 
-from deephaven_massive._errors import EntitlementError
+from deephaven_massive._errors import EntitlementError, MassiveError
 from deephaven_massive._massive import (
     FlatFileClient,
     ReadColumn,
@@ -79,6 +84,63 @@ _JVM_ARGS = [
 ]
 
 
+def _is_xdist_controller(config: pytest.Config) -> bool:
+    """Tell whether this process hands tests to pytest-xdist workers instead of running them.
+
+    The condition is xdist's own for starting its distributed session: a distribution mode
+    other than `no` and at least one worker (`-n 0` leaves none), in a run that is more than
+    collection. Under `--collect-only`, `--fixtures`, and `--fixtures-per-test`, xdist starts
+    no session and the main process collects the tests itself. Workers carry `workerinput`.
+
+    Args:
+        config: The pytest configuration.
+
+    Returns:
+        True only in the xdist controller of a distributed run.
+    """
+    option = config.option
+    return (
+        getattr(option, "dist", "no") != "no"
+        and bool(getattr(option, "tx", None))
+        and not option.collectonly
+        and not option.showfixtures
+        and not option.show_fixtures_per_test
+        and not hasattr(config, "workerinput")
+    )
+
+
+def _selects_live_tests(config: pytest.Config) -> bool:
+    """Tell whether the run's `-m` expression selects any live test.
+
+    A live test carries `integration` and any combination of the markers only live tests use:
+    `integration_limits`, `integration_smoke`, `needs`, `settles`, and `requests`. An `-m`
+    expression matches a marker by name whatever its arguments, so `-m needs` selects every
+    live test with a `needs` marker. Each combination of those markers is tried; a keyword
+    form such as `needs(x=1)` is treated as matching nothing, since their arguments are
+    positional.
+
+    Args:
+        config: The pytest configuration, for the `-m` expression.
+
+    Returns:
+        True if a test with any of those marker sets would be selected.
+    """
+    expression = Expression.compile(config.option.markexpr or "")
+    optional = (_LIMITS, _SMOKE, "needs", "settles", "requests")
+
+    def carrying(markers: frozenset[str]) -> Callable[..., bool]:
+        def matcher(name: str, /, **kwargs: str | int | bool | None) -> bool:
+            return not kwargs and name in markers
+
+        return matcher
+
+    return any(
+        expression.evaluate(carrying(frozenset({_INTEGRATION, *extra})))
+        for size in range(len(optional) + 1)
+        for extra in itertools.combinations(optional, size)
+    )
+
+
 # `trylast` matters: pytest's faulthandler plugin installs its SIGSEGV handler in its own
 # `pytest_configure`. The JVM must install its signal handlers after that, chaining to the
 # faulthandler, because the JVM raises SIGSEGV on purpose (implicit null checks, safepoints).
@@ -88,14 +150,26 @@ _JVM_ARGS = [
 def pytest_configure(config: pytest.Config) -> None:
     """Start the embedded Deephaven server once per process, before collection.
 
-    Then check that the update graph runs the 25 ms cycle the tests are written for.
+    Then check that the update graph runs the 25 ms cycle the tests are written for. Under
+    pytest-xdist (`-n`), only the worker processes start a server.
 
     Args:
-        config: The pytest configuration (unused; required by the hook signature).
+        config: The pytest configuration, read to tell an xdist controller from a worker.
 
     Raises:
-        pytest.UsageError: If the JVM did not apply the cycle property.
+        pytest.UsageError: If the JVM did not apply the cycle property, or if the live tests
+            are asked to run on parallel workers.
     """
+    # The xdist controller only hands tests to its workers and reports their results; it never
+    # imports a test module or runs a test. Each worker is its own process that runs this hook
+    # and starts its own JVM, so a JVM in the controller would cost only startup time and
+    # memory.
+    if _is_xdist_controller(config):
+        # The live tests share Massive's per-key rate limits and write one evidence log and
+        # one summary, which only a single process keeps whole.
+        if _selects_live_tests(config):
+            raise pytest.UsageError("the live tests run in one process: drop -n, or pass -n 0")
+        return
     # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
     Server(port=0, jvm_args=_JVM_ARGS).start()
     atexit.register(_final_jvm_exit)
@@ -212,6 +286,39 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     return to_pylist
 
 
+@pytest.fixture
+def string_objects() -> Callable[[Table, str], int]:
+    """Return a function that counts the distinct Java string objects of a column's values.
+
+    Identity is read inside Deephaven, since a string crossing to Python is copied. The formula
+    goes straight to Java: the Python `Table.update` copies the calling frame's locals into the
+    query scope through jpy, where they would live until the JVM collected them, keeping a
+    result (and through it its session) alive.
+
+    Returns:
+        A function of a table and a column name, counting the objects among non-null values.
+    """
+    liveness = importlib.import_module("deephaven.liveness_scope")
+    jpy = importlib.import_module("jpy")
+    update_graph = importlib.import_module("deephaven.update_graph")
+    java_table = jpy.get_type("io.deephaven.engine.table.Table")
+
+    def count(table: Table, column: str) -> int:
+        # The derived tables live in a scope of their own, released at once: a refreshing table
+        # derived from a live result would keep its stream or poll running.
+        scope = liveness.LivenessScope()
+        try:
+            # Java calls: the Python wrappers would copy this frame's locals.
+            with scope.open(), update_graph.shared_lock(table):
+                refs = table.j_table.update(f"Ref = java.lang.System.identityHashCode({column})")
+                distinct = refs.where(f"!isNull({column})").selectDistinct("Ref")
+                return int(jpy.cast(distinct, java_table).size())
+        finally:
+            scope.release()
+
+    return count
+
+
 _ROWS_WHEN_TIMEOUT = 15.0
 """Seconds `rows_when` waits for a live table's rows to match."""
 
@@ -322,6 +429,287 @@ def massive_session() -> Iterator[MassiveSession]:
     session.close()
 
 
+_LIBRARY_THREADS: Final = ("MassiveSession #", "massive")
+"""The name prefixes of the library's threads: a session's reaper, diagnostics writer, pollers,
+and crypto-pair worker (`MassiveSession #N ...`), and a connection's client, flush, and
+verdict-move threads (`massive-ws ...`, `massive-flush ...`, `massive-move ...`). The bare
+`massive` prefix also matches the `massive #N ...` names of the session-named threads."""
+
+
+@pytest.fixture(autouse=True)
+def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Fail a test that leaves a session running or alive, or a library thread alive.
+
+    A session is in the live set exactly while it has a running stream or poll or a held
+    diagnostics view, so a test that ends with one has leaked a table, or the library has. A
+    session the test created that is still alive at the end, in the live set or not, is held
+    by something that should have let it go. Only what the test itself started counts, so one
+    leak fails its own test and not every test after it.
+
+    Autouse, and named to sort first (pytest orders autouse fixtures by name), so it is set up
+    first and runs after every other fixture's teardown (a closed `massive_session` included).
+    The library frees an unused session by reference counting alone, so the check runs with
+    the cyclic collector off and polls, bounded and in Python, until nothing is left. Unless
+    the first look finds nothing, it collects with `gc.DEBUG_SAVEALL`, at most once a second,
+    which keeps what it would free in `gc.garbage`: a session a cycle there holds
+    (`_held_by_cycles`) is one reference counting never frees, and the test fails with "freed
+    only by the cyclic collector", unless the cycle runs through an exception's traceback. A
+    test marked `jvm_held`, whose own formula hands its frame's locals to the JVM, gets one JVM
+    collection for what is still alive or running after a second.
+    """
+    before = _running()
+    yield
+    # Every other fixture is torn down, but pytest keeps their values in the item until its
+    # teardown ends; drop them, as pytest is about to, so a closed session can be freed.
+    funcargs: dict[str, object] | None = getattr(request.node, "funcargs", None)
+    if funcargs:
+        funcargs.clear()
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        cyclic: set[str] = set()
+        started = time.monotonic()
+        deadline = started + 30.0
+        pause = threading.Event()  # never set; only paces the bounded wait
+        next_collect = started + 0.04  # after a first look, then at most once a second: slow
+        jvm_collected = False
+        jvm_held = request.node.get_closest_marker("jvm_held") is not None
+        while True:
+            _drop_logged_objects(request.node)  # a library thread may still be logging
+            if time.monotonic() > next_collect:
+                cyclic |= _collect_cycles(before)
+                next_collect = time.monotonic() + 1.0
+            sessions, alive, groups, threads = _new(before)
+            if not sessions and not alive and not groups and not threads:
+                break
+            if time.monotonic() > deadline:
+                pytest.fail(f"left running after the test: {_left(before)}")
+            if jvm_held and not jvm_collected and time.monotonic() > started + 1.0:
+                # A formula a test ran (`t.update("...")`) copies its frame's locals into the
+                # query scope through jpy, and a session, a result, or a table derived from it
+                # among them lives until the JVM collects them: that is Deephaven's, not a leak
+                # of the library.
+                jpy = importlib.import_module("jpy")
+                jpy.get_type("java.lang.System").gc()
+                jvm_collected = True
+            for thread in threads:  # wait on the threads themselves, briefly each
+                thread.join(0.05)
+            if not threads:
+                pause.wait(0.05)
+        if cyclic:
+            pytest.fail(f"freed only by the cyclic collector: sessions {sorted(cyclic)}")
+    finally:
+        if enabled:
+            gc.enable()
+
+
+_Running: TypeAlias = "tuple[set[str], set[str], set[object], set[threading.Thread]]"
+
+
+def _new(before: _Running) -> _Running:
+    """Return what of the library runs now that did not run before the test.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The new live sessions, alive sessions, connection groups, and threads.
+    """
+    sessions, alive, groups, threads = _running()
+    return sessions - before[0], alive - before[1], groups - before[2], threads - before[3]
+
+
+def _left(before: _Running) -> str:
+    """Name what a test left running, for a failure message.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The text.
+    """
+    sessions, alive, groups, threads = _new(before)
+    return (
+        f"sessions {sorted(sessions)}, alive sessions {sorted(alive)}, {len(groups)} connection "
+        f"groups, threads {sorted(t.name for t in threads)}"
+    )
+
+
+def _collect_cycles(before: _Running) -> set[str]:
+    """Collect garbage, and name the sessions the test started that only a cycle held.
+
+    Collects with `gc.DEBUG_SAVEALL`, so what the collector would free stays in `gc.garbage`
+    to be inspected; then empties it, which frees it. A session in that garbage was reachable
+    only through a reference cycle, which reference counting never frees.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The labels of those sessions, except the ones only a traceback's frames held.
+    """
+    session = importlib.import_module("deephaven_massive._session")
+    _, alive, _, _ = _new(before)
+    with session._keys_lock:
+        cores = [ref() for ref in session._open_sessions]
+    wanted = {id(core): core.label for core in cores if core is not None and core.label in alive}
+    del cores
+    gc.set_debug(gc.DEBUG_SAVEALL)
+    try:
+        gc.collect()
+        garbage = list(gc.garbage)
+        gc.garbage.clear()
+    finally:
+        gc.set_debug(0)
+    # A raised exception and the frames of its traceback form a cycle, and a frame holds its
+    # locals: a session a failing call had in hand lives until the collector breaks that
+    # cycle. That is how Python works, not a leak, so the references out of frames and
+    # tracebacks are not followed, and only a session another cycle holds is named.
+    cyclic = _held_by_cycles(garbage, follow=_not_a_traceback) & set(wanted)
+    del garbage
+    return {wanted[key] for key in cyclic}
+
+
+def _not_a_traceback(item: object) -> bool:
+    """Tell whether the references out of an object count: not out of a frame or traceback.
+
+    Args:
+        item: A garbage object.
+
+    Returns:
+        False for a frame or a traceback.
+    """
+    return type(item) not in {types.FrameType, types.TracebackType}
+
+
+_RESTORES_METHODS: Final = pytest.version_tuple < (9, 2)
+"""Whether this pytest restores a patched method as an attribute of its own instance."""
+
+
+def _held_by_cycles(garbage: list[object], *, follow: Callable[[object], bool]) -> set[int]:
+    """Return the ids of the garbage that a reference cycle holds.
+
+    Not everything the collector finds is held by a cycle. On a free-threaded build a reference
+    another thread dropped waits for its object's creating thread to merge it, and the
+    collector merges it first; an object that then has no reference left is garbage too,
+    although reference counting alone frees it. So the references among the garbage are
+    counted, and what nothing else in the garbage refers to is let go, repeatedly, as
+    reference counting would let it go; what remains is held by a cycle.
+
+    pytest before 9.2 restores a patched method by setting it on its own instance: a bound
+    method under its own name in the instance's `__dict__`, a cycle of the test tool's. On such
+    a pytest that one reference is not counted; any other self-reference is.
+
+    Args:
+        garbage: What the collector found unreachable.
+        follow: Whether the references out of an object count.
+
+    Returns:
+        The ids of the objects reference counting alone would never free.
+    """
+    ids = {id(item) for item in garbage}
+    owners = (
+        {id(vars(item)): item for item in garbage if _has_dict(item)} if _RESTORES_METHODS else {}
+    )
+    holds: dict[int, list[int]] = {}
+    held = dict.fromkeys(ids, 0)
+    for item in garbage:
+        referents: list[object]
+        if not follow(item):
+            referents = []
+        elif id(item) in owners:
+            owner = owners[id(item)]
+            attributes = cast("dict[str, object]", item).items()
+            referents = [v for k, v in attributes if not _restored_method(owner, k, v)]
+        else:
+            referents = gc.get_referents(item)
+        holds[id(item)] = [id(each) for each in referents if id(each) in ids]
+        for key in holds[id(item)]:
+            held[key] += 1
+    free = [key for key, count in held.items() if not count]
+    while free:
+        for key in holds[free.pop()]:
+            held[key] -= 1
+            if not held[key]:
+                free.append(key)
+    return {key for key, count in held.items() if count}
+
+
+def _restored_method(owner: object, name: str, value: object) -> bool:
+    """Tell whether an instance attribute is a method pytest restored onto its own instance.
+
+    Args:
+        owner: The instance.
+        name: The attribute's name.
+        value: Its value.
+
+    Returns:
+        True for a bound method of `owner`, under its own name, of the class's own function.
+    """
+    return (
+        type(value) is types.MethodType
+        and value.__self__ is owner
+        and value.__name__ == name
+        and value.__func__ is getattr(type(owner), name, None)
+    )
+
+
+def _has_dict(item: object) -> bool:
+    """Tell whether an object has an instance `__dict__`, without touching a dead proxy.
+
+    Args:
+        item: The object.
+
+    Returns:
+        True if `vars(item)` returns its attributes.
+    """
+    if issubclass(type(item), (type, types.ModuleType, weakref.ProxyTypes)):
+        return False
+    try:
+        vars(item)
+    except TypeError:
+        return False
+    return True
+
+
+def _drop_logged_objects(item: pytest.Item) -> None:
+    """Keep only the text of the log records pytest keeps with a test item.
+
+    The records hold a logged exception (in the arguments and the exception info), and through
+    its traceback the test's frames, for the whole run; the report has their text already.
+
+    Args:
+        item: The test item.
+    """
+    records_key = importlib.import_module("_pytest.logging").caplog_records_key
+    for records in item.stash.get(records_key, {}).values():
+        for record in records:
+            record.msg, record.args, record.exc_info = record.getMessage(), None, None
+
+
+def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
+    """Return what of the library runs now: sessions, connection groups, and threads.
+
+    Returns:
+        The labels of the sessions in the live set, the labels of every session not yet
+        freed, the connection groups, and the alive library threads (`_LIBRARY_THREADS`).
+    """
+    core = importlib.import_module("deephaven_massive._tables.core")
+    session = importlib.import_module("deephaven_massive._session")
+    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    with core._live_lock:
+        live: set[str] = {each.label for each in core._live.values()}
+    with session._keys_lock:
+        cores = [ref() for ref in session._open_sessions]
+    alive = {each.label for each in cores if each is not None}
+    with ws._groups_lock:
+        groups: set[object] = set(ws._groups.values())
+    threads = {
+        t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
+    }
+    return live, alive, groups, threads
+
+
 @pytest.fixture(autouse=True)
 def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Number each test's streams from 1, so tests can name them by id.
@@ -371,6 +759,7 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
 
         def make(**options: object) -> WsSession:
             session: WsSession = module.WsSession(fake_ws_server, **options)
+            sessions.callback(_drop_session, session)  # last: after the close below
             sessions.callback(session.close)
             return session
 
@@ -380,6 +769,20 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
     while (left := _client_threads()) and time.monotonic() < deadline:
         pause.wait(0.02)
     assert not left, f"threads outlived their session: {left}"
+
+
+def _drop_session(harness: WsSession) -> None:
+    """Drop a closed wrapper's session and transport, once the test is done with them.
+
+    The wrapper and the transport refer to each other (the transport holds the wrapper's bound
+    methods), so without this the session would live until the cyclic collector broke that
+    cycle.
+
+    Args:
+        harness: The wrapper.
+    """
+    vars(harness).pop("session", None)
+    vars(harness).pop("connections", None)
 
 
 _CLIENT_THREADS_TIMEOUT: Final = 15.0
@@ -1186,8 +1589,13 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
 def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
     """Print which open questions the run verified, and the plans the rest need.
 
-    An item (a `settles` argument) is verified when every test that settles it passed; one
-    whose tests were skipped for a plan is listed under the cheapest plan text it needs.
+    An item (a `settles` argument) is verified when every test that settles it ran and
+    passed. One that some of its tests never ran for (a `-k` or path selection left them
+    out) is "partly run", never verified, since part of its question went unchecked; one
+    whose tests were skipped for a plan is listed under the cheapest plan text it needs. A run
+    whose paths narrow collection (a `::` test id, or a path other than the configured test
+    paths) may not have collected every test of a question, so its passed items are reported
+    as "passed in this selection", not verified.
 
     Args:
         terminalreporter: The terminal reporter, whose statistics hold the outcomes.
@@ -1208,12 +1616,16 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
     verified: list[str] = []
     needing: dict[str, list[str]] = {}
     other: list[str] = []
+    partly: list[str] = []
     ran_items = {i for t, (items, _) in settled.items() if t in outcome for i in items}
     if not ran_items:
         return
     for item in sorted(ran_items, key=_item_order):
-        tests = [(t, needs) for t, (items, needs) in settled.items() if item in items]
-        tests = [(t, needs) for t, needs in tests if t in outcome]
+        every = [(t, needs) for t, (items, needs) in settled.items() if item in items]
+        tests = [(t, needs) for t, needs in every if t in outcome]
+        if len(tests) < len(every):
+            partly.append(f"{item} ({len(tests)} of {len(every)} tests ran)")
+            continue
         results = [outcome.get(t) for t, _ in tests]
         if all(result == "passed" for result in results):
             verified.append(item)
@@ -1225,15 +1637,65 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
             )
         else:
             other.append(item)
-    total = len(verified) + sum(len(items) for items in needing.values()) + len(other)
+    _write_settled(
+        terminalreporter,
+        narrowed=_narrowed(config),
+        verified=verified,
+        needing=needing,
+        unverified={"failed or skipped": other, "partly run": partly},
+    )
+
+
+def _narrowed(config: pytest.Config) -> bool:
+    """Return whether the run's paths may leave some live tests uncollected.
+
+    Args:
+        config: The pytest configuration, for the run's paths and the configured test paths.
+
+    Returns:
+        True when a path names a test id (`::`) or is not one of the configured test paths;
+        False for a run of the configured paths, which pytest uses when none is given.
+    """
+    configured = {(config.rootpath / p).resolve() for p in config.getini("testpaths")}
+    here = config.invocation_params.dir
+    return any("::" in arg or (here / arg).resolve() not in configured for arg in config.args)
+
+
+def _write_settled(
+    terminalreporter: pytest.TerminalReporter,
+    *,
+    narrowed: bool,
+    verified: list[str],
+    needing: dict[str, list[str]],
+    unverified: dict[str, list[str]],
+) -> None:
+    """Write the open-questions section of the terminal summary.
+
+    Args:
+        terminalreporter: The terminal reporter that writes the summary.
+        narrowed: Whether the run's paths may have left some live tests uncollected; its
+            passed items are then "passed in this selection", not "verified".
+        verified: The items every collected test of which ran and passed.
+        needing: The items skipped for a plan, by the plan's text.
+        unverified: The other items, by why they are not verified.
+    """
+    total = (
+        len(verified)
+        + sum(len(items) for items in needing.values())
+        + sum(len(items) for items in unverified.values())
+    )
     terminalreporter.write_sep("=", "open questions")
-    terminalreporter.write_line(f"verified {len(verified)} of {total}: {', '.join(verified)}")
+    passed = f"{len(verified)} of {total}: {', '.join(verified)}"
+    terminalreporter.write_line(
+        f"passed in this selection {passed} (run the full live suite to verify)"
+        if narrowed
+        else f"verified {passed}"
+    )
     for plan, items in needing.items():
         terminalreporter.write_line(f"{len(items)} need {plan}: {', '.join(items)}")
-    if other:
-        terminalreporter.write_line(
-            f"{len(other)} not verified (failed or skipped): {', '.join(other)}"
-        )
+    for why, items in unverified.items():
+        if items:
+            terminalreporter.write_line(f"{len(items)} not verified ({why}): {', '.join(items)}")
 
 
 def _item_order(item: str) -> tuple[int, str]:
@@ -1770,7 +2232,10 @@ def _wall_clock(stamp_ms: int) -> str:
         (13, 0): " (the half-day close)",
         (16, 0): " (the regular close)",
         (0, 0): " (midnight)",
+        (1, 0): " (midnight in Chicago)",
         (9, 30): " (the open)",
+        (16, 15): " (the index-option close)",
+        (13, 15): " (the index-option half-day close)",
     }.get((local.hour, local.minute), "")
     return f"{utc:%Y-%m-%dT%H:%M:%SZ} = {local:%H:%M} New York{notable}"
 
@@ -1818,3 +2283,613 @@ def half_day_report(
         return lines
 
     return report
+
+
+_SAME_BAR = 1e-6
+"""The relative error within which two sources' open, high, low, close, or volume agree; a
+flat file's text and a JSON number of the same price can differ in the last digits."""
+
+StampedBar = tuple[int, tuple[float | None, ...]]
+"""One source's bar: its stamp in epoch milliseconds and its open, high, low, close, and
+volume (None where the source has none, such as an index's volume)."""
+
+StampDays = dict[str, tuple[date, date]]
+"""The day-stamp checks' dates, by unit: `"day"` the full and the half trading day; `"week"`,
+`"month"`, `"quarter"`, and `"year"` the first and last day to read of that unit's bars."""
+
+_TICKER_PARAMS: Final = {"I:": "indicesTicker", "O:": "optionsTicker"}
+"""The range and `/prev` path placeholder of a ticker's class, by its prefix; stocks have none."""
+
+_OHLCV_KEYS: Final = {
+    "t": ("o", "h", "l", "c", "v"),
+    "window_start": ("open", "high", "low", "close", "volume"),
+}
+"""The value keys of a raw REST bar (stamped `t`) and of a day flat-file row (`window_start`)."""
+
+
+def _thanksgiving(year: int) -> date:
+    """Return the US Thanksgiving Day of a year: the fourth Thursday of November.
+
+    Args:
+        year: The year.
+
+    Returns:
+        The date. US exchanges close that day and close early, at 13:00 New York time, on the
+        Friday after, by their fixed holiday rules.
+    """
+    first = date(year, 11, 1)
+    return first + timedelta(days=(3 - first.weekday()) % 7 + 21)
+
+
+def _is_half_day(day: date) -> bool:
+    """Return whether US exchanges close early, at 13:00 New York time, on a day.
+
+    By the exchanges' rules: the Friday after Thanksgiving, and July 3 and December 24 when
+    they fall Monday to Thursday (on a Friday the next day's holiday moves onto them).
+
+    Args:
+        day: The day.
+
+    Returns:
+        True for a half trading day.
+    """
+    if day == _thanksgiving(day.year) + timedelta(days=1):
+        return True
+    return (day.month, day.day) in {(7, 3), (12, 24)} and day.weekday() < 4
+
+
+def _months_before(day: date, months: int) -> date:
+    """Return the first day of the month `months` before the month of `day`.
+
+    Args:
+        day: Any day of the month counted from.
+        months: How many months back, 0 for `day`'s own month.
+
+    Returns:
+        The first of that month.
+    """
+    index = day.year * 12 + day.month - 1 - months
+    return date(index // 12, index % 12 + 1, 1)
+
+
+def _stamp_days(today: date) -> StampDays:
+    """Return the day-stamp checks' dates: a recent Thanksgiving week and recent longer periods.
+
+    The half day is the Friday after the most recent Thanksgiving with `half + 3 days <=
+    today`: that week's Sunday is over, so every bar it holds, an index week updated around
+    the clock included, is complete and its flat files are published. Its days are at most
+    about a year and two weeks old, inside every stock and option plan's history; an index
+    plan that keeps one year can lack them in the two weeks before the next Thanksgiving week
+    ends. The longer periods are anchored to `today` instead, so they are as recent as whole
+    periods can be.
+
+    Args:
+        today: The run's day, in New York time.
+
+    Returns:
+        By unit: `"day"` the Wednesday before Thanksgiving (a full trading day) and the Friday
+        after (a half day); `"week"` the Monday of the week before and the Sunday ending
+        Thanksgiving week; `"month"` the two whole months before the current month;
+        `"quarter"` the two whole quarters before the current quarter; and `"year"` January 1
+        of this year to `today`, which holds this year's unfinished bar (none yet before the
+        year's first trading day).
+    """
+    half = _thanksgiving(today.year) + timedelta(days=1)
+    if half + timedelta(days=3) > today:
+        half = _thanksgiving(today.year - 1) + timedelta(days=1)
+    this_month = today.replace(day=1)
+    this_quarter = date(today.year, (today.month - 1) // 3 * 3 + 1, 1)
+    return {
+        "day": (half - timedelta(days=2), half),
+        "week": (half - timedelta(days=11), half + timedelta(days=2)),
+        "month": (_months_before(today, 2), this_month - timedelta(days=1)),
+        "quarter": (_months_before(this_quarter, 6), this_quarter - timedelta(days=1)),
+        "year": (date(today.year, 1, 1), today),
+    }
+
+
+@pytest.fixture(scope="session")
+def stamp_days() -> StampDays:
+    """Return the dates the day-stamp checks read, computed from the run's day.
+
+    Massive's two-year history on Basic plans would push fixed dates out of reach, so the
+    checks read the most recent finished Thanksgiving week: its Wednesday is a full trading
+    day and its Friday a half day. See `_stamp_days` for every unit.
+
+    Returns:
+        The dates, by unit.
+    """
+    return _stamp_days(datetime.now(_NEW_YORK).date())
+
+
+def _ticker_param(ticker: str) -> str:
+    """Return the range and `/prev` path placeholder of a ticker's class.
+
+    Args:
+        ticker: A stock, `O:` option, or `I:` index ticker.
+
+    Returns:
+        `"stocksTicker"`, `"optionsTicker"`, or `"indicesTicker"`.
+    """
+    return _TICKER_PARAMS.get(ticker[:2], "stocksTicker")
+
+
+def _new_york_day(stamp_ms: int) -> date:
+    """Return the New York calendar day of an epoch-millisecond stamp.
+
+    Args:
+        stamp_ms: The stamp.
+
+    Returns:
+        The day.
+    """
+    return datetime.fromtimestamp(stamp_ms / 1000, UTC).astimezone(_NEW_YORK).date()
+
+
+def _stamped(row: Mapping[str, Any]) -> StampedBar:
+    """Return a raw REST bar's or day flat-file row's stamp and values.
+
+    Args:
+        row: A REST bar as Massive sent it (`t` in ms; `o`, `h`, `l`, `c`, `v`) or a day-file
+            row as `flat_file_tickers` reads it (`window_start` in ns; `open`, ... as text).
+
+    Returns:
+        The stamp in epoch milliseconds and the open, high, low, close, and volume, None where
+        the source has none (the index day file has no volume).
+    """
+    if "t" in row:
+        stamp = int(row["t"])
+        keys = _OHLCV_KEYS["t"]
+    else:
+        stamp = int(str(row["window_start"])) // _MS
+        keys = _OHLCV_KEYS["window_start"]
+    return stamp, tuple(None if row.get(k) is None else float(str(row[k])) for k in keys)
+
+
+def _largest_error(left: tuple[float | None, ...], right: tuple[float | None, ...]) -> float | None:
+    """Return the largest relative error between two bars' values.
+
+    Open, high, low, and close must be present on both; the volume counts only when both have
+    one.
+
+    Args:
+        left: One bar's values.
+        right: The other's.
+
+    Returns:
+        The largest relative error, or None when either lacks an open, high, low, or close.
+    """
+    errors = []
+    for index, (a, b) in enumerate(zip(left, right, strict=False)):
+        if a is None or b is None:
+            if index < 4:
+                return None
+            continue
+        errors.append(abs(a - b) / max(abs(a), abs(b), 1e-12))
+    return max(errors, default=None)
+
+
+def _match_text(values: tuple[float | None, ...], ranged: list[StampedBar]) -> str:
+    """Describe which range bar a bar from another source matches.
+
+    Args:
+        values: The other source's values.
+        ranged: The range bars it may match.
+
+    Returns:
+        `"matches the range bar of <day> (largest relative error <e>)"`, or the closest bar
+        when none is within `_SAME_BAR`, or `"no range bar to compare"`.
+    """
+    scored = [
+        (error, _new_york_day(stamp))
+        for stamp, other in ranged
+        if (error := _largest_error(values, other)) is not None
+    ]
+    if not scored:
+        return "no range bar to compare"
+    error, day = min(scored)
+    verdict = "matches" if error <= _SAME_BAR else "matches no range bar; closest is"
+    return f"{verdict} the range bar of {day} (largest relative error {error:.2e})"
+
+
+def _read_range(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+    ticker: str,
+    *,
+    span: str,
+    bounds: tuple[date, date],
+) -> list[dict[str, Any]]:
+    """Read one ticker's raw bars of one unit from the aggregates range endpoint, unfiltered.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+        ticker: The ticker; its prefix selects the class's endpoint.
+        span: The unit, such as `"minute"`, `"day"`, or `"week"`.
+        bounds: The first and last day, inclusive.
+
+    Returns:
+        The bars as Massive sent them, oldest first.
+    """
+    param = _ticker_param(ticker)
+    path = f"/v2/aggs/ticker/{{{param}}}/range/{{multiplier}}/{{timespan}}/{{from}}/{{to}}"
+    params = {param: ticker, "multiplier": 1, "timespan": span}
+    params |= {"from": bounds[0], "to": bounds[1]}
+    return rest_rows(path, params, {"sort": "asc", "limit": 50_000})
+
+
+def _weekday_after(day: date, step: int) -> date:
+    """Return the nearest weekday before (`step=-1`) or after (`step=1`) a day.
+
+    Args:
+        day: The day.
+        step: -1 or 1.
+
+    Returns:
+        The weekday; a holiday on it is not skipped, so a read from it still reaches a
+        trading day on the far side of a day off.
+    """
+    found = day + timedelta(days=step)
+    while found.weekday() >= 5:
+        found += timedelta(days=step)
+    return found
+
+
+def _week_stamp_days(start: date, end: date) -> tuple[date, date]:
+    """Return the New York stamp days that count a week bar as one of the weeks `start`-`end`.
+
+    A week bar may be stamped on its Monday, on the Sunday before, or on the Saturday before
+    (00:00 UTC Sunday is 19:00 or 20:00 New York time on Saturday). Counting stamp days from
+    the Saturday before `start` to the Friday before `end` keeps all three stamps of every
+    week in the span and none of a neighbour's: the week before's latest stamp, its Monday,
+    is five days before the first day counted, and the week after's earliest, the Saturday
+    before its Monday, is the day before `end`, one day after the last day counted. For the
+    weeks 2025-11-17 to 2025-11-30 that is 2025-11-15 (Saturday) to 2025-11-28 (Friday).
+
+    Args:
+        start: The Monday of the first week.
+        end: The Sunday of the last week.
+
+    Returns:
+        The first and last stamp day counted, inclusive.
+    """
+    return start - timedelta(days=2), end - timedelta(days=2)
+
+
+def _inside(
+    raw: list[dict[str, Any]],
+    *,
+    ticker: str,
+    span: str,
+    days: tuple[date, date],
+    evidence: Callable[[str], None],
+) -> list[dict[str, Any]]:
+    """Keep the raw bars whose New York stamp day falls in a span, recording the rest.
+
+    Massive may widen a range to whole periods of its unit (a week from its Sunday), so a
+    read can return a period the check did not ask for. Each such bar is recorded as
+    "outside the span" with its stamp, and the count line says how many were read and kept.
+
+    Args:
+        raw: The bars as Massive sent them.
+        ticker: The ticker, for the evidence.
+        span: The unit, for the evidence.
+        days: The first and last stamp day kept, inclusive.
+        evidence: Records one evidence line.
+
+    Returns:
+        The bars kept, in their order.
+    """
+    kept = []
+    for bar in raw:
+        if days[0] <= _new_york_day(int(bar["t"])) <= days[1]:
+            kept.append(bar)
+        else:
+            evidence(f"{ticker} {span} bar outside the span: {_bar_text(_stamped(bar))}")
+    evidence(
+        f"{ticker} {span} bars stamped {days[0]} to {days[1]}: {len(kept)} of {len(raw)} read "
+        "(any other was outside the span: the range widened to whole periods)"
+    )
+    return kept
+
+
+def _bar_text(bar: StampedBar) -> str:
+    """Describe a stamped bar: its stamp in UTC and New York time, and its values.
+
+    Args:
+        bar: The bar.
+
+    Returns:
+        Such as `"t=2025-11-26T05:00:00Z = 00:00 New York (midnight) ohlcv=(...)"`.
+    """
+    return f"t={_wall_clock(bar[0])} ohlcv={bar[1]}"
+
+
+@pytest.fixture
+def range_bars(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+) -> Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]:
+    """Return a function that reads one ticker's raw bars from the aggregates range endpoint.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+
+    Returns:
+        A function `(ticker, span, bounds)`: the ticker (its prefix selects the class), the
+        unit (such as `"minute"`), and the first and last day, inclusive. It returns the bars
+        as Massive sent them, unfiltered, oldest first.
+    """
+
+    def read(ticker: str, span: str, bounds: tuple[date, date]) -> list[dict[str, Any]]:
+        return _read_range(rest_rows, ticker, span=span, bounds=bounds)
+
+    return read
+
+
+@pytest.fixture
+def stamped_bar() -> Callable[[Mapping[str, Any]], StampedBar]:
+    """Return a function that turns a raw REST bar or day flat-file row into a stamped bar.
+
+    Returns:
+        A function mapping a row to its stamp in epoch milliseconds and its open, high, low,
+        close, and volume (see `_stamped`).
+    """
+    return _stamped
+
+
+@pytest.fixture
+def largest_error() -> Callable[[tuple[float | None, ...], tuple[float | None, ...]], float | None]:
+    """Return a function that measures how far apart two bars' values are.
+
+    Returns:
+        A function `(left, right)` returning the largest relative error of their open, high,
+        low, close, and (when both have one) volume, or None when either lacks a price.
+    """
+    return _largest_error
+
+
+@pytest.fixture
+def day_bar_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+    evidence: Callable[[str], None],
+) -> Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]:
+    """Return a function that compares one ticker's 1-day bars across sources.
+
+    It reads the ticker's 1-day bars once from the aggregates range endpoint, unfiltered,
+    from the weekday before the first day to the weekday after the last, and reports each
+    asked day's range bars with their stamps (UTC and New York time) and values. Beside them
+    it reports the same day's bar from every other source the caller read (grouped daily, a
+    day flat file, a rebuild from minute bars), with its stamp and which day's range bar it
+    matches, with the largest relative error of its open, high, low, close, and volume (a
+    volume only when both have one); a match is within 1e-6.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as the report has it.
+
+    Returns:
+        A function `(ticker, days, others)`: the ticker (its prefix selects the class), the
+        days, and the other sources' bars, by source name and day. It records the evidence
+        and returns the days without a range bar.
+    """
+
+    def report(
+        ticker: str,
+        days: tuple[date, ...],
+        others: Mapping[str, Mapping[date, list[StampedBar]]],
+    ) -> list[date]:
+        bounds = (_weekday_after(min(days), -1), _weekday_after(max(days), 1))
+        ranged = [
+            _stamped(bar) for bar in _read_range(rest_rows, ticker, span="day", bounds=bounds)
+        ]
+        lines = [f"{ticker} range 1-day bars {bounds[0]} to {bounds[1]}: {len(ranged)}"]
+        missing = []
+        for day in days:
+            own = [bar for bar in ranged if _new_york_day(bar[0]) == day]
+            if not own:
+                missing.append(day)
+                lines.append(f"{ticker} {day} range: no 1-day bar")
+            lines.extend(f"{ticker} {day} range 1-day bar: {_bar_text(bar)}" for bar in own)
+            for name, by_day in others.items():
+                found = by_day.get(day, [])
+                if not found:
+                    lines.append(f"{ticker} {day} {name}: no bar")
+                lines.extend(
+                    f"{ticker} {day} {name}: {_bar_text(bar)}; {_match_text(bar[1], ranged)}"
+                    for bar in found
+                )
+        for line in lines:
+            evidence(line)
+        return missing
+
+    return report
+
+
+@pytest.fixture
+def prev_bar_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+    evidence: Callable[[str], None],
+) -> Callable[[str], int]:
+    """Return a function that compares `/prev` with the range bar of the same day.
+
+    `/prev` serves only the most recent completed trading day, so its stamp is checked on
+    whatever day that is when the test runs; a short-day stamp shows only on a run on the
+    trading day after a half day. For one ticker it reads the raw `/prev` bar, takes its New
+    York calendar day, says whether that day is a half day, reads the range endpoint's 1-day
+    bars around it, and reports the stamps (UTC and New York time) and which day's range bar
+    `/prev` matches, with the largest relative error.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as the report has it.
+
+    Returns:
+        A function taking the ticker (its prefix selects the class). It records the evidence
+        and returns how many `/prev` bars it read.
+    """
+
+    def report(ticker: str) -> int:
+        param = _ticker_param(ticker)
+        prevs = rest_rows(f"/v2/aggs/ticker/{{{param}}}/prev", {param: ticker}, {})
+        if not prevs:
+            evidence(f"{ticker} /prev: no bar")
+            return 0
+        for prev in prevs:
+            bar = _stamped(prev)
+            day = _new_york_day(bar[0])
+            half = "yes" if _is_half_day(day) else "no"
+            evidence(f"{ticker} /prev ({day}, half day: {half}): {_bar_text(bar)}")
+            bounds = (_weekday_after(day, -1), _weekday_after(day, 1))
+            ranged = [
+                _stamped(r) for r in _read_range(rest_rows, ticker, span="day", bounds=bounds)
+            ]
+            for r in ranged:
+                evidence(f"{ticker} range 1-day bar: {_bar_text(r)}")
+            evidence(f"{ticker} /prev {_match_text(bar[1], ranged)}")
+        return len(prevs)
+
+    return report
+
+
+@pytest.fixture
+def period_bar_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+    evidence: Callable[[str], None],
+) -> Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]:
+    """Return a function that shows the stamps of one ticker's week or longer bars.
+
+    For each unit asked for it reads the bars over a range of days from the aggregates range
+    endpoint, unfiltered, and reports each stamp in UTC and New York time with its values.
+    Weeks are read from the Saturday before the first Monday to the last Saturday, and a week
+    bar is counted when its New York stamp day falls from that Saturday to the last Friday
+    (see `_week_stamp_days`), so a week stamped on its Monday or on the weekend before is
+    counted once. Massive may widen a range to whole periods of its unit (a week from its
+    Sunday), so each bar stamped outside the span is recorded as such and left out. A
+    read the plan refuses (a range beyond the plan's history) is recorded as evidence and
+    counts as no bars, so the other units' evidence is kept. Reading it: a bar stamped 00:00
+    New York time (01:00 for an index) on its period's first day, or on the Saturday or
+    Sunday before a week's Monday, is one the library accepts.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as the report has it.
+
+    Returns:
+        A function `(ticker, spans, expected)`: the ticker (its prefix selects the class), the
+        first and last day to read of each unit (`"week"`, `"month"`, `"quarter"`, `"year"`),
+        and the fewest and most bars expected of each. It records the evidence and returns
+        whether every unit returned an expected number of bars.
+    """
+
+    def report(
+        ticker: str,
+        spans: Mapping[str, tuple[date, date]],
+        expected: Mapping[str, tuple[int, int]],
+    ) -> bool:
+        complete = True
+        for span, (start, end) in spans.items():
+            week = span == "week"
+            first = start - timedelta(days=2) if week else start
+            last = end - timedelta(days=1) if week else end
+            try:
+                raw = _read_range(rest_rows, ticker, span=span, bounds=(first, last))
+            except WireEntitlementError as error:
+                evidence(
+                    f"{ticker} {span} bars {first} to {last}: refused, beyond the plan's "
+                    f"history? ({error})"
+                )
+                complete = False
+                continue
+            inside = _week_stamp_days(start, end) if week else (start, end)
+            bars = [
+                _stamped(b)
+                for b in _inside(raw, ticker=ticker, span=span, days=inside, evidence=evidence)
+            ]
+            least, most = expected[span]
+            complete &= least <= len(bars) <= most
+            evidence(f"{ticker} {span} bars counted: {len(bars)} (expected {least} to {most})")
+            for bar in bars:
+                evidence(f"{ticker} {span} bar: {_bar_text(bar)}")
+        return complete
+
+    return report
+
+
+@pytest.fixture
+def week_bars(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+    evidence: Callable[[str], None],
+) -> Callable[[str, tuple[date, date]], list[dict[str, Any]]]:
+    """Return a function that reads one ticker's week bars of whole calendar weeks.
+
+    It reads like `period_bar_report` (from the Saturday before the first Monday to the last
+    Saturday), keeps the bars whose New York stamp day falls in `_week_stamp_days`, and
+    records each bar outside the span and the count, before returning.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as it is known.
+
+    Returns:
+        A function `(ticker, weeks)`: the ticker and the Monday of the first week and the
+        Sunday of the last. It returns the raw week bars kept, oldest first.
+    """
+
+    def read(ticker: str, weeks: tuple[date, date]) -> list[dict[str, Any]]:
+        start, end = weeks
+        bounds = (start - timedelta(days=2), end - timedelta(days=1))
+        raw = _read_range(rest_rows, ticker, span="week", bounds=bounds)
+        return _inside(
+            raw, ticker=ticker, span="week", days=_week_stamp_days(start, end), evidence=evidence
+        )
+
+    return read
+
+
+def _new_york_text(nanos: int | None) -> str:
+    """Write epoch nanoseconds as New York wall-clock time.
+
+    Args:
+        nanos: Nanoseconds since the Unix epoch, or None.
+
+    Returns:
+        Such as `"2025-11-28 00:00 EST"`, or `"null"`.
+    """
+    if nanos is None:
+        return "null"
+    return f"{datetime.fromtimestamp(nanos / 1e9, UTC).astimezone(_NEW_YORK):%Y-%m-%d %H:%M %Z}"
+
+
+@pytest.fixture
+def library_stamps(
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[Callable[[], Table]], str]:
+    """Return a function that runs one library bar call and describes the bars' windows.
+
+    A refusal is not an outcome to record: the returned function lets `EntitlementError`
+    propagate, so the test fails (its declared plan covers the data) rather than reporting it.
+
+    Args:
+        table_rows: Snapshots a table into rows.
+
+    Returns:
+        A function taking the call (such as `partial(q.history, start, end)`). It returns
+        each row's `Symbol`, `Date`, `TimestampStart`, and `TimestampEnd` (in New York wall
+        clock), or the text of the `MassiveError` the call raised.
+    """
+
+    def describe(call: Callable[[], Table]) -> str:
+        try:
+            rows = table_rows(call())
+        except EntitlementError:
+            raise
+        except MassiveError as error:
+            return f"MassiveError: {error}"
+        if not rows:
+            return "no rows"
+        return "; ".join(
+            f"{r['Symbol']} Date={r['Date']} TimestampStart={_new_york_text(r['TimestampStart'])}"
+            f" TimestampEnd={_new_york_text(r['TimestampEnd'])}"
+            for r in rows
+        )
+
+    return describe
