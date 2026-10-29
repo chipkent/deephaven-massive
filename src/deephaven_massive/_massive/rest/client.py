@@ -33,7 +33,7 @@ import urllib3
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.net.http import https_proxy, proxy_credentials, ssl_context
-from deephaven_massive._massive.net.redaction import clean_received
+from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     MAX_RETRY_AFTER,
@@ -232,8 +232,8 @@ class RestClient:
         self._base = f"{origin[0]}://{urlsplit(base_url).netloc}"
         self._host = origin[1]
         self._clock = clock
-        # Kept only to clean every response body of a key the server echoes (`net.redaction`).
-        self._api_key = api_key
+        # Cleans every response body of a key the server echoes (`net.redaction`).
+        self._redactor = Redactor(api_key)
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "User-Agent": USER_AGENT,
@@ -473,7 +473,7 @@ class RestClient:
             )
         elapsed = self._clock.monotonic() - started
         # Cleaned before anything reads it, so no row, error, or log line can quote the key.
-        data = clean_received(response.data, self._api_key)
+        data = self._redactor.received(response.data)
         if response.status == HTTPStatus.OK:
             page = decode_page(data, rest_path, request)
             _log.debug(
