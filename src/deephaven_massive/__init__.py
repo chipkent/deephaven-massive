@@ -118,13 +118,14 @@ _EXPORTS: dict[str, str] = {
     "TickerType": "deephaven_massive._enums",
     "Timeframe": "deephaven_massive._enums",
     "Timespan": "deephaven_massive._enums",
-    "enable_debug_logging": "deephaven_massive._logging",
+    "enable_debug_logging": "deephaven_massive._debug_log",
 }
 
 # Type checkers read the imports, so they see each name's real type and flag a name outside
 # `__all__`; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._debug_log import enable_debug_logging
     from deephaven_massive._enums import (
         AssetClass,
         ConditionDataType,
@@ -143,7 +144,6 @@ if TYPE_CHECKING:
         Timespan,
     )
     from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
-    from deephaven_massive._logging import enable_debug_logging
     from deephaven_massive._session import MassiveSession
     from deephaven_massive._types import ALL
 else:

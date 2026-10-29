@@ -178,4 +178,4 @@ def test_reading_a_name_imports_only_its_defining_module() -> None:
 
 def test_the_logging_switch_needs_no_other_module() -> None:
     # It must work before a Deephaven server exists, so it loads nothing that needs the JVM.
-    assert _modules_loaded_by("enable_debug_logging") == ["deephaven_massive._logging"]
+    assert _modules_loaded_by("enable_debug_logging") == ["deephaven_massive._debug_log"]

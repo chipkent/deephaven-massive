@@ -1,0 +1,28 @@
+{
+  "count": 1,
+  "request_id": "047c7035a86042b1925118e5f68d81b0",
+  "results": [
+    {
+      "issuer_cik": "0001045810",
+      "issuer_name": "NVIDIA CORP",
+      "last_filing_date": "2026-09-18",
+      "net_shares": -34918,
+      "net_value": -7648632.45,
+      "planned_purchase_value": 0,
+      "planned_sale_value": 7648632.45,
+      "purchase_count": 0,
+      "purchase_shares": 0,
+      "purchase_value": 0,
+      "purchaser_count": 0,
+      "sale_count": 3,
+      "sale_shares": 34918,
+      "sale_value": 7648632.45,
+      "seller_count": 1,
+      "tickers": [
+        "NVDA"
+      ],
+      "transaction_date": "2026-09-17"
+    }
+  ],
+  "status": "OK"
+}

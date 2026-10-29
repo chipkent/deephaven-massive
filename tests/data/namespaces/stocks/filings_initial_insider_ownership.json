@@ -1,0 +1,49 @@
+{
+  "count": 1,
+  "request_id": "047c7035a86042b1925118e5f68d81b0",
+  "results": [
+    {
+      "accession_number": "0001628280-26-022046",
+      "aff_10b5_one": null,
+      "date_of_original_submission": null,
+      "direct_or_indirect": "D",
+      "exercise_date": null,
+      "exercise_price": null,
+      "filing_date": "2026-03-30",
+      "filing_url": "https://www.sec.gov/Archives/edgar/data/1903508/0001628280-26-022046.txt",
+      "footnotes": [
+        {
+          "description": "The options granted on May 17, 2022 vested 100% on the third anniversary of the grant date.",
+          "id": "F1"
+        },
+        {
+          "description": "The exercise price of the options granted on May 17, 2022 was GPB 8.85, or approximately $11.80 based on a GBP to USD exchange rate as of March 27, 2026 of 1.3336.",
+          "id": "F2"
+        }
+      ],
+      "form_type": "3",
+      "is_director": false,
+      "is_officer": true,
+      "is_other": false,
+      "is_ten_percent_owner": false,
+      "issuer_cik": "0001903508",
+      "issuer_name": "Public Policy Holding Company, Inc.",
+      "nature_of_ownership": null,
+      "not_subject_to_section_16": null,
+      "officer_title": "Chief Administrative Officer",
+      "owner_cik": "0002125791",
+      "owner_name": "Mazzanti Matthew Ross",
+      "period_of_report": "2026-03-20",
+      "remarks": null,
+      "security_title": "Options",
+      "security_type": "derivative",
+      "shares_owned": null,
+      "tickers": [
+        "PPHC"
+      ],
+      "underlying_security_shares": 9000,
+      "underlying_security_title": "Common Stock, $0.001 par value"
+    }
+  ],
+  "status": "OK"
+}

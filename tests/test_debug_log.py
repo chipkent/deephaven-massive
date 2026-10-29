@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive import _logging
+from deephaven_massive import _debug_log
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -29,9 +29,9 @@ LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}Z (\w+) \[([^\]]+)\] ([
 
 @pytest.fixture(autouse=True)
 def fresh_switch(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(_logging, "_switch", _logging._Switch())
-    monkeypatch.delenv(_logging.LEVEL_VARIABLE, raising=False)
-    monkeypatch.delenv(_logging.FILE_VARIABLE, raising=False)
+    monkeypatch.setattr(_debug_log, "_switch", _debug_log._Switch())
+    monkeypatch.delenv(_debug_log.LEVEL_VARIABLE, raising=False)
+    monkeypatch.delenv(_debug_log.FILE_VARIABLE, raising=False)
     level, handlers = LIBRARY.level, list(LIBRARY.handlers)
     yield
     for handler in [h for h in LIBRARY.handlers if h not in handlers]:
@@ -66,7 +66,7 @@ def test_enable_debug_logging_writes_every_level_to_stderr(
         (
             "INFO",
             "MainThread",
-            "deephaven_massive._logging",
+            "deephaven_massive._debug_log",
             "logging deephaven_massive at DEBUG to stderr (from enable_debug_logging())",
         ),
         ("DEBUG", "MainThread", "deephaven_massive._query", "call 7 start"),
@@ -141,7 +141,7 @@ def test_the_environment_variable_turns_the_log_on(
     *, value: str, level: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", value)
-    _logging.configure_from_environment()
+    _debug_log.configure_from_environment()
     assert LIBRARY.level == level
 
     CHILD.info("an INFO line")
@@ -154,7 +154,7 @@ def test_the_file_variable_sends_the_lines_to_a_file(
     path = tmp_path / "massive.log"
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "DEBUG")
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", str(path))
-    _logging.configure_from_environment()
+    _debug_log.configure_from_environment()
     CHILD.debug("into the file")
     text = path.read_text(encoding="utf-8")
     assert "logging deephaven_massive at DEBUG to " in text
@@ -171,7 +171,7 @@ def test_an_unset_or_blank_level_changes_nothing(
     # The file variable alone does nothing.
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", str(tmp_path / "massive.log"))
     handlers = list(LIBRARY.handlers)
-    _logging.configure_from_environment()
+    _debug_log.configure_from_environment()
     assert LIBRARY.handlers == handlers
     assert LIBRARY.level == logging.NOTSET
     assert not (tmp_path / "massive.log").exists()
@@ -184,15 +184,15 @@ def test_an_unknown_level_names_the_variable(monkeypatch: pytest.MonkeyPatch) ->
         "WARNING, ERROR, CRITICAL"
     )
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
-        _logging.configure_from_environment()
+        _debug_log.configure_from_environment()
     # The variables count as read: a later session does not raise again.
-    _logging.configure_from_environment()
+    _debug_log.configure_from_environment()
 
 
 def test_the_variables_are_read_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    _logging.configure_from_environment()
+    _debug_log.configure_from_environment()
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "DEBUG")
-    _logging.configure_from_environment()
+    _debug_log.configure_from_environment()
     assert LIBRARY.level == logging.NOTSET
 
 
@@ -200,7 +200,7 @@ def test_the_function_wins_over_the_variables(monkeypatch: pytest.MonkeyPatch) -
     dm.enable_debug_logging()
     handlers = list(LIBRARY.handlers)
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "ERROR")
-    _logging.configure_from_environment()
+    _debug_log.configure_from_environment()
     assert (LIBRARY.handlers, LIBRARY.level) == (handlers, logging.DEBUG)
 
 
@@ -210,6 +210,6 @@ def test_the_variables_lose_a_race_with_the_function(tmp_path: Path) -> None:
     dm.enable_debug_logging()
     handlers = list(LIBRARY.handlers)
     path = tmp_path / "massive.log"
-    _logging._install(logging.ERROR, path, environment=True)
+    _debug_log._install(logging.ERROR, path, environment=True)
     assert (LIBRARY.handlers, LIBRARY.level) == (handlers, logging.DEBUG)
     assert path.read_text(encoding="utf-8") == ""

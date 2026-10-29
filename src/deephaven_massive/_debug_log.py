@@ -1,4 +1,4 @@
-"""The switch that turns on the library's log: `enable_debug_logging` and two environment variables.
+"""The library's debug log: the switch that turns it on, and the rules every change follows.
 
 Every module of the library logs through `logging.getLogger(__name__)`, so every library logger
 is a child of `deephaven_massive` and a record's logger name says which file wrote it. Nothing
@@ -30,6 +30,31 @@ every record; Deephaven installs no root handler, so nothing is printed twice th
 Setting the level alone (`logging.getLogger("deephaven_massive").setLevel(logging.DEBUG)`) shows
 nothing below WARNING, because the last-resort handler drops lower levels; that is what this
 module's handler is for. A user who configures logging already only sets the level.
+
+**The rules every change follows** (`AGENTS.md` points here). A log from a failing run, with
+the issue text, must be enough for an agent to reproduce and fix the bug:
+
+- A decision is a branch on configuration, server data, or input that changes what is
+  requested, routed, or returned. Each decision logs at DEBUG with its inputs and outcome.
+- A failure logs at ERROR, and a degradation at WARNING. Each names what an agent needs to
+  reproduce it: the offending field and value, the dataset, the endpoint or channel, the
+  symbol, and the call or stream id. Every layer logs what it knows; repeats are fine. Log too
+  much rather than too little.
+- Nothing is logged per row or per frame except a failure.
+- No log call is passed the API key, the S3 secret, a header, or the authentication frame. A
+  wire client cleans what it receives of its own secret (`_massive/net/secrets.py`) before
+  anything reads it, so text built from a server's answer is safe to log.
+- Log calls use `%` arguments. Every new thread or pool is named `massive #<session> <role>`
+  (`SessionCore.thread_prefix`). Nothing is logged while `registry_lock` or another leaf lock is
+  held.
+
+Tools check what they can: ruff's `G` and `LOG` rules; the logging rules of
+`tests/test_layout.py` (no secret name in a logging call, every `threading.Thread` named and
+every `ThreadPoolExecutor` given a prefix, no logging call inside a `with` over a leaf lock);
+and the planted-secret test, `tests/massive/net/test_secrets.py`, which drives every wire client
+with distinctive secrets and DEBUG on every logger and finds them in no record or error.
+Reviewers check the rest: that each new decision and failure logs, with its values. Ask: could
+an agent fix this from the log alone?
 
 This module imports only the standard library and no other part of the library, so
 `dm.enable_debug_logging` works before a Deephaven server exists.
