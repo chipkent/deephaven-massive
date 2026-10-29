@@ -257,7 +257,9 @@ faulthandler_timeout = "120"  # pytest declares this option as a string, so TOML
 faulthandler_exit_on_timeout = true
 
 [tool.coverage.run]
-source = ["deephaven_massive"]
+# The library, and the logic of the live tests' fixtures, which runs only against Massive in a
+# live run and so is unit-tested against the fakes (`tests/live/`).
+source = ["deephaven_massive", "tests/_live"]
 branch = true
 
 [tool.coverage.report]

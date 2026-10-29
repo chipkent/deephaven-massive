@@ -7,9 +7,12 @@ component drops one leading underscore: `_namespaces/stocks.py` is tested by
 `__init__.py` is mirrored by `tests/<path>/test_init.py` and a `__main__.py` by
 `tests/<path>/test_main.py`. Live tests add the suffix `_integration` to the mirror's stem.
 
-A directory directly under `tests/` whose name starts with `_` (such as `tests/_fakes/`) is a
-helper package outside the mirror rule, as long as it holds no test modules: pytest collects a
-test module wherever it lies, so one inside a helper package must still mirror a source module.
+Two directories directly under `tests/` are helper packages, outside the mirror rule:
+`tests/_fakes/`, the fake servers, and `tests/_live/`, the logic of the live tests' fixtures
+(`HELPER_PACKAGES`; a new one needs owner approval). A helper package holds no test modules:
+pytest collects a test module wherever it lies, so one inside a helper package must still
+mirror a module. A helper module may have a unit test, at the path the same mirror rule gives
+it: `tests/_live/plans.py` is tested by `tests/live/test_plans.py`.
 The only other test files that mirror no module are `conftest.py`, this file, and
 `test_readme.py`, all at the top of `tests/`. Fixtures under `tests/data/` follow the test
 paths, so none of their directories starts with `_` either.
@@ -116,6 +119,10 @@ APPROVED_EXCEPTIONS = frozenset(
     }
 )
 
+HELPER_PACKAGES = frozenset({"_fakes", "_live"})
+"""The directories directly under `tests/` that hold helpers, not tests: the fake servers and
+the logic of the live tests' fixtures. A new entry needs owner approval."""
+
 _INTEGRATION_SUFFIX = "_integration"
 
 
@@ -168,13 +175,12 @@ def is_helper(test_file: PurePosixPath) -> bool:
         test_file: A Python file's path relative to `tests/`.
 
     Returns:
-        True for a file inside a directory directly under `tests/` whose name starts with `_`,
-        unless pytest would treat it as a test module or a conftest (`test_*.py`,
-        `*_test.py`, `conftest.py`).
+        True for a file inside one of the `HELPER_PACKAGES`, unless pytest would treat it as a
+        test module or a conftest (`test_*.py`, `*_test.py`, `conftest.py`).
     """
     return (
         len(test_file.parts) > 1
-        and test_file.parts[0].startswith("_")
+        and test_file.parts[0] in HELPER_PACKAGES
         and test_file.name != "conftest.py"
         and not test_file.name.startswith("test_")
         and not test_file.stem.endswith("_test")
@@ -240,9 +246,11 @@ def orphans(modules: Iterable[PurePosixPath], test_files: Iterable[PurePosixPath
 
     Returns:
         One `"tests/<path>"` entry per file that is neither a helper, an approved exception,
-        nor the mirror (unit or live) of a module.
+        nor the mirror (unit or live) of a module or of a helper module among `test_files`.
     """
+    test_files = list(test_files)
     mirrors = {mirror_of(module) for module in modules}
+    mirrors |= {mirror_of(test_file) for test_file in test_files if is_helper(test_file)}
     return [
         f"tests/{test_file}"
         for test_file in test_files
@@ -433,8 +441,27 @@ def test_an_approved_exception_counts_only_at_the_top_of_tests() -> None:
 # Helper packages.
 
 
-def test_an_underscore_directory_under_tests_is_a_helper_package() -> None:
+def test_the_approved_directories_are_helper_packages() -> None:
     assert orphans([], _paths("_fakes/__init__.py", "_fakes/rest.py", "_fakes/ws/server.py")) == []
+    assert orphans([], _paths("_live/__init__.py", "_live/plans.py")) == []
+
+
+def test_another_underscore_directory_is_no_helper_package() -> None:
+    assert orphans([], _paths("_helpers/base.py")) == ["tests/_helpers/base.py"]
+
+
+def test_a_helper_module_is_tested_by_its_mirror() -> None:
+    files = _paths("_live/plans.py", "_live/__init__.py", "live/test_plans.py", "live/test_init.py")
+    assert orphans([], files) == []
+
+
+def test_a_test_of_no_helper_module_is_an_orphan() -> None:
+    files = _paths("_live/plans.py", "live/test_calendar.py", "_other/x.py", "other/test_x.py")
+    assert orphans([], files) == [
+        "tests/live/test_calendar.py",
+        "tests/_other/x.py",
+        "tests/other/test_x.py",
+    ]
 
 
 @pytest.mark.parametrize(
