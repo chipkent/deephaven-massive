@@ -5,9 +5,9 @@ description: "Mandatory gate before any push that runs paid CI and the review bo
 
 # Review locally before you push
 
-Every push to a branch with an open PR runs the full CI matrix and the review bots, and both cost
-money. Find the problems here, where they are free, so the push that follows is the last one for
-that batch.
+Every push to a branch with an open PR runs the review bots and every CI job its changes affect
+(the full test matrix whenever code or a test input changes), and both cost money. Find the
+problems here, where they are free, so the push that follows is the last one for that batch.
 
 Run this review **after** `./scripts/check.sh` (full) is green and **before** the push that opens
 the PR or delivers a batch of fixes. Fix every finding, rerun the full check, and then push once,
