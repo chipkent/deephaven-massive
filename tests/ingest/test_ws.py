@@ -1638,10 +1638,14 @@ def test_the_connection_logs_drift_rejects_and_a_summary(
     result = harness.query(TRADES, ["AAPL"]).blink()
     harness.subscribed("T.AAPL")
     connection = harness.connection()
+    first = harness.on_loop(connection, lambda: connection._summary)
+    assert first is not None  # the first generation started the summary's timer
     with caplog.at_level(logging.DEBUG):
         harness.send(trade("AAPL", zz=1), trade("AAPL", p="bad"))
         harness.flush()
         harness.on_loop(connection, connection._summarize)
+    # Each summary starts the next window's timer.
+    assert harness.on_loop(connection, lambda: connection._summary) is not first
     assert f"(schema drift) at {_URL} channel T; symbol AAPL; first value 1" in caplog.text
     [rejected] = [m for m in caplog.messages if "a rejected row fails" in m]
     assert rejected.startswith(f"{_URL} channel T: a rejected row fails streams [1]: ")

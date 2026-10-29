@@ -1457,7 +1457,7 @@ class RestEndpoints:
                 )
             )
             future.set_exception(failure)
-            _report(failure, call=None)
+            _report_host_failure(failure)
             self._core.diagnostics.write(
                 ConnectionRow(
                     transport=Transport.REST,
@@ -1556,7 +1556,7 @@ class RestEndpoints:
         try:
             table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
         except MassiveError as error:
-            _report(error, call=call)
+            _report(error, call)
             raise
         return self._static(table)
 
@@ -1618,7 +1618,7 @@ class RestEndpoints:
                 stamps=stamp_rule(spec, request),
             )
         except MassiveError as error:
-            _report(error, call=call)
+            _report(error, call)
             raise
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
         return self._static(table)
@@ -1670,8 +1670,8 @@ class RestEndpoints:
         )
 
 
-def _report(error: MassiveError, *, call: int | None) -> None:
-    """Log a failure at ERROR with exactly the text its exception carries, and its call's id.
+def _report(error: MassiveError, call: int) -> None:
+    """Log a failed call at ERROR with its id and exactly the text its exception carries.
 
     The exception itself propagates to the caller, whose traceback shows where it came from,
     so the record holds the call and the message alone: `call 3 failed: HTTP 400 from GET
@@ -1680,13 +1680,21 @@ def _report(error: MassiveError, *, call: int | None) -> None:
 
     Args:
         error: The failure.
-        call: The id of the verb call that failed, or None for a failure no verb call owns
-            (a host decision, which its waiting callers share).
+        call: The id of the verb call that failed.
     """
-    if call is None:
-        logger.error("%s", error)
-    else:
-        logger.error("call %d failed: %s", call, error)
+    logger.error("call %d failed: %s", call, error)
+
+
+def _report_host_failure(error: MassiveError) -> None:
+    """Log a failed host decision at ERROR with exactly the text its exception carries.
+
+    No verb call owns a host decision (every caller waiting for it shares the failure), so the
+    record holds the message alone, which names the asset class, the request, and its status.
+
+    Args:
+        error: The failure.
+    """
+    logger.error("%s", error)
 
 
 def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict[str, object]:

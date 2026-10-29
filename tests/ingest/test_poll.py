@@ -333,12 +333,17 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
 ) -> None:
     script.rows(("AAPL", 1.0), ("MSFT", 2.0))
     with caplog.at_level(logging.DEBUG, LOGGER):
-        table = start(massive_session, script=script, pollers=pollers, clock=clock)
+        table = start(
+            massive_session, script=script, pollers=pollers, clock=clock, mode=PollMode.APPEND
+        )
         until(lambda: len(pairs(table, dh_to_pylist)) == 2)
+        script.rows(("AAPL", 1.0), ("MSFT", 2.0))
+        next_cycle(clock)  # the same rows again: read, but nothing new to publish
         script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
         next_cycle(clock)
     assert caplog.messages == [
         "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in 0.000 s",
+        "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 0 published in 0.000 s",
         "stocks.dividends poll() stream 1: HTTP 503 from GET /stocks/v1/dividends",
     ]
 
