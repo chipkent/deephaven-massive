@@ -380,8 +380,9 @@ _STOCK_LIST_DATASETS = (
     *(f"_StockFinancials.{name}" for name in ("cash_flow_statements", "ratios")),
     *(f"_StockFilings.{name}" for name in ("index", "sections_10k", "text_8k")),
     *(f"_StockFilings.{name}" for name in ("disclosures_8k", "risk_factors")),
-    *(f"_StockFilings.{name}" for name in ("institutional_holdings", "insider_holdings")),
+    *(f"_StockFilings.{name}" for name in ("institutional_holdings", "initial_insider_ownership")),
     *(f"_StockFilings.{name}" for name in ("insider_transactions", "risk_factor_taxonomy")),
+    *(f"_StockFilings.{name}" for name in ("insider_activity", "insider_holdings")),
     "_StockFilings.disclosure_taxonomy",
 )
 ENUM_PARAMETERS |= {

@@ -145,18 +145,6 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
     _rest("/stocks/dev/trades/{ticker}", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/filings/10-K/vX_0/sections", _UNDOCUMENTED, undocumented=True),
     _rest(
-        "/stocks/insiders/vX/activity",
-        "Not yet declared: documented since 2026-10-28 as daily insider buying and selling "
-        "totals per issuer, which no dataset serves; the Form 4 dataset returns the individual "
-        "filings instead. Its dataset is a separate addition.",
-    ),
-    _rest(
-        "/stocks/insiders/vX/holdings",
-        "Not yet declared: documented since 2026-10-28 as each insider's current consolidated "
-        "holding per issuer, which no dataset serves; the Form 3 dataset returns the individual "
-        "initial filings instead. Its dataset is a separate addition.",
-    ),
-    _rest(
         "/v2/snapshot/locale/us/markets/stocks/tickers/{stocksTicker}",
         "Covered by the stocks snapshots dataset, which sends the `tickers` filter to the "
         "full-market snapshot.",
