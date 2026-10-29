@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestClient, Transport, source
 from deephaven_massive._session import CATALOG
 
@@ -81,7 +82,7 @@ _PLAN_NAMES = {
     "currencies": "a Currencies plan",
     "futures": "a Futures plan",
 }
-_SYMBOLS = {
+_SYMBOLS: dict[dm.AssetClass | ClassFromPrefix, str] = {
     dm.AssetClass.STOCKS: "AAPL",
     dm.AssetClass.INDICES: "I:SPX",
     dm.AssetClass.FOREX: "C:EURUSD",
@@ -149,7 +150,7 @@ def _subscription(spec: DatasetSpec) -> str | None:
     Returns:
         `"stocks"`, `"options"`, `"indices"`, `"currencies"`, `"futures"`, or None.
     """
-    return None if spec.asset_class is None else _SUBSCRIPTIONS[spec.asset_class]
+    return None if spec.asset_class is ClassFromPrefix.ANY else _SUBSCRIPTIONS[spec.asset_class]
 
 
 def _plan(name: str, spec: DatasetSpec, verb: str) -> str:
@@ -212,7 +213,7 @@ def _symbol(name: str, spec: DatasetSpec, client: RestClient) -> str:
         return _option(client)
     if spec.asset_class is dm.AssetClass.FUTURES:
         return _FOUND.setdefault("futures", _front_future())
-    return _SYMBOLS.get(spec.asset_class, "AAPL") if spec.asset_class else "AAPL"
+    return _SYMBOLS.get(spec.asset_class, "AAPL")
 
 
 def _query(session: dm.MassiveSession, name: str, verb: str, *, client: RestClient) -> QueryBase:

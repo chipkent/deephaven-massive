@@ -75,7 +75,7 @@ from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, TypeAlias, cast
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -85,12 +85,20 @@ from deephaven import arrow as dh_arrow
 from deephaven_massive._datasets.catalog import filter_key, takes_instants
 from deephaven_massive._datasets.dates import day_class, instant_bound, trades_at_weekends
 from deephaven_massive._datasets.history_source import StampRule, partition_dates, stamp_rule
-from deephaven_massive._datasets.schema import rename, required_fields, widen
+from deephaven_massive._datasets.schema import (
+    OPTION_ROOT,
+    RAW_SYMBOL,
+    rename,
+    required_fields,
+    widen,
+)
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
-    canonical,
+    WireSymbols,
+    forex_codes,
+    option_roots,
     symbol_class,
-    ws_symbol,
+    unknown_symbol_message,
 )
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
@@ -98,8 +106,15 @@ from deephaven_massive._datasets.timestamps import (
     instants,
     utc_day_stamps,
 )
-from deephaven_massive._enums import AssetClass, Timespan, subscription_of
-from deephaven_massive._errors import MassiveError, from_wire, log_once
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    Subscription,
+    Timespan,
+    UnknownSymbols,
+    subscription_of,
+)
+from deephaven_massive._errors import MassiveError, PermanentError, from_wire
 from deephaven_massive._ingest import hosts, poll
 from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
 from deephaven_massive._ingest.rate_limits import PaceCheck, ReadShape, announce, bucket_of
@@ -163,6 +178,48 @@ _SESSION_DATE: Final = "session_end_date"
 """The futures date parameter that names a trading session, not a calendar day."""
 
 
+_TICKERS_PATH: Final = "/v3/reference/tickers"
+"""The reference path that lists crypto tickers with their base and quote currencies."""
+_TICKERS_PAGE: Final = 1000
+"""The rows per page of the crypto ticker list: the endpoint's largest page."""
+
+CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str]]"
+"""Splits a crypto ticker into its base and quote currencies (`RestReader.crypto_pair`)."""
+
+CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
+"""Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
+
+
+def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
+    """Read one row of Massive's crypto ticker list.
+
+    Args:
+        ticker: The row's ticker, such as `X:DOTUSD`.
+        row: The row, with `base_currency_symbol` and `currency_symbol`.
+
+    Returns:
+        `(base, quote)` when the two currencies join to the ticker; otherwise why not.
+    """
+    base, quote = row.get("base_currency_symbol"), row.get("currency_symbol")
+    if isinstance(base, str) and isinstance(quote, str) and f"X:{base}{quote}" == ticker:
+        return base, quote
+    return (
+        f"Massive's reference data gives the currencies {base!r} and {quote!r}, which do not "
+        "join to it"
+    )
+
+
+class UnlistedPairError(PermanentError):
+    """A crypto ticker whose two currencies Massive's reference data does not give.
+
+    A path that takes the pair as two currencies (`/v1/last/crypto/{from}/{to}`,
+    `/v1/open-close/crypto/{from}/{to}/{date}`) needs the split, which only Massive's reference
+    data gives; the session's crypto ticker list, read once, does not list the ticker, or gives
+    currencies that do not join to it (`RestReader.crypto_pair`). A `poll()` table fails with
+    it, since every later cycle would read the same list.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Call:
     """One planned request of a REST path, which may span several pages.
@@ -208,7 +265,7 @@ def _axis_query(
     rest_path: RestPath,
     *,
     dates: tuple[date | None, date | None],
-    asset_class: AssetClass | None = None,
+    asset_class: AssetClass | ClassFromPrefix,
 ) -> dict[str, object]:
     """Return the time-axis parameters of a request, by wire name.
 
@@ -226,8 +283,8 @@ def _axis_query(
             for an open end), or the exact instants a `history()` window requests. A
             calendar-date axis only ever receives dates (`build_query` refuses datetimes
             there).
-        asset_class: The class whose day rules apply to this request (`dates.day_class`);
-            None, the default, takes the dataset's own class (New York days without one).
+        asset_class: The class whose day rules apply to this request (`dates.day_class`), or
+            `ClassFromPrefix.ANY` for New York days.
 
     Returns:
         The parameters to send; empty when the dataset has no time axis.
@@ -239,7 +296,6 @@ def _axis_query(
     """
     if spec.time_axis is None:
         return {}
-    zone_class = spec.asset_class if asset_class is None else asset_class
     params = {p.name: p for p in rest_path.params}
     query: dict[str, object] = {}
     for index, name in enumerate(spec.time_axis):
@@ -250,7 +306,7 @@ def _axis_query(
             continue
         if takes_instants(rest_path, name, param.kind):
             try:
-                query[name] = instant_bound(zone_class, name, value, unit=param.unit, upper=upper)
+                query[name] = instant_bound(asset_class, name, value, unit=param.unit, upper=upper)
             except ValueError as error:
                 raise ValueError(f"{spec.name}: {error}") from None
         elif param.kind is ParamKind.DATE:
@@ -261,7 +317,7 @@ def _axis_query(
 
 
 def _filter_days(
-    rest_path: RestPath, query: Mapping[str, object], asset_class: AssetClass | None
+    rest_path: RestPath, query: Mapping[str, object], asset_class: AssetClass | ClassFromPrefix
 ) -> dict[str, object]:
     """Return the query with each date on an instant range filter as its day's bound.
 
@@ -276,7 +332,8 @@ def _filter_days(
     Args:
         rest_path: The path, whose parameters and fields are read.
         query: The query parameters, by wire name.
-        asset_class: The class whose day rules apply (`dates.day_class`), or None.
+        asset_class: The class whose day rules apply (`dates.day_class`), or
+            `ClassFromPrefix.ANY` for New York days.
 
     Returns:
         A new mapping.
@@ -300,23 +357,30 @@ def _filter_days(
     return sent
 
 
-def _pair(spec: DatasetSpec, symbol: str) -> tuple[str, str]:
+def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]:
     """Split a forex or crypto symbol into the two currencies a `{from}/{to}` path takes.
 
     Args:
         spec: The dataset, whose asset class is forex or crypto.
         symbol: The canonical symbol, such as `C:EURUSD` or `X:BTCUSD`.
+        split: Splits a crypto symbol by Massive's crypto ticker list
+            (`RestReader.crypto_pair`); a forex pair never needs it, since its two codes have
+            three letters each.
 
     Returns:
         The base and quote currencies, such as `("EUR", "USD")`.
 
     Raises:
         ValueError: If the dataset's class has no currency pairs.
+
+    A crypto symbol `split` cannot split raises its `MassiveError`; no split is ever guessed.
     """
-    if spec.asset_class not in (AssetClass.FOREX, AssetClass.CRYPTO):
+    asset_class = spec.asset_class
+    if asset_class is not AssetClass.FOREX and asset_class is not AssetClass.CRYPTO:
         raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
-    base, _, quote = ws_symbol(spec.asset_class, symbol).partition("-")
-    return base, quote
+    if asset_class is AssetClass.CRYPTO:
+        return split(symbol)
+    return forex_codes(symbol)
 
 
 def _own_symbols(
@@ -365,6 +429,7 @@ def _symbol_parts(
     *,
     slot: str | None,
     pair: bool = False,
+    split: CryptoSplit,
 ) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
     """Return how a request's symbols spread over requests of one path.
 
@@ -385,6 +450,7 @@ def _symbol_parts(
         slot: The path's one placeholder that no parameter, key, or window fills, or None.
         pair: True when the path's `{from}` and `{to}` placeholders are filled by nothing
             else, so each symbol's currency pair (`_pair`) fills them.
+        split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
         `(symbol, path parameters, query parameters)` per request: `symbol` is set for a
@@ -421,7 +487,7 @@ def _symbol_parts(
         query: dict[str, object] = {}
         for name in targets:
             if name == "from" and "to" in params:
-                path["from"], path["to"] = _pair(spec, symbol)
+                path["from"], path["to"] = _pair(spec, symbol, split)
             elif params[name].in_path:
                 path[name] = symbol
             else:
@@ -571,11 +637,12 @@ def plan_calls(
     fixed: Mapping[str, object] | None = None,
     dates: tuple[date | None, date | None] = (None, None),
     extra: Mapping[str, object] | None = None,
+    split: CryptoSplit,
 ) -> list[Call]:
     """Plan the requests that serve a dataset call on one REST path.
 
-    Pure: no I/O. The REST client checks the parameters against the path again before it
-    sends anything.
+    Makes no request itself; only `split` may, the first time a crypto pair is split. The
+    REST client checks the parameters against the path again before it sends anything.
 
     Args:
         spec: The dataset.
@@ -588,6 +655,9 @@ def plan_calls(
         extra: For `history()`, query parameters added to every call after the time axis:
             the ascending direction (`_ascending`) and, for one futures session, its
             `session_end_date`; None adds none.
+        split: Splits a crypto symbol a `{from}/{to}` path takes as two currencies, by
+            Massive's crypto ticker list (`RestReader.crypto_pair`); called only for such a
+            path.
 
     Returns:
         The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
@@ -614,7 +684,7 @@ def plan_calls(
     empty = [p.name for p in rest_path.params if p.in_path and p.name not in filled]
     slot = empty[0] if len(empty) == 1 else None
     calls = []
-    parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair)
+    parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair, split=split)
     for symbol, own_path, own_query in parts:
         zone_class = day_class(spec, map(symbol_class, _own_symbols(spec, symbol, own_query)))
         axis = _axis_query(spec, rest_path, dates=dates, asset_class=zone_class)
@@ -642,8 +712,8 @@ class _Converter:
         projected: True when the path joins the dataset through a projection of its kind
             membership (the indices snapshot as index values): a row that carries an `error`
             has no value to project, so it is dropped instead of kept.
-        asset_class: The dataset's asset class, by whose rules a symbol read from the rows is
-            canonicalized.
+        symbols: How a symbol read from the rows becomes canonical (`WireSymbols`), and
+            what a spelling the library cannot read does.
         symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
             from the request.
     """
@@ -655,22 +725,31 @@ class _Converter:
     required: frozenset[str]
     required_on_error: frozenset[str]
     projected: bool
-    asset_class: AssetClass | None
+    symbols: WireSymbols
     symbol_key: str | None
 
     @classmethod
-    def build(cls, catalog: Catalog, spec: DatasetSpec, rest_path: RestPath) -> _Converter:
+    def build(
+        cls,
+        catalog: Catalog,
+        spec: DatasetSpec,
+        rest_path: RestPath,
+        *,
+        unknown_symbols: UnknownSymbols,
+    ) -> _Converter:
         """Prepare the conversion from the path's generated fields and the dataset's schema.
 
         Args:
             catalog: The catalog, for the dataset's merged schema.
             spec: The dataset.
             rest_path: The path.
+            unknown_symbols: The session's rule for a symbol spelling the library cannot
+                read; `WARN` also adds the `RawSymbol` column to the schema.
 
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec)
+        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.
@@ -686,7 +765,9 @@ class _Converter:
                 m.kind == spec.kind and m.group == spec.group and m.projection is not None
                 for m in rest_path.memberships
             ),
-            asset_class=spec.asset_class,
+            symbols=WireSymbols(
+                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+            ),
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
         )
 
@@ -739,56 +820,41 @@ class _Converter:
             symbol: The value of the keys taken from the request.
 
         Returns:
-            The batch in the dataset's schema.
+            The batch in the dataset's schema, with the derived columns (`OptionRoot`,
+            `RawSymbol`) computed from the symbols.
+
+        Raises:
+            RowDataError: If a row's symbol is a spelling the library cannot read and the
+                session's `unknown_symbols` is `FAIL`; under `WARN` such a row keeps a null
+                `Symbol` and the text in `RawSymbol`.
 
         A timestamp out of range raises the `UnitMismatchError` of `timestamps.instants`.
         """
         rows = batch.num_rows
-        arrays = []
+        arrays: dict[str, pa.Array] = {}
+        raw = pa.nulls(rows, pa.string())
         for column_type, name, source in self.columns:
             target = column_type.arrow_type
-            if source is None:
-                arrays.append(pa.nulls(rows, target))
+            if name == OPTION_ROOT:
+                values = option_roots(arrays["Symbol"])
+            elif name == RAW_SYMBOL:
+                values = raw
+            elif source is None:
+                values = pa.nulls(rows, target)
             elif source.field is None:
-                arrays.append(pa.array([symbol] * rows, target))
+                values = pa.array([symbol] * rows, target)
             else:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
-                    values = pa.array(
-                        [self._canonical(value) for value in values.to_pylist()], pa.string()
-                    )
+                    read = self.symbols.read(values, {})
+                    if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
+                        raise RowDataError(unknown_symbol_message(self.dataset, read.unknown))
+                    values, raw = read.symbols, read.raw
                 if source.unit is not None:
                     label = f"{self.dataset}.{name}"
                     values = instants(label, source.unit, values, time_column=name == "Timestamp")
-                arrays.append(widen(values, target))
-        return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
-
-    def _canonical(self, value: str | None) -> str | None:
-        """Return a symbol read from the rows in its canonical form (`AUD/USD` as `C:AUDUSD`).
-
-        Args:
-            value: The row's symbol; None only where the dataset declares its symbol key
-                optional (`KeySpec.required` False) and the row has none.
-
-        Returns:
-            The canonical symbol, or None for a row without one; a value that is no valid
-            symbol of the class is kept as sent, and logged once per process at WARNING.
-        """
-        if value is None:
-            return None
-        try:
-            return canonical(self.asset_class, value)
-        except (TypeError, ValueError):
-            log_once(
-                logger,
-                f"row-symbol:{self.dataset}",
-                "%s: Massive sent the symbol %r, which is not a valid symbol of its class; it is "
-                "kept as sent",
-                self.dataset,
-                value,
-                level=logging.WARNING,
-            )
-            return value
+            arrays[name] = widen(values, target)
+        return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
 
 
 def _keep(batch: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
@@ -844,10 +910,13 @@ class RestState:
     session, so the client closes, and every poller stops, when the session closes or is
     collected unclosed. It holds no reference to the session core, so that closer never keeps
     the core alive. Thread-safe: the host decisions and the once-only flags sit behind one leaf
-    lock, held only to read or change them; the client and the pollers are thread-safe.
+    lock, held only to read or change them; the client and the pollers are thread-safe. It
+    also holds, for the session, Massive's list of crypto tickers with their two currencies
+    (`RestReader.crypto_pair`): read once, on first need, by the first caller, while every
+    other caller waits on its future outside the lock.
     """
 
-    __slots__ = ("_client", "_hosts", "_lock", "_once", "label", "pollers")
+    __slots__ = ("_client", "_crypto", "_hosts", "_lock", "_once", "label", "pollers")
 
     def __init__(self, client: RestClient, label: str) -> None:
         """Hold the session's client; no request is made.
@@ -862,6 +931,7 @@ class RestState:
         self._lock = threading.Lock()
         self._hosts: dict[tuple[AssetClass, ChannelFamily], Future[HostDecision]] = {}
         self._once: set[tuple[str, ...]] = set()
+        self._crypto: Future[CryptoTickers] | None = None
 
     @property
     def client(self) -> RestClient:
@@ -929,6 +999,28 @@ class RestState:
             if self._hosts.get(key) is future:
                 del self._hosts[key]
 
+    def crypto_future(self) -> tuple[Future[CryptoTickers], bool]:
+        """Return the session's crypto ticker list, or claim it for the caller to read.
+
+        Returns:
+            The list's future and whether the caller created it: the creator reads the list
+            and completes the future; everyone else waits on it, outside every lock.
+        """
+        with self._lock:
+            if self._crypto is not None:
+                return self._crypto, False
+            self._crypto = Future()
+            return self._crypto, True
+
+    def forget_crypto(self) -> None:
+        """Remove a failed read of the crypto ticker list, so that the next caller tries again.
+
+        Only the read's creator calls it, and no one can claim a new read before, so the read
+        removed is always the failed one.
+        """
+        with self._lock:
+            self._crypto = None
+
     def first(self, *key: str) -> bool:
         """Tell whether a fact is seen for the first time in this session, and remember it.
 
@@ -958,12 +1050,15 @@ class RestReader:
         catalog: The dataset catalog.
         drift: The session's drift registry.
         max_concurrency: The most requests of one fan-out at a time.
+        unknown_symbols: The session's rule for a symbol spelling the library cannot read
+            (`MassiveConfig.unknown_symbols`).
     """
 
     state: RestState
     catalog: Catalog
     drift: DriftRegistry
     max_concurrency: int
+    unknown_symbols: UnknownSymbols
 
     def rest_path(self, template: str) -> RestPath:
         """Return a generated REST path.
@@ -975,6 +1070,98 @@ class RestReader:
             The path.
         """
         return cast("RestPath", self.catalog.source(Transport.REST, template))
+
+    def crypto_pair(self, symbol: str) -> tuple[str, str]:
+        """Return a crypto ticker's base and quote currencies, with no guess.
+
+        A joined ticker does not say where its quote starts (`X:DOTUSD` could be `DOT-USD` or
+        `DO-TUSD`; `X:ETHWBTC` ends in `BTC` but quotes in `WBTC`), so every split comes from
+        Massive's reference data: the session reads Massive's whole list of crypto tickers
+        once, on first need (`/v3/reference/tickers?market=crypto`, every page, first with
+        `active=true` and then with `active=false`, so a delisted pair splits too), keeping
+        each ticker's `base_currency_symbol` and `currency_symbol`, whose join must be the
+        ticker. Its requests count against the currencies subscription's rate limit, so on a
+        Basic subscription they wait their turn. Blocks the calling thread for that read, or
+        while another thread makes it; holds no lock meanwhile. A failed read is not kept, so
+        the next call tries again. A read that succeeds is kept for the session as it is, even
+        when it lists no pair: every pair is then refused.
+
+        Args:
+            symbol: A canonical crypto ticker, such as `X:DOTUSD`.
+
+        Returns:
+            `(base, quote)`, such as `("DOT", "USD")`.
+
+        Raises:
+            UnlistedPairError: If the list does not hold the ticker, or its currencies do not
+                join to the ticker; a `poll()` table fails with it.
+
+        A failed read raises its public error (`AuthenticationError`, `EntitlementError`, or
+        `MassiveError`). Every message names the ticker; nothing falls back to a guessed split.
+        """
+        where = f"{symbol!r} cannot be split into its two currencies"
+        try:
+            tickers = self._crypto_tickers()
+        except MassiveError as public:
+            raise type(public)(
+                f"{where}: reading Massive's crypto tickers failed: {public}",
+                status=public.status,
+                request_id=public.request_id,
+            ) from public
+        entry = tickers.get(symbol)
+        if entry is None:
+            raise UnlistedPairError(f"{where}: Massive's reference data does not list it")
+        if isinstance(entry, str):
+            raise UnlistedPairError(f"{where}: {entry}")
+        return entry
+
+    def _crypto_tickers(self) -> CryptoTickers:
+        """Return the session's crypto ticker list, reading it on first need.
+
+        Returns:
+            Each crypto ticker Massive lists: its `(base, quote)`, or why its currencies
+            cannot be used.
+
+        A failed read raises its public `MassiveError` (`AuthenticationError`,
+        `EntitlementError`), also to every caller that waited on it; an unexpected error of
+        the reader propagates to it, and its waiters get a `MassiveError` naming it.
+        """
+        future, created = self.state.crypto_future()
+        if not created:
+            return future.result()
+        tickers: dict[str, tuple[str, str] | str] = {}
+        try:
+            # The list is crypto reference data, charged to the currencies subscription. Its
+            # pages share one lane of their own, so they wait their turn with other reads
+            # instead of queueing behind them; closing the client still ends their waits.
+            with Cancel() as lane:
+                # Listed pairs first, then delisted ones, so that a past date of a delisted
+                # pair still splits; a ticker in both keeps its listed entry.
+                for active in (True, False):
+                    query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
+                    for page in self.state.client.pages(
+                        self.rest_path(_TICKERS_PATH),
+                        {},
+                        query,
+                        bucket=bucket_of(Subscription.CURRENCIES),
+                        cancel=lane,
+                    ):
+                        for row in page.rows:
+                            ticker = row.get("ticker")
+                            if isinstance(ticker, str):
+                                tickers.setdefault(ticker, _crypto_entry(ticker, row))
+        except WireError as error:
+            public = self._public(error)
+            self.state.forget_crypto()
+            future.set_exception(public)
+            raise public from error
+        except BaseException as error:
+            # Every waiter gets a MassiveError; the reader's own unexpected error propagates.
+            self.state.forget_crypto()
+            future.set_exception(MassiveError(f"the read failed: {error!r}"))
+            raise
+        future.set_result(tickers)
+        return tickers
 
     def read(
         self,
@@ -1021,7 +1208,9 @@ class RestReader:
         Errors: the public error of each `WireError` (`_public`), and `RowDataError` for a row
         that breaks the schema. A closed session raises `MassiveError("... is closed")`.
         """
-        converter = _Converter.build(self.catalog, spec, rest_path)
+        converter = _Converter.build(
+            self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
+        )
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
                 self._call,
@@ -1299,7 +1488,12 @@ class RestReader:
             rest_path = self.rest_path(template)
             try:
                 _base(spec, rest_path, request, fixed={})
-                _axis_query(spec, rest_path, dates=(request.start, request.end))
+                _axis_query(
+                    spec,
+                    rest_path,
+                    dates=(request.start, request.end),
+                    asset_class=spec.asset_class,
+                )
             except ValueError as error:
                 errors.append(error)
         if len(errors) == len(templates):
@@ -1310,7 +1504,8 @@ class RestReader:
     ) -> list[tuple[RestPath, list[Call]]]:
         """Plan the requests of a `fetch()` or `poll()` cycle, path by path.
 
-        Pure: no I/O.
+        Makes no request, except that the first crypto pair a path takes as two currencies
+        reads the session's crypto ticker list (`crypto_pair`).
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1321,7 +1516,8 @@ class RestReader:
             Each path the cycle reads (`fetch_paths`) with its calls; none for an empty symbol
             tuple (a reactive table with no valid row), which reads nothing.
 
-        A parameter a path does not take raises the `ValueError` of `_base`.
+        A parameter a path does not take raises the `ValueError` of `_base`; a crypto pair
+        that cannot be split raises the `MassiveError` of `crypto_pair`.
         """
         if symbols == ():
             return []  # an emptied symbol table asks for nothing, whatever the paths take
@@ -1329,7 +1525,12 @@ class RestReader:
         for template, own in fetch_paths(spec, symbols):
             rest_path = self.rest_path(template)
             calls = plan_calls(
-                spec, rest_path, request, symbols=own, dates=(request.start, request.end)
+                spec,
+                rest_path,
+                request,
+                symbols=own,
+                dates=(request.start, request.end),
+                split=self.crypto_pair,
             )
             planned.append((rest_path, calls))
         return planned
@@ -1409,7 +1610,10 @@ class RestReader:
             tables.append(table)
             requests += made
         if not tables:
-            return self.catalog.dataset_schema(spec).arrow_schema().empty_table(), 0
+            schema = self.catalog.dataset_schema(
+                spec, raw_symbol=self.unknown_symbols is UnknownSymbols.WARN
+            )
+            return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
         if request.limit is not None:
             rows = rows.slice(0, request.limit)
@@ -1440,7 +1644,13 @@ class RestEndpoints:
     def _reader(self) -> RestReader:
         """Return a reader of the session's paths."""
         core = self._core
-        return RestReader(self._state, core.catalog, core.drift, core.config.max_concurrency)
+        return RestReader(
+            self._state,
+            core.catalog,
+            core.drift,
+            core.config.max_concurrency,
+            core.config.unknown_symbols,
+        )
 
     def _static(self, table: pa.Table) -> Table:
         """Convert rows to a static Deephaven table, inside the session's execution context.
@@ -1512,6 +1722,23 @@ class RestEndpoints:
         future.set_result(decision)
         self._write_decision(asset_class, family, decision)
         return decision
+
+    def crypto_pair(self, symbol: str) -> tuple[str, str]:
+        """Return a crypto ticker's base and quote, from Massive's reference data if needed.
+
+        The WebSocket transport calls it, before a stream starts or on its lookup worker, for a
+        crypto ticker (`RestReader.crypto_pair`), from the session's crypto ticker list, read
+        once.
+
+        Args:
+            symbol: A canonical crypto ticker.
+
+        Returns:
+            `(base, quote)`.
+
+        A failed or empty lookup raises the `MassiveError` of `RestReader.crypto_pair`.
+        """
+        return self._reader().crypto_pair(symbol)
 
     def record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
@@ -1639,7 +1866,9 @@ class RestEndpoints:
             shape = ReadShape.PER_DAY
         else:
             rest_path = reader.rest_path(cast("str", spec.history_path))
-            calls = _history_calls(spec, rest_path, request, window=window)
+            calls = _history_calls(
+                spec, rest_path, request, window=window, split=reader.crypto_pair
+            )
             shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
         announce(
             self._state.client.governor,
@@ -1822,7 +2051,12 @@ def _range_segments(requested: TimeRange) -> dict[str, object]:
 
 
 def _history_calls(
-    spec: DatasetSpec, rest_path: RestPath, request: Request, *, window: HistoryWindow
+    spec: DatasetSpec,
+    rest_path: RestPath,
+    request: Request,
+    *,
+    window: HistoryWindow,
+    split: CryptoSplit,
 ) -> list[Call]:
     """Plan the requests of a `history()` call with explicit symbols on the history path.
 
@@ -1838,6 +2072,7 @@ def _history_calls(
         rest_path: The history path.
         request: The normalized arguments, with static symbols.
         window: The call's window.
+        split: Splits a crypto symbol into its two currencies (`plan_calls`).
 
     Returns:
         The calls, in result order: for sessions, by date and then by symbol.
@@ -1856,6 +2091,7 @@ def _history_calls(
                 request,
                 symbols=request.symbols,
                 extra={**order, _SESSION_DATE: day},
+                split=split,
             )
         ]
     # The aggregates take their range as `{from}/{to}` timestamp segments.
@@ -1869,6 +2105,7 @@ def _history_calls(
         fixed=_range_segments(requested) if ranged else {},
         dates=(requested.start, requested.end),
         extra=order,
+        split=split,
     )
 
 

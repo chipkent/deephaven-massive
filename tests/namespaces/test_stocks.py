@@ -538,7 +538,7 @@ def test_list_datasets_filter_by_optional_symbols(
     make = factory(massive_session, name)
     assert type(make()) is Query
     assert make()._request.symbols is None
-    assert make("aapl")._request.symbols == ("AAPL",)
+    assert make("AAPL")._request.symbols == ("AAPL",)
     with pytest.raises(ValueError, match="use symbols=None, which returns every ticker"):
         make(dm.ALL)
 
@@ -777,7 +777,7 @@ def test_trades_fetch_reads_each_symbols_last_trade(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, last_trade="/v2/last/trade/AAPL")
-    out = table_rows(rest_session.stocks.trades("aapl").fetch())
+    out = table_rows(rest_session.stocks.trades("AAPL").fetch())
     assert sent(fake_rest) == [("/v2/last/trade/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["Price"], r["Size"]) for r in out] == [
         ("AAPL", 1617901342969834000, 129.8473, 25.0)

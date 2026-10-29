@@ -67,6 +67,9 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
         "BASKET",
         "LT",
     ],
+    dm.SymbolConvention: ["massive", "yahoo", "nasdaq", "cms"],
+    dm.OnError: ["raise", "null"],
+    dm.UnknownSymbols: ["fail", "warn"],
 }
 
 # Enums that mirror a parameter enum of the generated REST paths, by parameter name. Every path
@@ -175,7 +178,11 @@ def test_module_exports() -> None:
         "Recency",
         "ChannelFamily",
         "subscription_of",
+        "ClassFromPrefix",
     }
+    # The class of a dataset that spans classes is internal: no public signature takes it.
+    assert not hasattr(dm, "ClassFromPrefix")
+    assert [member.name for member in _enums.ClassFromPrefix] == ["ANY"]
     # The transport is the wire package's, named once for both sides of the boundary.
     assert not hasattr(_enums, "Transport")
 
@@ -202,6 +209,7 @@ def _resolution_namespace() -> dict[str, object]:
         "_datasets.schema",
         "_datasets.timestamps",
         "_tables.diagnostics",
+        "_tables.watchlist",
         "_namespaces.base",
         "_namespaces.partners",
         "_namespaces.stocks",
@@ -237,7 +245,9 @@ def _public_callables() -> list[tuple[str, object]]:
         )
     ]
     seen: set[type] = set()
-    found: list[tuple[str, object]] = []
+    found: list[tuple[str, object]] = [
+        (name, getattr(dm, name)) for name in dm.__all__ if inspect.isfunction(getattr(dm, name))
+    ]
     while classes:
         cls = classes.pop()
         if cls in seen:
@@ -287,11 +297,20 @@ def test_literal_detection_ignores_enum_members() -> None:
 # with its own rejection test.
 _FUTURES_ENUMS = "namespaces/test_futures.py::test_enum_parameters_reject_plain_strings"
 
+_CONVERTER_ENUMS = "datasets/test_symbols.py::test_converter_enums_reject_text"
+_CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
+
 ENUM_PARAMETERS = {
     "MassiveConfig.__init__.ws_hosts": "test_config.py::test_ws_hosts_types",
     "MassiveConfig.__init__.rest_basic_subscriptions": (
         "test_config.py::test_rest_basic_subscriptions_hold_subscriptions_only"
     ),
+    "MassiveConfig.__init__.unknown_symbols": "test_config.py::test_unknown_symbols_is_the_enum",
+    "canonical_symbol.asset_class": _CONVERTER_ENUMS,
+    "canonical_symbol.convention": _CONVERTER_ENUMS,
+    "canonicalize_symbols.asset_class": _CANONICALIZE_ENUMS,
+    "canonicalize_symbols.convention": _CANONICALIZE_ENUMS,
+    "canonicalize_symbols.on_error": _CANONICALIZE_ENUMS,
     "MassiveSession.snapshots.order": "test_session.py::test_unified_snapshots",
     "_Economy.funding_conditions.order": "namespaces/test_economy.py::test_enums_reject_text",
     "_Economy.inflation.order": "namespaces/test_economy.py::test_enums_reject_text",
@@ -441,4 +460,4 @@ def test_each_asset_class_has_one_subscription() -> None:
         dm.AssetClass.FOREX: dm.Subscription.CURRENCIES,
         dm.AssetClass.CRYPTO: dm.Subscription.CURRENCIES,
     }
-    assert _enums.subscription_of(None) is None
+    assert _enums.subscription_of(_enums.ClassFromPrefix.ANY) is None

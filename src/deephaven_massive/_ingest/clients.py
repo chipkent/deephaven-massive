@@ -184,7 +184,10 @@ class SessionClients:
             created = connections is None
             if connections is None:
                 connections = self._streams = WsConnections(
-                    core, resolve_host=self._resolve_host, record_verdict=self._record_verdict
+                    core,
+                    resolve_host=self._resolve_host,
+                    record_verdict=self._record_verdict,
+                    crypto_pair=self._crypto_pair,
                 )
         if created:
             core.on_close(connections.close)
@@ -201,6 +204,17 @@ class SessionClients:
             The decision, cached for the session by the REST transport.
         """
         return self.rest().resolve_host(asset_class, family)
+
+    def _crypto_pair(self, symbol: str) -> tuple[str, str]:
+        """Return a crypto ticker's base and quote through the session's REST transport.
+
+        Args:
+            symbol: A canonical crypto ticker.
+
+        Returns:
+            `(base, quote)`, cached for the session by the REST transport.
+        """
+        return self.rest().crypto_pair(symbol)
 
     def _record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision

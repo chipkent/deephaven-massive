@@ -24,7 +24,7 @@ import deephaven_massive as dm
 from deephaven_massive import _namespaces, _session
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import reference
@@ -244,7 +244,7 @@ def test_namespaces(massive_session: dm.MassiveSession) -> None:
 
 def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
     query = massive_session.snapshots(
-        ["X:BTCUSD", "aapl", "c:eurusd", "O:SPY251219C00600000"],
+        ["X:BTCUSD", "AAPL", "C:EURUSD", "O:SPY251219C00600000"],
         sort="ticker",
         order=dm.Order.DESC,
         limit=3,
@@ -537,7 +537,7 @@ def test_every_per_class_description_is_shown_by_a_dataset_of_its_class() -> Non
     # text: none may read the source, or an earlier source's text may win the column.
     shown: dict[str, set[str]] = {}
     for spec in _session.CATALOG.by_name.values():
-        if spec.asset_class is not None:
+        if spec.asset_class is not ClassFromPrefix.ANY:
             texts = shown.setdefault(spec.asset_class.value, set())
             texts.update(c.description for c in _session.CATALOG.dataset_schema(spec).columns)
     missing = [

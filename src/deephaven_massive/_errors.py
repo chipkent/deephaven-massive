@@ -26,7 +26,9 @@ through `TablePublisher.publish_failure`, so the table fails where Deephaven use
 failure is also logged at ERROR and shown in `m.streams()`.
 
 The module also holds `log_once`, the one helper for facts that are logged a single time per
-process (a codec choice, a detected unit, rate-limit advice).
+process (a codec choice, a detected unit, rate-limit advice), `BoundedWarnings`, which reports
+each of a bounded number of bad values once, and `PermanentError`, the internal base of the
+ingest errors a retry cannot fix, which is not exported.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
@@ -38,7 +40,15 @@ import threading
 
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 
-__all__ = ["AuthenticationError", "EntitlementError", "MassiveError", "from_wire", "log_once"]
+__all__ = [
+    "AuthenticationError",
+    "BoundedWarnings",
+    "EntitlementError",
+    "MassiveError",
+    "PermanentError",
+    "from_wire",
+    "log_once",
+]
 
 
 class MassiveError(Exception):
@@ -134,6 +144,28 @@ class EntitlementError(MassiveError):
     """
 
 
+class PermanentError(MassiveError):
+    """A failure that the same request would meet again, so a retry cannot fix it.
+
+    Internal: not exported from `dm`, and only its subclasses are raised. They are the ingest
+    errors whose cause is settled for the session or the request: a row that breaks its
+    dataset's schema (`RowDataError`), a parameter the chosen path does not take
+    (`UnsupportedParameterError`), a symbol table's row that is not Massive's ticker
+    (`SymbolRowError`), and a crypto pair missing from the session's ticker list
+    (`UnlistedPairError`). A `poll()` table fails with one rather than retrying it every cycle.
+    The subclasses are defined in the ingest modules (`_ingest/poll.py`, `_ingest/rest.py`),
+    and the fatal set of `poll()` names only this base, so a subclass defined in a module the
+    poll module cannot import (`rest.py` imports `poll.py`) still fails the table.
+
+    Example:
+        ::
+
+            from deephaven_massive._errors import MassiveError, PermanentError
+
+            assert issubclass(PermanentError, MassiveError)
+    """
+
+
 def from_wire(error: WireError) -> MassiveError:
     """Return the public error for an error raised by the wire package.
 
@@ -184,3 +216,57 @@ def log_once(
             return
         _logged.add(key)
     log.log(level, message, *args)
+
+
+class BoundedWarnings:
+    """Log a WARNING the first time each value is seen, for at most `limit` distinct values.
+
+    For a stream of bad values that may never end (a watchlist row typed wrong, a symbol
+    spelling Massive keeps sending): each value is reported once, and once `limit` values have
+    been reported, one last record says that further values are not logged, so the set it
+    remembers and the log stay bounded. Created by its owner (a module, or one call of
+    `canonicalize_symbols`) and shared by every thread that reports: one leaf lock guards the
+    set and is never held while logging.
+
+    Example:
+        ::
+
+            import logging
+
+            from deephaven_massive._errors import BoundedWarnings
+
+            warnings = BoundedWarnings(logging.getLogger("example"), limit=10)
+            warnings.warn("BRK/B", "%r is not a ticker; its rows are null", "BRK/B")
+    """
+
+    __slots__ = ("_limit", "_lock", "_log", "_seen")
+
+    def __init__(self, log: logging.Logger, *, limit: int) -> None:
+        """Start with no value reported.
+
+        Args:
+            log: The logger to write to.
+            limit: The most distinct values reported; a positive count.
+        """
+        self._log = log
+        self._limit = limit
+        self._lock = threading.Lock()
+        self._seen: set[str] = set()
+
+    def warn(self, value: str, message: str, *args: object) -> None:
+        """Log `message` at WARNING if `value` is new and the limit is not reached.
+
+        Args:
+            value: Identifies what is reported; a value already seen logs nothing.
+            message: The `%`-style message.
+            *args: The message's arguments.
+        """
+        with self._lock:
+            if value in self._seen or len(self._seen) > self._limit:
+                return
+            self._seen.add(value)
+            last = len(self._seen) > self._limit
+        if last:
+            self._log.warning("%d values were reported; further ones are not logged", self._limit)
+        else:
+            self._log.warning(message, *args)

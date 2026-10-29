@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import time
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._enums import AssetClass, Subscription, _require_enum
+from deephaven_massive._enums import AssetClass, Subscription, UnknownSymbols, _require_enum
 from deephaven_massive._errors import AuthenticationError
 from deephaven_massive._types import override
 
@@ -96,6 +96,26 @@ def _env_s3_secret_access_key() -> str | None:
     return _env("MASSIVE_S3_SECRET_ACCESS_KEY")
 
 
+def _env_unknown_symbols() -> UnknownSymbols:
+    """Read `MASSIVE_UNKNOWN_SYMBOLS`: `fail` (the default when unset) or `warn`, in any case.
+
+    Returns:
+        The setting.
+
+    Raises:
+        ValueError: If the variable holds any other text; the message names both values.
+    """
+    text = _env("MASSIVE_UNKNOWN_SYMBOLS")
+    if text is None:
+        return UnknownSymbols.FAIL
+    try:
+        return UnknownSymbols(text.lower())
+    except ValueError:
+        raise ValueError(
+            f"MASSIVE_UNKNOWN_SYMBOLS must be 'fail' or 'warn', not {text!r}"
+        ) from None
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class MassiveConfig:
     """Everything a `MassiveSession` needs to know: credentials, hosts, timeouts, and limits.
@@ -163,6 +183,12 @@ class MassiveConfig:
         rest_base_url: The REST API base URL.
         s3_endpoint_url: The flat-file S3 endpoint URL.
         s3_bucket: The flat-file S3 bucket.
+        unknown_symbols: What to do with a symbol Massive sends in a spelling the library
+            cannot read as the dataset's class: `UnknownSymbols.FAIL` fails the request or
+            stream that received it, naming the spelling; `UnknownSymbols.WARN` keeps the row
+            with a null `Symbol`, adds a `RawSymbol` column holding the text, and logs each
+            spelling once at WARNING. Defaults to `MASSIVE_UNKNOWN_SYMBOLS` (`fail` or `warn`),
+            then `FAIL`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -180,14 +206,16 @@ class MassiveConfig:
     rest_base_url: str = "https://api.massive.com"
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
+    unknown_symbols: UnknownSymbols = field(default_factory=_env_unknown_symbols)
 
     def __post_init__(self) -> None:
         """Validate every field; freeze `ws_hosts` and `rest_basic_subscriptions` into copies.
 
-        A `ws_hosts` key that is not a `dm.AssetClass`, a host that is not a `str`, a
-        `rest_basic_subscriptions` that is not a set of `dm.Subscription`, or a numeric field
-        of a non-numeric type also raises `TypeError`, and a non-positive number `ValueError`
-        (`require_positive_number`, `require_positive_int`).
+        An `unknown_symbols` that is not a `dm.UnknownSymbols`, a `ws_hosts` key that is not a
+        `dm.AssetClass`, a host that is not a `str`, a `rest_basic_subscriptions` that is not a
+        set of `dm.Subscription`, or a numeric field of a non-numeric type also raises
+        `TypeError`, and a non-positive number `ValueError` (`require_positive_number`,
+        `require_positive_int`).
 
         Raises:
             TypeError: If `api_key` is not a `str` or `flat_file_publish_cutoff` is not a
@@ -228,6 +256,7 @@ class MassiveConfig:
             raise TypeError(f"flat_file_publish_cutoff must be a datetime.time, not {kind}")
         if cutoff.tzinfo is not None:
             raise ValueError("flat_file_publish_cutoff is a New York wall-clock time; drop tzinfo")
+        _require_enum(self.unknown_symbols, UnknownSymbols, "unknown_symbols")
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
         basic = _validate_basic_subscriptions(self.rest_basic_subscriptions)
         object.__setattr__(self, "rest_basic_subscriptions", basic)

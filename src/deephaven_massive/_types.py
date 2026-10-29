@@ -97,8 +97,9 @@ Symbols: TypeAlias = str | Sequence[str] | Table | _All
 A `str` is one symbol. A `Sequence[str]` is materialized to a tuple when the query is built (an
 empty or exhausted iterable raises `ValueError("no symbols")`). A `Table` must have a `Symbol`
 column; streams follow its rows as they are added and removed, and polls re-read it each cycle.
-`ALL` means every symbol. Input forms are normalized to Massive's canonical form, so
-`"EUR/USD"` and `"C:EURUSD"` name the same pair.
+`ALL` means every symbol. Every symbol, and every row of a table, must be Massive's exact REST
+ticker (`"C:EURUSD"`, not `"EUR/USD"`); `dm.canonical_symbol` and `dm.canonicalize_symbols`
+convert other spellings.
 """
 
 DateLike: TypeAlias = str | date | datetime
