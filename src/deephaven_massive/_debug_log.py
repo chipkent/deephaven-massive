@@ -57,8 +57,9 @@ the issue text, must be enough for an agent to reproduce and fix the bug:
 Tools check what they can: ruff's `G` and `LOG` rules; the logging rules of
 `tests/test_layout.py` (no secret name in a logging call, every `threading.Thread` named and
 every `ThreadPoolExecutor` given a prefix, no logging call inside a `with` over a leaf lock);
-and the planted-secret test, `tests/massive/net/test_redaction.py`, which drives every wire client
-with distinctive secrets and DEBUG on every logger and finds them in no record or error.
+the planted-secret test, `tests/massive/net/test_redaction.py`, which drives every wire client
+with distinctive secrets and DEBUG on every logger and finds them in no record or error; and the
+thread-name tests of `tests/ingest/test_ws.py` and `tests/ingest/test_poll.py`.
 Reviewers check the rest: that each new decision and failure logs, with its values. Ask: could
 an agent fix this from the log alone?
 

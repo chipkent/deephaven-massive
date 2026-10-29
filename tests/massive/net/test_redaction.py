@@ -23,7 +23,7 @@ from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._massive.net.redaction import (
     REDACTED,
-    clean_received,
+    Redactor,
     redact,
     redact_value,
 )
@@ -66,7 +66,7 @@ _TRADES = RestPath(
 _FILE = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 
 
-# --- redact, redact_value, and clean_received ----------------------------------------------------
+# --- redact, redact_value, and Redactor -------------------------------------------------------
 
 
 def test_redact_replaces_every_occurrence_of_each_secret() -> None:
@@ -85,40 +85,59 @@ def test_redact_returns_text_without_a_secret_unchanged() -> None:
     assert redact(text, PLANTED_KEY) is text
 
 
-def test_clean_received_replaces_each_secret_and_leaves_clean_data_uncopied() -> None:
+def test_the_redactor_replaces_each_secret_and_leaves_clean_data_uncopied() -> None:
     data = f'{{"message":"{PLANTED_KEY}","other":"{PLANTED_S3}"}}'.encode()
-    cleaned = clean_received(data, PLANTED_KEY, PLANTED_S3, None, "")
+    cleaned = Redactor(PLANTED_KEY, PLANTED_S3, None, "").received(data)
     assert cleaned == b'{"message":"***","other":"***"}'
     clean = b'{"status":"OK"}'
-    assert clean_received(clean, PLANTED_KEY) is clean
-    assert clean_received(clean) is clean  # no secret to look for
+    assert Redactor(PLANTED_KEY).received(clean) is clean
+    assert Redactor().received(clean) is clean  # no secret to look for
     text = '[{"ev":"status","message":"fine"}]'
-    assert clean_received(text, PLANTED_KEY) is text
+    assert Redactor(PLANTED_KEY).received(text) is text
 
 
 @pytest.mark.parametrize("kind", [bytes, str])
-def test_clean_received_finds_a_secret_spelled_by_json_escapes(kind: type) -> None:
+def test_the_redactor_finds_a_secret_spelled_by_json_escapes(kind: type) -> None:
     raw = f'{{"error":"bad key {ESCAPED_KEY}","k\\u0065y":["{ESCAPED_KEY}",1]}}'
     data = raw.encode() if kind is bytes else raw
-    cleaned = clean_received(data, PLANTED_KEY)
+    cleaned = Redactor(PLANTED_KEY).received(data)
     assert type(cleaned) is kind
     assert json.loads(cleaned) == {"error": "bad key ***", "key": ["***", 1]}
 
 
-def test_clean_received_leaves_escapes_without_a_secret_alone() -> None:
+def test_the_redactor_decodes_nothing_whose_escapes_spell_no_secret_character() -> None:
+    # The escape spells `é`, a character of no secret: the body is not even decoded.
+    data = b'{"text":"caf\\u00e9","n":1}'
+    assert Redactor(PLANTED_KEY).received(data) is data
+
+
+@pytest.mark.parametrize(
+    ("secret", "spelled"),
+    [
+        ("a/b-key", "a\\/b-key"),  # the short escape of `/`
+        ("key-\U0001f600", "key-\\ud83d\\ude00"),  # a surrogate pair, beyond the BMP
+        ("Key-1", "\\u004Bey-1"),  # upper-case hex digits
+    ],
+)
+def test_the_redactor_finds_each_escape_a_secret_character_has(secret: str, spelled: str) -> None:
+    data = f'{{"echo":"{spelled}"}}'.encode()
+    assert json.loads(Redactor(secret).received(data)) == {"echo": REDACTED}
+
+
+def test_the_redactor_leaves_escapes_without_a_secret_alone() -> None:
     data = b'{"text":"a \\"quoted\\" word","n":1}'
-    assert clean_received(data, PLANTED_KEY) is data
+    assert Redactor(PLANTED_KEY).received(data) is data
 
 
-def test_clean_received_leaves_text_that_is_not_json_alone() -> None:
+def test_the_redactor_leaves_text_that_is_not_json_alone() -> None:
     data = b"<html>a \\u0050 page</html>"
-    assert clean_received(data, PLANTED_KEY) is data
+    assert Redactor(PLANTED_KEY).received(data) is data
 
 
 def test_a_secret_with_a_quote_is_found_in_its_json_escaped_form() -> None:
     odd_key = 'key"with\\odd'
     encoded = json.dumps({"echo": odd_key}).encode()
-    assert json.loads(clean_received(encoded, odd_key)) == {"echo": REDACTED}
+    assert json.loads(Redactor(odd_key).received(encoded)) == {"echo": REDACTED}
 
 
 def test_redact_value_rebuilds_only_what_holds_a_secret() -> None:
@@ -391,3 +410,9 @@ def test_an_s3_error_without_the_secret_keeps_its_cause(fake_s3: FakeS3) -> None
     finally:
         client.close()
     assert info.value.__cause__ is not None
+
+
+def test_the_redactor_passes_on_a_decoded_body_that_holds_no_secret() -> None:
+    # The escape spells `P`, a character of the key, so the body is decoded; nothing changes.
+    data = b'{"text":"\\u0050ython"}'
+    assert Redactor(PLANTED_KEY).received(data) is data

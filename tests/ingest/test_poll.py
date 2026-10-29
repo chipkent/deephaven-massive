@@ -348,6 +348,24 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
     ]
 
 
+def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
+    *, massive_session: dm.MassiveSession, pollers: Pollers, clock: FakeClock
+) -> None:
+    names: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
+    schema = massive_session._core.catalog.dataset_schema(DIVIDENDS).arrow_schema()
+
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int]:
+        pooled = executor.submit(lambda: threading.current_thread().name).result(TIMEOUT)
+        names.put((threading.current_thread().name, pooled))
+        return schema.empty_table(), 1
+
+    start(massive_session, script=cast("Script", read), pollers=pollers, clock=clock)
+    poller, pool = names.get(timeout=TIMEOUT)
+    prefix = massive_session._core.thread_prefix
+    assert poller == f"{prefix} poll-1"
+    assert pool == f"{prefix} poll-1 rest_0"
+
+
 def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
     *,
     massive_session: dm.MassiveSession,

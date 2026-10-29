@@ -183,8 +183,8 @@ nothing is kept or shimmed for compatibility.
     big-picture Summary from which a reader with no context could explain the whole PR, the
     required sections in order with the engineering detail in How it works, nothing the reader
     must decode, and rewritten to the final state on every push that changes the PR.
-18. **Every change logs its decisions and failures, with their values, and never a secret**
-    (`DESIGN.md` § 17.1; `tests/test_layout.py` and `tests/massive/net/test_redaction.py`).
+18. **Every change logs its decisions and failures, with their values, and never a secret**:
+    the rules and their checks are in the `src/deephaven_massive/_debug_log.py` docstring.
 
 ## Layers
 
