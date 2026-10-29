@@ -369,7 +369,9 @@ def test_a_failure_is_recorded_before_the_table_fails(
     monkeypatch.setattr(TablePublisher, "publish_failure", failing)
     script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
-    poller_of(pollers).thread.join(TIMEOUT)
+    poller = poller_of(pollers)
+    poller.thread.join(TIMEOUT)
+    assert not poller.thread.is_alive()  # the poller is done with `order`
     assert order == ["recorded", "table failed"]
     massive_session.release(table)
 

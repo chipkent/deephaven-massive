@@ -381,8 +381,9 @@ class StreamQuery(QueryBase):
     A refreshing `Table` passed as symbols is reactive: the stream subscribes and unsubscribes
     as its rows change. A static (non-refreshing) `Table` is a fixed symbol list instead, read
     once when the verb is called, as `fetch()` and `history()` read one: the stream is the one
-    an equal symbol list opens. A table with no symbol, or with a row that is not Massive's
-    exact ticker, raises `ValueError`.
+    an equal symbol list opens. A row that is not Massive's exact ticker raises `ValueError`
+    in either kind; a static table with no symbol raises `ValueError` too, while an empty
+    refreshing table opens its stream and subscribes as rows arrive.
 
     Built by a dataset method, such as `m.stocks.luld(...)`; immutable and reusable.
 
