@@ -80,13 +80,22 @@ access to the month's end ([S4], [S5]).
 |---|---|---|
 | Every class on Basic | $0 | about 12 questions: the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (NVDA around its 2024 split, the adjusted echo on every page, COST's dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; plus the 429 text and the rate buckets |
 | Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
-| Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (with full contracts history), and the option half-day stamps |
-| Stocks Starter | $29 | adds the delayed-key refusal text, the flat-file publication time, and that a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com and NVDA's as-traded day file (with `s3`; if it answers anything else, the library raises on every flat-file range that holds a weekend) |
+| Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (with full contracts history), the option half-day stamps, and the stamps of SPY and SPXW 1-day and week bars on every source (with `s3` for the day file) |
+| Stocks Starter | $29 | adds the delayed-key refusal text, the flat-file publication time, and that a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com and NVDA's as-traded day file (with `s3`; if it answers anything else, the library raises on every flat-file range that holds a weekend), and the stamps of AAPL's 1-day, week, and month bars on every source (with `s3` for the day file) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
 | the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields, its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
-| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
+| Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; the options topic cap |
 | Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only |
+
+The bar-stamp checks read the most recent Thanksgiving week that has ended, so their day and
+week reads are at most about a year and two weeks old. In the two weeks before the next
+Thanksgiving week ends, the index day and week reads sit just past one year old, and a plan
+that keeps one year of index history refuses them; the refusal is recorded, and the index
+tests fail until the new week ends. Their month and quarter reads are the two whole ones
+before the run's, and the index year read runs from January 1 to the run's day, so they stay
+recent; before the year's first trading day there is no year bar yet, and the year read is
+recorded as skipped.
 
 Partner datasets (Benzinga, ETF Global, TMX, consumer spending) are $99 a month each; NOI is
 a $49 expansion ([S9]); economy data and each class's reference data are free on Basic.
@@ -155,6 +164,16 @@ is not a holiday, with the variables above exported:
 
    ```bash
    uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
+   ```
+
+6. **On the trading day after a half day**, the three REST stamp tests again. The half days
+   are the Friday after Thanksgiving, and December 24 and July 3 when they fall Monday to
+   Thursday. `/prev` serves only the most recent completed trading day, so only then does it
+   show a short-day stamp; the evidence marks that day `half day: yes`. Run alone, the three
+   tests leave their questions "partly run" in the summary, since the file tests did not run:
+
+   ```bash
+   uv run pytest -m integration -k "day_and_week_bar_stamps_from_rest or day_and_longer_bar_stamps_from_rest" 2>&1 | tee -a live-checks.log
    ```
 
 ## Reading the results

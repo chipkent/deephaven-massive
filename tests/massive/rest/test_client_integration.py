@@ -21,7 +21,7 @@ import pytest
 import urllib3
 
 from deephaven_massive._massive import Transport, source
-from deephaven_massive._massive.net.http import ssl_context
+from deephaven_massive._massive.net.http import TlsConsumer, ssl_context
 from deephaven_massive._massive.rest.query import request_target
 
 if TYPE_CHECKING:
@@ -70,7 +70,7 @@ def send(live_config: MassiveConfig) -> Iterator[Callable[[Request], tuple[int, 
         A function mapping a request to its HTTP status and a description: the rate-limit
         headers and, for a refusal, Massive's message (or the start of the body).
     """
-    pool = urllib3.PoolManager(ssl_context=ssl_context(), retries=False)
+    pool = urllib3.PoolManager(ssl_context=ssl_context(TlsConsumer.URLLIB3), retries=False)
     headers = {"Authorization": f"Bearer {live_config.api_key}"}
 
     def run(request: Request) -> tuple[int, str]:

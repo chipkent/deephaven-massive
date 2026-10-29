@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import boto3
+import botocore.loaders
 import botocore.utils
 import certifi
 import pyarrow as pa
@@ -263,6 +264,138 @@ def test_a_close_while_the_network_settings_are_read_creates_no_client(
     with pytest.raises(WireError, match="is closed"):
         client.open(KEY)
     assert (fake_s3.clients, fake_s3.keys()) == ([], [])
+
+
+class _OwnedLock:
+    """A lock that records which thread holds it, standing in for the shared loader's lock."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.owner: int | None = None  # the holder's thread id; None while free
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+        self.owner = threading.get_ident()
+
+    def __exit__(self, *_: object) -> None:
+        self.owner = None
+        self._lock.release()
+
+
+class _CheckedLoader(botocore.loaders.Loader):
+    """botocore's loader, checking that each model load holds the shared lock, alone."""
+
+    def __init__(self, lock: _OwnedLock) -> None:
+        super().__init__()
+        self._lock = lock
+        self._guard = threading.Lock()
+        self._active = 0
+        self.unlocked_loads = 0  # loads by a thread that did not hold the shared lock
+        self.most_at_once = 0  # the most loads in progress at the same time
+
+    @override
+    def load_service_model(
+        self, service_name: str, type_name: str, api_version: str | None = None
+    ) -> object:
+        with self._guard:
+            if self._lock.owner != threading.get_ident():
+                self.unlocked_loads += 1
+            self._active += 1
+            self.most_at_once = max(self.most_at_once, self._active)
+        try:
+            return super().load_service_model(service_name, type_name, api_version)
+        finally:
+            with self._guard:
+                self._active -= 1
+
+
+@pytest.fixture
+def loaders(monkeypatch: pytest.MonkeyPatch) -> list[_CheckedLoader]:
+    """Give the test a fresh shared model loader and record every loader it creates.
+
+    Returns:
+        The loaders created, in order; the process-wide one is restored after the test.
+    """
+    lock = _OwnedLock()
+    created: list[_CheckedLoader] = []
+    guard = threading.Lock()
+
+    def create_loader() -> _CheckedLoader:
+        loader = _CheckedLoader(lock)
+        with guard:
+            created.append(loader)
+        return loader
+
+    monkeypatch.setattr(botocore.loaders, "create_loader", create_loader)
+    shared = client_module._ModelLoader()
+    monkeypatch.setattr(shared, "_lock", lock)  # records the owner for the checks
+    monkeypatch.setattr(client_module, "_MODEL_LOADER", shared)
+    return created
+
+
+def _loader_of(client: FlatFileClient) -> object:
+    """Return the botocore model loader the client's boto3 client was built with."""
+    built: Any = client._client
+    return built._loader
+
+
+def test_every_client_shares_one_model_loader(
+    *, fake_s3: FakeS3, loaders: list[_CheckedLoader]
+) -> None:
+    first, second = make_client(), make_client(endpoint_url="https://s3.example.com")
+    try:
+        first.open(KEY)
+        second.open(KEY)
+        assert _loader_of(first) is _loader_of(second)
+        assert loaders == [_loader_of(first)]  # created once, with the holder
+    finally:
+        first.close()
+        second.close()
+    assert len(fake_s3.clients) == 2
+    assert loaders[0].unlocked_loads == 0
+
+
+def test_building_clients_leaves_the_search_paths_as_the_first_build_did(
+    *, fake_s3: FakeS3, loaders: list[_CheckedLoader]
+) -> None:
+    clients = [make_client() for _ in range(3)]
+    try:
+        clients[0].open(KEY)
+        after_first = list(loaders[0].search_paths)
+        clients[1].open(KEY)
+        clients[2].open(KEY)
+    finally:
+        for client in clients:
+            client.close()
+    assert loaders[0].search_paths == after_first
+    assert len(set(after_first)) == len(after_first)  # boto3's data directory listed once
+    assert any(path.startswith(str(Path(boto3.__file__).parent)) for path in after_first)
+
+
+def test_clients_built_at_once_create_one_model_loader_and_never_load_at_once(
+    *, fake_s3: FakeS3, loaders: list[_CheckedLoader]
+) -> None:
+    clients = [make_client() for _ in range(8)]
+    start = threading.Barrier(len(clients), timeout=TIMEOUT)
+
+    def first_request(client: FlatFileClient) -> None:  # a failure leaves its client unbuilt
+        start.wait()
+        client.open(KEY)
+
+    threads = [threading.Thread(target=first_request, args=(client,)) for client in clients]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(TIMEOUT)
+        assert not any(thread.is_alive() for thread in threads)
+        assert len(loaders) == 1
+        assert all(_loader_of(client) is loaders[0] for client in clients)
+    finally:
+        for client in clients:
+            client.close()
+    assert len(fake_s3.clients) == len(clients)
+    assert (loaders[0].unlocked_loads, loaders[0].most_at_once) == (0, 1)
 
 
 @pytest.mark.parametrize("code", ["InvalidAccessKeyId", "SignatureDoesNotMatch"])
