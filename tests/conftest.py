@@ -2298,7 +2298,10 @@ def period_bar_report(
     For each unit asked for it reads the bars over a range of days from the aggregates range
     endpoint, unfiltered, and reports each stamp in UTC and New York time with its values.
     Weeks are read from the Saturday before the first Monday to the last Saturday, so a week
-    stamped on its Monday or on the weekend before is read once and the next week is not. A
+    stamped on its Monday or on the weekend before is read once and the next week is not.
+    Massive may widen a range to whole periods of its unit (a week from its Sunday), so bars
+    stamped before the first day or after the last are left out, and how many were is
+    recorded either way. A
     read the plan refuses (a range beyond the plan's history) is recorded as evidence and
     counts as no bars, so the other units' evidence is kept. Reading it: a bar stamped 00:00
     New York time (01:00 for an index) on its period's first day, or on the Saturday or
@@ -2334,7 +2337,12 @@ def period_bar_report(
                 )
                 complete = False
                 continue
-            bars = [_stamped(b) for b in raw]
+            bars = [b for b in map(_stamped, raw) if first <= _new_york_day(b[0]) <= last]
+            evidence(
+                f"{ticker} {span}: {len(raw) - len(bars)} of {len(raw)} bars stamped outside "
+                f"{first} to {last}, left out (more than 0 means the range widened to whole "
+                "periods)"
+            )
             least, most = expected[span]
             complete &= least <= len(bars) <= most
             evidence(

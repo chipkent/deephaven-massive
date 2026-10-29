@@ -275,6 +275,15 @@ def _day_rebuilds(
     return found
 
 
+def _new_york_day(stamp_ms: int) -> date:
+    """Return the New York calendar day of an epoch-millisecond stamp.
+
+    Returns:
+        The day.
+    """
+    return datetime.fromtimestamp(stamp_ms / 1000, UTC).astimezone(_NEW_YORK).date()
+
+
 def _week_spans(stamp_ms: int) -> list[tuple[str, date, int]]:
     """Return the spans a week bar may cover, from its stamp.
 
@@ -283,13 +292,31 @@ def _week_spans(stamp_ms: int) -> list[tuple[str, date, int]]:
         seven days from the stamp's own New York day (a week that starts on the weekend
         before its Monday).
     """
-    local = datetime.fromtimestamp(stamp_ms / 1000, UTC).astimezone(_NEW_YORK).date()
+    local = _new_york_day(stamp_ms)
     monday = local + timedelta(days=(7 - local.weekday()) % 7)
     return [
         ("Monday to Friday", monday, 5),
         ("Monday to Sunday", monday, 7),
         ("seven days from the stamp's day", local, 7),
     ]
+
+
+def _week_minutes(
+    range_bars: RangeBars, index: str, spans: Mapping[int, list[tuple[str, date, int]]]
+) -> list[dict[str, Any]]:
+    """Read the minute bars of every span the week bars may cover, in one range.
+
+    Returns:
+        The raw minute bars, from the day before the earliest span to the end of the latest;
+        none when there are no spans.
+    """
+    windows = [
+        (first, first + timedelta(days=n)) for found in spans.values() for _, first, n in found
+    ]
+    if not windows:
+        return []
+    bounds = (min(w[0] for w in windows) - timedelta(days=1), max(w[1] for w in windows))
+    return range_bars(index, "minute", bounds)
 
 
 def _week_lines(
@@ -301,8 +328,10 @@ def _week_lines(
 ) -> tuple[list[str], int]:
     """Show which days an index's week bars cover, weekend included or not.
 
-    Reads the week bars of two calendar weeks (from the Saturday before the first Monday to
-    the last Saturday, so a bar stamped on its Monday or the weekend before is read once),
+    Reads the week bars of two calendar weeks (stamped from the Saturday before the first
+    Monday to the last Saturday, so a bar stamped on its Monday or the weekend before is
+    counted once; Massive may widen the range to whole weeks, so bars stamped outside are
+    left out and counted either way),
     then the minute bars of every span those bars may cover, and rebuilds each span (see
     `_week_spans`) in New York and in Chicago time, reporting each rebuild's largest relative
     error against the week bar.
@@ -310,21 +339,18 @@ def _week_lines(
     Returns:
         The evidence lines and how many week bars were read.
     """
-    bars = range_bars(index, "week", (weeks[0] - timedelta(days=2), weeks[1] - timedelta(days=1)))
+    bounds = (weeks[0] - timedelta(days=2), weeks[1] - timedelta(days=1))
+    raw = range_bars(index, "week", bounds)
+    bars = [b for b in raw if bounds[0] <= _new_york_day(int(b["t"])) <= bounds[1]]
     spans = {int(bar["t"]): _week_spans(int(bar["t"])) for bar in bars}
-    windows = [
-        (first, first + timedelta(days=n)) for found in spans.values() for _, first, n in found
-    ]
-    minutes = (
-        range_bars(
-            index,
-            "minute",
-            (min(w[0] for w in windows) - timedelta(days=1), max(w[1] for w in windows)),
-        )
-        if windows
-        else []
+    minutes = _week_minutes(range_bars, index, spans)
+    header = (
+        f"{index}: {len(bars)} week bars stamped {bounds[0]} to {bounds[1]} "
+        f"({len(raw) - len(bars)} of {len(raw)} outside, left out; more than 0 means the range "
+        "widened to whole weeks), "
+        f"{len(minutes)} minute bars"
     )
-    lines = [f"{index}: {len(bars)} week bars, {len(minutes)} minute bars"]
+    lines = [header]
     for bar in bars:
         stamp = datetime.fromtimestamp(int(bar["t"]) / 1000, UTC)
         values = tuple(float(bar[k]) for k in ("o", "h", "l", "c"))
