@@ -179,7 +179,7 @@ def fail_one_poll_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
     failures = [RuntimeError("conversion failed")]
 
     def flaky(data: pa.Table) -> Table:
-        if failures and " poll #" in threading.current_thread().name:
+        if failures and " poll-" in threading.current_thread().name:
             raise failures.pop()
         return convert(data)
 
@@ -355,6 +355,27 @@ def test_the_streams_row_follows_the_cycles_and_the_release(
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
     assert pollers._live == set()
+
+
+def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
+    *, massive_session: dm.MassiveSession, pollers: Pollers, clock: FakeClock
+) -> None:
+    names: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
+    schema = massive_session._core.catalog.dataset_schema(DIVIDENDS).arrow_schema()
+
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int]:
+        pooled = executor.submit(lambda: threading.current_thread().name).result(TIMEOUT)
+        names.put((threading.current_thread().name, pooled))
+        return schema.empty_table(), 1
+
+    # Held until the end: a table nothing refers to may be collected, which stops its poller
+    # before its first cycle.
+    table = start(massive_session, script=cast("Script", read), pollers=pollers, clock=clock)
+    poller, pool = names.get(timeout=TIMEOUT)
+    prefix = massive_session._core.thread_prefix
+    assert poller == f"{prefix} poll-1"
+    assert pool == f"{prefix} poll-1 rest_0"
+    massive_session.release(table)
 
 
 def test_an_entitlement_error_fails_the_table_and_ends_the_poller(

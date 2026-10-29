@@ -24,6 +24,7 @@ import gzip
 import importlib
 import itertools
 import os
+import re
 import sys
 import threading
 import time
@@ -490,11 +491,11 @@ def massive_session() -> Iterator[MassiveSession]:
     session.close()
 
 
-_LIBRARY_THREADS: Final = ("MassiveSession #", "massive")
-"""The name prefixes of the library's threads: a session's reaper, diagnostics writer, pollers,
-and crypto-pair worker (`MassiveSession #N ...`), and a connection's client, flush, and
-verdict-move threads (`massive-ws ...`, `massive-flush ...`, `massive-move ...`). The bare
-`massive` prefix also matches the `massive #N ...` names of the session-named threads."""
+_LIBRARY_THREADS: Final = ("massive",)
+"""The name prefix of the library's threads: a session's reaper, diagnostics writer, pollers,
+call pools, and crypto-pair worker (`massive #N ...`), a connection group's clients, flush,
+delayed-start, verdict-move, and futures schedule threads (`massive group #N ...`), and a
+client made alone (`massive ws ...`)."""
 
 
 @pytest.fixture(autouse=True)
@@ -869,9 +870,10 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
     closed at teardown, so a test may also close one itself.
 
     Teardown closes every session even when one close raises, then waits, for at most
-    `_CLIENT_THREADS_TIMEOUT` seconds, until no client loop thread (`massive-ws …`) or flush
-    thread (`massive-flush …`) is alive, and fails the test if one is: a client left running
-    reconnects forever, to a stopped server or through whatever proxy a later test sets.
+    `_CLIENT_THREADS_TIMEOUT` seconds, until no client loop thread (`massive group #<n> ws …`)
+    or flush thread (`massive group #<n> flush …`) is alive, and fails the test if one is: a
+    client left running reconnects forever, to a stopped server or through whatever proxy a
+    later test sets.
 
     Yields:
         The factory.
@@ -910,14 +912,13 @@ def _drop_session(harness: WsSession) -> None:
 _CLIENT_THREADS_TIMEOUT: Final = 15.0
 """Seconds `make_ws_session`'s teardown waits for its sessions' threads to end."""
 
+_CLIENT_THREAD: Final = re.compile(r"massive(?: group)?(?: #\d+)? (?:ws|flush) ")
+"""The name of a WebSocket client's loop thread or a connection's flush thread."""
+
 
 def _client_threads() -> list[str]:
     """Return the names of the live WebSocket client and flush threads, in any session."""
-    return [
-        t.name
-        for t in threading.enumerate()
-        if t.name.startswith(("massive-ws ", "massive-flush ")) and t.is_alive()
-    ]
+    return [t.name for t in threading.enumerate() if _CLIENT_THREAD.match(t.name) and t.is_alive()]
 
 
 @pytest.fixture

@@ -14,10 +14,11 @@ The server logs through its own logger at WARNING, so its DEBUG frame log (which
 the client's authentication frame) never reaches a test that captures every logger.
 
 Tests script the next connections before they happen (`reject_next`, `greet_next`,
-`auth_replies`) and act on the live one (`send`, `close`) from the test thread. Everything the
-server observes is kept under one lock, and `wait_for` blocks on a condition until a predicate
-over it holds, so tests synchronize with the client's thread deterministically, never by
-sleeping. Built by the `fake_ws_server` fixture in `tests/conftest.py`.
+`auth_replies`, each a status, a `(status, message)` pair, or a raw frame) and act on the live
+one (`send`, `close`) from the test thread. Everything the server observes is kept under one
+lock, and `wait_for` blocks on a condition until a predicate over it holds, so tests synchronize
+with the client's thread deterministically, never by sleeping. Built by the `fake_ws_server`
+fixture in `tests/conftest.py`.
 """
 
 from __future__ import annotations
@@ -67,6 +68,21 @@ def status_frame(status: str, message: str | None = None) -> str:
     """
     text = _MESSAGES.get(status, "") if message is None else message
     return json.dumps([{"ev": "status", "status": status, "message": text}])
+
+
+def _auth_reply(reply: str | tuple[str, str] | bytes) -> tuple[str | bytes, str | None]:
+    """Return the frame of a scripted reply to the key, and its status.
+
+    Args:
+        reply: A status, a `(status, message)` pair, or a raw frame.
+
+    Returns:
+        The frame to send, and its status (None for a raw frame).
+    """
+    if isinstance(reply, bytes):
+        return reply, None
+    status, message = reply if isinstance(reply, tuple) else (reply, None)
+    return status_frame(status, message), status
 
 
 def _ack_frame(
@@ -126,7 +142,9 @@ class FakeMassiveServer:
         """Start serving on an ephemeral port; returns once the port is bound."""
         self._lock = threading.Condition()
         self.connections: list[Connection] = []
-        self.auth_replies: list[str] = []
+        # Each reply is a status, sent with Massive's message for it; a (status, message) pair;
+        # or bytes, sent as they are in a binary frame, as a server that broke protocol would.
+        self.auth_replies: list[str | tuple[str, str] | bytes] = []
         self.auto_ack = True
         self.combined_acks = False
         self.close_after_refusal = True
@@ -317,8 +335,9 @@ class FakeMassiveServer:
                 record.auth = str(auth)
                 reply = self.auth_replies.pop(0) if self.auth_replies else "auth_success"
                 self._lock.notify_all()
-            await ws.send(status_frame(reply))
-            if reply != "auth_success":
+            frame, status = _auth_reply(reply)
+            await ws.send(frame)
+            if status != "auth_success":
                 if self.close_after_refusal:
                     await ws.close()
                 await ws.wait_closed()

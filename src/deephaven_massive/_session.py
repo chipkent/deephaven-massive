@@ -14,9 +14,13 @@ once, at import, from the `DATASETS` of every namespace module. Every core holds
 so the dataset layer never has to find the namespace modules itself.
 
 The module also numbers sessions (`MassiveSession #1`, a per-process counter, used in the
-`repr`, in error messages, and in the same-key WARNING) and keeps the weak registry of open
-sessions that warns when a second open session uses the same API key with different connection
-settings, so the two cannot share their WebSocket connections.
+`repr`, in error messages, and in the same-key WARNING, and `massive #1` at the start of the
+session's own threads' names) and keeps the weak registry of open sessions that warns when a
+second open session uses the same API key with different connection settings, so the two
+cannot share their WebSocket connections. Creating a session applies the logging environment
+variables once per process (`_debug_log.configure_from_environment`) and logs, at INFO, the
+session's label and its configuration without its secrets, so a log attached to a bug report
+says what ran.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from deephaven.table import Table
 
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
+from deephaven_massive._debug_log import configure_from_environment
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
 from deephaven_massive._namespaces import (
@@ -104,14 +109,30 @@ _session_numbers = itertools.count(1)
 _open_sessions: list[weakref.ref[SessionCore]] = []
 
 
-def _next_label() -> str:
-    """Return the next session label of the process.
+def _next_number() -> int:
+    """Return the next session number of the process.
 
     Returns:
-        `"MassiveSession #<n>"`, numbered from 1.
+        The number, from 1: the session is `MassiveSession #<n>`, and its threads' names start
+        with `massive #<n>`.
     """
     with _keys_lock:
-        return f"MassiveSession #{next(_session_numbers)}"
+        return next(_session_numbers)
+
+
+def _log_session(label: str, config: MassiveConfig) -> None:
+    """Log, at INFO, a new session's label and its configuration, without its secrets.
+
+    The configuration's `repr` leaves out both secrets; each is shown only as set or unset. The
+    process itself (versions, the GIL, the snapshot, the proxy and CA settings) is described
+    once, when the log is turned on.
+
+    Args:
+        label: The session's label, such as `"MassiveSession #1"`.
+        config: The session's configuration.
+    """
+    secret = "set" if config.s3_secret_access_key is not None else "unset"
+    logger.info("%s: %r with api_key set, s3_secret_access_key %s", label, config, secret)
 
 
 def _register(core: SessionCore) -> None:
@@ -248,7 +269,13 @@ class MassiveSession:
                 "create the session from the console or an application script, or use "
                 "make_user_exec_ctx() without freeze_vars."
             )
-        core = SessionCore(config, exec_ctx, _next_label(), catalog=CATALOG)
+        configure_from_environment()
+        number = _next_number()
+        label = f"MassiveSession #{number}"
+        _log_session(label, config)
+        core = SessionCore(
+            config, exec_ctx, label, catalog=CATALOG, thread_prefix=f"massive #{number}"
+        )
         core.attach(SessionClients(core))
         _register(core)
         self._core = core

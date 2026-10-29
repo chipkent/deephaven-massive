@@ -318,7 +318,6 @@ class Poller:
         "_interval",
         "_key_names",
         "_keys",
-        "_label",
         "_max_concurrency",
         "_mode",
         "_pollers",
@@ -333,6 +332,7 @@ class Poller:
         "_stop",
         "_stream_id",
         "_thread",
+        "_thread_name",
     )
 
     def __init__(
@@ -369,7 +369,8 @@ class Poller:
         """
         self._core = weakref.ref(core)
         self._exec_ctx = core.exec_ctx
-        self._label = core.label
+        # The poller thread's name; its fan-out pool's threads add " rest_<n>".
+        self._thread_name = f"{core.thread_prefix} poll-{stream_id}"
         self._max_concurrency = core.config.max_concurrency
         self._schema = core.dataset_schema(spec)
         self._spec = spec
@@ -389,9 +390,7 @@ class Poller:
         # The identities an APPEND table holds; only the poller thread touches it.
         self._seen: set[tuple[Hashable, ...]] = set()
         self._published = 0
-        self._thread = threading.Thread(
-            target=self._run, name=f"{core.label} poll #{stream_id}", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name=self._thread_name, daemon=True)
 
     @property
     def thread(self) -> threading.Thread:
@@ -446,9 +445,7 @@ class Poller:
         try:
             with (
                 entered(self._exec_ctx),
-                ThreadPoolExecutor(
-                    self._max_concurrency, f"{self._label} poll #{self._stream_id}"
-                ) as pool,
+                ThreadPoolExecutor(self._max_concurrency, f"{self._thread_name} rest") as pool,
             ):
                 while not self._stop.is_set():
                     began = self._clock.monotonic()

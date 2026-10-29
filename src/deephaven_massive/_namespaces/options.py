@@ -37,6 +37,7 @@ from deephaven_massive._enums import (
     ChannelFamily,
     ClassFromPrefix,
     ContractType,
+    NotBars,
     Order,
     Timespan,
     _require_enum,
@@ -146,8 +147,8 @@ TRADES: Final = DatasetSpec(
     kind="trades",
     fetch_path=_LAST_TRADE,
     history_path=_TRADES,
-    channels={None: "T"},
-    flat_file_prefixes={None: _TRADE_FILES},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: _TRADE_FILES},
     keys={
         (_REST, _LAST_TRADE): _keys("Ticker", "SipTimestamp"),
         (_REST, _TRADES): _from_path("SipTimestamp"),
@@ -164,8 +165,8 @@ QUOTES: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     kind="quotes",
     history_path=_QUOTES,
-    channels={None: "Q"},
-    flat_file_prefixes={None: _QUOTE_FILES},
+    channels={NotBars.ANY: "Q"},
+    flat_file_prefixes={NotBars.ANY: _QUOTE_FILES},
     keys={
         (_REST, _QUOTES): _from_path("SipTimestamp"),
         (_WS, "options/Q"): _keys("Ticker", "SipTimestamp"),
@@ -202,7 +203,7 @@ FMV: Final = DatasetSpec(
     summary="Massive's fair market value of US-listed options contracts, streamed in real time.",
     asset_class=AssetClass.OPTIONS,
     kind="fmv",
-    channels={None: "FMV"},
+    channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
     keys={(_WS, "options/FMV"): _keys("Ticker", "FmvLastUpdated")},
 )

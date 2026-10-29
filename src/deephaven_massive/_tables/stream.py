@@ -87,7 +87,7 @@ from deephaven_massive._datasets.symbols import (
     unknown_symbol_message,
 )
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
-from deephaven_massive._enums import UnknownSymbols
+from deephaven_massive._enums import NotBars, UnknownSymbols
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
@@ -302,8 +302,9 @@ class ChannelPlan:
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
         schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
         _, symbol_field = fields[key_column(spec, "symbol", symbol)]
-        # A bars channel serves one timespan, always of one unit.
-        timespan = next(span for span, name in spec.channels.items() if name == channel)
+        # A bars channel serves one timespan, always of one unit; any other channel has none.
+        span = next(span for span, name in spec.channels.items() if name == channel)
+        timespan = None if span is NotBars.ANY else span
         return cls(
             dataset=spec.name,
             asset_class=asset_class,

@@ -33,6 +33,7 @@ from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
     Direction,
+    NotBars,
     Order,
     PollMode,
     Timeframe,
@@ -116,8 +117,8 @@ TRADES: Final = DatasetSpec(
     kind="trades",
     fetch_path=_LAST_TRADE,
     history_path=_TRADES,
-    channels={None: "T"},
-    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
         (_R, _LAST_TRADE): _ticker_keys("SipTimestamp"),
         (_R, _TRADES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
@@ -134,8 +135,8 @@ QUOTES: Final = DatasetSpec(
     kind="quotes",
     fetch_path=_LAST_QUOTE,
     history_path=_QUOTES,
-    channels={None: "Q"},
-    flat_file_prefixes={None: "us_stocks_sip/quotes_v1"},
+    channels={NotBars.ANY: "Q"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/quotes_v1"},
     keys={
         (_R, _LAST_QUOTE): _ticker_keys("SipTimestamp"),
         (_R, _QUOTES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
@@ -173,7 +174,7 @@ LULD: Final = DatasetSpec(
     summary="Limit up-limit down price bands of US-listed stocks, as they change.",
     asset_class=_STOCKS,
     kind="luld",
-    channels={None: "LULD"},
+    channels={NotBars.ANY: "LULD"},
     keys={(_W, "stocks/LULD"): _ticker_keys("UnixTimestamp")},
 )
 IMBALANCES: Final = DatasetSpec(
@@ -181,7 +182,7 @@ IMBALANCES: Final = DatasetSpec(
     summary="Net order imbalances of US-listed stocks ahead of opening and closing auctions.",
     asset_class=_STOCKS,
     kind="imbalances",
-    channels={None: "NOI"},
+    channels={NotBars.ANY: "NOI"},
     keys={(_W, "stocks/NOI"): _ticker_keys("UnixTimestamp")},
 )
 FMV: Final = DatasetSpec(
@@ -189,7 +190,7 @@ FMV: Final = DatasetSpec(
     summary="Massive's fair market value estimate of US-listed stocks, as it updates.",
     asset_class=_STOCKS,
     kind="fmv",
-    channels={None: "FMV"},
+    channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
     keys={(_W, "stocks/FMV"): _ticker_keys("FmvLastUpdated")},
 )

@@ -105,7 +105,10 @@ def test_every_exported_enum_is_tested() -> None:
     exported = {
         getattr(dm, name)
         for name in dm.__all__
-        if isinstance(getattr(dm, name), type) and issubclass(getattr(dm, name), Enum)
+        if isinstance(getattr(dm, name), type)
+        and issubclass(getattr(dm, name), Enum)
+        # The wire enums; `LogOutput` is the debug log's, tested with it.
+        and getattr(dm, name).__module__ == "deephaven_massive._enums"
     }
     assert exported == set(EXPECTED_VALUES)
 
@@ -179,10 +182,14 @@ def test_module_exports() -> None:
         "ChannelFamily",
         "subscription_of",
         "ClassFromPrefix",
+        "NotBars",
     }
     # The class of a dataset that spans classes is internal: no public signature takes it.
     assert not hasattr(dm, "ClassFromPrefix")
     assert [member.name for member in _enums.ClassFromPrefix] == ["ANY"]
+    # The source key of a dataset that is not bars is internal too.
+    assert not hasattr(dm, "NotBars")
+    assert [member.name for member in _enums.NotBars] == ["ANY"]
     # The transport is the wire package's, named once for both sides of the boundary.
     assert not hasattr(_enums, "Transport")
 
@@ -200,6 +207,7 @@ def _resolution_namespace() -> dict[str, object]:
         "_enums",
         "_errors",
         "_config",
+        "_debug_log",
         "_query",
         "_session",
         "_datasets.catalog",

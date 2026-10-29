@@ -3,7 +3,9 @@
 `MassiveSession` (in `_session.py`) is what users create; it delegates everything stateful to
 one `SessionCore`, which queries and namespaces share. The core owns:
 
-- the session's label (`MassiveSession #1`), used in error messages and log records;
+- the session's label (`MassiveSession #1`), used in error messages and log records, and its
+  thread prefix (`massive #1`), the start of the name of every thread the session owns, so each
+  log line's thread says which session wrote it;
 - the configuration, the process's dataset `Catalog`, and the captured Deephaven
   `ExecutionContext`, entered on every library thread;
 - `registry_lock`, the one leaf lock that guards every session registry: no Deephaven call, network
@@ -272,12 +274,14 @@ class RestTransport(Protocol):
         """
         ...
 
-    def fetch(self, spec: DatasetSpec, request: Request) -> Table:
+    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 
         Args:
             spec: The dataset.
             request: The normalized arguments.
+            call: The verb call's id (`next_stream_id`), which its log lines and thread names
+                carry.
         """
         ...
 
@@ -294,7 +298,9 @@ class RestTransport(Protocol):
         """
         ...
 
-    def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
+    def history(
+        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+    ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, static.
 
         Args:
@@ -302,6 +308,7 @@ class RestTransport(Protocol):
             request: The normalized arguments, with the parsed `start` and `end` bounds.
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
+            call: The verb call's id, as `fetch` takes it.
         """
         ...
 
@@ -348,6 +355,7 @@ class FlatFileTransport(Protocol):
         window: HistoryWindow,
         *,
         dates: Sequence[date],
+        call: int,
     ) -> Table:
         """Return the rows of `window` from the dataset's flat files, static.
 
@@ -358,6 +366,8 @@ class FlatFileTransport(Protocol):
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
+            call: The verb call's id (`next_stream_id`), which its log lines and thread names
+                carry.
         """
         ...
 
@@ -547,7 +557,13 @@ class SessionCore:
     """
 
     def __init__(
-        self, config: MassiveConfig, exec_ctx: ExecutionContext, label: str, *, catalog: Catalog
+        self,
+        config: MassiveConfig,
+        exec_ctx: ExecutionContext,
+        label: str,
+        *,
+        catalog: Catalog,
+        thread_prefix: str,
     ) -> None:
         """Create the core, its reaper, the diagnostics tables and writer, and the drift registry.
 
@@ -557,10 +573,14 @@ class SessionCore:
             label: The session's label, such as `"MassiveSession #1"`.
             catalog: Every declared dataset (`CATALOG` in `_session.py`), read by the
                 transports.
+            thread_prefix: The start of the name of every thread the session owns, such as
+                `"massive #1"`; each thread adds its role (`"massive #1 reaper"`,
+                `"massive #1 call-7 rest"`).
         """
         self.config: Final = config
         self.exec_ctx: Final = exec_ctx
         self.label: Final = label
+        self.thread_prefix: Final = thread_prefix
         self.catalog: Final = catalog
         self.registry_lock: Final = threading.RLock()
         me = weakref.ref(self)
@@ -568,13 +588,13 @@ class SessionCore:
         # and nothing has started a thread yet if it does.
         self.diagnostics: Final = Diagnostics(
             exec_ctx,
-            f"{label} diagnostics",
+            f"{thread_prefix} diagnostics",
             on_death=functools.partial(SessionCore._thread_died, me, "diagnostics writer"),
         )
         try:
             self._reaper = Reaper(
                 exec_ctx,
-                f"{label} reaper",
+                f"{thread_prefix} reaper",
                 on_death=functools.partial(SessionCore._thread_died, me, "reaper"),
             )
         except BaseException:  # the writer is running: stop it, or it holds the tables forever
@@ -1236,8 +1256,10 @@ class SessionCore:
         """Return a new process-unique stream id, the `StreamId` of an `m.streams()` row.
 
         The one allocator of stream ids: WebSocket streams get theirs when the session
-        registers them, and the REST transport calls this for each `poll()` table's row, so
-        the two kinds never collide. Thread-safe; takes only a leaf lock of its own, so it may
+        registers them, the REST transport calls this for each `poll()` table's row, and each
+        static verb (`fetch()`, `history()`) takes one as its call id, which its log lines and
+        thread names carry (`call 7`), so no two of them ever collide.
+        Thread-safe; takes only a leaf lock of its own, so it may
         be called with or without `registry_lock` held.
 
         Returns:
