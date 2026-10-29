@@ -63,12 +63,11 @@ from deephaven_massive._namespaces.partners import _Partners
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._tables.core import (
-    ON_UPDATE_GRAPH,
     SessionCore,
     has_execution_context,
     has_script_query_scope,
-    on_update_graph,
 )
+from deephaven_massive._tables.liveness import refuse_update_graph_thread
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -234,7 +233,9 @@ class MassiveSession:
 
         When `config` is None, `MassiveConfig()` reads the environment and raises its own
         `AuthenticationError` if no API key is configured (it is not repeated under Raises
-        because this method does not raise it itself).
+        because this method does not raise it itself). On a Deephaven update-graph thread, for
+        example inside a table listener, it raises `ValueError`; a thread that holds the update
+        graph's lock, as the Deephaven console does for every command, may create a session.
 
         Args:
             config: The configuration; None means `MassiveConfig()`, which reads the API key
@@ -246,7 +247,6 @@ class MassiveSession:
                 session must be created inside a Deephaven worker), or if the context's query
                 scope is not the Python script session's own, as with
                 `make_user_exec_ctx(freeze_vars=[...])`.
-            ValueError: If called on an update-graph thread or under the update-graph lock.
         """
         if config is None:
             config = MassiveConfig()
@@ -260,8 +260,7 @@ class MassiveSession:
                 "console or an application script, or enter a context first "
                 "(with deephaven.execution_context.get_exec_ctx(): ...)."
             )
-        if on_update_graph(exec_ctx):
-            raise ValueError(ON_UPDATE_GRAPH)
+        refuse_update_graph_thread(exec_ctx)
         if not has_script_query_scope(exec_ctx):
             raise MassiveError(
                 "MassiveSession needs an ExecutionContext whose query scope is the Python script "
@@ -461,10 +460,9 @@ class MassiveSession:
 
         Massive limits REST requests per subscription (5 per minute on the free Basic tier,
         none on a paid one), counted across every key and session of the account. Each row
-        shows one subscription's bucket, or `other` for the datasets Massive assigns to none:
-        its `State` (`READY`, `PACED` while requests wait for a slot, `PAUSED` after a 429,
-        `REFUSED` while requests fail because Massive refused them for longer than the library
-        waits), `RequestsPerMinute` and `LimitSource` (`DECLARED` in
+        shows one subscription's bucket, or `other` for reference data and the other datasets
+        Massive assigns to none: its `State` (`READY`, `PACED` while requests wait for a slot,
+        `PAUSED` after a 429), `RequestsPerMinute` and `LimitSource` (`DECLARED` in
         `MassiveConfig.rest_basic_subscriptions`, or `LEARNED` from Massive's refusal), the
         requests in flight, waiting, and in the last window, totals of requests and refusals,
         `PausedUntil`, and the latest refusal. Sessions of this process that use the same API
@@ -515,7 +513,9 @@ class MassiveSession:
         with the data; a new operation on `t` itself (`t.where(...)`) raises "Can not listen to
         failed table". `m.streams()` shows every stream `CLOSED` (one that had already failed
         keeps `FAILED`), and a `connections()` or `streams()` table taken before the close
-        keeps its final rows. The session's streams leave their WebSocket connections, and
+        keeps its final rows (in a console command, which holds the update graph's lock, once
+        the command is over; there `close()` returns at once, waiting for nothing). The
+        session's streams leave their WebSocket connections, and
         every connection no other session of the same key uses is closed. "MassiveSession #1
         closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
         `connections()`, `streams()`, and `rate_limits()` raise

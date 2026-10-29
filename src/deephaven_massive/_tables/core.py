@@ -48,16 +48,30 @@ because the core's finalizer only queues work on the reaper. On a free-threaded 
 reference dropped on another thread reaches the thread that created the core only when that
 thread next runs Python code (or a cyclic collection runs), so the core is freed then.
 
-The module also holds the process-wide stream-id allocator and three context checks.
-`on_update_graph` runs at every entry point: `MassiveSession()`, every verb (through
-`SessionCore.require_verb_thread`), and `close()`. `has_execution_context` and
-`has_script_query_scope` run only when a `MassiveSession` is constructed, which is the one place
-an execution context is captured.
+The module also holds the process-wide stream-id allocator and two context checks,
+`has_execution_context` and `has_script_query_scope`, which run only when a `MassiveSession` is
+constructed, the one place an execution context is captured. The thread checks live beside
+`entered` in `_tables/liveness.py`: `refuse_update_graph_thread` runs at every entry point
+(`MassiveSession()`, every verb through `SessionCore.run_verb`, and `close()`), and
+`holds_update_graph_lock` tells the calls that would wait on another thread whether they may.
+
+**The console holds the UG lock.** Deephaven's console runs every command holding the update
+graph's exclusive lock, so no update cycle runs until the command returns; a user thread may
+hold the shared lock to the same effect. Every call works there, and a call on a thread that
+holds the lock never waits for an update cycle or on a thread that may need the lock (the
+diagnostics writer, a poller, another caller's stream open): `close()` waits neither for the
+diagnostics writer nor for the cycle that applies its final rows, and a verb never waits for
+another thread's open of the same stream (see below). Only update-graph threads themselves
+(table listeners) are refused. A verb that runs long there pauses every live table of the
+worker, which the session reports once (`SessionCore.run_verb`).
 
 Lock order: the update-graph (UG) lock, then `registry_lock`, then the live set's leaf lock. A
 stream is registered under `registry_lock` before it opens (with a session-minted id), then
 opened with no lock held; a second verb on the same key waits for that open on its own thread,
-outside every lock, instead of opening a second stream.
+outside every lock, instead of opening a second stream. A second verb on a thread that holds
+the UG lock cannot wait (the open may need that lock, to start a watchlist's listener), so it
+takes the key over: it registers and opens a stream of its own, which later verbs on the key
+reuse, while the first open finishes for its own caller alone.
 """
 
 from __future__ import annotations
@@ -69,10 +83,10 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 
 from deephaven.dherror import DHError
-from deephaven.update_graph import has_exclusive_lock, has_shared_lock, shared_lock
+from deephaven.update_graph import shared_lock
 
 from deephaven_massive._enums import UnknownSymbols
 from deephaven_massive._errors import MassiveError
@@ -85,7 +99,14 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     describe_symbols,
 )
-from deephaven_massive._tables.liveness import Reaper, ResultRegistry, entered, make_result
+from deephaven_massive._tables.liveness import (
+    Reaper,
+    ResultRegistry,
+    entered,
+    holds_update_graph_lock,
+    make_result,
+    refuse_update_graph_thread,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -105,7 +126,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.liveness import StreamHandle
 
 __all__ = [
-    "ON_UPDATE_GRAPH",
+    "PAUSED_TABLES_WARNING_SECONDS",
     "FlatFileTransport",
     "IngestPorts",
     "RestTransport",
@@ -113,10 +134,11 @@ __all__ = [
     "StreamTransport",
     "has_execution_context",
     "has_script_query_scope",
-    "on_update_graph",
 ]
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 # A thread with no execution context gets Deephaven's empty default context, whose update graph
@@ -173,30 +195,9 @@ def has_script_query_scope(exec_ctx: ExecutionContext) -> bool:
     return str(j_query_scope.getClass().getName()) == _SCRIPT_QUERY_SCOPE
 
 
-def on_update_graph(exec_ctx: ExecutionContext) -> bool:
-    """Tell whether the calling thread is an update-graph thread or holds the UG lock.
-
-    Args:
-        exec_ctx: The session's execution context.
-
-    Returns:
-        True on a UG refresh thread (for example inside a table listener), or while the
-        thread holds the UG's shared or exclusive lock.
-    """
-    update_graph = exec_ctx.update_graph
-    return (
-        bool(update_graph.j_update_graph.currentThreadProcessesUpdates())
-        or has_exclusive_lock(update_graph)
-        or has_shared_lock(update_graph)
-    )
-
-
-ON_UPDATE_GRAPH: Final = (
-    "deephaven_massive calls must not run on a Deephaven update-graph thread "
-    "(for example inside a table listener) or while holding the update-graph lock"
-)
-"""The `ValueError` text for a call on an update-graph thread: verbs create tables and take the
-registry lock, which would deadlock against the update cycle there."""
+PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
+"""Seconds a verb may run on a thread that holds the update graph's lock before the session
+logs, once, that the worker's live tables are paused (`SessionCore.run_verb`)."""
 
 
 def _next_stream_id() -> int:
@@ -502,7 +503,9 @@ class _StreamState:
 
     Its key maps to it while it is opening (so a second verb on the key waits on `ready`
     instead of opening a second stream) and then while it is held, not failed, and not shut
-    down; `_release_hold`, `fail_stream`, and `stream_shut_down` unmap it.
+    down; `_release_hold`, `fail_stream`, and `stream_shut_down` unmap it. A verb that holds the
+    update graph's lock and finds the key's stream still opening takes the key over for a
+    record of its own (`_claim`), so the first record then lives and ends unmapped.
 
     Attributes:
         key: The stream's key.
@@ -617,6 +620,8 @@ class SessionCore:
         # Shared with the finalizer, which runs the closers of a session collected unclosed.
         self._closers: list[Callable[[], None]] = []
         self._closed = False
+        # Whether a long verb under the update graph's lock has been reported.
+        self._warned_paused_tables = False
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
         finalizer = weakref.finalize(
@@ -673,20 +678,61 @@ class SessionCore:
             del _live[id(self)]
         self._reaper.submit(functools.partial(_let_go, self))
 
-    def require_verb_thread(self) -> None:
-        """The guard every verb runs first: this is not a UG thread, and the session is open.
+    def run_verb(self, call: str, body: Callable[[], _T]) -> _T:
+        """Run a verb: its guard first, then its body, timed when it holds the UG lock.
 
-        The thread is checked first, so a verb on an update-graph thread raises `ValueError`
-        whether or not the session is closed.
+        The guard checks the thread first, so a verb on an update-graph thread raises the
+        `ValueError` of `refuse_update_graph_thread` whether or not the session is closed, and
+        then the session, before the body checks a single argument. A thread that holds the
+        update graph's lock, such as a console command's, passes, and the body is timed there:
+        while it runs no live table of the worker updates, so a verb that ran
+        `PAUSED_TABLES_WARNING_SECONDS` or longer, such as a `history()` of many requests on a
+        rate-limited key, logs one WARNING saying so, the first time only, whether it returned
+        or raised.
+
+        Args:
+            call: The verb, as the warning names it, such as `"stocks.bars history()"`.
+            body: The verb's work.
+
+        Returns:
+            What `body` returned.
 
         Raises:
-            ValueError: On an update-graph thread, or while holding the update-graph lock.
             MassiveError: If the session is closed.
         """
-        if on_update_graph(self.exec_ctx):
-            raise ValueError(ON_UPDATE_GRAPH)
+        refuse_update_graph_thread(self.exec_ctx)
         if self.closed:
             raise MassiveError(f"{self.label} is closed")
+        if not holds_update_graph_lock(self.exec_ctx):
+            return body()
+        began = time.monotonic()
+        try:
+            return body()
+        finally:
+            self._warn_paused_tables(call, time.monotonic() - began)
+
+    def _warn_paused_tables(self, call: str, seconds: float) -> None:
+        """Warn, once per session, that a verb held the update graph's lock for a long time.
+
+        Args:
+            call: The verb, as the warning names it.
+            seconds: How long it ran; under `PAUSED_TABLES_WARNING_SECONDS` logs nothing.
+        """
+        if seconds < PAUSED_TABLES_WARNING_SECONDS:
+            return
+        with self.registry_lock:
+            first = not self._warned_paused_tables
+            self._warned_paused_tables = True
+        if first:
+            logger.warning(
+                "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "
+                "update graph's lock: live tables do not update until the command ends; run "
+                "long downloads from a thread of your own, outside a console command (logged "
+                "once per session)",
+                self.label,
+                call,
+                seconds,
+            )
 
     # --- Transport factory hooks: one per transport, served by the attached ingest ports. ---
 
@@ -921,6 +967,11 @@ class SessionCore:
         windows that remain are inside the cleanup code itself (an interrupt while a hold or a scope
         is being released).
 
+        A caller that holds the update graph's lock never waits for another thread's open, which
+        may need that lock to finish (starting a watchlist's listener does): it takes the key
+        over and opens a stream of its own (`_claim`). The lock is checked once, here, outside
+        `registry_lock`, since the check is a Java call.
+
         Args:
             spec: The dataset.
             request: The normalized arguments.
@@ -933,10 +984,11 @@ class SessionCore:
         A closed session, or one that closes while the stream opens, raises the `MassiveError`
         of `_claim` or `_open`.
         """
+        may_wait = not holds_update_graph_lock(self.exec_ctx)
         while True:
             holds: list[tuple[int, threading.Event | None]] = []
             try:
-                claim = self._claim(spec, request, key, holds=holds)
+                claim = self._claim(spec, request, key, may_wait=may_wait, holds=holds)
                 if isinstance(claim, threading.Event):
                     claim.wait()  # another thread is opening the stream; never under a lock
                     continue
@@ -961,6 +1013,7 @@ class SessionCore:
         request: Request,
         key: StreamKey,
         *,
+        may_wait: bool,
         holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
         """Take a hold on the stream with `key`, find its open in progress, or register it.
@@ -968,10 +1021,20 @@ class SessionCore:
         One critical section under `registry_lock`; it never waits and makes no Deephaven
         call.
 
+        A caller that may not wait, because it holds the update graph's lock, takes over the key
+        of a stream still opening on another thread: it registers a new record and maps the key
+        to it. The first stream finishes opening for its own caller and is never reused, and
+        the verbs waiting for it wake, claim again, and find the new record. Every unmapping
+        checks that the key still maps to the stream being unmapped, so the first stream's end
+        leaves the key alone. A take-over is logged at INFO, after the lock is released, so
+        the two rows of the key in `m.streams()` are explained.
+
         Args:
             spec: The dataset.
             request: The normalized arguments.
             key: The stream key.
+            may_wait: False when the caller holds the update graph's lock, so it may not wait
+                for another thread's open.
             holds: Receives one `(stream_id, ready)` entry per hold this call takes, appended
                 inside the lock right after the registry stores it, so the caller cleans up
                 exactly what was taken: `(stream_id, None)` for a hold on an open stream it
@@ -980,9 +1043,9 @@ class SessionCore:
 
         Returns:
             The handle of an open stream, with one more hold taken on it; the `ready` event of
-            a stream another thread is opening, to wait on before claiming again; or the id of
-            a new `OPENING` record registered for this caller, with the opener's hold, which
-            the caller must pass to `_open`.
+            a stream another thread is opening, to wait on before claiming again (only when
+            `may_wait`); or the id of a new `OPENING` record registered for this caller, with
+            the opener's hold, which the caller must pass to `_open`.
 
         Raises:
             MassiveError: If the session is closed (a verb that passed the guard just before
@@ -994,13 +1057,16 @@ class SessionCore:
             existing = self._stream_ids.get(key)
             if existing is not None:
                 state = self._streams[existing]
-                if state.handle is None:
+                if state.handle is not None:
+                    row = replace(state.row, held_results=state.row.held_results + 1)
+                    self._streams[existing] = replace(state, row=row)
+                    holds.append((existing, None))  # right after the store: the caller cleans up
+                    self.diagnostics.write(row)
+                    return state.handle
+                if may_wait:
                     return state.ready
-                row = replace(state.row, held_results=state.row.held_results + 1)
-                self._streams[existing] = replace(state, row=row)
-                holds.append((existing, None))  # right after the store: the caller cleans up
-                self.diagnostics.write(row)
-                return state.handle
+                # Opening on another thread, which may need the UG lock this caller holds to
+                # finish: take the key over below rather than wait.
             stream_id = _next_stream_id()
             count, text = describe_symbols(request.symbol_key())
             row = StreamRow(
@@ -1021,7 +1087,20 @@ class SessionCore:
             self._streams[stream_id] = state
             holds.append((stream_id, ready))  # right after the stores: the caller cleans up
             self._sync_live()
-            return stream_id
+        if existing is not None:  # the key was taken over from a stream still opening
+            logger.info(
+                "%s: %s stream %d opens alongside stream %d for %s, which another thread is "
+                "still opening: this call holds the update graph's lock (a console command) "
+                "and cannot wait for that open, so m.streams() shows both; later calls reuse "
+                "stream %d",
+                self.label,
+                spec.name,
+                stream_id,
+                existing,
+                text,
+                stream_id,
+            )
+        return stream_id
 
     def _open(
         self, spec: DatasetSpec, request: Request, *, channel: str, stream_id: int
@@ -1527,16 +1606,20 @@ class SessionCore:
         `snapshot()`, `to_pandas`, and `to_arrow`); the closers run (the session's streams leave
         their connections, connections no other session uses close, and the pollers stop); the
         final rows are written and the diagnostics scope released, and `close()` returns once
-        the update cycle that applied them has ended, so a held view shows them. Results stay
-        tracked, so garbage collection and `release()` still free them. Logs "MassiveSession #1
-        closed; N live tables failed": a WARNING when N > 0, INFO otherwise; the tables
-        themselves are not logged one by one.
-
-        Raises:
-            ValueError: On an update-graph thread, even when the session is already closed.
+        the update cycle that applied them has ended, so a held view shows them. On a thread
+        that holds the update graph's lock, such as a console command's, no cycle can run until
+        the lock is released, so `close()` waits for neither the rows nor the cycle: the
+        diagnostics writer applies the rows, and a held view shows them, once the caller
+        releases the lock. There the closers join no thread either (`WsConnections.close`):
+        while they would wait no live table updates, and the threads, daemons that never need
+        the lock, end on their own. Results stay tracked, so garbage collection and `release()`
+        still free them. Logs "MassiveSession #1 closed; N live tables failed": a WARNING when
+        N > 0, INFO otherwise; the tables themselves are not logged one by one. On an
+        update-graph thread it raises the `ValueError` of `refuse_update_graph_thread`, even
+        when the session is already closed.
         """
-        if on_update_graph(self.exec_ctx):
-            raise ValueError(ON_UPDATE_GRAPH)
+        refuse_update_graph_thread(self.exec_ctx)
+        locked = holds_update_graph_lock(self.exec_ctx)
         text = f"{self.label} was closed; this table no longer updates"
         with self.registry_lock:
             if self._closed:
@@ -1563,10 +1646,14 @@ class SessionCore:
                 closer()
             except Exception:
                 logger.exception("%s: a transport failed to close", self.label)
-        self.diagnostics.release()
+        # The writer's `InputTable.add` waits for an update cycle, which cannot run while this
+        # thread holds the update graph's lock: waiting for the writer there would never end.
+        self.diagnostics.release(wait=not locked)
         # The final rows are in the diagnostics tables, but a view of them (a held
         # `m.streams()`) updates later in the update cycle that applied them: wait for that
-        # cycle to end, so a view read right after close() shows them.
+        # cycle to end, so a view read right after close() shows them. A thread that holds the
+        # lock already takes it again at once: no cycle is running, and none has applied the
+        # rows yet.
         with shared_lock(self.exec_ctx.update_graph):
             pass
         level = logging.WARNING if failed else logging.INFO

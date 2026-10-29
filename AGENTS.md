@@ -54,7 +54,11 @@ uv build                                 # sdist and wheel
 9. **`DESIGN.md` first.** A change to a public signature, default, or table semantics updates
    `DESIGN.md` first: an owner decision.
 10. **Tests mirror the package**, one leading underscore dropped per path component:
-    `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`.
+    `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`. Two helper
+    packages sit outside the rule: `tests/_fakes/`, the fake servers, and `tests/_live/`, the
+    logic behind the live tests' fixtures. Each `tests/_live/` module has a unit test at the
+    same mirrored path (`tests/_live/plans.py` is tested by `tests/live/test_plans.py`); the
+    fakes have none. A new helper package, or tests for another one, needs owner approval.
 11. **Coverage is 100%** of statements and branches. Delete a dead defensive branch instead of
     covering it. `# pragma: no cover` needs a reason on its line and owner approval in the PR.
 12. **Every suppression has a reason**: each ruff ignore entry, `# noqa`, and
@@ -128,6 +132,10 @@ These prevent deadlocks and leaks.
   so never run one under `registry_lock`.
 - **Never block in a table listener.** It runs on a UG thread holding the UG lock: compute the
   diff, hand it to a worker, return. No table operations, I/O, or waits on library threads.
+- **The console holds the UG lock.** Deephaven runs every console command under the exclusive
+  UG lock, so every call must work there: only UG threads are refused, and a call holding the
+  lock never waits for an update cycle or on a thread that may need the lock (the diagnostics
+  writer, a poller, another caller's stream open).
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
   on the caller thread; a refreshing table made outside an explicit scope lives as long as the
   console session.

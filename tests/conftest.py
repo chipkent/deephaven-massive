@@ -10,8 +10,10 @@ Test modules never import from this file; they request its fixtures by name. Fak
 
 The live integration tests (`tests/**/test_*_integration.py`) get their own fixtures here too:
 the marker checks, the key skip, live sessions and wire clients, raw flat-file and REST
-readers, and the `evidence` recorder, which writes `live-evidence.log` as it goes and closes
-the terminal summary.
+readers, the run's plans, dates, and corporate actions, and the `evidence` recorder, which
+writes `live-evidence.log` as it goes and closes the terminal summary. The logic behind the
+plans, dates, contracts, and corporate actions lives in `tests/_live/`, where it is unit-tested
+against the fakes; the fixtures here only call it.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import faulthandler
+import functools
 import gc
 import gzip
 import importlib
@@ -32,7 +35,6 @@ import types
 import weakref
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
-from datetime import time as dt_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeAlias, cast
 from zoneinfo import ZoneInfo
@@ -52,6 +54,17 @@ from deephaven_massive._massive import (
     WireEntitlementError,
     object_key,
     source,
+)
+from tests._live import (
+    calendar,
+    classes,
+    contracts,
+    events,
+    plans,
+    probe,
+    streams,
+    summary,
+    week_windows,
 )
 
 if TYPE_CHECKING:
@@ -115,11 +128,10 @@ def _selects_live_tests(config: pytest.Config) -> bool:
     """Tell whether the run's `-m` expression selects any live test.
 
     A live test carries `integration` and any combination of the markers only live tests use:
-    `integration_limits`, `integration_smoke`, `needs`, `settles`, and `requests`. An `-m`
-    expression matches a marker by name whatever its arguments, so `-m needs` selects every
-    live test with a `needs` marker. Each combination of those markers is tried; a keyword
-    form such as `needs(x=1)` is treated as matching nothing, since their arguments are
-    positional.
+    `integration_limits`, `integration_smoke`, `needs`, `settles`, `verifies`, and `requests`. An
+    `-m` expression matches a marker by name whatever its arguments, so `-m needs` selects every
+    live test with a `needs` marker. Each combination of those markers is tried; a keyword form such
+    as `needs(x=1)` is treated as matching nothing, since their arguments are positional.
 
     Args:
         config: The pytest configuration, for the `-m` expression.
@@ -128,7 +140,7 @@ def _selects_live_tests(config: pytest.Config) -> bool:
         True if a test with any of those marker sets would be selected.
     """
     expression = Expression.compile(config.option.markexpr or "")
-    optional = (_LIMITS, _SMOKE, "needs", "settles", "requests")
+    optional = (_LIMITS, _SMOKE, "needs", "settles", "verifies", "requests")
 
     def carrying(markers: frozenset[str]) -> Callable[..., bool]:
         def matcher(name: str, /, **kwargs: str | int | bool | None) -> bool:
@@ -286,6 +298,64 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
         return rows
 
     return to_pylist
+
+
+_CONSOLE_COMMAND_TIMEOUT: Final = 30.0
+"""Seconds `console_command` lets one command run before it fails the test as a deadlock."""
+
+
+@pytest.fixture
+def console_command(
+    dh_exec_ctx: ExecutionContext, request: pytest.FixtureRequest
+) -> Callable[[Callable[[], None]], None]:
+    """Return a function that runs code the way the Deephaven console runs a command.
+
+    The console runs every command on one server thread that holds the update graph's exclusive
+    lock from the command's first line to its last, so no update cycle runs meanwhile. The
+    function runs its argument the same way: on a new daemon thread that enters the embedded
+    server's execution context (through a fresh wrapper, as library threads do) and takes the
+    Java exclusive lock itself, as the console does.
+
+    A command that raises fails the test: pytest reports the thread's exception with its
+    traceback. A command that has not returned after 30 seconds is a deadlock: its thread still
+    holds the lock, so no update cycle can run again in this process and every later test would
+    hang too. The function then fails the test, naming the deadlock, and stops the run after it
+    (`session.shouldstop`, which pytest-xdist passes on to the whole run); the thread is a
+    daemon, so it cannot keep the process alive.
+
+    Returns:
+        The function; it takes the command and returns once the command has returned.
+    """
+    liveness = importlib.import_module("deephaven_massive._tables.liveness")
+
+    def run(command: Callable[[], None]) -> None:
+        returned = threading.Event()
+
+        def body() -> None:
+            with liveness.entered(dh_exec_ctx):
+                lock = dh_exec_ctx.update_graph.j_update_graph.exclusiveLock()
+                lock.lock()
+                try:
+                    command()
+                finally:
+                    lock.unlock()
+            returned.set()
+
+        thread = threading.Thread(target=body, name="console command", daemon=True)
+        thread.start()
+        thread.join(_CONSOLE_COMMAND_TIMEOUT)
+        if thread.is_alive():
+            deadlock = (
+                f"a console command deadlocked: it did not return within "
+                f"{_CONSOLE_COMMAND_TIMEOUT:.0f} s, waiting for something that needs the update "
+                "graph's lock, which it holds; no update cycle can run in this process again"
+            )
+            request.session.shouldstop = deadlock
+            pytest.fail(deadlock)
+        if not returned.is_set():
+            pytest.fail("the console command raised; its traceback is reported with this test")
+
+    return run
 
 
 @pytest.fixture
@@ -776,7 +846,7 @@ def rest_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
         create = functools.partial(
             wire.RequestGovernor,
             rate_limits.BUCKETS,
-            unpaced=rate_limits.UNPACED,
+            learn_only=rate_limits.LEARN_ONLY,
             clock=clock,
             labels=rate_limits.LABELS,
         )
@@ -994,42 +1064,6 @@ _EVIDENCE_FILE = "live-evidence.log"
 _EVIDENCE_LOCK = threading.Lock()
 """Guards the evidence list and file, so a line may be recorded from any thread."""
 
-_PLANS_VARIABLE = "MASSIVE_LIVE_PLANS"
-"""The key's plans, as `stocks=starter,currencies=starter,s3`; unnamed classes are Basic."""
-
-_TIERS: Final = {
-    "stocks": ("basic", "starter", "developer", "advanced", "business"),
-    "options": ("basic", "starter", "developer", "advanced", "business"),
-    "indices": ("basic", "starter", "advanced", "business"),
-    "currencies": ("basic", "starter", "business"),
-    "futures": ("basic", "starter", "developer", "advanced", "business"),
-}
-"""Each class's plans, cheapest first (https://massive.com/pricing)."""
-
-_PRICES: Final = {
-    ("stocks", "starter"): "$29",
-    ("stocks", "developer"): "$79",
-    ("stocks", "advanced"): "$199",
-    ("stocks", "business"): "$2,499",
-    ("options", "starter"): "$29",
-    ("options", "developer"): "$79",
-    ("options", "advanced"): "$199",
-    ("options", "business"): "$1,999",
-    ("indices", "starter"): "$49",
-    ("indices", "advanced"): "$99",
-    ("indices", "business"): "$2,500",
-    ("currencies", "starter"): "$49",
-    ("currencies", "business"): "$999",
-    ("futures", "starter"): "$29",
-    ("futures", "developer"): "$79",
-    ("futures", "advanced"): "$199",
-    ("futures", "business"): "$999 a venue",
-}
-"""The monthly price of each paid plan (https://massive.com/pricing, https://massive.com/business)."""
-
-_S3 = "s3"
-_SOME_BASIC = "some:basic"
-"""A requirement met when at least one class is declared Basic: the rate-limit tests need one."""
 
 _REQUEST_SECONDS = 13.0
 """Seconds of timeout a live test gets for each REST request it makes to a Basic class."""
@@ -1037,78 +1071,121 @@ _REQUEST_SECONDS = 13.0
 _DEFAULT_REQUESTS = 10
 """The REST requests a live test is assumed to make when it declares none (`requests`)."""
 
-_SETTLED: Final = pytest.StashKey[dict[str, tuple[tuple[str, ...], tuple[str, ...]]]]()
-"""Each live test's `settles` items and `needs` requirements, by test id, for the summary."""
+_SETTLED: Final = pytest.StashKey[
+    dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]
+]()
+"""Each live test's `settles` items, `verifies` items, and `needs` requirements, by test id, for
+the summary."""
+
+_PLANS_KEY: Final = pytest.StashKey["plans.LivePlans"]()
+"""The run's plans, once the first live test has asked for them, for the summary."""
 
 
-def _declared_plans() -> tuple[dict[str, str], bool]:
-    """Read `MASSIVE_LIVE_PLANS`: each class's declared plan, and whether S3 is declared.
+def _probe_plans(config: MassiveConfig, today: date) -> plans.LivePlans:
+    """Find the key's plans by asking Massive, a few requests per class and one per prefix.
+
+    The requests take their permits from the run's governor of the key, every class paced as
+    Basic, since none is known yet: no class gets more than five requests, so none waits, and
+    the later tests' pacing counts them. The flat files are opened only with both S3
+    credentials.
+
+    Args:
+        config: The live configuration.
+        today: The run's New York day.
 
     Returns:
-        The plan of every class (Basic unless named) and the S3 flag.
+        The probed plans. A `PlanProbeError` of a probe that cannot tell them
+        (`probe.probe_tiers`) propagates.
+    """
+    dm = importlib.import_module("deephaven_massive")
+    lease = _live_governors().lease(
+        api_key=config.api_key,
+        base_url=config.rest_base_url,
+        basic=frozenset(dm.Subscription),
+        label="live plan probe",
+        listener=_ignore,
+    )
+    client = RestClient(
+        config.api_key, base_url=config.rest_base_url, max_concurrency=1, governor=lease.governor
+    )
+    try:
+        tiers = probe.probe_tiers(client, now=datetime.now(_NEW_YORK).time())
+    finally:
+        client.close()
+        lease.release()
+    prefixes: tuple[str, ...] = ()
+    if config.s3_access_key_id is not None and config.s3_secret_access_key is not None:
+        flat_files = FlatFileClient(
+            access_key_id=config.s3_access_key_id,
+            secret_access_key=config.s3_secret_access_key,
+            endpoint_url=config.s3_endpoint_url,
+            bucket=config.s3_bucket,
+            max_pool=1,
+        )
+        try:
+            prefixes = probe.reached_prefixes(flat_files, calendar.recent_monday(today))
+        finally:
+            flat_files.close()
+    return plans.LivePlans(
+        tiers=tiers,
+        s3=bool(prefixes),
+        flat_files=prefixes,
+        source=f"probed {datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}",
+    )
+
+
+@pytest.fixture(scope="session")
+def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
+    """Return the plans of the run's key: declared, cached today, or probed now.
+
+    `MASSIVE_LIVE_PLANS`, when set, overrides everything and nothing is probed. Otherwise the
+    plans come from `.live-plans.json` in the repository root when it was written today (New
+    York time), in this layout, for the same API key and S3 access key id, and else from a
+    probe: per class, a snapshot of one liquid ticker (Starter), its trades (Developer) and
+    quotes (Advanced), and the snapshot's `fmv` field (Business, for stocks, options, and
+    currencies); then one file of every flat-file prefix. The probe writes the cache, which
+    holds digests, never the credentials. The plans are recorded as evidence under "live
+    plans". Only the live tests request this fixture, after the key check, so a unit run never
+    probes.
+
+    Args:
+        pytestconfig: The pytest configuration, for the repository root and the stash.
+
+    Returns:
+        The plans.
 
     Raises:
-        pytest.UsageError: If an entry names an unknown class or plan.
+        pytest.UsageError: When a probe's answer proves nothing (`probe.PlanProbeError`):
+            the run cannot tell the plans and asks for `MASSIVE_LIVE_PLANS`.
     """
-    plans = dict.fromkeys(_TIERS, "basic")
-    s3 = False
-    for entry in os.environ.get(_PLANS_VARIABLE, "").lower().replace(" ", "").split(","):
-        if not entry:
-            continue
-        if entry == _S3:
-            s3 = True
-            continue
-        name, _, tier = entry.partition("=")
-        if tier not in _TIERS.get(name, ()):
-            raise pytest.UsageError(
-                f"{_PLANS_VARIABLE}: {entry!r} is not <class>=<plan> or s3; classes and plans: "
-                + "; ".join(f"{c}: {', '.join(t)}" for c, t in _TIERS.items())
-            )
-        plans[name] = tier
-    return plans, s3
-
-
-def _plan_text(requirement: str) -> str:
-    """Name a requirement for a person: its plan and monthly price.
-
-    Args:
-        requirement: `"<class>:<plan>"`, `"s3"`, or `"some:basic"`.
-
-    Returns:
-        Such as `"Currencies Starter ($49/month)"`.
-    """
-    if requirement == _S3:
-        return "S3 flat files (MASSIVE_S3_* credentials, on the class's Starter plan)"
-    if requirement == _SOME_BASIC:
-        return "at least one class left on Basic"
-    name, _, tier = requirement.partition(":")
-    price = "free" if tier == "basic" else f"{_PRICES[name, tier]}/month"
-    return f"{name.capitalize()} {tier.capitalize()} ({price})"
-
-
-def _unmet(requirements: tuple[str, ...]) -> list[str]:
-    """Return the requirements the declared plans do not meet.
-
-    Args:
-        requirements: `"<class>:<plan>"`, `"s3"`, or `"some:basic"` each.
-
-    Returns:
-        The unmet ones, in order.
-    """
-    plans, s3 = _declared_plans()
-    unmet = []
-    for requirement in requirements:
-        if requirement == _S3:
-            met = s3
-        elif requirement == _SOME_BASIC:
-            met = "basic" in plans.values()
+    declared = os.environ.get(plans.PLANS_VARIABLE, "").strip()
+    if declared:
+        run_plans = plans.declared_plans(declared)
+    else:
+        dm = importlib.import_module("deephaven_massive")
+        config: MassiveConfig = dm.MassiveConfig(api_key=_required_env("MASSIVE_API_KEY"))
+        today = calendar.today()
+        owner = {
+            "api_key": probe.digest(config.api_key),
+            "s3": probe.digest(config.s3_access_key_id),
+        }
+        path = pytestconfig.rootpath / probe.PLANS_CACHE
+        cached = probe.cached_plans(path, owner=owner, day=today)
+        if cached is None:
+            try:
+                run_plans = _probe_plans(config, today)
+            except probe.PlanProbeError as error:
+                msg = (
+                    f"the plan probe cannot tell the key's plans ({error}); declare them in "
+                    f"{plans.PLANS_VARIABLE}, such as stocks=starter,currencies=starter,s3"
+                )
+                raise pytest.UsageError(msg) from error
+            probe.store_plans(path, run_plans, owner=owner, day=today)
         else:
-            name, _, tier = requirement.partition(":")
-            tiers = _TIERS[name]
-            met = tiers.index(plans[name]) >= tiers.index(tier)
-        if not met:
-            unmet.append(requirement)
-    return unmet
+            run_plans = cached
+    pytestconfig.stash[_PLANS_KEY] = run_plans
+    _record(pytestconfig, "live plans", plans.plans_text(run_plans))
+    return run_plans
 
 
 def _requirements(item: pytest.Item) -> tuple[str, ...]:
@@ -1123,58 +1200,23 @@ def _requirements(item: pytest.Item) -> tuple[str, ...]:
     return tuple(str(arg) for marker in item.iter_markers("needs") for arg in marker.args)
 
 
-def _basic_classes(item: pytest.Item) -> list[str]:
-    """Return the classes a test reads that are declared Basic, whose requests are paced.
+def _may_read_basic(item: pytest.Item) -> bool:
+    """Return whether a test may read a class on Basic, whose requests are paced.
+
+    A test that runs on a class's Basic plan (`needs("<class>:basic")`) reads that class
+    whatever the key's plan, so its requests may wait for a place in the class's five a minute.
+    This needs no plan, so collection never probes.
 
     Args:
         item: The test.
 
     Returns:
-        The classes.
+        True when one of its `needs` requirements is a class's Basic plan.
     """
-    plans, _ = _declared_plans()
-    named = {r.partition(":")[0] for r in _requirements(item) if ":" in r}
-    return sorted(name for name in named if plans.get(name) == "basic")
-
-
-_TICKER_CLASSES: Final = {"X:": "currencies", "C:": "currencies", "I:": "indices", "O:": "options"}
-"""The class of a ticker by its prefix; a ticker without one is a stock."""
-
-_PATH_CLASSES: Final = (
-    ("/options", "options"),
-    ("/indices", "indices"),
-    ("/crypto", "currencies"),
-    ("/forex", "currencies"),
-    ("/fx/", "currencies"),
-    ("currencies", "currencies"),
-    ("/conversion/", "currencies"),
-    ("/stocks", "stocks"),
-    ("/v2/last/nbbo", "stocks"),
-)
-"""The class of a path without a ticker, by a word in its template."""
-
-
-def _live_bucket(template: str, path_params: Mapping[str, object]) -> str:
-    """Return the rate governor's bucket of a raw live request: the subscription of its data.
-
-    A path that names a ticker is charged to the ticker's class, by its prefix (`X:` and `C:`
-    currencies, `I:` indices, `O:` options, any other stocks); the futures paths to futures; a
-    path without a ticker by a word of its template. Reference data, economy data, market
-    status, partner data, and the unified snapshot belong to no subscription (`other`).
-
-    Args:
-        template: The generated path template, such as `"/v2/aggs/ticker/{stocksTicker}/prev"`.
-        path_params: The request's placeholder values.
-
-    Returns:
-        `"stocks"`, `"options"`, `"indices"`, `"currencies"`, `"futures"`, or `"other"`.
-    """
-    if template.startswith("/futures/"):
-        return "futures"
-    for name, value in path_params.items():
-        if "icker" in name:
-            return _TICKER_CLASSES.get(str(value)[:2], "stocks")
-    return next((name for word, name in _PATH_CLASSES if word in template), "other")
+    return any(
+        r.endswith(":basic") and r != plans.SOME_BASIC and r.partition(":")[0] in plans.TIERS
+        for r in _requirements(item)
+    )
 
 
 _LIVE_GOVERNORS: list[GovernorRegistry] = []
@@ -1197,15 +1239,19 @@ def _live_governors() -> GovernorRegistry:
         return _LIVE_GOVERNORS[0]
 
 
-def _basic_subscriptions() -> frozenset[Subscription]:
-    """Return the subscriptions `MASSIVE_LIVE_PLANS` leaves on Basic, for the live sessions.
+def _basic_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription]:
+    """Return the subscriptions on Basic, for the live sessions.
+
+    Args:
+        run_plans: The run's plans.
 
     Returns:
-        Each class declared (or left) Basic, as a `dm.Subscription`.
+        Each class on Basic, as a `dm.Subscription`.
     """
     dm = importlib.import_module("deephaven_massive")
-    plans, _ = _declared_plans()
-    return frozenset(dm.Subscription(name) for name, plan in plans.items() if plan == "basic")
+    return frozenset(
+        dm.Subscription(name) for name, tier in run_plans.tiers.items() if tier == "basic"
+    )
 
 
 _FLAT_FILE_BLOCK = 1 << 20
@@ -1272,9 +1318,10 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
     """Order, time, and register the live tests for the run's summary.
 
     The tests that need a class left on Basic (the rate-limit checks) run first, while their
-    class's minute is unspent. A test reading a class declared Basic gets a timeout scaled to
-    its REST requests (its `requests` marker, else 10), since each waits for a place in the
-    class's 5 a minute. Each test's `settles` items and `needs` are kept for the summary.
+    class's minute is unspent. A test that may read a class on Basic (`_may_read_basic`) gets
+    a timeout scaled to its REST requests (its `requests` marker, else 10), since each may wait
+    for a place in the class's 5 a minute; on a paid plan the longer limit is only unused. Each
+    test's `settles` and `verifies` items and its `needs` are kept for the summary.
 
     Args:
         config: The pytest configuration, whose stash keeps the items.
@@ -1283,12 +1330,13 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
     live = [item for item in items if item.get_closest_marker(_INTEGRATION) is not None]
     if not live:
         return
-    items.sort(key=lambda item: _SOME_BASIC not in _requirements(item))
+    items.sort(key=lambda item: plans.SOME_BASIC not in _requirements(item))
     settled = config.stash.setdefault(_SETTLED, {})
     for item in live:
         settles = tuple(str(a) for m in item.iter_markers("settles") for a in m.args)
-        settled[item.nodeid] = (settles, _requirements(item))
-        if not _basic_classes(item):
+        verifies = tuple(str(a) for m in item.iter_markers("verifies") for a in m.args)
+        settled[item.nodeid] = (settles, verifies, _requirements(item))
+        if not _may_read_basic(item):
             continue
         marker = item.get_closest_marker("requests")
         count = int(marker.args[0]) if marker is not None else _DEFAULT_REQUESTS
@@ -1301,22 +1349,24 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
 def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
     """Skip a live test under CI, without `MASSIVE_API_KEY`, or when the plans fall short.
 
-    It runs before the test's own fixtures, so a skipped live test touches nothing. `CI` is
-    checked too, so a key added to CI's secrets later still never reaches Massive from CI. A
-    test's `needs` markers name the plans it needs; one the declared plans
-    (`MASSIVE_LIVE_PLANS`) do not meet skips, naming the plan and its monthly price.
+    It runs before the test's own fixtures, so a skipped live test touches nothing but the
+    plans probe, which the first live test of a run triggers (`live_plans`). `CI` is checked
+    too, so a key added to CI's secrets later still never reaches Massive from CI. A test's
+    `needs` markers name the plans it needs; one the run's plans do not meet skips, naming the
+    plan and its monthly price.
 
     Args:
-        request: The requesting test, for its markers.
+        request: The requesting test, for its markers and the `live_plans` fixture.
     """
     if request.node.get_closest_marker(_INTEGRATION) is None:
         return
     if os.environ.get("CI", "").strip():
         pytest.skip("live tests never run in CI")
     _required_env("MASSIVE_API_KEY")
-    unmet = _unmet(_requirements(request.node))
+    run_plans: plans.LivePlans = request.getfixturevalue("live_plans")
+    unmet = plans.unmet(_requirements(request.node), run_plans)
     if unmet:
-        pytest.skip("needs " + "; ".join(_plan_text(r) for r in unmet))
+        pytest.skip("needs " + "; ".join(plans.plan_text(r) for r in unmet))
 
 
 def _required_env(name: str) -> str:
@@ -1348,6 +1398,7 @@ _PLANS: Final = {
     "test_ws_integration.py": "the plan this check names in its docstring",
 }
 """The plan a live test module's data needs, named in a skip when the key lacks it."""
+
 
 _ENTITLEMENT_MARKS: Final = ("HTTP 403", "NOT_AUTHORIZED", "not entitled", "plan may not include")
 """Text that marks a stream's or a poll's error as a missing entitlement."""
@@ -1416,12 +1467,16 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
     The 120 s faulthandler limit is cancelled for the call of a live test, whose own timeout,
     scaled to its paced requests, bounds it instead.
 
-    A test that declares its plans (`needs`) runs only when they are declared held, so a
-    refusal (an `EntitlementError`, or the wire's `WireEntitlementError`: an HTTP 403 or a
-    `NOT_AUTHORIZED` envelope) contradicts the declaration: it is recorded as evidence and
-    fails the test. A live test without `needs` (the smoke tier handles its own) skips with
-    "not entitled: needs <plan>", the plan taken from the test module. Other tests are
-    untouched.
+    A refusal is an `EntitlementError`, or the wire's `WireEntitlementError` (an HTTP 403 or a
+    `NOT_AUTHORIZED` envelope). One that names the timeframe ("Your plan doesn't include this
+    data timeframe") skips the test, "outside the plan's history", when the day it asked for
+    is before the first day the plan keeps by the documented history windows; refused for a
+    day inside the window, it fails, since that may be a library bug (`plans.history_verdict`).
+    Any other refusal of a test that declares its
+    plans (`needs`) contradicts them, since it runs only when the plans hold them: it is
+    recorded as evidence and fails the test. A live test without `needs` (the smoke tier
+    handles its own) skips with "not entitled: needs <plan>", the plan taken from the test
+    module. Other tests are untouched.
 
     Args:
         item: The test being run.
@@ -1446,10 +1501,19 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
     except (EntitlementError, WireEntitlementError) as error:
         if item.get_closest_marker(_INTEGRATION) is None:
             raise
+        if plans.is_timeframe_refusal(error):
+            reason = plans.history_verdict(
+                error, item.config.stash.get(_PLANS_KEY, None), calendar.today()
+            )
+            if reason is not None:
+                _record(item.config, item.nodeid, f"{reason} ({error})")
+                pytest.skip(f"{reason} ({error})")
+            _record(item.config, item.nodeid, f"refused inside the plan's history: {error}")
+            raise
         requirements = _requirements(item)
         if requirements:
-            declared = ", ".join(_plan_text(r) for r in requirements)
-            _record(item.config, item.nodeid, f"refused although {declared} is declared: {error}")
+            held = ", ".join(plans.plan_text(r) for r in requirements)
+            _record(item.config, item.nodeid, f"refused although the plans hold {held}: {error}")
             raise
         plan = _PLANS.get(item.path.name, "a plan that includes this data")
         pytest.skip(not_entitled_reason(plan, error))
@@ -1477,79 +1541,61 @@ def skip_if_not_entitled(
     return check
 
 
-@pytest.fixture
-def live_env() -> Callable[[str], str]:
-    """Return a function that reads a required environment variable or skips the test.
-
-    Live tests that need a second key (a Business or a delayed one) or a named Basic
-    subscription call it first.
-
-    Returns:
-        A function mapping a variable's name to its stripped value; it skips the test when
-        the variable is unset or blank.
-    """
-    return _required_env
-
-
-@pytest.fixture
-def index_symbol() -> str:
-    """Return the index a live test reads: `I:SPX`, or `I:NDX` when Indices is declared Basic.
+def _index_symbol(run_plans: plans.LivePlans) -> str:
+    """Return the index a live request reads: `I:SPX`, or `I:NDX` when Indices is on Basic.
 
     Indices Basic excludes SPX, DJI, RUT, and VIX
     (https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier).
 
+    Args:
+        run_plans: The run's plans.
+
     Returns:
         The index's ticker.
     """
-    plans, _ = _declared_plans()
-    return "I:NDX" if plans["indices"] == "basic" else "I:SPX"
+    return "I:NDX" if run_plans.tiers["indices"] == "basic" else "I:SPX"
 
 
 @pytest.fixture
-def require_plans() -> Callable[[tuple[str, ...]], None]:
-    """Return a function that skips a test unless the declared plans meet some requirements.
+def index_symbol(live_plans: plans.LivePlans) -> str:
+    """Return the index a live test reads: `I:SPX`, or `I:NDX` when Indices is on Basic.
 
-    For a test whose requirements depend on its parameters (the smoke tier's), where a
-    `needs` marker cannot name them.
+    Args:
+        live_plans: The run's plans.
 
     Returns:
-        A function taking requirements (`"<class>:<plan>"`, `"s3"`); it skips, naming each
-        unmet plan and its price.
+        The index's ticker (see `_index_symbol`).
     """
-
-    def check(requirements: tuple[str, ...]) -> None:
-        unmet = _unmet(requirements)
-        if unmet:
-            pytest.skip("needs " + "; ".join(_plan_text(r) for r in unmet))
-
-    return check
+    return _index_symbol(live_plans)
 
 
 @pytest.fixture
-def basic_class() -> str:
-    """Return a class declared on Basic, preferring the one a run is least likely to need.
+def basic_class(live_plans: plans.LivePlans) -> str:
+    """Return a class on Basic, preferring the one a run is least likely to need.
+
+    Args:
+        live_plans: The run's plans.
 
     Returns:
         `"indices"`, `"futures"`, `"options"`, `"stocks"`, or `"currencies"`, the first of those
-        declared Basic; the test is skipped when none is.
+        on Basic; the test is skipped when none is.
     """
-    plans, _ = _declared_plans()
-    basic = [
-        n for n in ("indices", "futures", "options", "stocks", "currencies") if plans[n] == "basic"
-    ]
+    order = ("indices", "futures", "options", "stocks", "currencies")
+    basic = [name for name in order if live_plans.tiers[name] == "basic"]
     if not basic:
         pytest.skip("needs at least one class left on Basic")
     return basic[0]
 
 
 @pytest.fixture
-def delayed_key(live_config: MassiveConfig) -> str:
+def delayed_key(live_config: MassiveConfig, live_plans: plans.LivePlans) -> str:
     """Return a key with delayed stocks data: `MASSIVE_DELAYED_API_KEY`, or the main key.
 
-    The main key serves when Stocks is declared Starter or Developer, the delayed plans.
+    The main key serves when Stocks is on Starter or Developer, the delayed plans.
 
     Args:
         live_config: The live configuration, for the main key.
+        live_plans: The run's plans.
 
     Returns:
         The key; the test is skipped when there is none.
@@ -1557,8 +1603,7 @@ def delayed_key(live_config: MassiveConfig) -> str:
     key = os.environ.get("MASSIVE_DELAYED_API_KEY", "").strip()
     if key:
         return key
-    plans, _ = _declared_plans()
-    if plans["stocks"] not in {"starter", "developer"}:
+    if live_plans.tiers["stocks"] not in {"starter", "developer"}:
         pytest.skip("needs a delayed Stocks key: MASSIVE_DELAYED_API_KEY, or Stocks Starter")
     return live_config.api_key
 
@@ -1624,6 +1669,9 @@ def _skip_reason(report: pytest.TestReport) -> str:
 def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
     """Print the smoke tier's coverage: passed, not entitled, otherwise skipped, failed.
 
+    A stream case that passed without a row (a closed market) is counted apart among the
+    passes as "acknowledged only": its pass rests on Massive's acknowledgement alone.
+
     Args:
         terminalreporter: The terminal reporter, whose statistics hold the reports.
     """
@@ -1642,10 +1690,11 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
         return
     refused = [r for r in skipped if _skip_reason(r).startswith("not entitled")]
     other = [r for r in skipped if r not in refused]
+    quiet = [r for r in passed if ("stream", "acknowledged only") in r.user_properties]
     terminalreporter.write_sep("=", "smoke coverage")
     terminalreporter.write_line(
-        f"{len(passed)} passed, {len(refused)} not entitled, {len(other)} skipped otherwise, "
-        f"{len(failed)} failed"
+        f"{len(passed)} passed ({len(quiet)} of them streams acknowledged only, without a row), "
+        f"{len(refused)} not entitled, {len(other)} skipped otherwise, {len(failed)} failed"
     )
     for title, reports in (("not entitled", refused), ("skipped", other), ("failed", failed)):
         for report in reports:
@@ -1656,24 +1705,21 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
 
 
 def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
-    """Print which open questions the run verified, and the plans the rest need.
+    """Print which open questions the run verified or ran, and the plans the rest need.
 
-    An item (a `settles` argument) is verified when every test that settles it ran and
-    passed. One that some of its tests never ran for (a `-k` or path selection left them
-    out) is "partly run", never verified, since part of its question went unchecked; one
-    whose tests were skipped for a plan is listed under the cheapest plan text it needs. A run
-    whose paths narrow collection (a `::` test id, or a path other than the configured test
-    paths) may not have collected every test of a question, so its passed items are reported
-    as "passed in this selection", not verified.
+    Gathers each live test's outcome and hands the sorting to `summary.question_lines`, which
+    explains the groups. Nothing is printed for a run without a key or without a live test
+    that answers a question.
 
     Args:
         terminalreporter: The terminal reporter, whose statistics hold the outcomes.
-        config: The pytest configuration, whose stash holds each test's items and needs.
+        config: The pytest configuration, whose stash holds each test's items and needs and
+            the run's plans.
     """
     settled = config.stash.setdefault(_SETTLED, {})
     ran = any(terminalreporter.stats.get(kind) for kind in ("passed", "failed", "skipped"))
     keyed = bool(os.environ.get("MASSIVE_API_KEY", "").strip())
-    if not (ran and keyed) or not any(items for items, _ in settled.values()):
+    if not (ran and keyed):
         return
     outcome: dict[str, str] = {}
     for kind in ("passed", "failed", "skipped", "error"):
@@ -1682,37 +1728,14 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
                 report.when == "call" or kind != "passed"
             ):
                 outcome[report.nodeid] = kind
-    verified: list[str] = []
-    needing: dict[str, list[str]] = {}
-    other: list[str] = []
-    partly: list[str] = []
-    ran_items = {i for t, (items, _) in settled.items() if t in outcome for i in items}
-    if not ran_items:
-        return
-    for item in sorted(ran_items, key=_item_order):
-        every = [(t, needs) for t, (items, needs) in settled.items() if item in items]
-        tests = [(t, needs) for t, needs in every if t in outcome]
-        if len(tests) < len(every):
-            partly.append(f"{item} ({len(tests)} of {len(every)} tests ran)")
-            continue
-        results = [outcome.get(t) for t, _ in tests]
-        if all(result == "passed" for result in results):
-            verified.append(item)
-            continue
-        unmet = [r for t, needs in tests if outcome.get(t) == "skipped" for r in _unmet(needs)]
-        if unmet:
-            needing.setdefault(", ".join(_plan_text(r) for r in dict.fromkeys(unmet)), []).append(
-                item
-            )
-        else:
-            other.append(item)
-    _write_settled(
-        terminalreporter,
-        narrowed=_narrowed(config),
-        verified=verified,
-        needing=needing,
-        unverified={"failed or skipped": other, "partly run": partly},
+    lines = summary.question_lines(
+        settled, outcome, config.stash.get(_PLANS_KEY, None), narrowed=_narrowed(config)
     )
+    if not lines:
+        return
+    terminalreporter.write_sep("=", "open questions")
+    for line in lines:
+        terminalreporter.write_line(line)
 
 
 def _narrowed(config: pytest.Config) -> bool:
@@ -1728,55 +1751,6 @@ def _narrowed(config: pytest.Config) -> bool:
     configured = {(config.rootpath / p).resolve() for p in config.getini("testpaths")}
     here = config.invocation_params.dir
     return any("::" in arg or (here / arg).resolve() not in configured for arg in config.args)
-
-
-def _write_settled(
-    terminalreporter: pytest.TerminalReporter,
-    *,
-    narrowed: bool,
-    verified: list[str],
-    needing: dict[str, list[str]],
-    unverified: dict[str, list[str]],
-) -> None:
-    """Write the open-questions section of the terminal summary.
-
-    Args:
-        terminalreporter: The terminal reporter that writes the summary.
-        narrowed: Whether the run's paths may have left some live tests uncollected; its
-            passed items are then "passed in this selection", not "verified".
-        verified: The items every collected test of which ran and passed.
-        needing: The items skipped for a plan, by the plan's text.
-        unverified: The other items, by why they are not verified.
-    """
-    total = (
-        len(verified)
-        + sum(len(items) for items in needing.values())
-        + sum(len(items) for items in unverified.values())
-    )
-    terminalreporter.write_sep("=", "open questions")
-    passed = f"{len(verified)} of {total}: {', '.join(verified)}"
-    terminalreporter.write_line(
-        f"passed in this selection {passed} (run the full live suite to verify)"
-        if narrowed
-        else f"verified {passed}"
-    )
-    for plan, items in needing.items():
-        terminalreporter.write_line(f"{len(items)} need {plan}: {', '.join(items)}")
-    for why, items in unverified.items():
-        if items:
-            terminalreporter.write_line(f"{len(items)} not verified ({why}): {', '.join(items)}")
-
-
-def _item_order(item: str) -> tuple[int, str]:
-    """Sort numbered items first, by number, then named ones.
-
-    Args:
-        item: An item, such as `"21"` or `"429 text"`.
-
-    Returns:
-        The sort key.
-    """
-    return (int(item), "") if item.isdigit() else (10_000, item)
 
 
 def pytest_terminal_summary(
@@ -1805,18 +1779,22 @@ def pytest_terminal_summary(
 
 
 @pytest.fixture
-def live_config() -> MassiveConfig:
+def live_config(live_plans: plans.LivePlans) -> MassiveConfig:
     """Return a `MassiveConfig` with `MASSIVE_API_KEY`, and the S3 credentials when set.
 
-    The classes `MASSIVE_LIVE_PLANS` leaves on Basic are its `rest_basic_subscriptions`, so the
-    library paces their requests at 5 a minute from the first one.
+    The classes on Basic are its `rest_basic_subscriptions`, so the library paces their
+    requests at 5 a minute from the first one.
+
+    Args:
+        live_plans: The run's plans.
 
     Returns:
         The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
     """
     dm = importlib.import_module("deephaven_massive")
     config: MassiveConfig = dm.MassiveConfig(
-        api_key=_required_env("MASSIVE_API_KEY"), rest_basic_subscriptions=_basic_subscriptions()
+        api_key=_required_env("MASSIVE_API_KEY"),
+        rest_basic_subscriptions=_basic_subscriptions(live_plans),
     )
     return config
 
@@ -1982,13 +1960,54 @@ def _read_flat_file(
     return (rows if max_rows is None else rows[:max_rows]), extra
 
 
+def _require_prefix(run_plans: plans.LivePlans, prefix: str) -> None:
+    """Skip the test unless the S3 credentials reach a flat-file prefix (`plans.reaches`).
+
+    Args:
+        run_plans: The run's plans.
+        prefix: The generated prefix.
+    """
+    if not plans.reaches(run_plans, prefix):
+        pytest.skip(f"needs the {prefix} flat files: the S3 credentials do not reach them")
+
+
+@pytest.fixture
+def flat_files_reached(live_plans: plans.LivePlans) -> Callable[[str], bool]:
+    """Return a function that tells whether the S3 credentials reach a flat-file prefix.
+
+    For a test that reads several prefixes and records each one it cannot reach, instead of
+    skipping at the first (`flat_file_head` and its kin skip).
+
+    Args:
+        live_plans: The run's plans.
+
+    Returns:
+        A function of a generated prefix (see `plans.reaches`).
+    """
+    return functools.partial(plans.reaches, live_plans)
+
+
+@pytest.fixture
+def plan_history_start(live_plans: plans.LivePlans) -> Callable[[str], date | None]:
+    """Return a function that names the first day a class's plan keeps.
+
+    Args:
+        live_plans: The run's plans.
+
+    Returns:
+        A function of a class (`"options"`, ...) returning the day, or None for a plan that
+        keeps all history (see `plans.history_start`).
+    """
+    return lambda name: plans.history_start(live_plans, name, calendar.today())
+
+
 _HEAD_ROWS = 1000
 """How many rows `flat_file_head` keeps from the start of a file."""
 
 
 @pytest.fixture
 def flat_file_head(
-    live_flat_files: FlatFileClient,
+    live_flat_files: FlatFileClient, live_plans: plans.LivePlans
 ) -> Callable[[str, date, str | None], FlatFileRows | None]:
     """Return a function that reads the first rows of one flat file, as raw text.
 
@@ -1996,16 +2015,19 @@ def flat_file_head(
 
     Args:
         live_flat_files: The live flat-file client.
+        live_plans: The run's plans, for the prefixes the credentials reach.
 
     Returns:
         A function `(prefix, day, venue)`: the generated prefix (such as
         `"global_forex/quotes_v1"`), the file's day, and the venue that fills a futures
         prefix (`"cme"`; None for every other prefix). It returns the first 1,000 rows, every
         value as the file's text, and the file's undocumented headers, or None when the file
-        does not exist; a refusal raises the wire error.
+        does not exist; a refusal raises the wire error. It skips the test for a prefix the
+        plans probe did not reach (`_require_prefix`).
     """
 
     def read(prefix: str, day: date, venue: str | None) -> FlatFileRows | None:
+        _require_prefix(live_plans, prefix)
         key = object_key(prefix, day, venue)
         return _read_flat_file(live_flat_files, key, prefix, max_rows=_HEAD_ROWS, tickers=None)
 
@@ -2014,12 +2036,15 @@ def flat_file_head(
 
 @pytest.fixture
 def flat_file_tickers(
-    live_flat_files: FlatFileClient,
+    live_flat_files: FlatFileClient, live_plans: plans.LivePlans
 ) -> Callable[[str, date, Collection[str] | None], FlatFileRows | None]:
     """Return a function that reads every row of some tickers from one flat file, as raw text.
 
+    It skips the test for a prefix the plans probe did not reach (`_require_prefix`).
+
     Args:
         live_flat_files: The live flat-file client.
+        live_plans: The run's plans, for the prefixes the credentials reach.
 
     Returns:
         A function `(prefix, day, tickers)`: the generated prefix of a file without a venue
@@ -2029,6 +2054,7 @@ def flat_file_tickers(
     """
 
     def read(prefix: str, day: date, tickers: Collection[str] | None) -> FlatFileRows | None:
+        _require_prefix(live_plans, prefix)
         wanted = None if tickers is None else sorted(tickers)
         key = object_key(prefix, day)
         return _read_flat_file(live_flat_files, key, prefix, max_rows=None, tickers=wanted)
@@ -2038,15 +2064,17 @@ def flat_file_tickers(
 
 @pytest.fixture
 def flat_file_sessions(
-    live_flat_files: FlatFileClient,
+    live_flat_files: FlatFileClient, live_plans: plans.LivePlans
 ) -> Callable[[str, date, str], Counter[str | None] | None]:
     """Return a function that counts the `session_end_date` values of a whole futures file.
 
     The whole file is read, block by block, and only the counts are kept, so a large minute
-    file costs no memory.
+    file costs no memory. It skips the test for a prefix the plans probe did not reach
+    (`_require_prefix`).
 
     Args:
         live_flat_files: The live flat-file client.
+        live_plans: The run's plans, for the prefixes the credentials reach.
 
     Returns:
         A function `(prefix, day, venue)`: a futures prefix such as
@@ -2056,6 +2084,7 @@ def flat_file_sessions(
     """
 
     def count(prefix: str, day: date, venue: str) -> Counter[str | None] | None:
+        _require_prefix(live_plans, prefix)
         file = live_flat_files.open(object_key(prefix, day, venue))
         if file is None:
             return None
@@ -2196,7 +2225,7 @@ def rest_rows(
     ) -> list[dict[str, Any]]:
         rest_path = source(Transport.REST, path)
         pages = live_rest.pages(
-            rest_path, path_params, query_params, bucket=_live_bucket(path, path_params)
+            rest_path, path_params, query_params, bucket=classes.bucket_of(path, path_params)
         )
         return [row for page in pages for row in page.rows]
 
@@ -2206,93 +2235,219 @@ def rest_rows(
 _MS = 1_000_000
 """Nanoseconds per millisecond."""
 
-_DAY_MS = 86_400_000
-"""Milliseconds per day."""
-
-_WEEK_MS = 7 * _DAY_MS
-"""Milliseconds per week."""
-
-_WEEK_RANGE = (date(2026, 2, 23), date(2026, 3, 22))
-"""The four calendar weeks, Monday to Sunday, whose week bars the week-start checks read."""
-
-_MATCH = 1e-9
-"""The relative volume error within which a candidate week is the bar's bucket."""
-
 _NEW_YORK = ZoneInfo("America/New_York")
 
+# --- Live test dates ------------------------------------------------------------------------
+# Fixed dates age out of a Basic plan's history and land on holidays, so the live tests compute
+# theirs from the run's New York day with the US stock exchanges' fixed holiday rules. A closure
+# no rule predicts (a national day of mourning) is not known; a test that reads one finds no
+# rows there and says so.
 
-def _week_candidates(stamp_ms: int) -> list[tuple[str, int]]:
-    """Return the candidate starts of the seven days a week bar may cover.
 
-    Args:
-        stamp_ms: The bar's stamp, in epoch milliseconds.
+@pytest.fixture(scope="session")
+def recent_monday() -> date:
+    """Return the most recent Monday that was a trading day and whose flat files are published.
+
+    For the checks that read one day of a file or of an endpoint that takes a date: a Monday's
+    files also follow a weekend, which the weekend checks read. See `calendar.recent_monday`.
 
     Returns:
-        `(label, start_ms)` pairs: 00:00 UTC of each day from three days before the stamp's
-        UTC day to three days after, and 17:00 New York time of each of those days (the
-        forex trading day's start).
+        The Monday.
     """
-    day = datetime.fromtimestamp(stamp_ms / 1000, UTC).date()
-    found = []
-    for offset in range(-3, 4):
-        start = day + timedelta(days=offset)
-        utc = datetime.combine(start, dt_time(), UTC)
-        new_york = datetime.combine(start, dt_time(17), _NEW_YORK)
-        found.append((f"{start:%a %m-%d} 00:00 UTC", int(utc.timestamp()) * 1000))
-        found.append((f"{start:%a %m-%d} 17:00 New York", int(new_york.timestamp()) * 1000))
-    return found
+    return calendar.recent_monday(calendar.today())
+
+
+@pytest.fixture(scope="session")
+def recent_week() -> tuple[date, date]:
+    """Return the most recent ended calendar week without an exchange holiday.
+
+    Returns:
+        Its Monday and Sunday (see `calendar.recent_week`).
+    """
+    return calendar.recent_week(calendar.today())
+
+
+@pytest.fixture(scope="session")
+def recent_month() -> tuple[date, date]:
+    """Return the most recent ended calendar month.
+
+    Returns:
+        Its first and last day.
+    """
+    return calendar.recent_month(calendar.today())
+
+
+@pytest.fixture(scope="session")
+def previous_trading_day() -> date:
+    """Return the last trading day before the run's New York day, holidays skipped.
+
+    Returns:
+        The day.
+    """
+    return calendar.trading_day_before(calendar.today())
+
+
+@pytest.fixture(scope="session")
+def recent_holiday() -> Callable[[str], date]:
+    """Return a function that finds the most recent occurrence of an exchange holiday.
+
+    Returns:
+        A function taking `"martin luther king day"` or `"good friday"` and returning its most
+        recent date a week or more before the run's New York day (`calendar.recent_holiday`).
+    """
+    today = calendar.today()
+    return lambda name: calendar.recent_holiday(name, today)
+
+
+@pytest.fixture
+def front_contract() -> Callable[[str, date], str]:
+    """Return a function that names a futures product's front contract on a day.
+
+    Returns:
+        A function `(product, day)`, the product `"ES"` or `"ZC"` (see `contracts.front_contract`).
+    """
+    return contracts.front_contract
+
+
+_MARKETS: Final = {
+    "stocks": ("market",),
+    "options": ("market",),
+    "indices": ("indicesGroups", "s_and_p"),
+    "fx": ("currencies", "fx"),
+    "crypto": ("currencies", "crypto"),
+}
+"""Where `/v1/marketstatus/now` gives each market's status; options trade the stock session, and
+S&P indices are computed in it."""
+
+
+@pytest.fixture
+def market_status(live_rest: RestClient, evidence: Callable[[str], None]) -> Callable[[str], str]:
+    """Return a function that reads one market's status from Massive.
+
+    A stream test asserts that Massive acknowledged its topics whatever the hour, and asserts
+    rows only while their market is open: it skips only when this status says the market is
+    not open. The stocks, options, indices, forex, and crypto statuses come from
+    `/v1/marketstatus/now`, which belongs to no subscription; the futures status is the E-mini
+    S&P 500's `market_event` from `/futures/v1/market-status?product_code=ES`, which every
+    Futures plan includes.
+
+    Args:
+        live_rest: The live REST client.
+        evidence: Records the status read.
+
+    Returns:
+        A function taking `"stocks"`, `"options"`, `"indices"`, `"fx"`, `"crypto"`, or
+        `"futures"`, and returning Massive's status: `"open"`, `"closed"`, `"extended-hours"`,
+        and so on, and for futures `"open"`, `"pause"`, `"close"`, and so on.
+    """
+
+    def status(market: str) -> str:
+        if market == "futures":
+            rows = live_rest.get(
+                source(Transport.REST, "/futures/v1/market-status"),
+                {},
+                {"product_code": "ES"},
+                bucket="futures",
+            ).rows
+            found = str(rows[0].get("market_event")) if rows else "unknown"
+        else:
+            page = live_rest.get(
+                source(Transport.REST, "/v1/marketstatus/now"), {}, {}, bucket="other"
+            )
+            body: object = page.body
+            for step in _MARKETS[market]:
+                body = body.get(step) if isinstance(body, dict) else None
+            found = str(body)
+        evidence(f"market status of {market}: {found}")
+        return found
+
+    return status
+
+
+@pytest.fixture
+def wait_acked(
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[MassiveSession, int, float], int]:
+    """Return a function that waits until a session's topics are acknowledged.
+
+    Massive acknowledges a topic whether or not its market is open, so a stream test asserts
+    the acknowledgement, which a closed market cannot hide, before it waits for any row.
+
+    Returns:
+        A function `(session, topics, deadline)`, the deadline a `time.monotonic()` value: it
+        returns the sum of `AckedTopics` over the session's connections once it reaches
+        `topics`, once one of the session's streams has `FAILED`, or once the deadline has
+        passed, whichever comes first.
+    """
+
+    def wait(session: MassiveSession, topics: int, deadline: float) -> int:
+        pause = threading.Event()  # never set; only paces the polling
+        while True:
+            acked = sum(int(r["AckedTopics"] or 0) for r in table_rows(session.connections()))
+            failed = any(r["State"] == "FAILED" for r in table_rows(session.streams()))
+            if acked >= topics or failed or time.monotonic() >= deadline:
+                return acked
+            pause.wait(0.25)
+
+    return wait
+
+
+WeekReport = tuple[list[str], int, list[str]]
+"""What `week_bar_report` found: the evidence lines, how many week bars it checked, and the
+stamps of those whose closest candidate window is not the library's week."""
 
 
 @pytest.fixture
 def week_bar_report(
     rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
-) -> Callable[[str, str], list[str]]:
+    recent_week: tuple[date, date],
+) -> Callable[[str, str, str], WeekReport]:
     """Return a function that shows where Massive starts a week bar, from raw REST bars.
 
-    It reads the week bars and the hour bars of one ticker over four calendar weeks
-    (2026-02-23 to 2026-03-22) from the aggregates range endpoint, unfiltered. For each week
-    bar it reports its stamp, its volume, the first and last hour bar of the seven days from
-    its stamp, and the candidate seven-day windows whose hour-bar volume comes closest to the
-    bar's: windows starting at 00:00 UTC, and at 17:00 New York time, on each day from three
-    days before the stamp to three after. A candidate within a relative error of 1e-9 is
-    marked `MATCH`: that is the bucket Massive uses, wherever the bar is stamped.
+    It reads the week bars and the hour bars of one ticker over four calendar weeks, the
+    recent week without a holiday and the three before it, from the aggregates range endpoint,
+    unfiltered. For each week bar it reports its stamp, its volume, the first and last hour bar
+    of the seven days from its stamp, and the three candidate seven-day windows whose hour-bar
+    volume comes closest to the bar's (`week_windows.score`); a candidate within a relative
+    error of 1e-9 is marked `MATCH`: that is the bucket Massive uses, wherever the bar is
+    stamped. A bar of the four weeks (`week_windows.is_checked`) is checked by comparison: the
+    library's week must be the closest window, ties allowed (`week_windows.library_is_closest`).
 
     Args:
         rest_rows: Reads raw REST rows.
+        recent_week: The last of the four weeks.
 
     Returns:
-        A function `(ticker_param, ticker)`: the path placeholder of the class (such as
-        `"stocksTicker"`) and the ticker. It returns the evidence lines.
+        A function `(ticker_param, ticker, zone)`: the path placeholder of the class (such as
+        `"stocksTicker"`), the ticker, and the class's day zone, `"UTC"` (crypto, forex) or
+        `"New York"` (stocks). It returns the evidence lines, how many bars it checked, and the
+        stamps of the checked bars whose closest window is not the library's week.
     """
+    span_of_weeks = (recent_week[0] - timedelta(days=21), recent_week[1])
+    first, last = span_of_weeks
 
-    def report(ticker_param: str, ticker: str) -> list[str]:
+    def report(ticker_param: str, ticker: str, zone: str) -> WeekReport:
+        day_zone = UTC if zone == "UTC" else _NEW_YORK
         path = (
             f"/v2/aggs/ticker/{{{ticker_param}}}/range/{{multiplier}}/{{timespan}}/{{from}}/{{to}}"
         )
-        first, last = _WEEK_RANGE
 
         def bars(span: str) -> list[dict[str, Any]]:
             params = {ticker_param: ticker, "multiplier": 1, "timespan": span}
             params |= {"from": first - timedelta(days=7), "to": last + timedelta(days=7)}
             return rest_rows(path, params, {"sort": "asc", "limit": 50_000})
 
-        weeks, hours = bars("week"), bars("hour")
-
-        def volume(start_ms: int) -> float:
-            return float(sum(h["v"] for h in hours if start_ms <= h["t"] < start_ms + _WEEK_MS))
-
-        lines = [f"{ticker}: {len(weeks)} week bars, {len(hours)} hour bars"]
-        for week in weeks:
+        week_rows, hours = bars("week"), bars("hour")
+        lines = [f"{ticker} {first} to {last}: {len(week_rows)} week bars, {len(hours)} hour bars"]
+        checked, misses = 0, []
+        for week in week_rows:
             stamp = int(week["t"])
             target = float(week["v"])
-            inside = [h for h in hours if stamp <= h["t"] < stamp + _WEEK_MS]
-            scored = sorted(
-                (abs(volume(start) - target) / max(abs(target), 1e-12), label)
-                for label, start in _week_candidates(stamp)
-            )
+            inside = [h for h in hours if stamp <= h["t"] < stamp + week_windows.WEEK_MS]
+            scored = week_windows.score(stamp, target, hours, zone=day_zone)
             best = ", ".join(
-                f"{label} err={error:.2e}{' MATCH' if error <= _MATCH else ''}"
-                for error, label in scored[:3]
+                f"{label} err={error:.2e}{' MATCH' if error <= week_windows.MATCH else ''}"
+                for error, label, _ in scored[:3]
             )
             span = (
                 f"{_instant_text(inside[0]['t'] * _MS)} .. {_instant_text(inside[-1]['t'] * _MS)}"
@@ -2303,14 +2458,13 @@ def week_bar_report(
                 f"week t={_instant_text(stamp * _MS)} v={target} hours from the stamp: {span}; "
                 f"closest windows: {best}"
             )
-        return lines
+            if week_windows.is_checked(stamp, span_of_weeks):
+                checked += 1
+                if not week_windows.library_is_closest(scored):
+                    misses.append(_instant_text(stamp * _MS))
+        return lines, checked, misses
 
     return report
-
-
-_HALF_DAYS = (date(2025, 11, 28), date(2025, 12, 24))
-"""US market half days (closing at 13:00 New York time): the day after Thanksgiving 2025 and
-Christmas Eve 2025."""
 
 
 def _wall_clock(stamp_ms: int) -> str:
@@ -2337,46 +2491,38 @@ def _wall_clock(stamp_ms: int) -> str:
 
 
 @pytest.fixture
-def half_day_report(
+def minute_span_report(
     rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
-) -> Callable[[str, str], list[str]]:
-    """Return a function that shows how REST stamps the bars of a half trading day.
+    evidence: Callable[[str], None],
+) -> Callable[[str, date], int]:
+    """Return a function that records where one day's minute bars of a ticker start and end.
 
-    For each half day (2025-11-28, 2025-12-24) it reads one ticker's day bar and its minute
-    bars from the aggregates range endpoint, unfiltered, and reports the day bar's stamp and
-    the first and last minute bar's, each in UTC and New York time with the notable hour named
-    (13:00 the half-day close, 16:00 the regular close, midnight, the 09:30 open).
+    On a half day the regular session ends at 13:00 New York time (13:15 for index options),
+    so the last minute bar shows whether a source cuts the day there.
 
     Args:
         rest_rows: Reads raw REST rows.
+        evidence: Records the line.
 
     Returns:
-        A function `(ticker_param, ticker)`: the path placeholder of the class (such as
-        `"stocksTicker"`) and the ticker. It returns the evidence lines.
+        A function `(ticker, day)`: the ticker (its prefix selects the class) and the day. It
+        reads that day's minute bars from the aggregates range endpoint, records their count
+        and the first and last stamp in UTC and New York time, and whether the day is a half
+        day, and returns the count.
     """
 
-    def report(ticker_param: str, ticker: str) -> list[str]:
-        path = (
-            f"/v2/aggs/ticker/{{{ticker_param}}}/range/{{multiplier}}/{{timespan}}/{{from}}/{{to}}"
+    def report(ticker: str, day: date) -> int:
+        bars = _read_range(rest_rows, ticker, span="minute", bounds=(day, day))
+        half = "yes" if calendar.is_half_day(day) else "no"
+        if not bars:
+            evidence(f"{ticker} {day} (half day: {half}) minute bars: none")
+            return 0
+        first, last = _wall_clock(int(bars[0]["t"])), _wall_clock(int(bars[-1]["t"]))
+        evidence(
+            f"{ticker} {day} (half day: {half}) {len(bars)} minute bars: first t={first}, "
+            f"last t={last}"
         )
-        lines = []
-        for day in _HALF_DAYS:
-            for span in ("day", "minute"):
-                params = {ticker_param: ticker, "multiplier": 1, "timespan": span}
-                params |= {"from": day, "to": day}
-                bars = rest_rows(path, params, {"sort": "asc", "limit": 50_000})
-                if not bars:
-                    lines.append(f"{ticker} {day} {span} bars: none")
-                elif span == "day":
-                    lines.extend(
-                        f"{ticker} {day} day bar: t={_wall_clock(int(b['t']))}" for b in bars
-                    )
-                else:
-                    first, last = _wall_clock(int(bars[0]["t"])), _wall_clock(int(bars[-1]["t"]))
-                    lines.append(
-                        f"{ticker} {day} {len(bars)} minute bars: first t={first}, last t={last}"
-                    )
-        return lines
+        return len(bars)
 
     return report
 
@@ -2389,9 +2535,6 @@ StampedBar = tuple[int, tuple[float | None, ...]]
 """One source's bar: its stamp in epoch milliseconds and its open, high, low, close, and
 volume (None where the source has none, such as an index's volume)."""
 
-StampDays = dict[str, tuple[date, date]]
-"""The day-stamp checks' dates, by unit: `"day"` the full and the half trading day; `"week"`,
-`"month"`, `"quarter"`, and `"year"` the first and last day to read of that unit's bars."""
 
 _TICKER_PARAMS: Final = {"I:": "indicesTicker", "O:": "optionsTicker"}
 """The range and `/prev` path placeholder of a ticker's class, by its prefix; stocks have none."""
@@ -2403,99 +2546,18 @@ _OHLCV_KEYS: Final = {
 """The value keys of a raw REST bar (stamped `t`) and of a day flat-file row (`window_start`)."""
 
 
-def _thanksgiving(year: int) -> date:
-    """Return the US Thanksgiving Day of a year: the fourth Thursday of November.
-
-    Args:
-        year: The year.
-
-    Returns:
-        The date. US exchanges close that day and close early, at 13:00 New York time, on the
-        Friday after, by their fixed holiday rules.
-    """
-    first = date(year, 11, 1)
-    return first + timedelta(days=(3 - first.weekday()) % 7 + 21)
-
-
-def _is_half_day(day: date) -> bool:
-    """Return whether US exchanges close early, at 13:00 New York time, on a day.
-
-    By the exchanges' rules: the Friday after Thanksgiving, and July 3 and December 24 when
-    they fall Monday to Thursday (on a Friday the next day's holiday moves onto them).
-
-    Args:
-        day: The day.
-
-    Returns:
-        True for a half trading day.
-    """
-    if day == _thanksgiving(day.year) + timedelta(days=1):
-        return True
-    return (day.month, day.day) in {(7, 3), (12, 24)} and day.weekday() < 4
-
-
-def _months_before(day: date, months: int) -> date:
-    """Return the first day of the month `months` before the month of `day`.
-
-    Args:
-        day: Any day of the month counted from.
-        months: How many months back, 0 for `day`'s own month.
-
-    Returns:
-        The first of that month.
-    """
-    index = day.year * 12 + day.month - 1 - months
-    return date(index // 12, index % 12 + 1, 1)
-
-
-def _stamp_days(today: date) -> StampDays:
-    """Return the day-stamp checks' dates: a recent Thanksgiving week and recent longer periods.
-
-    The half day is the Friday after the most recent Thanksgiving with `half + 3 days <=
-    today`: that week's Sunday is over, so every bar it holds, an index week updated around
-    the clock included, is complete and its flat files are published. Its days are at most
-    about a year and two weeks old, inside every stock and option plan's history; an index
-    plan that keeps one year can lack them in the two weeks before the next Thanksgiving week
-    ends. The longer periods are anchored to `today` instead, so they are as recent as whole
-    periods can be.
-
-    Args:
-        today: The run's day, in New York time.
-
-    Returns:
-        By unit: `"day"` the Wednesday before Thanksgiving (a full trading day) and the Friday
-        after (a half day); `"week"` the Monday of the week before and the Sunday ending
-        Thanksgiving week; `"month"` the two whole months before the current month;
-        `"quarter"` the two whole quarters before the current quarter; and `"year"` January 1
-        of this year to `today`, which holds this year's unfinished bar (none yet before the
-        year's first trading day).
-    """
-    half = _thanksgiving(today.year) + timedelta(days=1)
-    if half + timedelta(days=3) > today:
-        half = _thanksgiving(today.year - 1) + timedelta(days=1)
-    this_month = today.replace(day=1)
-    this_quarter = date(today.year, (today.month - 1) // 3 * 3 + 1, 1)
-    return {
-        "day": (half - timedelta(days=2), half),
-        "week": (half - timedelta(days=11), half + timedelta(days=2)),
-        "month": (_months_before(today, 2), this_month - timedelta(days=1)),
-        "quarter": (_months_before(this_quarter, 6), this_quarter - timedelta(days=1)),
-        "year": (date(today.year, 1, 1), today),
-    }
-
-
 @pytest.fixture(scope="session")
-def stamp_days() -> StampDays:
+def stamp_days() -> calendar.StampDays:
     """Return the dates the day-stamp checks read, computed from the run's day.
 
-    Massive's two-year history on Basic plans would push fixed dates out of reach, so the
-    checks read the most recent finished Thanksgiving week: its Wednesday is a full trading
-    day and its Friday a half day. See `_stamp_days` for every unit.
+    The checks read the most recent half day whose week has ended, and the trading day before
+    it, so a full and a short day are compared and both stay inside every plan's history. See
+    `calendar.stamp_days` for every unit.
 
     Returns:
         The dates, by unit.
     """
-    return _stamp_days(datetime.now(_NEW_YORK).date())
+    return calendar.stamp_days(calendar.today())
 
 
 def _ticker_param(ticker: str) -> str:
@@ -2832,7 +2894,7 @@ def prev_bar_report(
         for prev in prevs:
             bar = _stamped(prev)
             day = _new_york_day(bar[0])
-            half = "yes" if _is_half_day(day) else "no"
+            half = "yes" if calendar.is_half_day(day) else "no"
             evidence(f"{ticker} /prev ({day}, half day: {half}): {_bar_text(bar)}")
             bounds = (_weekday_after(day, -1), _weekday_after(day, 1))
             ranged = [
@@ -2854,16 +2916,16 @@ def period_bar_report(
     """Return a function that shows the stamps of one ticker's week or longer bars.
 
     For each unit asked for it reads the bars over a range of days from the aggregates range
-    endpoint, unfiltered, and reports each stamp in UTC and New York time with its values.
-    Weeks are read from the Saturday before the first Monday to the last Saturday, and a week
-    bar is counted when its New York stamp day falls from that Saturday to the last Friday
-    (see `_week_stamp_days`), so a week stamped on its Monday or on the weekend before is
-    counted once. Massive may widen a range to whole periods of its unit (a week from its
-    Sunday), so each bar stamped outside the span is recorded as such and left out. A
-    read the plan refuses (a range beyond the plan's history) is recorded as evidence and
-    counts as no bars, so the other units' evidence is kept. Reading it: a bar stamped 00:00
-    New York time (01:00 for an index) on its period's first day, or on the Saturday or
-    Sunday before a week's Monday, is one the library accepts.
+    endpoint, unfiltered, and reports each stamp in UTC and New York time with its values. Weeks are
+    read from the Saturday before the first Monday to the last Saturday, and a week bar is counted
+    when its New York stamp day falls from that Saturday to the last Friday (see
+    `_week_stamp_days`), so a week stamped on its Monday or on the weekend before is counted once.
+    Massive may widen a range to whole periods of its unit (a week from its Sunday), so each bar
+    stamped outside the span is recorded as such and left out. A read the plan refuses is recorded
+    and the other units are still read; the first refusal is then raised, for the run to judge (a
+    day outside the plan's history skips the test). Reading it: a bar stamped 00:00 New York time
+    (01:00 for an index) on its period's first day, or on the Saturday or Sunday before a week's
+    Monday, is one the library accepts.
 
     Args:
         rest_rows: Reads raw REST rows.
@@ -2873,7 +2935,8 @@ def period_bar_report(
         A function `(ticker, spans, expected)`: the ticker (its prefix selects the class), the
         first and last day to read of each unit (`"week"`, `"month"`, `"quarter"`, `"year"`),
         and the fewest and most bars expected of each. It records the evidence and returns
-        whether every unit returned an expected number of bars.
+        whether every unit returned an expected number of bars; a refused read raises its
+        `WireEntitlementError` once the other units are read.
     """
 
     def report(
@@ -2882,6 +2945,7 @@ def period_bar_report(
         expected: Mapping[str, tuple[int, int]],
     ) -> bool:
         complete = True
+        refused: list[WireEntitlementError] = []
         for span, (start, end) in spans.items():
             week = span == "week"
             first = start - timedelta(days=2) if week else start
@@ -2889,11 +2953,8 @@ def period_bar_report(
             try:
                 raw = _read_range(rest_rows, ticker, span=span, bounds=(first, last))
             except WireEntitlementError as error:
-                evidence(
-                    f"{ticker} {span} bars {first} to {last}: refused, beyond the plan's "
-                    f"history? ({error})"
-                )
-                complete = False
+                evidence(f"{ticker} {span} bars {first} to {last}: refused ({error})")
+                refused.append(error)
                 continue
             inside = _week_stamp_days(start, end) if week else (start, end)
             bars = [
@@ -2905,6 +2966,8 @@ def period_bar_report(
             evidence(f"{ticker} {span} bars counted: {len(bars)} (expected {least} to {most})")
             for bar in bars:
                 evidence(f"{ticker} {span} bar: {_bar_text(bar)}")
+        if refused:
+            raise refused[0]
         return complete
 
     return report
@@ -2989,3 +3052,183 @@ def library_stamps(
         )
 
     return describe
+
+
+# --- Corporate actions the live tests read ----------------------------------------------------
+# A fixed split or dividend ages out of a Basic plan's two years of history, so the tests find
+# recent ones through the library, once per run.
+
+
+_EVENTS: dict[str, list[Any]] = {}
+"""The events found so far in the run, by kind; the first test that needs one fills it."""
+
+
+@pytest.fixture
+def recent_splits(
+    table_rows: Callable[[Table], list[dict[str, Any]]], evidence: Callable[[str], None]
+) -> Callable[[MassiveSession], list[events.Split]]:
+    """Return a function that finds the year's most recent forward splits of common stocks.
+
+    The first call of a run reads every split of the year and after it (one REST request,
+    `_all_splits`), chooses the candidates (`events.forward_splits`), then checks the newest
+    ones against the reference tickers until five common stocks are found (a request each,
+    `events.first_common`); later calls reuse them. Each call records them as evidence.
+
+    Args:
+        table_rows: Snapshots a table into rows.
+        evidence: Records the splits found.
+
+    Returns:
+        A function taking the test's session and returning the splits, newest first; empty
+        when the year had none.
+    """
+
+    def find(session: MassiveSession) -> list[events.Split]:
+        if "splits" not in _EVENTS:
+            window = events.event_window(calendar.today())
+            found = events.forward_splits(_all_splits(session, table_rows), window)
+            common = _is_common_stock(session, table_rows)
+            _EVENTS["splits"] = events.first_common(found, lambda s: s.symbol, common)
+        evidence(f"recent forward splits: {_EVENTS['splits']}")
+        return list(_EVENTS["splits"])
+
+    return find
+
+
+@pytest.fixture
+def special_dividends(
+    table_rows: Callable[[Table], list[dict[str, Any]]], evidence: Callable[[str], None]
+) -> Callable[[MassiveSession], list[events.Dividend]]:
+    """Return a function that finds the year's most recent special cash dividends.
+
+    The first call of a run reads up to 50 dividends of the last year classed `special`, newest
+    first, through the session's `stocks.dividends` (one REST request), chooses the candidates
+    without a later split (`events.special_dividends`, with `_all_splits`), then checks them
+    against the reference tickers until five common stocks are found (`events.first_common`);
+    later calls reuse them. Each call records them as evidence.
+
+    Args:
+        table_rows: Snapshots a table into rows.
+        evidence: Records the dividends found.
+
+    Returns:
+        A function taking the test's session and returning the dividends, newest first; empty
+        when the year had none.
+    """
+
+    def find(session: MassiveSession) -> list[events.Dividend]:
+        if "dividends" not in _EVENTS:
+            dm = importlib.import_module("deephaven_massive")
+            start, end = events.event_window(calendar.today())
+            query = session.stocks.dividends(
+                start=start,
+                end=end,
+                sort="ex_dividend_date",
+                order=dm.Order.DESC,
+                limit=50,
+                filters={"distribution_type": "special"},
+            )
+            rows = table_rows(query.fetch())
+            found = events.special_dividends(rows, _all_splits(session, table_rows))
+            common = _is_common_stock(session, table_rows)
+            _EVENTS["dividends"] = events.first_common(found, lambda d: d.symbol, common)
+        evidence(f"recent special cash dividends: {_EVENTS['dividends']}")
+        return list(_EVENTS["dividends"])
+
+    return find
+
+
+def _all_splits(
+    session: MassiveSession, table_rows: Callable[[Table], list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    """Read every split of every kind from the event window's start on, once per run.
+
+    Args:
+        session: The test's session.
+        table_rows: Snapshots a table into rows.
+
+    Returns:
+        The rows of `stocks.splits`, newest first, announced future ones included.
+    """
+    if "all splits" not in _EVENTS:
+        dm = importlib.import_module("deephaven_massive")
+        query = session.stocks.splits(
+            start=events.event_window(calendar.today())[0],
+            sort="execution_date",
+            order=dm.Order.DESC,
+            limit=5_000,
+        )
+        _EVENTS["all splits"] = table_rows(query.fetch())
+    return list(_EVENTS["all splits"])
+
+
+def _is_common_stock(
+    session: MassiveSession, table_rows: Callable[[Table], list[dict[str, Any]]]
+) -> Callable[[str], bool]:
+    """Return a function that asks the reference tickers whether a ticker is a common stock.
+
+    Args:
+        session: The test's session.
+        table_rows: Snapshots a table into rows.
+
+    Returns:
+        A function of a ticker: True when `reference.tickers` lists it as a common stock (one
+        request); an ETF, leveraged or not, a fund, or a warrant answers no row.
+    """
+    dm = importlib.import_module("deephaven_massive")
+
+    def check(symbol: str) -> bool:
+        query = session.reference.tickers(symbols=symbol, ticker_type=dm.TickerType.CS)
+        return bool(table_rows(query.fetch()))
+
+    return check
+
+
+@pytest.fixture
+def rows_due(
+    live_rest: RestClient, live_plans: plans.LivePlans, evidence: Callable[[str], None]
+) -> Callable[[str], tuple[str, bool]]:
+    """Return a function that tells whether a delayed stream must have delivered rows by now.
+
+    For indices it reads the S&P indices' status from `/v1/marketstatus/now` and takes the
+    session to open at 09:30 New York time; for futures it reads the E-mini S&P 500's
+    `market_event` and its `timestamp` from `/futures/v1/market-status`. Rows are due once the
+    market has been open longer than the plan's feed delay (`streams.rows_due`).
+
+    Args:
+        live_rest: The live REST client.
+        live_plans: The run's plans, whose class plan sets the delay.
+        evidence: Records the status, the open, and the verdict.
+
+    Returns:
+        A function taking `"indices"` or `"futures"` and returning Massive's status and
+        whether rows are due.
+    """
+
+    def due(name: str) -> tuple[str, bool]:
+        now = datetime.now(UTC)
+        opened: datetime | None = None
+        if name == "futures":
+            rows = live_rest.get(
+                source(Transport.REST, "/futures/v1/market-status"),
+                {},
+                {"product_code": "ES"},
+                bucket="futures",
+            ).rows
+            status = str(rows[0].get("market_event")) if rows else "unknown"
+            stamp = rows[0].get("timestamp") if rows else None
+            if status == "open" and isinstance(stamp, str):
+                opened = datetime.fromisoformat(stamp)
+        else:
+            body = live_rest.get(
+                source(Transport.REST, "/v1/marketstatus/now"), {}, {}, bucket="other"
+            ).body
+            groups = body.get("indicesGroups") if isinstance(body, dict) else None
+            status = str(groups.get("s_and_p")) if isinstance(groups, dict) else "unknown"
+            if status == "open":
+                opened = streams.index_session_open(now)
+        verdict = streams.rows_due(live_plans, name, opened=opened, now=now)
+        evidence(f"{name} status {status}, open since {opened}, rows due: {verdict}")
+        return status, verdict
+
+    return due

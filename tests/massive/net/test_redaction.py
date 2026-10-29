@@ -26,7 +26,7 @@ from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlement
 from deephaven_massive._massive.net.redaction import REDACTED, Redactor, redact
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.rest.governor import RequestGovernor
+from deephaven_massive._massive.rest.governor import Patience, RequestGovernor
 from deephaven_massive._massive.spec.types import (
     DriftReport,
     Field,
@@ -273,7 +273,8 @@ def test_the_rest_client_never_shows_the_api_key(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", reply)
     with pytest.raises(WireError) as info:
-        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
+        # A 429 fails once its pauses outlast the call's patience, quoting the refusal.
+        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks", patience=Patience(600.0))
     # The server's words are kept, with the key replaced, so the failure still explains itself.
     assert REDACTED in info.value.message
     _assert_no_secret(every_logger_at_debug, info.value)
