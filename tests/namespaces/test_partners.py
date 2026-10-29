@@ -145,9 +145,14 @@ def test_the_partner_datasets_pass_every_catalog_gate() -> None:
     assert Catalog(partners.DATASETS).problems() == ()
 
 
+# Pages kept below the documented maximum because each row carries long text.
+TEXT_PAGES = {"partners.benzinga.news": 1_000, "partners.benzinga.analyst_insights": 5_000}
+
+
 @pytest.mark.parametrize("name", DATASETS)
-def test_the_page_size_is_the_documented_maximum(name: str) -> None:
-    assert spec_of(name).page_size == (5_000 if name in SMALL_PAGES else 50_000)
+def test_the_page_size_is_the_documented_maximum_unless_rows_carry_long_text(name: str) -> None:
+    expected = 5_000 if name in SMALL_PAGES else 50_000
+    assert spec_of(name).page_size == TEXT_PAGES.get(name, expected)
 
 
 # The schemas the declarations yield.
