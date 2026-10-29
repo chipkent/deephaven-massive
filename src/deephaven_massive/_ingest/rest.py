@@ -102,7 +102,7 @@ from deephaven_massive._enums import AssetClass, Timespan, subscription_of
 from deephaven_massive._errors import MassiveError, from_wire, log_once
 from deephaven_massive._ingest import hosts, poll
 from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
-from deephaven_massive._ingest.rate_limits import PaceCheck, announce, bucket_of
+from deephaven_massive._ingest.rate_limits import PaceCheck, ReadShape, announce, bucket_of
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -161,12 +161,6 @@ _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 _SATURDAY: Final = 5
 _SESSION_DATE: Final = "session_end_date"
 """The futures date parameter that names a trading session, not a calendar day."""
-
-_PER_DAY: Final = "one per day"
-"""How a grouped-daily download's requests are counted, for its INFO notice."""
-
-_PER_SESSION: Final = "one per session and symbol, more where a session spans several pages"
-"""How a per-session download's requests are counted, for its INFO notice."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1642,11 +1636,11 @@ class RestEndpoints:
                 if day.weekday() < _SATURDAY or trades_at_weekends(spec.asset_class)
             ]
             calls = [Call({**path, "date": day}, query) for day in days]
-            shape: str | None = _PER_DAY
+            shape = ReadShape.PER_DAY
         else:
             rest_path = reader.rest_path(cast("str", spec.history_path))
             calls = _history_calls(spec, rest_path, request, window=window)
-            shape = _PER_SESSION if window.requested is None else None
+            shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
         announce(
             self._state.client.governor,
             f"{spec.name} history",

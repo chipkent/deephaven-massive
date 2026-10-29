@@ -35,7 +35,6 @@ listener takes (the diagnostics queue's leaf lock). None of them is ever taken u
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import itertools
 import logging
@@ -44,8 +43,8 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Final
-from urllib.parse import urlsplit
 
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
@@ -90,6 +89,33 @@ _MINUTE: Final = 60.0
 """Seconds in the minute Massive's limits count."""
 
 
+class ReadShape(StrEnum):
+    """How a static read's requests are counted, which decides its INFO notice (`announce`).
+
+    A member's value is the phrase the notice quotes.
+
+    Attributes:
+        PAGED: The pages of a read whose request count follows its data, not its window. Only
+            a paced bucket's notice is logged.
+        PER_DAY: One request per day of the window, such as a grouped-daily download.
+        PER_SESSION: One request per trading session and symbol, more where a session spans
+            several pages.
+    """
+
+    PAGED = "paged"
+    PER_DAY = "one per day"
+    PER_SESSION = "one per session and symbol, more where a session spans several pages"
+
+
+def _real_clock_governor() -> RequestGovernor:
+    """Make a governor with every bucket of `BUCKETS`, named by `LABELS`, on the real clock.
+
+    Returns:
+        A new `RequestGovernor` with nothing declared.
+    """
+    return _massive.RequestGovernor(BUCKETS, labels=LABELS)
+
+
 def bucket_of(subscription: Subscription | None) -> str:
     """Return the governor bucket a request of a subscription is charged to.
 
@@ -100,22 +126,6 @@ def bucket_of(subscription: Subscription | None) -> str:
         The subscription's value, or `OTHER`.
     """
     return OTHER if subscription is None else subscription.value
-
-
-def _origin(base_url: str) -> tuple[str, str, int]:
-    """Return the scheme, host, and port a REST base URL reaches.
-
-    Args:
-        base_url: The base URL, such as `"https://api.massive.com"`.
-
-    Returns:
-        The lower-case scheme and host and the port (443 for `https`, 80 for `http` when
-        none is given), so two spellings of one origin share a governor.
-    """
-    parts = urlsplit(base_url)
-    scheme = parts.scheme.lower()
-    port = parts.port or (443 if scheme == "https" else 80)
-    return scheme, (parts.hostname or "").lower(), port
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,14 +238,14 @@ class GovernorRegistry:
 
     __slots__ = ("_create", "_entries", "_holders", "_learned", "_lock")
 
-    def __init__(self, create: Callable[[], RequestGovernor] | None = None) -> None:
+    def __init__(self, create: Callable[[], RequestGovernor] = _real_clock_governor) -> None:
         """Start with no governor.
 
         Args:
-            create: Makes each new governor, with the buckets `BUCKETS` and the `LABELS`; None
-                for one on the real clock. Tests pass one whose governors wait on a fake clock.
+            create: Makes each new governor, with the buckets `BUCKETS` and the `LABELS`; by
+                default on the real clock. Tests pass one whose governors wait on a fake clock.
         """
-        self._create = create or functools.partial(_massive.RequestGovernor, BUCKETS, labels=LABELS)
+        self._create = create
         self._lock = threading.Lock()
         self._entries: dict[tuple[str, tuple[str, str, int]], _Entry] = {}
         # The buckets learned Basic by a pruned governor, by key: kept for the process's life.
@@ -269,7 +279,8 @@ class GovernorRegistry:
 
         Args:
             api_key: The session's API key; only its SHA-256 digest is kept.
-            base_url: The session's REST base URL; its scheme, host, and port are kept.
+            base_url: The session's REST base URL; its scheme, host, and port are kept
+                (`origin_of`, which the REST client also checks it with).
             basic: The subscriptions the session declares Basic.
             label: The session's label, for the WARNING.
             listener: Called after every change of the governor (`RequestGovernor.subscribe`);
@@ -279,7 +290,7 @@ class GovernorRegistry:
             The lease, whose `governor` the session's REST client uses.
         """
         digest = hashlib.sha256(api_key.encode()).hexdigest()
-        key = (digest, _origin(base_url))
+        key = (digest, _massive.origin_of(base_url))
         mine = frozenset(basic)
         with self._lock:
             self._prune()
@@ -486,7 +497,11 @@ def rate_limit_source(governor: RequestGovernor) -> tuple[list[RateLimitRow], fl
 
 
 def announce(
-    governor: RequestGovernor, read: str, buckets: Iterable[str], *, shape: str | None = None
+    governor: RequestGovernor,
+    read: str,
+    buckets: Iterable[str],
+    *,
+    shape: ReadShape = ReadShape.PAGED,
 ) -> None:
     """Log at INFO, before a long static read, how many requests it makes and how long they take.
 
@@ -508,13 +523,13 @@ def announce(
         governor: The session's governor.
         read: What is read, such as `"stocks.bars history"`.
         buckets: The bucket of each planned request, one entry per request.
-        shape: How the download counts its requests (`"one per day"`), or None for a read
-            that is announced only when it is paced.
+        shape: How the read counts its requests. The default, `ReadShape.PAGED`, announces
+            a read only when it is paced.
     """
     rate = _massive.RequestGovernor.BASIC_REQUESTS_PER_MINUTE
     for bucket, count in Counter(buckets).items():
         seconds = governor.estimate(bucket, count)
-        what = f"{count} requests" if shape is None else f"{count} requests, {shape}"
+        what = f"{count} requests" if shape is ReadShape.PAGED else f"{count} requests, {shape}"
         if seconds is not None:
             if seconds >= _MINUTE:
                 logger.info(
@@ -526,7 +541,7 @@ def announce(
                     bucket,
                     math.floor(seconds / _MINUTE),
                 )
-        elif shape is not None and bucket != OTHER and count > rate:
+        elif shape is not ReadShape.PAGED and bucket != OTHER and count > rate:
             logger.info(
                 "%s: %s; if the %s subscription is on the Basic tier (%d requests a minute), "
                 "they take at least %d min",

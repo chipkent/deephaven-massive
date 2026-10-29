@@ -434,8 +434,8 @@ gone; the transports it builds hold the core itself, never the weak reference.
   `selectors`, and read neither `threading.Thread` nor `threading.Timer`, by attribute, import,
   or literal `getattr` (`threading` itself stays allowed, for leaf locks);
 - `_massive.__all__` splits into vocabulary names (the three errors, the spec names, and the
-  pure parameter encoder `encode_value`; a subprocess test checks that reading every one of
-  them loads no client and no network module) and
+  pure functions `encode_value` and `origin_of`; a subprocess test checks that reading every
+  one of them loads no client and no network module) and
   client names (`RestClient`, `Page`, `to_batch`, `RequestGovernor`, `BucketState`, `Cancel`,
   `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`,
   `ReadPlan`, `ReadColumn`, `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
@@ -2863,6 +2863,9 @@ net/                 shared by every client; imports nothing else in _massive
   http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); proxy from HTTPS_PROXY/NO_PROXY
   cancel.py          Cancel: a one-way threading.Event that follows parent tokens and runs
                      callbacks when set
+  origins.py         origin_of(url): the (scheme, host, port) a URL reaches, default port
+                     filled in; the REST client's next_url check and the governor registry's
+                     key both compare origins with it
   retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; 15/30/60 s 429
                      pauses; RATE_LIMIT_PATIENCE, 10 minutes),
                      retryable classification; TLS never retried; Clock (injectable, tests
@@ -2961,7 +2964,9 @@ websockets:
   parameter value's wire text by its `ParamKind`, in `spec.values`, which the REST client and
   the library's filter check both run, so a filter the check accepts always encodes; it loads
   no client, and a subprocess test checks that no vocabulary name loads a client or network
-  module).
+  module);
+- origins: `origin_of` (from `net.origins`), the vocabulary name the library uses to key a
+  shared governor by REST origin.
 
 `Param` is reached as an attribute of `RestPath`. `Transport` (`REST`, `WS`, `FLAT_FILES`) is
 the library's one transport enum.

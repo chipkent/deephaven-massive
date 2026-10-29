@@ -2151,7 +2151,9 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
     m = dm.MassiveSession(config)
     governor = governor_of(m)
     for _ in range(4):  # one slot is left
-        governor.done(governor.acquire("currencies", _massive.Cancel()), answered=True)
+        governor.done(
+            governor.acquire("currencies", _massive.Cancel(), lane=object()), answered=True
+        )
     refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
     for pair in ("BTC/USD", "ETH/USD", "SOL/USD"):
         fake_rest.reply(f"/v1/last/crypto/{pair}", refused)
@@ -2241,7 +2243,7 @@ def test_a_released_poll_stops_waiting_for_a_slot(
     m = dm.MassiveSession(config)
     governor = governor_of(m)
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel()), answered=True)
+        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
     q = query(m, DIVIDENDS, symbols=["AAPL"])
     assert isinstance(q, Query)
     left = threading.Event()

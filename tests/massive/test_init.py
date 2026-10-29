@@ -46,6 +46,7 @@ EXPECTED_INTERFACE = [
     "WsState",
     "encode_value",
     "object_key",
+    "origin_of",
     "provenance",
     "source",
     "sources",

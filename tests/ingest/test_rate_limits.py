@@ -18,6 +18,7 @@ from deephaven_massive._ingest.rate_limits import (
     GovernorRegistry,
     PaceCheck,
     RateLimitWarnings,
+    ReadShape,
     announce,
     bucket_of,
     rate_limit_rows,
@@ -59,7 +60,7 @@ def _paced(governor: _massive.RequestGovernor) -> dict[str, int | None]:
 def _refuse(
     governor: _massive.RequestGovernor, bucket: str, message: str, *, retry_after: float
 ) -> None:
-    permit = governor.acquire(bucket, _massive.Cancel())
+    permit = governor.acquire(bucket, _massive.Cancel(), lane=object())
     with contextlib.suppress(_massive.WireError):  # a pause past the patience gives up
         governor.refused(permit, retry_after=retry_after, message=message, request_id="r1")
 
@@ -148,7 +149,7 @@ def test_an_idle_entry_outlives_its_last_lease_until_its_window_passes() -> None
     registry = _registry(clock)
     lease = _lease(registry, basic=frozenset({Subscription.STOCKS}))
     governor = lease.governor
-    governor.done(governor.acquire("stocks", _massive.Cancel()), answered=True)
+    governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
     lease.release()
     # A new session soon after (a notebook cell run again) still sees the slot held.
     again = _lease(registry, basic=frozenset({Subscription.STOCKS}))
@@ -255,9 +256,12 @@ def test_rows_show_each_buckets_state() -> None:
     governor = _massive.RequestGovernor(BUCKETS, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel()), answered=True)
+        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
     waiting = threading.Thread(
-        target=governor.acquire, args=("stocks", _massive.Cancel()), daemon=True
+        target=governor.acquire,
+        args=("stocks", _massive.Cancel()),
+        kwargs={"lane": object()},
+        daemon=True,
     )
     waiting.start()
     clock.wait_for_sleepers(1)
@@ -307,10 +311,10 @@ def test_a_daily_download_of_an_unpaced_subscription_names_the_basic_cost(
 ) -> None:
     governor = _massive.RequestGovernor(BUCKETS, clock=FakeClock())
     with caplog.at_level(logging.INFO, LOGGER):
-        announce(governor, "stocks.bars history", ["stocks"] * 11, shape="one per day")
-        announce(governor, "stocks.bars history", ["stocks"] * 5, shape="one per day")
-        announce(governor, "economy.yields history", ["other"] * 40, shape="one per day")
-        announce(governor, "stocks.trades history", ["stocks"] * 40)  # no shape: quiet
+        announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
+        announce(governor, "stocks.bars history", ["stocks"] * 5, shape=ReadShape.PER_DAY)
+        announce(governor, "economy.yields history", ["other"] * 40, shape=ReadShape.PER_DAY)
+        announce(governor, "stocks.trades history", ["stocks"] * 40)  # paged: quiet
     assert caplog.messages == [
         (
             "stocks.bars history: 11 requests, one per day; if the stocks subscription is on the "
@@ -323,7 +327,7 @@ def test_a_paced_daily_download_states_its_pace(caplog: pytest.LogCaptureFixture
     governor = _massive.RequestGovernor(BUCKETS, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.INFO, LOGGER):
-        announce(governor, "stocks.bars history", ["stocks"] * 11, shape="one per day")
+        announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
     assert caplog.messages == [
         (
             "stocks.bars history: 11 requests, one per day; paced at 5 requests a minute (stocks); "
@@ -357,7 +361,7 @@ def test_a_paced_bucket_with_every_slot_held_shows_paced() -> None:
     governor = _massive.RequestGovernor(BUCKETS, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel()), answered=True)
+        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
     rows, change = rate_limits.rate_limit_source(governor)
     stocks = next(row for row in rows if row.bucket == "stocks")
     # Nobody waits, but the next request would: it is not READY.
@@ -384,7 +388,7 @@ def test_a_learned_basic_outlives_its_pruned_governor() -> None:
 def test_the_default_registry_names_the_other_buckets_requests() -> None:
     lease = _lease(GovernorRegistry())
     governor = lease.governor
-    permit = governor.acquire(OTHER, _massive.Cancel())
+    permit = governor.acquire(OTHER, _massive.Cancel(), lane=object())
     with pytest.raises(_massive.WireError, match="refused requests outside Massive's"):
         governor.refused(permit, retry_after=700.0, message="busy", request_id=None)
     lease.release()

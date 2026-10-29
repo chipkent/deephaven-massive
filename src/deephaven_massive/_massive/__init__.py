@@ -36,6 +36,8 @@ Interface:
       start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
       API key, and a snapshot of one subscription's state for diagnostics.
     - `Cancel`: the cancellation token that ends a request's waits.
+    - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, the key the library
+      shares a governor by.
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
       part of `spec` and loads no client: the REST client encodes every request with it, and
       the library's filter check calls it so a value it accepts always encodes.
@@ -92,6 +94,7 @@ __all__ = [
     "WsState",
     "encode_value",
     "object_key",
+    "origin_of",
     "provenance",
     "source",
     "sources",
@@ -130,6 +133,7 @@ _EXPORTS: dict[str, str] = {
     "WireType": "deephaven_massive._massive.spec.types",
     "WireUnit": "deephaven_massive._massive.spec.types",
     "object_key": "deephaven_massive._massive.flatfiles.layout",
+    "origin_of": "deephaven_massive._massive.net.origins",
     "to_batch": "deephaven_massive._massive.rest.batch",
     "encode_value": "deephaven_massive._massive.spec.values",
 }
@@ -146,6 +150,7 @@ if TYPE_CHECKING:
         WireEntitlementError,
         WireError,
     )
+    from deephaven_massive._massive.net.origins import origin_of
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
     from deephaven_massive._massive.rest.governor import BucketState, RequestGovernor

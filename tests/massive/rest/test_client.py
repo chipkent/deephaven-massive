@@ -1146,7 +1146,7 @@ class _RecordingGovernor(RequestGovernor):
         self.lanes: list[object] = []
 
     @override
-    def acquire(self, bucket: str, cancel: Cancel, *, lane: Hashable | None = None) -> Permit:
+    def acquire(self, bucket: str, cancel: Cancel, *, lane: Hashable) -> Permit:
         self.lanes.append(lane)
         return super().acquire(bucket, cancel, lane=lane)
 

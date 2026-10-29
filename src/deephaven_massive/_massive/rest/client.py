@@ -37,6 +37,7 @@ from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.net.http import https_proxy, proxy_credentials, ssl_context
+from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
@@ -47,11 +48,7 @@ from deephaven_massive._massive.net.retry import (
     transient_wait,
 )
 from deephaven_massive._massive.rest.governor import is_basic_refusal
-from deephaven_massive._massive.rest.query import (
-    next_target,
-    origin_of,
-    request_target,
-)
+from deephaven_massive._massive.rest.query import next_target, request_target
 from deephaven_massive._massive.rest.response import Request, decode_page, http_error
 
 if TYPE_CHECKING:
@@ -59,8 +56,8 @@ if TYPE_CHECKING:
 
     from urllib3 import BaseHTTPResponse
 
+    from deephaven_massive._massive.net.origins import Origin
     from deephaven_massive._massive.rest.governor import Permit, RequestGovernor
-    from deephaven_massive._massive.rest.query import Origin
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec.types import RestPath
 

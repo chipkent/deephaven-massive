@@ -59,6 +59,7 @@ import logging
 import threading
 from collections import deque
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._massive.net.errors import WireError
@@ -176,13 +177,13 @@ class _Waiter:
 
     __slots__ = ("lane", "permit", "wake")
 
-    def __init__(self, lane: Hashable | None) -> None:
+    def __init__(self, lane: Hashable) -> None:
         """Create the waiter.
 
         Args:
-            lane: The lane it waits in; None for a lane of its own.
+            lane: The lane it waits in.
         """
-        self.lane: Hashable = self if lane is None else lane
+        self.lane = lane
         self.wake = threading.Event()
         # Set, under the governor's lock, before anything else changes at the grant, so an
         # interrupted `acquire` always knows what to hand back.
@@ -430,7 +431,7 @@ class RequestGovernor:
         buckets: Iterable[str],
         *,
         clock: Clock = SYSTEM_CLOCK,
-        labels: Mapping[str, str] | None = None,
+        labels: Mapping[str, str] = MappingProxyType({}),
     ) -> None:
         """Create the buckets, each unpaced and idle.
 
@@ -447,10 +448,9 @@ class RequestGovernor:
         names = tuple(buckets)
         if not names or len(set(names)) != len(names):
             raise ValueError(f"buckets must be distinct names, at least one: {names!r}")
-        named = labels or {}
         self._clock = clock
         self._lock = threading.Lock()
-        self._buckets = {name: _Bucket(named.get(name, f"{name} requests")) for name in names}
+        self._buckets = {name: _Bucket(labels.get(name, f"{name} requests")) for name in names}
         self._listeners: tuple[Callable[[], None], ...] = ()
 
     @property
@@ -497,7 +497,7 @@ class RequestGovernor:
                 bucket.wake_head()
         self._notify()
 
-    def acquire(self, bucket: str, cancel: Cancel, *, lane: Hashable | None = None) -> Permit:
+    def acquire(self, bucket: str, cancel: Cancel, *, lane: Hashable) -> Permit:
         """Wait until a request of `bucket` may start, and return its permit.
 
         Blocks the calling thread, outside every lock, for as long as the bucket's lanes,
@@ -514,7 +514,8 @@ class RequestGovernor:
             cancel: Ends the wait when set: the request gives up its place.
             lane: The lane the request waits in, such as its read's cancellation token: the
                 requests of one lane start in order, and the lanes of a bucket take turns.
-                None for a lane of its own.
+                A request alone in its lane passes a key of its own, such as a fresh
+                `object()`.
 
         Returns:
             The permit.
