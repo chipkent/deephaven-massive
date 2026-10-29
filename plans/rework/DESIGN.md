@@ -2567,7 +2567,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   and one that holds all of them (and the batch has no row without a valid symbol) gets the
   whole batch with no filter, so the common single-stream case costs one `add`. A non-gating
   benchmark test records warmed median rows per second for 1, 10, and 100 streams at 200,
-  2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping.
+  2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping. The default
+  run records only 10 streams at 2,000 rows; the `benchmark` marker, deselected by default,
+  carries the rest of the sweep (`-m benchmark`).
 - Each flush applies the failures queued before it, then publishes, so a failed stream gets no
   row after its failure; rows buffered for it in that flush are dropped. A batch that cannot
   be converted or published fails that dataset's streams on the channel, with a `MassiveError`

@@ -525,8 +525,22 @@ def _median_seconds(work: Callable[[], None], *, repeats: int = 7, warmups: int 
     return statistics.median(times)
 
 
-@pytest.mark.parametrize("rows_per_flush", [200, 2_000, 20_000])
-@pytest.mark.parametrize("streams", [1, 10, 100])
+# The default run measures one point, enough to keep the benchmark working; the other eight
+# points of the sweep cost several seconds, and since the test never asserts, they run only
+# when asked for: `uv run pytest tests/tables/test_stream.py -m benchmark`.
+_FAN_OUT_DEFAULT = (10, 2_000)
+_FAN_OUT_SWEEP = [
+    pytest.param(streams, rows, marks=pytest.mark.benchmark, id=f"{streams}-{rows}")
+    for streams in (1, 10, 100)
+    for rows in (200, 2_000, 20_000)
+    if (streams, rows) != _FAN_OUT_DEFAULT
+]
+
+
+@pytest.mark.parametrize(
+    ("streams", "rows_per_flush"),
+    [pytest.param(*_FAN_OUT_DEFAULT, id="{}-{}".format(*_FAN_OUT_DEFAULT)), *_FAN_OUT_SWEEP],
+)
 def test_benchmark_fan_out(
     massive_session: dm.MassiveSession,
     capsys: pytest.CaptureFixture[str],
