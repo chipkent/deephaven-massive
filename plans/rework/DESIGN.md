@@ -2672,14 +2672,18 @@ and whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values.
 
 **Secrets.** The API key travels only in the REST client's header and the WebSocket
 authentication frame; the S3 secret goes only to boto3; the proxy password is already
-stripped (`net.http`). A server can still echo a secret, so each client passes every excerpt of
-a server's words it logs or puts in an error through `net.secrets` (`redact` on text, `redacted`
-on a built `WireError`), which replaces its own secret with `***`. The library never enables
+stripped (`net.http`). A server can still echo a secret, so each client cleans what it
+receives before anything reads it, through `net.secrets`: the REST client every response body
+(`redact_bytes`), the WebSocket client every frame, the handshake's included (`redact`), and the
+flat-file client S3's error words, leaving out of the error chain a botocore error that quotes
+them. Every row, error, excerpt, and log line built from them is then free of the secret,
+wherever it is built. The replacement runs only when the secret is present (a fast substring
+search), so a clean body is passed on uncopied. The library never enables
 DEBUG on urllib3 or botocore, and the websockets frame log stays off
 ([section 19.2](#192-the-websocket-client)). The planted-secret test
 (`tests/massive/net/test_secrets.py`) runs the fakes with distinctive secrets and DEBUG on every
-logger through a 401, a 429, bodies and a status that echo the key, `auth_failed`, and an S3
-403, and finds neither secret in any record or error; the logging rules of
+logger through a 401, a 429, bodies, rows, and a status that echo the key, `auth_failed`, and S3
+errors, and finds neither secret in any record or error; the logging rules of
 `tests/test_layout.py` are a cheap backstop (no secret name in a logging call, every thread
 and pool named, no logging call under a leaf lock).
 
@@ -2831,8 +2835,8 @@ net/                 shared by every client; imports nothing else in _massive
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
-  secrets.py         redact, redacted: a client's secrets become *** in any server text it logs
-                     or quotes in an error
+  secrets.py         redact, redact_bytes: a client's secrets become *** in whatever it receives,
+                     before it is decoded, quoted, or logged
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
   types.py           Transport, Source(key, transport, fields, memberships),

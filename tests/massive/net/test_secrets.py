@@ -3,8 +3,8 @@
 The planted-secret test gives the REST, WebSocket, and flat-file clients distinctive secrets,
 turns on DEBUG for every logger (the library's, urllib3's, websockets', botocore's), drives
 each client through the failures most likely to quote a secret back (a 401, a 429, an error
-body and a non-JSON body that echo the key, an `auth_failed` reply and a status that echo it,
-and an S3 403), and then searches every captured record, formatted with its
+body, a non-JSON body, and a row that echo the key, an `auth_failed` reply, a status, and a data
+row that echo it, and S3 errors), and then searches every captured record, formatted with its
 traceback, and every error's text, `repr`, and traceback for the secrets. Neither may appear.
 The S3 access key id is not a secret: botocore's DEBUG log of the signed request names it.
 """
@@ -20,9 +20,17 @@ import pytest
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
-from deephaven_massive._massive.net.secrets import REDACTED, redact, redacted
+from deephaven_massive._massive.net.secrets import REDACTED, redact, redact_bytes
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath
+from deephaven_massive._massive.spec.types import (
+    Field,
+    Param,
+    ParamKind,
+    RestPath,
+    Source,
+    Transport,
+    WireType,
+)
 from deephaven_massive._massive.ws.client import WsClient, WsState
 from deephaven_massive._massive.ws.protocol import Status, StatusKind
 from tests._fakes.clock import FakeClock
@@ -47,7 +55,7 @@ _TRADES = RestPath(
 _FILE = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 
 
-# --- redact and redacted ----------------------------------------------------------------------
+# --- redact and redact_bytes -------------------------------------------------------------------
 
 
 def test_redact_replaces_every_occurrence_of_each_secret() -> None:
@@ -62,32 +70,16 @@ def test_redact_skips_an_absent_or_empty_secret() -> None:
 
 
 def test_redact_returns_text_without_a_secret_unchanged() -> None:
-    assert redact("HTTP 404 from GET /v3/x", PLANTED_KEY) == "HTTP 404 from GET /v3/x"
+    text = "HTTP 404 from GET /v3/x"
+    assert redact(text, PLANTED_KEY) is text
 
 
-def test_redacted_returns_a_clean_error_itself() -> None:
-    error = WireError("HTTP 500 from GET /v3/x", status=500)
-    assert redacted(error, PLANTED_KEY) is error
-
-
-@pytest.mark.parametrize("kind", [WireError, WireAuthError, WireEntitlementError])
-def test_redacted_copies_an_error_that_quotes_a_secret(kind: type[WireError]) -> None:
-    error = kind(
-        f"HTTP 401 from GET /v3/x: unknown key {PLANTED_KEY}",
-        status=401,
-        host="api.massive.com",
-        path="/v3/x",
-        request_id="r1",
-    )
-    clean = redacted(error, PLANTED_KEY)
-    assert type(clean) is kind
-    assert clean.message == f"HTTP 401 from GET /v3/x: unknown key {REDACTED}"
-    assert (clean.status, clean.host, clean.path, clean.request_id) == (
-        401,
-        "api.massive.com",
-        "/v3/x",
-        "r1",
-    )
+def test_redact_bytes_replaces_each_secret_and_leaves_clean_bytes_uncopied() -> None:
+    data = f'{{"message":"{PLANTED_KEY}","other":"{PLANTED_S3}"}}'.encode()
+    cleaned = redact_bytes(data, PLANTED_KEY, PLANTED_S3, None, "")
+    assert cleaned == b'{"message":"***","other":"***"}'
+    clean = b'{"status":"OK"}'
+    assert redact_bytes(clean, PLANTED_KEY) is clean
 
 
 # --- the planted-secret test --------------------------------------------------------------------
@@ -115,7 +107,6 @@ def every_logger_at_debug(caplog: pytest.LogCaptureFixture) -> pytest.LogCapture
     # The root's level reaches every logger without one of its own: urllib3's, websockets',
     # botocore's, and the library's.
     caplog.set_level(logging.DEBUG)
-
     return caplog
 
 
@@ -153,6 +144,15 @@ def test_the_rest_client_never_shows_the_api_key(
     _assert_no_secret(every_logger_at_debug, info.value)
 
 
+def test_a_page_whose_rows_echo_the_api_key_is_cleaned_before_it_is_decoded(
+    rest: RestClient, fake_rest: FakeRestServer, every_logger_at_debug: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", Reply(envelope([{"note": f"key {PLANTED_KEY}"}])))
+    page = rest.get(_TRADES, {"stockTicker": "AAPL"}, {})
+    assert page.rows == [{"note": f"key {REDACTED}"}]
+    _assert_no_secret(every_logger_at_debug)
+
+
 def test_the_websocket_client_never_shows_the_api_key(
     fake_ws_server: FakeMassiveServer, every_logger_at_debug: pytest.LogCaptureFixture
 ) -> None:
@@ -181,18 +181,23 @@ def test_the_websocket_client_never_shows_the_api_key(
     assert state is WsState.FAILED
 
 
-def test_a_status_echoing_the_api_key_reaches_the_library_cleaned(
+def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
     fake_ws_server: FakeMassiveServer, every_logger_at_debug: pytest.LogCaptureFixture
 ) -> None:
     received: list[Status] = []
-    opened: list[int] = []
+    rows: list[dict[str, object]] = []
+    trades = Source(
+        key="stocks/T",
+        transport=Transport.WS,
+        fields=(Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),),
+    )
     client = WsClient(
         fake_ws_server.url(),
         api_key=PLANTED_KEY,
-        sources=(),
-        on_open=opened.append,
+        sources=(trades,),
+        on_open=lambda _generation: None,
         on_status=lambda _generation, status: received.append(status),
-        on_data=lambda *_: None,
+        on_data=lambda _generation, _channel, data, _rejects, _drift: rows.extend(data),
         on_state=lambda *_: None,
         reconnect_backoff=1.0,
         max_reconnect_backoff=1.0,
@@ -201,14 +206,18 @@ def test_a_status_echoing_the_api_key_reaches_the_library_cleaned(
     client.start()
     try:
         fake_ws_server.wait_for(lambda server: len(server.connections) == 1)
-        frame = [{"ev": "status", "status": "error", "message": f"refused for {PLANTED_KEY}"}]
+        frame = [
+            {"ev": "status", "status": "error", "message": f"refused for {PLANTED_KEY}"},
+            {"ev": "T", "sym": PLANTED_KEY},
+        ]
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)
         fake_ws_server.send(json.dumps(frame))
-        fake_ws_server.wait_for(lambda _server: bool(received))
+        fake_ws_server.wait_for(lambda _server: bool(received) and bool(rows))
     finally:
         client.close()
         assert client.join(10.0)
     assert received == [Status(kind=StatusKind.REFUSED, message=f"refused for {REDACTED}")]
+    assert rows == [{"Ticker": REDACTED}]
     _assert_no_secret(every_logger_at_debug)
 
 

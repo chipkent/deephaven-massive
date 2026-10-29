@@ -31,7 +31,7 @@ import asyncio
 import contextlib
 import logging
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
@@ -43,7 +43,7 @@ from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.net.http import ssl_context
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
-from deephaven_massive._massive.net.secrets import redact
+from deephaven_massive._massive.net.secrets import redact, redact_bytes
 from deephaven_massive._massive.ws.backoff import Backoff
 from deephaven_massive._massive.ws.protocol import (
     FrameDecoder,
@@ -223,8 +223,8 @@ class WsClient:
             url: The endpoint, `wss://<host>/<path>` (or `ws://` against a local test server),
                 such as `"wss://socket.massive.com/stocks"`.
             api_key: The Massive API key. It is sent only in the authentication frame and
-                never logged; a server message that echoes it has it replaced with `***`
-                (`net.secrets`) before it is logged, raised, or passed to `on_status`.
+                never logged; a frame that echoes it has it replaced with `***`
+                (`net.secrets`) before it is decoded, so nothing built from it can quote it.
             sources: The WebSocket sources of the endpoint's cluster (keys `"<cluster>/<ev>"`),
                 against which every frame is decoded.
             on_open: Called with each new generation's number; see the class documentation.
@@ -582,13 +582,7 @@ class WsClient:
         if greeting != "connected":
             raise ValueError(f"expected the 'connected' status, got {greeting!r}")
         await websocket.send(auth_frame(self._api_key))
-        try:
-            reply, message = handshake_status(await websocket.recv())
-        except ValueError as error:
-            # The error quotes the reply, which may echo the key just sent; `from None` keeps
-            # the uncleaned text out of the traceback.
-            raise ValueError(redact(str(error), self._api_key)) from None
-        message = redact(message, self._api_key)
+        reply, message = handshake_status(self._clean(await websocket.recv()))
         if reply == "auth_success":
             return None
         if reply == "auth_failed":
@@ -599,9 +593,7 @@ class WsClient:
             )
         if reply == _NO_SLOT:
             return _NO_SLOT
-        raise ValueError(
-            redact(f"unexpected reply to the key: {reply!r} ({message!r})", self._api_key)
-        )
+        raise ValueError(f"unexpected reply to the key: {reply!r} ({message!r})")
 
     async def _run_generation(self, websocket: ClientConnection) -> _Ended:
         """Open a generation and decode its frames until the socket closes.
@@ -623,10 +615,10 @@ class WsClient:
         try:
             self._on_open(generation.number)
             async for frame in websocket:
-                for event in self._decoder.decode(frame):
+                for event in self._decoder.decode(self._clean(frame)):
                     if isinstance(event, Status):
                         no_slot = no_slot or event.kind is StatusKind.MAX_CONNECTIONS
-                        self._on_status(generation.number, self._cleaned(event))
+                        self._on_status(generation.number, event)
                     else:
                         self._on_data(
                             generation.number, event.channel, event.rows, event.rejects, event.drift
@@ -639,18 +631,22 @@ class WsClient:
         logger.info("the connection to %s closed (code %s)", self._url, websocket.close_code)
         return _Ended(uptime=self._clock.monotonic() - opened_at, waiting_slot=no_slot)
 
-    def _cleaned(self, status: Status) -> Status:
-        """Return a status with the API key replaced in its message, should the server echo it.
+    def _clean(self, frame: str | bytes) -> str | bytes:
+        """Return a received frame with the API key replaced, should the server echo it.
+
+        Every frame passes through here before it is decoded, so no status, row, reject, error,
+        or log line built from it can quote the key.
 
         Args:
-            status: The decoded status.
+            frame: The frame as received: text, or bytes for a binary frame.
 
         Returns:
-            `status` itself when its message does not hold the key, otherwise a copy whose
-            message has `***` in its place.
+            The frame itself when it does not hold the key, otherwise a copy with `***` in
+            its place.
         """
-        message = redact(status.message, self._api_key)
-        return status if message == status.message else replace(status, message=message)
+        if isinstance(frame, bytes):
+            return redact_bytes(frame, self._api_key)
+        return redact(frame, self._api_key)
 
     @staticmethod
     async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str | None]) -> None:
