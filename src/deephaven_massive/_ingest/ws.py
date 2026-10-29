@@ -247,7 +247,8 @@ class Connection:
     `m.connections()` of each session in `users`, under the group's lock and only while it is
     that session's current connection for the key, so a connection that left the registry
     never overwrites the row of the one that replaced it. A session stays in `users`, also with
-    no lease left, until it closes, so it sees the connection's last state.
+    no lease left, until it closes, and through the close of a connection no other session
+    leases, so it sees the connection's last state, `CLOSED` included.
     """
 
     def __init__(
@@ -1509,7 +1510,9 @@ class ConnectionGroup:
         """Record the verdict and move a connection's streams to the delayed host's connection.
 
         Runs on the thread `reroute` starts. Every session on the connection records the
-        verdict. The successor is the delayed host's connection, created here unless one
+        verdict, also one that leased the connection while the verdict was being recorded or
+        the successor built (both happen outside the lock): it is recorded once the leases
+        have moved. The successor is the delayed host's connection, created here unless one
         exists; under the lock, the old connection leaves the registry, every lease moves with
         its session, each session shows the successor's row, and the successor awaits the
         moved streams, so a release or watchlist change that reaches it before `adopt` waits
@@ -1522,16 +1525,8 @@ class ConnectionGroup:
         """
         asset_class = connection.asset_class
         with self.lock:
-            users = [
-                owner
-                for owner in connection.users
-                if not owner.closed and owner.core() is not None  # a freed one is closing
-            ]
-        for owner in users:
-            try:
-                owner.record_verdict(asset_class, ChannelFamily.TICK, decision)
-            except Exception:
-                logger.exception("could not record the real-time verdict for %s", connection.url)
+            users = self._open_users(connection)
+        self._record_verdict(connection, users, decision)
         url = f"wss://{decision.host}{connection.path}"
         candidate = Connection(
             self,
@@ -1544,6 +1539,7 @@ class ConnectionGroup:
         )
         successor: Connection | None = None
         moved: list[int] = []
+        late: list[WsConnections] = []
         with self.lock:
             # Not if the connection is closing or failed, or left the registry meanwhile: its
             # last session closed, or it failed (its streams fail with it).
@@ -1573,6 +1569,8 @@ class ConnectionGroup:
                         successor.take(owner)
                         connection.give(owner)
                         moved.append(stream_id)
+                late = [owner for owner in self._open_users(connection) if owner not in users]
+        self._record_verdict(connection, late, decision)
         if successor is not candidate:
             candidate.close()
         if successor is None:  # the connection closed or failed meanwhile
@@ -1586,6 +1584,39 @@ class ConnectionGroup:
                 for stream_id in moved:
                     successor.cap_pending.pop(stream_id, None)
             successor.post(successor.check_idle)
+
+    @staticmethod
+    def _open_users(connection: Connection) -> list[WsConnections]:
+        """Return the sessions on a connection that are neither closed nor freed; lock held.
+
+        Args:
+            connection: The connection.
+
+        Returns:
+            Those sessions.
+        """
+        return [
+            owner
+            for owner in connection.users
+            if not owner.closed and owner.core() is not None  # a freed one is closing
+        ]
+
+    @staticmethod
+    def _record_verdict(
+        connection: Connection, owners: list[WsConnections], decision: HostDecision
+    ) -> None:
+        """Record the verdict with each of some sessions' REST transports; no lock held.
+
+        Args:
+            connection: The connection the verdict arrived on.
+            owners: The sessions.
+            decision: The delayed host's decision.
+        """
+        for owner in owners:
+            try:
+                owner.record_verdict(connection.asset_class, ChannelFamily.TICK, decision)
+            except Exception:
+                logger.exception("could not record the real-time verdict for %s", connection.url)
 
 
 class WsConnections:
@@ -2132,8 +2163,10 @@ class WsConnections:
 
         Runs as a session closer: on the thread that closes the session, or on the reaper for a
         session freed unclosed (which has no stream left). Under the group's lock, every lease
-        of the session is returned, and the session leaves every connection's users; a
-        connection that no other session leases is taken out of the registry. Then, outside
+        of the session is returned, and the session leaves the users of every connection
+        another session still leases; a connection that no other session leases is taken out
+        of the registry, and the session stays its user, so its final `CLOSED` row reaches the
+        session's diagnostics (written before they are released). Then, outside
         the lock, the session's streams stop being routed at once (the session has already
         failed their tables) and their topics are released on the connections that stay; the
         unused connections are closed (which interrupts a backoff wait at once) and each is
@@ -2168,7 +2201,8 @@ class WsConnections:
 
         Returns:
             The session's streams with the connection each leased, and the connections that no
-            other session leases, now out of the registry and to be closed.
+            other session leases, now out of the registry and to be closed. The session leaves
+            the users of every other connection, and stays a user of those it closes.
         """
         group = self.group
         mine = [(s, cast("Connection", self._forget(s))) for s in sorted(self._mine)]
@@ -2178,10 +2212,13 @@ class WsConnections:
         for connection in {*group.connections.values(), *(c for _, c in mine)}:
             if self not in connection.users:
                 continue
-            del connection.users[self]
-            if not connection.leases:  # no other session leases it
-                closing.append(connection)
-                if group.connections.get(connection.url) is connection:
-                    del group.connections[connection.url]
-                connection.retired = True
+            if connection.leases:  # another session leases it: it stays theirs
+                del connection.users[self]
+                continue
+            # No session leases it: it closes. The session stays one of its users, so its last
+            # row, `CLOSED`, still reaches the session's `m.connections()`.
+            closing.append(connection)
+            if group.connections.get(connection.url) is connection:
+                del group.connections[connection.url]
+            connection.retired = True
         return mine, closing

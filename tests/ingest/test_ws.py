@@ -1164,6 +1164,52 @@ def test_retiring_a_replaced_connection_keeps_its_replacement(ws_session: WsSess
     ws_session.session.release(result)
 
 
+def test_a_session_that_joins_during_a_move_records_the_verdict(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    # Another session leases the connection while the verdict is being recorded: its lease
+    # moves with the others, so it records the verdict too, and its next stream of the class
+    # goes to the delayed host instead of being refused again.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    other = join(custom_session)
+    mine = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    old = custom_session.connection("wss://socket.test/futures")
+    record = custom_session.connections.record_verdict
+    joined: list[Table] = []
+
+    def join_while_recording(
+        asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
+    ) -> None:
+        joined.append(custom_session.query(FUTURES, ["NQZ5"], other).blink())
+        record(asset_class, family, decision)
+
+    custom_session.connections.record_verdict = join_while_recording
+    custom_session.connections.group._move(old, DELAYED)
+    assert len(custom_session.verdicts) == 2  # the joining session's too
+    with custom_session.connections.group.lock:
+        assert {c.url for c in custom_session.connections.group.streams.values()} == {
+            "wss://delayed.test/futures"
+        }
+    custom_session.session.release(mine)
+    other.close()
+    joined.clear()
+
+
+def test_a_closed_sessions_view_shows_its_connection_closed(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # The session's close closes the connection only it used; the connection's last row,
+    # `CLOSED`, still reaches the session's diagnostics before they are released.
+    view = ws_session.session.connections()
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    ws_session.close()
+    (row,) = [r for r in dh_to_pylist(view) if r["Transport"] == "WS"]
+    assert row["State"] == "CLOSED"
+    del result, view
+
+
 def test_a_verdict_is_taken_once(make_ws_session: Callable[..., WsSession]) -> None:
     custom_session = make_ws_session(decide=unknown_futures)
     custom_session.connections.group.reconnect_backoff = 0.01
