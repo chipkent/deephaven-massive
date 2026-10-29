@@ -110,23 +110,28 @@ class Redactor:
     def received(self, data: str) -> str: ...
 
     @overload
-    def received(self, data: str | bytes) -> str | bytes: ...
+    def received(self, data: bytearray) -> bytes | bytearray: ...
 
-    def received(self, data: str | bytes) -> str | bytes:
+    @overload
+    def received(self, data: str | bytes | bytearray) -> str | bytes | bytearray: ...
+
+    def received(self, data: str | bytes | bytearray) -> str | bytes | bytearray:
         """Return a received body or frame with each secret replaced, however JSON spells it.
 
         Args:
-            data: The body or frame as received: `bytes`, or `str` for a WebSocket text frame.
-                It is usually JSON, but need not be: a body cut short or a proxy's HTML page is
-                cleaned the same way.
+            data: The body or frame as received: `bytes` or a `bytearray` (a streamed REST
+                body, never copied to `bytes` here: it can be hundreds of megabytes), or `str`
+                for a WebSocket text frame. It is usually JSON, but need not be: a body cut
+                short or a proxy's HTML page is cleaned the same way.
 
         Returns:
             `data` with every spelling of each secret (as it is, with any of its characters
             spelled by a JSON escape, or both) replaced by `REDACTED`; `data` itself, uncopied,
-            when nothing was replaced.
+            when nothing was replaced. A cleaned `bytearray` comes back as `bytes` or a
+            `bytearray`; both decode the same.
         """
-        if isinstance(data, bytes):
-            cleaned = data
+        if isinstance(data, (bytes, bytearray)):
+            cleaned: bytes | bytearray = data
             for needle in self._needles:  # the secret as it is, first: see `_spelled`
                 raw = needle.encode()
                 if raw in cleaned:

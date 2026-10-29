@@ -36,7 +36,8 @@ everything else the library decides belongs here:
   and leaves the registry. A fatal failure (a rejected key, a handshake error retrying cannot
   fix) fails every stream on it, a stream opening at that moment included. `m.close()` removes
   the session's streams from their connections, closes every connection no other session
-  leases, and waits a bounded time for its threads. While a connection waits for a slot
+  leases, and waits a bounded time for its threads; a connection the real-time verdict is
+  moving closes itself once it has handed its streams over. While a connection waits for a slot
   (`WAITING_SLOT`), each of its streams says so in its `Error`.
 
 **Threads and locks.** Each connection's subscription state is confined to its client's loop
@@ -678,33 +679,36 @@ class Connection:
         `successor`). A stream whose lease is gone (its blink table shut down, or its session
         closed, after or before the move) stays behind: it stops being routed, `successor`
         stops awaiting it, and its topics are never subscribed there, so a closed session's
-        stream cannot keep the successor open.
+        stream cannot keep the successor open. The connection closes even if the hand-over
+        raises, since a connection out of the registry has no other close.
 
         Args:
             successor: The connection that takes over.
         """
-        streams = list(self._streams.values())
-        self._streams.clear()
-        self._successor = successor
-        with self._lock:
-            leased = self._group.streams
-            moving = [s for s in streams if s.stream_id in leased]
-            gone = {s.stream_id for s in streams} - {s.stream_id for s in moving}
+        try:
+            streams = list(self._streams.values())
+            self._streams.clear()
+            self._successor = successor
+            with self._lock:
+                leased = self._group.streams
+                moving = [s for s in streams if s.stream_id in leased]
+                gone = {s.stream_id for s in streams} - {s.stream_id for s in moving}
+                for stream_id in gone:
+                    successor.awaiting.discard(stream_id)
+                    successor.cap_pending.pop(stream_id, None)
+                failure = successor.failure
+                if failure is None:
+                    for stream in moving:
+                        successor.flusher.routes.add(stream.channel, stream.sink)
             for stream_id in gone:
-                successor.awaiting.discard(stream_id)
-                successor.cap_pending.pop(stream_id, None)
-            failure = successor.failure
-            if failure is None:
-                for stream in moving:
-                    successor.flusher.routes.add(stream.channel, stream.sink)
-        for stream_id in gone:
-            self.flusher.routes.remove(stream_id)
-        if failure is not None:
-            self.flusher.fail([s.stream_id for s in moving], failure)
-        else:
-            successor.post(successor.adopt, moving)
-        self.subscriptions.ended()
-        self.close(final_flush=True)
+                self.flusher.routes.remove(stream_id)
+            if failure is not None:
+                self.flusher.fail([s.stream_id for s in moving], failure)
+            else:
+                successor.post(successor.adopt, moving)
+            self.subscriptions.ended()
+        finally:  # the connection ends even if the hand-over raised: nothing else closes it
+            self.close(final_flush=True)
 
     def adopt(self, streams: list[_Stream]) -> None:
         """Take over the streams of a connection the verdict moved, and the calls they missed.
@@ -2322,6 +2326,9 @@ class WsConnections:
         unused connections are closed (which interrupts a backoff wait at once) and each is
         joined for at most `JOIN_TIMEOUT` seconds, with a WARNING for one that has not ended.
         A connection whose loop has ended keeps no stream (`Connection._on_state`).
+        A connection the server's real-time verdict is moving, between the move and its
+        hand-over, is neither closed nor joined here: it is out of the registry and its leases
+        are on its successor, and its hand-over closes it (`Connection.hand_over`).
         Last, the session leaves the group.
 
         A closing thread that holds the update graph's lock (a console command) joins nothing,

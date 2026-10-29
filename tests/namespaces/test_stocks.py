@@ -1066,7 +1066,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
             "tickers.any_of": "AAPL",
             "timeframe": "quarterly",
             "period_end.gte": "2025-01-01",
-            "limit": "50000",
+            "limit": "10000",
         },
         ("PeriodEnd", "2025-06-28"),
     ),
@@ -1074,14 +1074,14 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         "financials.income_statements",
         {"timeframe": dm.Timeframe.TRAILING_TWELVE_MONTHS, "end": "2025-06-30"},
         "/stocks/financials/v1/income-statements",
-        {"timeframe": "trailing_twelve_months", "period_end.lte": "2025-06-30", "limit": "50000"},
+        {"timeframe": "trailing_twelve_months", "period_end.lte": "2025-06-30", "limit": "10000"},
         ("PeriodEnd", "2025-06-28"),
     ),
     (
         "financials.cash_flow_statements",
         {"symbols": ["MSFT", "AAPL"]},
         "/stocks/financials/v1/cash-flow-statements",
-        {"tickers.any_of": "AAPL,MSFT", "limit": "50000"},
+        {"tickers.any_of": "AAPL,MSFT", "limit": "10000"},
         ("PeriodEnd", "2025-06-28"),
     ),
     (
@@ -1123,7 +1123,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         "filings.risk_factors",
         {"symbols": "MGLD"},
         "/stocks/filings/vX/risk-factors",
-        {"ticker.any_of": "MGLD", "limit": "50000"},
+        {"ticker.any_of": "MGLD", "limit": "5000"},
         ("Symbol", "MGLD"),
     ),
     (
@@ -1843,7 +1843,8 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
     fake_rest.reply(template, Reply(body=body))
     table = cast("Query", factory(rest_session, name)()).poll(60, mode=mode)
     rows = _rows_when(table, len(body["results"]))
-    assert not table.j_table.isFailed()
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
     assert any(row[column] is None for row in rows for column in NULLABLE_KEYS[name])
     rest_session.release(table)
 
@@ -1935,7 +1936,8 @@ def test_ownership_filing_lines_that_differ_in_one_column_poll_as_two_rows(
     first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
     other = first | {wire_key: _other(first.get(wire_key), field.wire_type)}
     table, rows = _poll_lines(rest_session, fake_rest, name=name, lines=[first, other])
-    assert not table.j_table.isFailed()
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
     assert len({row[field.column] for row in rows}) == 2
     rest_session.release(table)
 
@@ -1960,7 +1962,8 @@ def test_an_ownership_filing_line_with_an_empty_optional_key_still_polls(
     template = cast("str", spec_of(name).fetch_path)
     first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
     table, _ = _poll_lines(rest_session, fake_rest, name=name, lines=[first | {wire_key: None}])
-    assert not table.j_table.isFailed()
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
     rest_session.release(table)
 
 

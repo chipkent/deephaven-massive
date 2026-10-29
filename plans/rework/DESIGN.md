@@ -1403,6 +1403,13 @@ Notation:
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
   when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
   stops once `limit` rows have arrived.
+- `DatasetSpec.page_size` is the endpoint's documented maximum `limit`, lowered where the rows
+  are long so one page decodes to some tens of MB at most: Benzinga news 1,000 (each article
+  carries its whole HTML body, so 50,000 could reach hundreds of MB), Benzinga analyst
+  insights and filing risk factors 5,000 (each row quotes prose), and the three financial
+  statements 10,000 (some fifty line items a row, over 60 MB at 50,000). Every other page
+  size is the documented maximum: 50,000 short rows decode to some 10 to 40 MB, and the
+  text-heavy filings endpoints (10-K sections, 8-K texts) document at most 100 rows.
 - The REST column names the path template as the OpenAPI spec writes it (the spec's own
   placeholder names, such as `{stocksTicker}`, are abbreviated here to `{t}`, `{o}`, `{u}`).
   Every path is a generated REST source (`_massive.source(Transport.REST, template)`,
@@ -4056,6 +4063,23 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   client retries itself), a 10 s connect and 30 s read timeout, `maxsize` at least
   `max_concurrency` so fan-out never discards connections, and `Accept-Encoding: gzip`
   (urllib3 decodes it). `User-Agent: deephaven-massive/<version>` (`net.USER_AGENT`).
+  The body is streamed (`preload_content=False`) into one buffer in 1 MiB decoded reads. A
+  body that decodes to more than `MAX_BODY_BYTES` (256 MiB, a module constant, not a setting)
+  raises `WireError` with the response's status, never retried, so a gzip bomb from a broken
+  or hostile server or proxy cannot exhaust memory. A body that does not decompress is
+  treated the same way: both are faults of the reply's content, which the same request would
+  bring again. A body that breaks off or times out is a transient failure, retried like a
+  reset. The governor still hears of every attempt whose status arrived: a 429 is reported
+  as a refusal (the bucket pauses) whether its body was read, was too large, would not
+  decompress, or broke off, and any other unreadable reply as answered. A body read in full
+  returns its connection to the pool; one abandoned part way (the cap, a reset, a decode
+  error) closes it first, so its unread rest is never taken for the next reply. The body read
+  in full passes through `Redactor.received` once, as the same `bytearray` (never copied to
+  `bytes`), before the 429, error, and page branches read it. The cap sits far above the largest page the datasets ask for (section 8):
+  pages of short rows (trades, quotes, bars, ratings) decode to some 10 to 40 MB at 50,000
+  rows, and pages of long rows stay at tens of MB because their page size is lowered. The cap
+  bounds a decompression bomb, not every memory risk: a body under it still parses into
+  Python objects several times its size.
 - **Authentication.** `Authorization: Bearer <key>` on every request. The key never appears in
   a URL: an `apiKey` parameter in a `next_url` is removed before the request. A key that is
   empty or holds anything but visible ASCII (a trailing newline from a key file) raises
