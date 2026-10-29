@@ -1,7 +1,8 @@
 name: CI
 
-# A pull request runs only the jobs its changes can affect; a push to main runs every job. The
-# lint job decides which, from the pull request's files, and the ci-ok job, the single required
+# A pull request into main runs only the jobs its changes can affect. Every other run, a push to
+# main, the weekly run, and a pull request into another branch, runs every job. The lint job
+# decides, from the files the pull request changes, and the ci-ok job, the single required
 # check, passes only when every job the change selected passed and every other job was skipped.
 # Requiring the jobs themselves would not work: a skipped matrix job reports no status under
 # its entries' names, so a pull request that skips the tests would wait forever.
@@ -10,10 +11,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Mondays at 07:23 UTC. With no lockfile, every run installs the newest releases, so a
+    # release that breaks the library is caught within a week even when nothing reaches main
+    # and the open pull requests skip the tests.
+    - cron: "23 7 * * 1"
 
 concurrency:
-  # One run per pull request (and one for main): a new push cancels the run it replaces.
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # One run per pull request, and one per event kind on main: a new push cancels the run it
+  # replaces, and the weekly run never cancels a push's run or is cancelled by one.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -28,34 +35,33 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      # The repository is private, so listing a pull request's files needs this scope.
-      pull-requests: read
     outputs:
       lint: ${{ steps.decide.outputs.lint }}
       test: ${{ steps.decide.outputs.test }}
       build: ${{ steps.decide.outputs.build }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # A pull request's checkout is GitHub's merge of it into its base; the merge's first
+          # parent, the base, must be present for the diff below.
+          fetch-depth: 2
       - name: List the files the pull request changes
         if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FILES_URL: repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files
-        # One line per changed file: its path, a tab, and its old path when it was renamed, so a
-        # file moved out of src/ still counts as a change to src/.
-        run: >-
-          gh api --paginate "$FILES_URL?per_page=100"
-          --jq '.[] | .filename + "\t" + (.previous_filename // "")'
-          > "$RUNNER_TEMP/changed-files.tsv"
+        # The diff from the base to the merge is exactly what merging would change. Without
+        # rename detection, a moved file counts under both its old and its new path. Git quotes
+        # a path holding a tab, a newline, or a non-ASCII character, so such a path matches no
+        # rule below and runs everything.
+        run: git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed-files.txt"
       - name: Decide which jobs the change affects
         id: decide
         env:
           EVENT: ${{ github.event_name }}
-          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
-        # Each job's pattern matches every path the job reads, so a change anywhere else cannot
-        # change its result. A test that starts reading a file outside its pattern must add the
-        # file there.
+          BASE_REF: ${{ github.base_ref }}
+        # Each job's pattern lists the paths known to affect it, and a second list names the
+        # files that no job reads. A changed path on neither list runs everything, so a new
+        # input, such as a tool's configuration file at the root, fails closed until a rule
+        # covers it.
         run: |
           set -euo pipefail
           everything() {
@@ -66,37 +72,44 @@ jobs:
             everything "a $EVENT event runs every job"
             exit 0
           fi
-          listed=$(wc -l < "$RUNNER_TEMP/changed-files.tsv")
-          if [ "$listed" -ne "$CHANGED_FILES" ]; then
-            # GitHub lists at most 3,000 of a pull request's files, and a push can land between
-            # the event and the listing.
-            everything "GitHub listed $listed of the $CHANGED_FILES changed files"
+          if [ "$BASE_REF" != main ]; then
+            # A pull request stacked on another branch is checked in full, since nothing
+            # guarantees which jobs ran for the branch beneath it.
+            everything "the pull request merges into '$BASE_REF', not main"
             exit 0
           fi
-          paths=$(tr '\t' '\n' < "$RUNNER_TEMP/changed-files.tsv" | sed '/^$/d')
-          if grep -qE '^\.github/workflows/' <<< "$paths"; then
+          paths=$(cat "$RUNNER_TEMP/changed-files.txt")
+          # Ruff and mypy check src/, tests/, and scripts/, configured by pyproject.toml.
+          lint='^(src|tests|scripts)/|^pyproject\.toml$'
+          # The suite also reads the vendored snapshot under vendor/ and the committed column
+          # reference under docs/datasets/, whose line endings .gitattributes fixes, and it runs
+          # scripts/spec-drift-issue.sh.
+          test='^(src|tests|scripts|vendor)/|^docs/datasets/|^(pyproject\.toml|\.gitattributes)$'
+          # The sdist carries src/, tests/, and docs/datasets/; the package metadata takes
+          # README.md and LICENSE; hatchling leaves out what .gitignore lists; and the wheel
+          # check compares the installed wheel with docs/datasets/.
+          build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore)$'
+          # Files no job reads: the plans, the developer and live-test guides, the agent
+          # instructions and skills, the pull request and issue templates, and the settings of
+          # Dependabot and of the local git hooks, which CI does not run.
+          unread='^(plans/|docs/dev/|docs/live-tests\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.pre-commit-config\.yaml$)'
+          if grep -qE '^\.github/(workflows|actions)/' <<< "$paths"; then
             everything "a workflow changed, and every job must exercise a workflow change"
+            exit 0
+          fi
+          uncovered=$(grep -vE "$lint|$test|$build|$unread" <<< "$paths" || true)
+          if [ -n "$uncovered" ]; then
+            everything "no rule covers $(head -n 3 <<< "$uncovered" | paste -sd ' ' -)"
             exit 0
           fi
           decide() {
             if grep -qE "$2" <<< "$paths"; then echo "$1=true"; else echo "$1=false"; fi
           }
           {
-            # Ruff and mypy check src/, tests/, and scripts/, configured by pyproject.toml.
-            decide lint '^(src|tests|scripts)/|^pyproject\.toml$'
-            # The suite also reads the vendored snapshot under vendor/ and the committed column
-            # reference under docs/datasets/, whose line endings .gitattributes fixes, and it
-            # runs scripts/spec-drift-issue.sh.
-            decide test '^(src|tests|scripts|vendor)/|^docs/datasets/|^(pyproject\.toml|\.gitattributes)$'
-            # The sdist carries src/, tests/, and docs/datasets/; the package metadata takes
-            # README.md and LICENSE; hatchling leaves out what .gitignore lists; and the wheel
-            # check compares the installed wheel with docs/datasets/.
-            decide build '^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore)$'
+            decide lint "$lint"
+            decide test "$test"
+            decide build "$build"
           } | tee -a "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.decide.outputs.lint == 'true'
-        with:
-          persist-credentials: false
       - name: Install uv
         if: steps.decide.outputs.lint == 'true'
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
@@ -308,15 +321,26 @@ jobs:
           TEST: ${{ needs.test.result }}
           TEST_LOWEST: ${{ needs.test-lowest.result }}
           BUILD: ${{ needs.build.result }}
+          RUN_LINT: ${{ needs.lint.outputs.lint }}
           RUN_TEST: ${{ needs.lint.outputs.test }}
           RUN_BUILD: ${{ needs.lint.outputs.build }}
         # The lint job runs on every run, since it makes the decision, so it must pass; it
         # skips its own checks when the change cannot affect them. The other jobs wait for it,
-        # so they never start after a lint failure. A matrix job's result is success only when
-        # every entry passed, the free-threaded 3.14t entry included.
+        # so they never start after a lint failure. Each decision must be exactly true or
+        # false; anything else fails. A matrix job's result is success only when every entry
+        # passed, the free-threaded 3.14t entry included.
         run: |
           set -euo pipefail
           failed=0
+          decision() {
+            case "$2" in
+              true | false) echo "$1 selected: $2" ;;
+              *)
+                echo "::error::$1 selected: '$2', expected true or false"
+                failed=1
+                ;;
+            esac
+          }
           expect() {
             if [ "$3" = "$2" ]; then
               echo "$1: $3"
@@ -326,6 +350,9 @@ jobs:
             fi
           }
           wanted() { if [ "$1" = true ]; then echo success; else echo skipped; fi; }
+          decision lint "$RUN_LINT"
+          decision test "$RUN_TEST"
+          decision build "$RUN_BUILD"
           expect lint success "$LINT"
           expect test "$(wanted "$RUN_TEST")" "$TEST"
           expect test-lowest "$(wanted "$RUN_TEST")" "$TEST_LOWEST"

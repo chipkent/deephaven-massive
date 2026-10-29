@@ -3885,12 +3885,15 @@ refresh gate and the catalog gates. What each change does:
 
 ## 20. Quality gates
 
-Every change must pass `scripts/check.sh full`, and every CI job including the free-threaded
-3.14t job. A pull request runs only the CI jobs its changed files can affect:
+Every change must pass `scripts/check.sh full`, and every CI job the change selects, the
+free-threaded 3.14t job included whenever the tests run; `ci-ok` is the required check that
+enforces it. A pull request into `main` runs only the CI jobs its changed files can affect, read
+from the diff between `main` and GitHub's merge of the pull request (a renamed file counts under
+both paths):
 
 - **Always:** the lint job, which lists the changed files and decides, and `ci-ok`, the single
-  required check. `ci-ok` passes only when the lint job passed, every job the change selected
-  passed, and every other job was skipped.
+  required check. `ci-ok` passes only when the lint job passed, each decision is exactly true or
+  false, every job the change selected passed, and every other job was skipped.
 - **Lint** (ruff, mypy, pyright): a file under `src/`, `tests/`, or `scripts/`, or
   `pyproject.toml`.
 - **Tests** (the whole matrix, 3.14t and the lowest-direct job included): a file under `src/`,
@@ -3898,11 +3901,17 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
 - **Build** (the sdist, the wheel, and the installed-wheel check): a file under `src/`,
   `tests/`, or `docs/datasets/`, or `scripts/check_wheel.py`, `pyproject.toml`, `README.md`,
   `LICENSE`, `.gitattributes`, or `.gitignore`.
-- **Everything:** a change to a workflow, a pull request with more files than GitHub lists,
-  and every push to `main`.
+- **Nothing beyond the decision:** files no job reads: `plans/`, `docs/dev/`,
+  `docs/live-tests.md`, `AGENTS.md`, `.claude/`, the pull request and issue templates,
+  `.github/dependabot.yml`, and `.pre-commit-config.yaml`.
+- **Everything:** a change under `.github/workflows/` or `.github/actions/`; any changed path
+  that matches none of the lists above, so a new input (a tool's configuration file at the
+  root, a new directory, a name git must quote) fails closed until a rule covers it; a pull
+  request into a branch other than `main`; every push to `main`; and a weekly scheduled run, so
+  a dependency release that breaks the library is caught within a week even when nothing
+  reaches `main`.
 
-A change to documents alone (plans, the rest of `docs/`, `AGENTS.md`, `.claude/`) runs only the
-decision and `ci-ok`. The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
+The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
 
 - **Coverage:** 100% statement and branch coverage. `pragma: no cover` needs a written reason
   and owner approval.
