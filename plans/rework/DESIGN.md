@@ -4134,7 +4134,8 @@ The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact 
 - **Mypy:** `strict` plus `warn_unreachable` and the extra error codes; the only override is
   `ignore_missing_imports` for `pyarrow.*`. Pyright runs as a non-gating second checker.
 - **Pytest 9:** `strict = true`, `filterwarnings = ["error"]`, `--import-mode=importlib`,
-  deadlock detection through `faulthandler_timeout` and `pytest-timeout`.
+  deadlock detection through `faulthandler_timeout` and `pytest-timeout`, and parallel
+  workers (pytest-xdist) in the full check and CI.
 - **Layout:** `tests/test_layout.py` passes: the mirror rule and naming of
   [section 4.2](#42-test-layout), the library's layers of [section 4.3](#43-layers), and the
   `_massive` boundary and layers of [section 19](#19-wire-clients-and-the-spec-snapshot).
@@ -4217,8 +4218,12 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `addopts = ["-ra", "--import-mode=importlib"]`, `pythonpath = ["."]` (test code imports
   helpers as `tests._fakes…`, so `tests/massive/` never shadows a top-level `massive`),
   `faulthandler_timeout = 120` with
-  `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Coverage is not in
-  `addopts`, so single-test runs and debuggers work.
+  `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Neither coverage
+  nor `-n` is in `addopts`, so single-test runs and debuggers work in one process.
+- **Parallel workers.** `scripts/check.sh full` runs pytest with `-n auto --maxprocesses=4`
+  and CI with `--numprocesses=auto` (pytest-xdist): each worker is its own process with its
+  own embedded JVM, and the controller that hands out the tests starts none. pytest-cov
+  combines the workers' coverage, so the 100% gate is unchanged.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
   "@(typing\\.)?overload"]`, each with a reason.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in
@@ -4227,8 +4232,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **One entry point.** `scripts/check.sh [fast|full] [--no-fix]`. Both tiers first run
   `uv sync --upgrade`, so they use the newest versions; offline, a local run warns and keeps
   what is installed, and CI fails. The fast tier then runs ruff fix, ruff format, and mypy; the
-  full tier adds pytest with coverage. Local hooks and CI call the same script; CI passes
-  `--output-format github` to ruff.
+  full tier adds pytest with coverage, on up to four worker processes. Local hooks and CI call
+  the same script; CI passes `--output-format github` to ruff.
 - **Agent hooks** (committed `.claude/settings.json`). After an agent edits a `.py` file, ruff
   fixes and formats it and reports remaining diagnostics to the agent. Before an agent ends its
   turn, `scripts/check.sh fast --no-fix` runs. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip`

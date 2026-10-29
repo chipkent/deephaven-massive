@@ -191,8 +191,12 @@ jobs:
         run: >-
           uv sync --python ${{ matrix.python-version }}
           ${{ matrix.python-version == '3.14' && '--extra orjson' || '' }}
-      - name: Pytest with 100% statement and branch coverage
-        run: uv run pytest --cov --cov-report=xml
+      - name: Pytest with 100% statement and branch coverage, on parallel workers
+        # One pytest-xdist worker per CPU, each with its own embedded JVM; pytest-cov combines
+        # their coverage. The CPU count is printed because it sets the number of workers.
+        run: |
+          echo "CPUs: $(nproc)"
+          uv run pytest --numprocesses=auto --cov --cov-report=xml
       - name: Upload coverage XML
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -244,10 +248,13 @@ jobs:
       - name: Show the resolved floor versions
         run: >-
           uv pip list | grep -iE
-          '^(deephaven-core|deephaven-server|pyarrow|numpy|pandas|boto3|botocore|urllib3|certifi|websockets|orjson|pytest) '
-      - name: Pytest
+          '^(deephaven-core|deephaven-server|pyarrow|numpy|pandas|boto3|botocore|urllib3|certifi|websockets|orjson|pytest|pytest-xdist) '
+      - name: Pytest, on parallel workers
         # Coverage is the newest-versions jobs' gate; this job checks only that the floors work.
-        run: uv run --no-sync pytest
+        # One pytest-xdist worker per CPU, as in the other test jobs.
+        run: |
+          echo "CPUs: $(nproc)"
+          uv run --no-sync pytest --numprocesses=auto
       - name: Upload JVM crash logs
         # tests/conftest.py points the JVM's crash log (-XX:ErrorFile) at the repository root.
         # A job cancelled by its timeout can be a hung or crashed JVM too.

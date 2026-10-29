@@ -88,14 +88,21 @@ _JVM_ARGS = [
 def pytest_configure(config: pytest.Config) -> None:
     """Start the embedded Deephaven server once per process, before collection.
 
-    Then check that the update graph runs the 25 ms cycle the tests are written for.
+    Then check that the update graph runs the 25 ms cycle the tests are written for. Under
+    pytest-xdist (`-n`), only the worker processes start a server.
 
     Args:
-        config: The pytest configuration (unused; required by the hook signature).
+        config: The pytest configuration, read to tell an xdist controller from a worker.
 
     Raises:
         pytest.UsageError: If the JVM did not apply the cycle property.
     """
+    # The xdist controller only hands tests to its workers and reports their results; it never
+    # imports a test module or runs a test. Each worker is its own process that runs this hook
+    # and starts its own JVM, so a JVM in the controller would cost only startup time and
+    # memory. Workers carry `workerinput`; the controller has `numprocesses` without it.
+    if getattr(config.option, "numprocesses", None) and not hasattr(config, "workerinput"):
+        return
     # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
     Server(port=0, jvm_args=_JVM_ARGS).start()
     atexit.register(_final_jvm_exit)

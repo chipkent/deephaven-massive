@@ -12,7 +12,7 @@ Run everything from the repository root, through `uv run`. The tests need JDK 17
 ```bash
 uv sync --upgrade                        # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
-./scripts/check.sh                       # full gate: ruff, format, mypy, pytest, 100% coverage
+./scripts/check.sh                       # full gate: ruff, format, mypy, pytest (4 workers), 100% coverage
 ./scripts/check.sh fast                  # ruff (fixing what it can) and mypy only
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
 PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded
