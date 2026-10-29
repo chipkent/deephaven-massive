@@ -67,7 +67,7 @@ import time
 import weakref
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
@@ -93,6 +93,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     describe_symbols,
 )
+from deephaven_massive._tables.liveness import holds_update_graph_lock
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import _All
@@ -300,6 +301,8 @@ class Connection:
         self.awaiting: set[int] = set()
         self.cap_admitted: frozenset[str] = frozenset()
         self.cap_pending: dict[int, frozenset[str]] = {}
+        # The row last written for each family, for `show_closed`.
+        self._rows: dict[ChannelFamily, ConnectionRow] = {}
         # Start and close bookkeeping, under its own leaf lock.
         self._start_lock = threading.Lock()
         self._started = False
@@ -447,6 +450,43 @@ class Connection:
         if timer is not None:
             timer.cancel()
         self.flusher.stop(final=final_flush)
+
+    def show_closed(self, owner: WsConnections) -> None:
+        """Show a closing connection `CLOSED` to a session that does not wait for its end.
+
+        A session that closes on a thread holding the update graph's lock (a console command)
+        does not join the connection, so the client's own last row, `CLOSED`, could reach the
+        session's diagnostics only after they are released, and be dropped: a held
+        `m.connections()` would keep showing the connection as it last was. So, under the
+        group's lock, which every row write holds, the session gets the last row written for
+        each family it shows, marked `CLOSED` with no topics and no buffered rows, as a
+        connection that has ended holds none (a `FAILED` row keeps its state), and then leaves
+        the connection's users, so no later row of the client replaces it. Reads only the
+        immutable rows the client thread stored, never its loop-confined state. Any thread.
+
+        Args:
+            owner: The closing session's `WsConnections`.
+        """
+        with self._lock:
+            now = time.time_ns()
+            core = owner.core()
+            for family, row in self._rows.items():
+                if core is not None and owner.owns_row(self, family):
+                    final = row
+                    if row.state is not ConnectionState.FAILED:
+                        final = replace(
+                            row,
+                            state=ConnectionState.CLOSED,
+                            topics=0,
+                            acked_topics=0,
+                            pending_topics=0,
+                            no_ack_topics=0,
+                            buffered_rows=0,
+                            next_reconnect_at=None,
+                            updated_at=now,
+                        )
+                    core.diagnostics.write(final)
+            self.users.pop(owner, None)
 
     def join(self, timeout: float) -> bool:
         """Wait a bounded time for the client's and the flush thread's ends.
@@ -1055,6 +1095,7 @@ class Connection:
                     last_error=self._last_error,
                     schema_drift=self._drift,
                 )
+                self._rows[family] = row
                 for owner, core in users:
                     if core is not None and owner.owns_row(self, family):
                         core.diagnostics.write(row)
@@ -1372,14 +1413,15 @@ class ConnectionGroup:
                 group.sessions.add(owner)
         return group
 
-    def detach(self, owner: WsConnections) -> None:
+    def detach(self, owner: WsConnections, *, wait: bool = True) -> None:
         """Take a closed session out of the group; the last one takes the group out of the registry.
 
-        The last session also closes the group's futures schedule calendar, outside the locks
-        (its close waits a bounded time for its worker).
+        The last session also closes the group's futures schedule calendar, outside the locks.
 
         Args:
             owner: The session's `WsConnections`, after its `close`.
+            wait: True to let the calendar's close wait a bounded time for its worker; False
+                when the closing thread holds the update graph's lock, which must not wait.
         """
         calendar = None
         with _groups_lock, self.lock:
@@ -1388,7 +1430,7 @@ class ConnectionGroup:
                 del _groups[self.key]
                 calendar, self._calendar = self._calendar, None
         if calendar is not None:
-            calendar.close()
+            calendar.close(wait=wait)
 
     def futures_calendar(self, *, contracts_path: str, schedules_path: str) -> FuturesCalendar:
         """Return the group's futures schedule calendar, creating it on first use.
@@ -1716,6 +1758,7 @@ class WsConnections:
         """
         self._core = weakref.ref(core)
         self._label = core.label
+        self._exec_ctx = core.exec_ctx  # for the closing thread's lock check
         self._resolve = resolve_host
         self.record_verdict = record_verdict
         self.fetch_rows = fetch_rows
@@ -2284,7 +2327,16 @@ class WsConnections:
         hand-over, is neither closed nor joined here: it is out of the registry and its leases
         are on its successor, and its hand-over closes it (`Connection.hand_over`).
         Last, the session leaves the group.
+
+        A closing thread that holds the update graph's lock (a console command) joins nothing,
+        neither the connections nor the group's futures schedule worker: no live table updates
+        while it waits, and against an unresponsive server each join could last its full
+        bound. Those threads are daemons that never need the lock, so they end on their own;
+        each closing connection's last row, `CLOSED`, is written by this thread instead
+        (`Connection.show_closed`), since the client's own would come after the session's
+        diagnostics are released.
         """
+        wait = not holds_update_graph_lock(self._exec_ctx)  # a Java call: before the lock
         with self._lock:
             if self._closed:
                 return
@@ -2298,14 +2350,16 @@ class WsConnections:
         for connection in closing:
             connection.close()
         for connection in closing:
-            if not connection.join(JOIN_TIMEOUT):
+            if not wait:  # the daemons end on their own; their last rows would come too late
+                connection.show_closed(self)
+            elif not connection.join(JOIN_TIMEOUT):
                 logger.warning(
                     "%s: the connection to %s has not ended %.0f s after close()",
                     self._label,
                     connection.url,
                     JOIN_TIMEOUT,
                 )
-        self.group.detach(self)
+        self.group.detach(self, wait=wait)
 
     def _leave(self) -> tuple[list[tuple[int, Connection]], list[Connection]]:
         """Return the session's leases and leave its connections; the group's lock is held.

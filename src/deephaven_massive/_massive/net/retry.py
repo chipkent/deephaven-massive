@@ -8,8 +8,8 @@ clients do the waiting, through a `Clock`, so tests replace time with a fake and
   2 seconds, each lengthened by up to 20 % of random jitter, so clients that failed together
   do not retry together.
 - **Rate limits** (HTTP 429) are not retries: the REST client's `RequestGovernor` pauses the
-  refused subscription's requests and resumes them, until a run's pauses add up to
-  `RATE_LIMIT_PATIENCE` (10 minutes), and they never count against `MAX_RETRIES`.
+  refused subscription's requests and resumes them, for as long as each read is willing to
+  wait, and they never count against `MAX_RETRIES`.
   This module gives the pause of a subscription whose requests are not paced
   (`rate_limit_wait`): what the response's `Retry-After` header asks, in either of its forms
   (a number of seconds or an HTTP date), and without a usable header 15, 30, then 60 seconds
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 __all__ = [
     "JITTER",
     "MAX_RETRIES",
-    "RATE_LIMIT_PATIENCE",
     "RATE_LIMIT_WAITS",
     "SYSTEM_CLOCK",
     "TRANSIENT_STATUSES",
@@ -70,13 +69,6 @@ JITTER = 0.2
 RATE_LIMIT_WAITS = (15.0, 30.0, 60.0)
 """The pause in seconds after the first, the second, and every later 429 of a run that carries
 no usable `Retry-After`, for a subscription whose requests are not paced."""
-
-RATE_LIMIT_PATIENCE = 600.0
-"""How long, in seconds of pauses in one run of 429s, requests keep pausing and resuming.
-
-A pause that brings the run's pauses past this (a long `Retry-After`, or refusals that go on)
-is not waited for: the request fails with status 429 instead.
-"""
 
 
 class Clock(Protocol):

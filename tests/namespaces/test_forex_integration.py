@@ -1,9 +1,11 @@
 """Live checks of forex data against Massive: day-bar stamps and cuts, weeks, pairs, and topics.
 
-Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
-the evidence, not a pass, answers the question. Raw rows come from the wire REST and flat-file
-clients, because the library moves the very stamps in question; the library's own answer to
-the same request is recorded beside them. How to run these tests is in `docs/live-tests.md`.
+Each test records what Massive sent (`evidence`). A test marked `settles` asserts only that the
+requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
+asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
+from the wire REST and flat-file clients, because the library moves the very stamps in question; the
+library's own answer to the same request is recorded beside them. How to run these tests is in
+`docs/live-tests.md`.
 
 The library's rule under test: a forex 1-day bar stamped at 00:00 UTC or at its UTC day's last
 millisecond is moved to 00:00 UTC of that day, whatever the source, and any other stamp fails
@@ -39,6 +41,7 @@ FlatFileTickers: TypeAlias = (
 )
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
+WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 
@@ -47,9 +50,6 @@ _RANGE = "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to
 _PREV = "/v2/aggs/ticker/{forexTicker}/prev"
 _GROUPED = "/v2/aggs/grouped/locale/global/market/fx/{date}"
 _DAY_FILE = "global_forex/day_aggs_v1"
-_FILE_DAY = date(2026, 6, 1)
-"""A past Monday whose flat files are published, inside a Basic plan's two years of history."""
-
 _MS = 1_000_000
 _NEW_YORK = ZoneInfo("America/New_York")
 _TOLERANCE = 1e-6
@@ -257,6 +257,7 @@ def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
 def test_forex_day_bar_of_the_flat_file_and_its_stamp(
     live_session: dm.MassiveSession,
     *,
+    recent_monday: date,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
     table_rows: TableRows,
@@ -265,20 +266,20 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
 ) -> None:
     """Whether `global_forex/day_aggs_v1`'s row of a day is the REST bar of the same day.
 
-    Records the file's `C:EURUSD` row of 2026-06-01 with its `window_start`, and, for each
-    REST range and grouped bar around that day, whether it is the same bar (open and close
-    equal, the rest within 1e-6) and each field's error. Reading it: the file and REST bars of
-    the same day being one bar, whatever their stamps, means the library's 00:00 UTC label is
-    right if each stamp lies in that UTC day; a file row matching another day's REST bar means
-    the sources cut or label days differently.
+    Records the file's `C:EURUSD` row of the most recent published Monday with its `window_start`,
+    and, for each REST range and grouped bar around that day, whether it is the same bar (open and
+    close equal, the rest within 1e-6) and each field's error. Reading it: the file and REST bars of
+    the same day being one bar, whatever their stamps, means the library's 00:00 UTC label is right
+    if each stamp lies in that UTC day; a file row matching another day's REST bar means the sources
+    cut or label days differently.
     """
-    read = flat_file_tickers(_DAY_FILE, _FILE_DAY, [_PAIR])
-    assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
+    read = flat_file_tickers(_DAY_FILE, recent_monday, [_PAIR])
+    assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
     rows, extra = read
     for row in rows:
         stamp = row["window_start"]
         shown = "<missing>" if stamp is None else instant_text(int(stamp))
-        evidence(f"{_DAY_FILE} {_FILE_DAY}: window_start={shown} row={row}")
+        evidence(f"{_DAY_FILE} {recent_monday}: window_start={shown} row={row}")
     evidence(f"{_DAY_FILE} undocumented headers: {sorted(extra)}")
     ranged = rest_rows(
         _RANGE,
@@ -286,12 +287,12 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
             "forexTicker": _PAIR,
             "multiplier": 1,
             "timespan": "day",
-            "from": _FILE_DAY - timedelta(days=1),
-            "to": _FILE_DAY + timedelta(days=1),
+            "from": recent_monday - timedelta(days=1),
+            "to": recent_monday + timedelta(days=1),
         },
         {"sort": "asc"},
     )
-    grouped = [r for r in rest_rows(_GROUPED, {"date": _FILE_DAY}, {}) if r.get("T") == _PAIR]
+    grouped = [r for r in rest_rows(_GROUPED, {"date": recent_monday}, {}) if r.get("T") == _PAIR]
     for row in rows:
         values = tuple(
             None if row[k] is None else float(str(row[k]))
@@ -305,7 +306,7 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
             )
     flat = live_session.forex.bars(_PAIR, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: flat.history(_FILE_DAY, _FILE_DAY, source=dm.HistorySource.FLAT_FILES),
+        lambda: flat.history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES),
         table_rows,
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
@@ -317,21 +318,22 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
 @pytest.mark.timeout(100)
 def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     *,
+    recent_monday: date,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
     evidence: Evidence,
 ) -> None:
     """Whether grouped daily and `global_forex/day_aggs_v1` list the same pairs on a day.
 
-    Records the pairs only one of them holds on 2026-06-01. Reading it: equal sets mean
-    `dm.ALL` forex day bars hold the same pairs from either source; otherwise the difference
-    belongs in the documentation of `dm.ALL` day bars.
+    Records the pairs only one of them holds on the most recent published Monday. Reading it: equal
+    sets mean `dm.ALL` forex day bars hold the same pairs from either source; otherwise the
+    difference belongs in the documentation of `dm.ALL` day bars.
     """
-    grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": _FILE_DAY}, {})}
-    read = flat_file_tickers(_DAY_FILE, _FILE_DAY, None)
-    assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
+    grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {})}
+    read = flat_file_tickers(_DAY_FILE, recent_monday, None)
+    assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
     filed = {str(row["ticker"]) for row in read[0]}
-    evidence(f"{_FILE_DAY}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
+    evidence(f"{recent_monday}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
     evidence(f"only in grouped daily: {sorted(grouped - filed)}")
     evidence(f"only in the flat file: {sorted(filed - grouped)}")
     assert grouped
@@ -342,83 +344,99 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
 @pytest.mark.settles("64")
 @pytest.mark.timeout(100)
 def test_forex_flat_files_of_a_weekend(
-    *, flat_file_tickers: FlatFileTickers, evidence: Evidence
+    *,
+    recent_monday: date,
+    flat_file_tickers: FlatFileTickers,
+    evidence: Evidence,
 ) -> None:
     """Whether Massive publishes forex day files for a Saturday and a Sunday.
 
-    Reads `global_forex/day_aggs_v1` for Saturday 2026-05-30 and Sunday 2026-05-31 and records,
-    for each, whether the file exists and how many pairs it holds. Reading it: the library
-    takes a forex Saturday for a day without trading, so a missing Saturday file is skipped
-    silently and a Sunday's is reported as a possible holiday; a Saturday file with rows, or
-    no Sunday file at all, means that rule must change.
+    Reads `global_forex/day_aggs_v1` for the Saturday and Sunday before the most recent
+    published Monday and records, for each, whether the file exists and how many pairs it
+    holds. Reading it: the library takes a forex Saturday for a day without trading, so a
+    missing Saturday file is skipped silently and a Sunday's is reported as a possible holiday;
+    a Saturday file with rows, or no Sunday file at all, means that rule must change.
     """
-    for day in (_FILE_DAY - timedelta(days=2), _FILE_DAY - timedelta(days=1)):
+    for day in (recent_monday - timedelta(days=2), recent_monday - timedelta(days=1)):
         read = flat_file_tickers(_DAY_FILE, day, None)
         pairs = None if read is None else len(read[0])
         evidence(f"{_DAY_FILE} {day} ({day:%A}): {'no file' if read is None else f'{pairs} rows'}")
 
 
 @pytest.mark.needs("currencies:basic")
-@pytest.mark.settles("33")
+@pytest.mark.verifies("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_forex_week_bars_start_on_monday_or_sunday(
     live_session: dm.MassiveSession,
     *,
-    week_bar_report: Callable[[str, str], list[str]],
+    recent_week: tuple[date, date],
+    week_bar_report: Callable[[str, str, str], tuple[list[str], int, list[str]]],
     table_rows: TableRows,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Which seven days a forex week bar covers, whatever day it is stamped on.
+    """Whether a forex week bar covers the calendar week from Monday 00:00 UTC.
 
-    For each raw week bar of `C:EURUSD` around 2026-02-23 to 2026-03-22, records its stamp and
-    the candidate windows whose hour-bar volume is closest to its own; `MATCH` marks the
-    bucket. Reading it: a Monday 00:00 UTC match confirms calendar weeks, as the library
-    assumes; a Sunday 00:00 UTC or Sunday 17:00 New York match means forex weeks are trading
-    weeks, and the library's forex week windows must start there. The last line shows which
-    bars the library's `history()` keeps.
+    For each raw week bar of `C:EURUSD` over the four weeks ending with the most recent week without
+    a holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
+    own; `MATCH` marks the bucket. Decides by comparison, not by an absolute tolerance: passes when,
+    for every bar of those weeks, the week from Monday 00:00 UTC, the calendar week the library
+    assumes, is the closest window, ties allowed; a failure names the bars whose closest window
+    starts elsewhere (such as Sunday 17:00 New York, the trading week's open), and the library's
+    forex week windows must start there. The last line shows which bars the library's `history()`
+    keeps.
     """
-    lines = week_bar_report("forexTicker", _PAIR)
+    lines, checked, misses = week_bar_report("forexTicker", _PAIR, "UTC")
     for line in lines:
         evidence(line)
+    first, last = recent_week[0] - timedelta(days=7), recent_week[1]
     kept = live_session.forex.bars(_PAIR, dm.Timespan.WEEK).history(
-        date(2026, 3, 2), date(2026, 3, 15), source=dm.HistorySource.REST
+        first, last, source=dm.HistorySource.REST
     )
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
-    evidence(f"library history 2026-03-02..2026-03-15 keeps the bars stamped {stamps}")
-    assert len(lines) > 1
+    evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
+    assert checked >= 3, f"only {checked} week bars of the four weeks"
+    assert not misses, f"week bars closer to another window than the library's: {misses}"
 
 
 @pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("27")
-@pytest.mark.timeout(100)
+@pytest.mark.timeout(160)
 def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     live_session: dm.MassiveSession,
     *,
     wait_rows: WaitRows,
+    wait_acked: WaitAcked,
+    market_status: Callable[[str], str],
     stream_report: Callable[[dm.MassiveSession], list[str]],
     evidence: Evidence,
 ) -> None:
     """Whether `C.EUR-USD` and `CA.EUR-USD` are acknowledged and deliver frames.
 
-    Streams quotes and minute bars of `C:EURUSD` (one connection, two topics) for up to 60 s
-    in all, and records the session's diagnostics before releasing them. Reading it: rows with
-    `Symbol` `C:EURUSD` and acknowledged topics confirm the dash spelling; a refusal in the
-    stream's error means topics must use another spelling. No row and no refusal on a weekend
-    says nothing: forex is closed then.
+    Streams quotes and minute bars of `C:EURUSD` (one connection, two topics) and asserts that
+    Massive acknowledged both, whatever the hour. When `/v1/marketstatus/now` says the forex
+    market is open it also waits up to 60 s for quotes and asserts they arrived with `Symbol`
+    `C:EURUSD`; when it says closed the test skips after the acknowledgement. The session's
+    diagnostics are recorded before the release. Reading it: acknowledged topics and rows
+    confirm the dash spelling; a refusal in the stream's error means topics must use another
+    spelling.
     """
-    deadline = time.monotonic() + _STREAM_WAIT
     quotes = live_session.forex.quotes(_PAIR).append_only()
     bars = live_session.forex.bars(_PAIR).append_only()
-    quote_rows = wait_rows(live_session, quotes, deadline)
-    bar_rows = wait_rows(live_session, bars, deadline)
+    acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
+    status = market_status("fx")
+    deadline = time.monotonic() + _STREAM_WAIT
+    quote_rows = wait_rows(live_session, quotes, deadline) if status != "closed" else []
+    bar_rows = wait_rows(live_session, bars, deadline) if quote_rows else []
     for line in stream_report(live_session):
         evidence(line)
     live_session.release(quotes)
     live_session.release(bars)
     evidence(f"C quotes received: {len(quote_rows)}; first: {quote_rows[:1]}")
     evidence(f"CA minute bars received: {len(bar_rows)}; first: {bar_rows[:1]}")
-    if not quote_rows:
-        pytest.skip(f"no forex quote arrived in {_STREAM_WAIT:.0f} s (is the market closed?)")
+    assert acked >= 2, f"Massive acknowledged {acked} of the 2 topics"
+    if status == "closed":
+        pytest.skip("the forex market is closed (per /v1/marketstatus/now)")
+    assert quote_rows, f"no forex quote arrived in {_STREAM_WAIT:.0f} s of an open market"
     assert {row["Symbol"] for row in quote_rows} == {_PAIR}

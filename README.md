@@ -119,10 +119,11 @@ The tests in `tests/**/test_*_integration.py` call Massive itself. They carry th
 marker, which the default run deselects, and they skip without `MASSIVE_API_KEY` and under CI,
 so neither `./scripts/check.sh` nor CI ever reaches Massive. `uv run pytest -m integration_smoke`
 checks every dataset and verb once, unattended; tests that deliberately exceed Massive's limits
-run only with `-m integration_limits`. Declare the plans the key holds in `MASSIVE_LIVE_PLANS`,
-and each test runs or skips, naming the plan it needs. [`docs/live-tests.md`](docs/live-tests.md)
-says how to run them, in which order, what each plan can verify, and how to get the S3
-credentials; each test's docstring says what its evidence means.
+run only with `-m integration_limits`. The first live test of a run asks Massive which plans
+the key holds (or reads them from `MASSIVE_LIVE_PLANS`), and each test runs or skips, naming the
+plan it needs. [`docs/live-tests.md`](docs/live-tests.md) says how to run them, what each plan
+can verify, and how to get the S3 credentials; each test's docstring says what its evidence
+means.
 
 ## License
 

@@ -493,9 +493,10 @@ class Subscription(StrEnum):
     minute, and every paid tier has no request limit. All the API keys of an account share the
     limits. Declare the subscriptions on Basic in `MassiveConfig.rest_basic_subscriptions` so
     their requests are paced from the first one; otherwise the library learns it from
-    Massive's first refusal. `m.rate_limits()` shows each one's state. Datasets Massive assigns
-    to no subscription (cross-market reference data, economy, partner data, the unified
-    snapshot) are never paced.
+    Massive's first refusal. `m.rate_limits()` shows each one's state. Reference data and the
+    other datasets Massive assigns to no subscription (economy, partner data, the unified
+    snapshot) are counted in a bucket of their own, `other`, which no setting declares but
+    which the library paces once Massive's refusal shows its limit.
 
     Example:
         ::

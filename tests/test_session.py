@@ -48,6 +48,7 @@ from deephaven_massive._tables.liveness import (
     StreamHandle,
     new_scope,
 )
+from tests._fakes.rest import Reply
 from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
@@ -60,7 +61,10 @@ if TYPE_CHECKING:
 
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.diagnostics import Diagnostics
+    from tests._fakes.rest import FakeRestServer
+    from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
+    from tests._fakes.ws_session import WsSession
 
 TIMEOUT = 30.0
 
@@ -434,9 +438,9 @@ def test_a_held_view_reads_the_final_rows_as_close_returns(
     diagnostics = type(core.diagnostics)
     release = diagnostics.release
 
-    def released(self: Diagnostics) -> None:
-        release(self)
-        steps.append("released")
+    def released(self: Diagnostics, *, wait: bool = True) -> None:
+        release(self, wait=wait)
+        steps.append(f"released, waiting: {wait}")
 
     def waited(update_graph: UpdateGraph) -> AbstractContextManager[None]:
         steps.append("waited for the cycle")
@@ -447,7 +451,7 @@ def test_a_held_view_reads_the_final_rows_as_close_returns(
     massive_session.close()
     (row,) = dh_arrow.to_arrow(view).to_pylist()
     assert row["State"] == "CLOSED"
-    assert steps == ["released", "waited for the cycle"]
+    assert steps == ["released, waiting: True", "waited for the cycle"]
     del result, view
 
 
@@ -568,6 +572,153 @@ def test_a_session_closed_while_a_stream_opens(
     with pytest.raises(dm.MassiveError, match="was closed while a stream was opening"):
         stream_query(massive_session).blink()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+# --- In the Deephaven console --------------------------------------------------------------------
+# The console runs every command holding the update graph's exclusive lock (`console_command`),
+# so no update cycle runs until the command returns: each call must return without waiting for
+# one, and what it writes to a live table shows once the command is over.
+
+TRADE = {
+    "ev": "T",
+    "sym": "MSFT",
+    "x": 4,
+    "i": "1",
+    "z": 3,
+    "p": 114.125,
+    "s": 100,
+    "c": [0, 12],
+    "t": 1536036818784,
+    "q": 1,
+}
+"""One trade frame of MSFT, as Massive streams it."""
+
+
+def test_stream_verbs_work_in_a_console_command(
+    *,
+    ws_session: WsSession,
+    console_command: Callable[[Callable[[], None]], None],
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    m = ws_session.session
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    made: dict[str, Table] = {}
+
+    def command() -> None:
+        trades = m.stocks.trades("MSFT")
+        made["append_only"] = trades.append_only()
+        made["ring"] = trades.ring(5)
+        made["last_by"] = trades.last_by()
+        blink = trades.blink()
+        made["watched"] = m.stocks.quotes(watchlist).append_only()
+        made["streams"] = m.streams()
+        made["connections"] = m.connections()
+        made["columns"] = trades.columns()
+        m.release(blink)
+
+    console_command(command)
+    ws_session.subscribed("T.MSFT", "Q.AAPL")  # the watchlist is followed
+    ws_session.publish(TRADE)
+    for shape in ("append_only", "ring", "last_by"):
+        rows_when(made[shape], lambda rows: [r["Price"] for r in rows] == [114.125])
+    streams = rows_when(made["streams"], lambda rows: len(rows) == 2)
+    assert sorted((r["Dataset"], r["State"], r["HeldResults"]) for r in streams) == [
+        ("stocks.quotes", "RUNNING", 1),
+        ("stocks.trades", "RUNNING", 3),
+    ]
+    rows_when(made["connections"], lambda rows: any(r["Transport"] == "WS" for r in rows))
+    assert made["columns"].size > 0
+    for table in made.values():
+        if table.is_refreshing:
+            m.release(table)
+
+
+def test_rest_and_flat_file_verbs_work_in_a_console_command(
+    *,
+    fake_rest: FakeRestServer,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    console_command: Callable[[Callable[[], None]], None],
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    fake_rest.reply(
+        "/v2/last/trade/AAPL",
+        Reply({"status": "OK", "results": {"T": "AAPL", "t": 1617901342969834000, "p": 129.84}}),
+    )
+    fake_rest.reply(
+        "/v2/aggs/ticker/AAPL/range/1/day/1577941200000/1578113999999",
+        Reply({"status": "OK", "adjusted": True, "results": [{"t": 1577941200000, "c": 75.08}]}),
+    )
+    ipo = {"ticker": "RAPP", "issuer_name": "Rapport Therapeutics Inc.", "ipo_status": "history"}
+    fake_rest.reply("/vX/reference/ipos", Reply({"status": "OK", "results": [ipo]}))
+    fake_s3.put(
+        "us_stocks_sip/day_aggs_v1/2023/03/2023-03-28.csv.gz",
+        make_csv_gz(
+            "ticker,volume,open,close,high,low,window_start,transactions\n"
+            "BCC,248274,61.68,61.99,62.565,61.41,1680033600000000000,4073\n"
+        ),
+    )
+    # The fake S3's test credentials, passed as a mapping as the flat-file tests do.
+    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
+    )
+    made: dict[str, Table] = {}
+    sessions: list[dm.MassiveSession] = []
+
+    def opening() -> None:
+        m = dm.MassiveSession(config)
+        sessions.append(m)
+        made["fetch"] = m.stocks.trades("AAPL").fetch()
+        bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
+        made["rest"] = bars.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST)
+        files = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
+        made["files"] = files.history(
+            "2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES
+        )
+        made["poll"] = m.stocks.ipos().poll(60)
+        made["streams"] = m.streams()
+
+    console_command(opening)
+    assert [r["Price"] for r in dh_to_pylist(made["fetch"])] == [129.84]
+    assert [r["Close"] for r in dh_to_pylist(made["rest"])] == [75.08]
+    assert [r["Symbol"] for r in dh_to_pylist(made["files"])] == ["BCC"]
+    rows_when(made["poll"], lambda rows: [r["Symbol"] for r in rows] == ["RAPP"])
+
+    def closing() -> None:
+        sessions[0].close()
+        with dm.MassiveSession(config) as other:  # opened and closed within one command
+            made["other"] = other.stocks.trades("AAPL").fetch()
+
+    console_command(closing)
+    assert [r["Price"] for r in dh_to_pylist(made["other"])] == [129.84]
+    rows_when(made["streams"], lambda rows: [r["State"] for r in rows] == ["CLOSED"])
+
+
+def test_close_in_a_console_command_returns_without_waiting_for_a_cycle(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    console_command: Callable[[Callable[[], None]], None],
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    # The diagnostics writer cannot apply the final rows while the command holds the lock, so
+    # close() returns without waiting for it; the rows, and the held view, follow once the
+    # command is over, and the writer then ends.
+    result = stream_query(massive_session).append_only()
+    view = massive_session.streams()
+    rows_when(view, lambda rows: [r["State"] for r in rows] == ["RUNNING"])
+    writer = massive_session._core.diagnostics.thread
+    console_command(massive_session.close)
+    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    rows_when(view, lambda rows: [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed)])
+    writer.join(TIMEOUT)
+    assert not writer.is_alive()
+    assert fake_streams.failed == {1: closed}
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
+    del result, view
 
 
 def test_repr_of_a_session_whose_construction_failed() -> None:

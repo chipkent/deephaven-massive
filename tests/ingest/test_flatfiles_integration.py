@@ -35,9 +35,6 @@ TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 
-_DAY = date(2026, 6, 1)
-"""A past Monday whose files are published, inside a Basic plan's two years of history."""
-
 _VENUES = ("cme", "cbot", "nymex", "comex")
 _DAY_NS = 86_400 * 1_000_000_000
 
@@ -48,6 +45,7 @@ _DAY_NS = 86_400 * 1_000_000_000
 def test_futures_files_hold_only_the_session_of_their_key(
     live_session: dm.MassiveSession,
     *,
+    recent_monday: date,
     flat_file_sessions: FlatFileSessions,
     table_rows: TableRows,
     evidence: Evidence,
@@ -56,10 +54,10 @@ def test_futures_files_hold_only_the_session_of_their_key(
 
     The library checks each block of a futures file against the key's session and fails the
     read otherwise. Counts the `session_end_date` values of the whole `session_aggs_v1` file
-    of 2026-06-01 for each venue, and of the whole CME `minute_aggs_v1` file (a Monday file,
-    which holds the Sunday-evening rows), then reads the CME session bars through the library.
-    Reading it: only `2026-06-01` everywhere confirms the key; any other date means the files
-    are not keyed by session and the library's check would fail real reads.
+    of the most recent published Monday for each venue, and of the whole CME `minute_aggs_v1` file
+    (a Monday file, which holds the Sunday-evening rows), then reads the CME session bars through
+    the library. Reading it: only that Monday everywhere confirms the key; any other date means the
+    files are not keyed by session and the library's check would fail real reads.
 
     Raises:
         WireEntitlementError: When a file is refused although Futures Starter and S3 are
@@ -71,33 +69,37 @@ def test_futures_files_hold_only_the_session_of_their_key(
     files.append(("us_futures_{venue}/minute_aggs_v1", "cme"))
     for prefix, venue in files:
         try:
-            counts = flat_file_sessions(prefix, _DAY, venue)
+            counts = flat_file_sessions(prefix, recent_monday, venue)
         except WireEntitlementError:
             raise
         except WireError as error:
             evidence(f"{prefix} {venue}: {type(error).__name__}: {error}")
             continue
         if counts is None:
-            evidence(f"{prefix} {venue}: no file for {_DAY}")
+            evidence(f"{prefix} {venue}: no file for {recent_monday}")
             continue
         read += 1
-        evidence(f"{prefix} {venue} {_DAY}: session_end_date counts {dict(counts)}")
+        evidence(f"{prefix} {venue} {recent_monday}: session_end_date counts {dict(counts)}")
     try:
         bars = live_session.futures.bars(
             dm.ALL, dm.Timespan.SESSION, venue=dm.FuturesVenue.CME
-        ).history(_DAY, _DAY, source=dm.HistorySource.FLAT_FILES)
-        evidence(f"library CME session bars of {_DAY}: {len(table_rows(bars))} rows")
+        ).history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES)
+        evidence(f"library CME session bars of {recent_monday}: {len(table_rows(bars))} rows")
     except dm.EntitlementError:
         raise
     except dm.MassiveError as error:
-        evidence(f"library CME session bars of {_DAY}: {type(error).__name__}: {error}")
+        evidence(f"library CME session bars of {recent_monday}: {type(error).__name__}: {error}")
     assert read
 
 
 @pytest.mark.needs("indices:starter", "s3")
-@pytest.mark.settles("22")
+@pytest.mark.verifies("22")
 def test_index_value_timestamps_are_nanoseconds(
-    flat_file_head: FlatFileHead, *, instant_text: Text, evidence: Evidence
+    flat_file_head: FlatFileHead,
+    *,
+    recent_monday: date,
+    instant_text: Text,
+    evidence: Evidence,
 ) -> None:
     """Whether `us_indices/values_v1` `timestamp` is in nanoseconds, as the library reads it.
 
@@ -105,10 +107,10 @@ def test_index_value_timestamps_are_nanoseconds(
     rows' raw `timestamp`, its digit count, and the instant it is as nanoseconds. Passes when
     that instant lies within a day of the file's day; a millisecond value lands in 1970.
     """
-    result = flat_file_head("us_indices/values_v1", _DAY, None)
-    assert result is not None, f"no us_indices/values_v1 file for {_DAY}"
+    result = flat_file_head("us_indices/values_v1", recent_monday, None)
+    assert result is not None, f"no us_indices/values_v1 file for {recent_monday}"
     rows, extra = result
-    assert rows, f"the us_indices/values_v1 file for {_DAY} has no rows"
+    assert rows, f"the us_indices/values_v1 file for {recent_monday} has no rows"
     for row in rows[:3]:
         raw = str(row["timestamp"])
         evidence(
@@ -116,7 +118,7 @@ def test_index_value_timestamps_are_nanoseconds(
         )
     evidence(f"undocumented headers: {sorted(extra)}")
     first = int(str(rows[0]["timestamp"]))
-    assert _day_ns(_DAY) - _DAY_NS <= first < _day_ns(_DAY) + 2 * _DAY_NS
+    assert _day_ns(recent_monday) - _DAY_NS <= first < _day_ns(recent_monday) + 2 * _DAY_NS
 
 
 def _day_ns(day: date) -> int:
@@ -132,22 +134,29 @@ def _day_ns(day: date) -> int:
 @pytest.mark.settles("28")
 @pytest.mark.timeout(100)
 def test_ticker_spellings_of_every_flat_file(
-    flat_file_head: FlatFileHead, *, evidence: Evidence
+    flat_file_head: FlatFileHead,
+    *,
+    recent_monday: date,
+    flat_files_reached: Callable[[str], bool],
+    evidence: Evidence,
 ) -> None:
     """How each flat file spells its tickers, beside REST's canonical forms.
 
-    Reads the first block of every flat-file prefix for 2026-06-01 (futures from `cme`) and
-    records the first tickers of each, any header the generated schema lacks, and each prefix
-    the credentials are refused. Reading it: every file spelling tickers as REST does
-    (`C:EURUSD`, `X:BTCUSD`, `I:SPX`, `O:...`, `ESH6`) confirms that symbol filters match file
-    rows; a file spelling them otherwise (the forex quotes sample shows `X:EUR-USD`) needs
-    that spelling among the symbol's wire spellings.
+    Reads the first block of every flat-file prefix for the most recent published Monday (futures
+    from `cme`) and records the first tickers of each, any header the generated schema lacks, and
+    each prefix the credentials are refused. Reading it: every file spelling tickers as REST does
+    (`C:EURUSD`, `X:BTCUSD`, `I:SPX`, `O:...`, `ESH6`) confirms that symbol filters match file rows;
+    a file spelling them otherwise (the forex quotes sample shows `X:EUR-USD`) needs that spelling
+    among the symbol's wire spellings.
     """
     read = 0
     for prefix in sources(Transport.FLAT_FILES):
         venue = "cme" if "{venue}" in prefix else None
+        if not flat_files_reached(prefix):
+            evidence(f"{prefix}: the S3 credentials do not reach it")
+            continue
         try:
-            result = flat_file_head(prefix, _DAY, venue)
+            result = flat_file_head(prefix, recent_monday, venue)
         except WireEntitlementError as error:
             evidence(f"{prefix}: not entitled: needs that class's flat files ({error})")
             continue
@@ -155,7 +164,7 @@ def test_ticker_spellings_of_every_flat_file(
             evidence(f"{prefix}: {type(error).__name__}: {error}")
             continue
         if result is None:
-            evidence(f"{prefix}: no file for {_DAY}")
+            evidence(f"{prefix}: no file for {recent_monday}")
             continue
         rows, extra = result
         read += 1
