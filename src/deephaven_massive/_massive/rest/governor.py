@@ -442,18 +442,13 @@ class _Bucket:
             head.wake.set()
 
     def expire(self, now: float) -> None:
-        """Free the slots whose window has passed, and stop waiting for an overdue probe.
-
-        A probe unanswered for `PROBE_TIMEOUT` lost its report; the next request probes in
-        its place, so no lost report can hold the bucket forever.
+        """Free the slots whose window has passed.
 
         Args:
             now: The monotonic time.
         """
         while self.slots and self.slots[0] <= now:
             self.slots.popleft()
-        if self.probe is not None and now >= self.probe_since + PROBE_TIMEOUT:
-            self.probe = None
 
     def gave_up(self, now: float) -> bool:
         """Tell whether the bucket's requests fail at once now.
@@ -518,9 +513,10 @@ class _Bucket:
             now: The monotonic time; the expired slots are already freed.
 
         Returns:
-            The monotonic time it may start (`now` or earlier means at once): behind a probe
-            waiting for its answer, when the probe would be overdue (its answer wakes it
-            sooner); or `math.inf` when every slot is held by a request in flight, so only a
+            The monotonic time it may start (`now` or earlier means at once). Behind a probe
+            waiting for its answer, that is when the probe is overdue: its report was lost
+            after `PROBE_TIMEOUT`, so this request starts as the new probe (the answer wakes
+            it sooner). `math.inf` when every slot is held by a request in flight, so only a
             change of the bucket can let it start.
         """
         start = max(now, self.pause_until)
