@@ -4135,7 +4135,7 @@ The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact 
   `ignore_missing_imports` for `pyarrow.*`. Pyright runs as a non-gating second checker.
 - **Pytest 9:** `strict = true`, `filterwarnings = ["error"]`, `--import-mode=importlib`,
   deadlock detection through `faulthandler_timeout` and `pytest-timeout`, and parallel
-  workers (pytest-xdist) in the full check and CI.
+  workers (pytest-xdist) in the local full check.
 - **Layout:** `tests/test_layout.py` passes: the mirror rule and naming of
   [section 4.2](#42-test-layout), the library's layers of [section 4.3](#43-layers), and the
   `_massive` boundary and layers of [section 19](#19-wire-clients-and-the-spec-snapshot).
@@ -4221,9 +4221,10 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Neither coverage
   nor `-n` is in `addopts`, so single-test runs and debuggers work in one process.
 - **Parallel workers.** `scripts/check.sh full` runs pytest with `-n auto --maxprocesses=4`
-  and CI with `--numprocesses=auto` (pytest-xdist): each worker is its own process with its
-  own embedded JVM, and the controller that hands out the tests starts none. pytest-cov
-  combines the workers' coverage, so the 100% gate is unchanged.
+  (pytest-xdist): each worker is its own process with its own embedded JVM, and the controller
+  that hands out the tests starts none. pytest-cov combines the workers' coverage, so the 100%
+  gate is unchanged. CI runs the suite in one process: its standard runners have 2 CPUs, where
+  two workers gained nothing once their startup was paid.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
   "@(typing\\.)?overload"]`, each with a reason.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in
