@@ -57,8 +57,8 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
-from deephaven_massive._tables.core import on_update_graph
 from deephaven_massive._tables.diagnostics import LimitSource, RateLimitRow, RateLimitState
+from deephaven_massive._tables.liveness import holds_update_graph_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -166,7 +166,7 @@ def read_patience(exec_ctx: ExecutionContext) -> Patience:
     Returns:
         A new `Patience` for the read.
     """
-    console = on_update_graph(exec_ctx)
+    console = holds_update_graph_lock(exec_ctx)
     seconds = CONSOLE_PATIENCE if console else READ_PATIENCE
     logger.debug("a read waits out %.0f s of pauses (update-graph lock held: %s)", seconds, console)
     return _massive.Patience(seconds)
