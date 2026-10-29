@@ -15,7 +15,8 @@ reorder, add, or drop columns by name). A key can also be refused with any statu
 `AccessDenied` for a plan without the dataset, 500 for a server error), fail before any response
 by name (`"unreachable"`: the endpoint cannot be reached), or fail part-way through its body (a
 dropped connection while streaming): always (`put_dropped`), or for its first few requests and
-then serve it whole (`drop`). Every request, every client close, and every body close is
+then serve it whole (`drop`); `before_drop` can hold such a failure until the reader has used
+the bytes served before it. Every request, every client close, and every body close is
 recorded. A listing is recorded in `listings` by the continuation token it sent, and `refuse`,
 `fail`, and `before_answer` treat it as a request for the key `""`. Built by the `fake_s3`
 fixture in `tests/conftest.py`; thread-safe, since the library reads several keys at once.
@@ -67,12 +68,21 @@ class _CopyingStream(io.BytesIO):
 
 
 class _DroppedStream(io.BytesIO):
-    """A response stream that serves its bytes and then fails as a dropped connection does."""
+    """A response stream that serves its bytes and then fails as a dropped connection does.
+
+    Before the failing read it calls `failing`, on the reading thread, so a test can hold the
+    failure until the reader has used the bytes served before it.
+    """
+
+    def __init__(self, data: bytes, failing: Callable[[], object]) -> None:
+        super().__init__(data)
+        self._failing = failing
 
     @override
     def read(self, size: int | None = -1, /) -> bytes:
         chunk = super().read(size)
         if not chunk:
+            self._failing()
             raise ProtocolError("Connection broken: IncompleteRead")
         return chunk
 
@@ -117,6 +127,11 @@ class FakeS3:
         # Called with the key on the requesting thread before each answer, so a test can hold a
         # read in flight or act at that moment; set it before the library's first read.
         self.before_answer: Callable[[str], object] | None = None
+        # Called with the key on the reading thread when a dropped body (`put_dropped`, `drop`)
+        # has served its bytes, just before the read that fails. A reader may read ahead on a
+        # thread of its own and report the failure before it has used the bytes it read, so a
+        # test that needs the reader to have used some of them first holds the failure here.
+        self.before_drop: Callable[[str], object] | None = None
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Attach this fake to every S3 client boto3 creates until the test ends.
@@ -314,10 +329,15 @@ class FakeS3:
             status, code, message = refusal
             return _error(status, code, message)
         if dropped is not None:
-            return _ok(self._body(key, _DroppedStream(dropped), len(dropped) + 1))
+            stream = _DroppedStream(dropped, lambda: self._before_drop(key))
+            return _ok(self._body(key, stream, len(dropped) + 1))
         if data is None:
             return _error(404, "NoSuchKey", "The specified key does not exist.")
         return _ok(self._body(key, _CopyingStream(data), len(data)))
+
+    def _before_drop(self, key: str) -> None:
+        if self.before_drop is not None:
+            self.before_drop(key)
 
     def _body(self, key: str, raw: io.BytesIO, length: int) -> StreamingBody:
         def closed() -> None:
