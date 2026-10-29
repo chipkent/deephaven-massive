@@ -2877,11 +2877,13 @@ without the GIL.
     session's first flat-file read, under `registry_lock` (the constructor only stores
     settings), and registers its close after releasing the lock;
   - the flat-file model-loader lock, one per process, held while an S3 client is built. Every
-    S3 client shares one botocore model loader, created by the first client and kept for the
-    life of the process (about 12 MB of parsed S3, endpoint, and retry models), so the files
-    are parsed once rather than once per client (about 100 ms each). botocore's loader fills
-    its cache without a lock and merges S3's extra definitions into a cached model in place, so
-    no two clients are built at once;
+    S3 client shares one botocore model loader, created when the module is imported, filled by
+    the first build, and kept for the life of the process (about 12 MB of parsed S3, endpoint,
+    and retry models), so the files are parsed once rather than once per client (about 100 ms
+    each). botocore's loader fills its cache without a lock, merges S3's extra definitions
+    into a cached model in place, and has boto3 append its data directory to the search paths
+    on every session, so no two clients are built at once, and each build removes the
+    duplicate search path it added;
   - the `_massive.spec` loaders, which load each generated file once;
   - `RestClient`'s not-before instant (section 19.1);
   - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;

@@ -153,40 +153,54 @@ class _ModelLoader:
     100 ms of CPU per client. One loader, registered on each client's botocore session, reads
     them once per process; every later client is built in about a tenth of that time.
 
-    The loader is created on first use and lives as long as the process, holding the parsed
-    models in memory (about 12 MB). It searches botocore's own data and `~/.aws/models`, as
+    The loader is created with this object, when the module is imported, which reads no file;
+    the first client build parses the models, and the loader keeps them in memory for the life
+    of the process (about 12 MB). It searches botocore's own data and `~/.aws/models`, as
     botocore does by default; the `data_path` setting (`AWS_DATA_PATH`) is not consulted.
 
+    Each boto3 session appends boto3's own data directory to the loader's search paths when it
+    is created. `building()` removes the copies a build adds, keeping each directory once, so
+    the list stays the length it had after the first build however many clients are built.
+
     Thread-safety: botocore's loader is not safe to share between threads that are loading.
-    It fills its cache without a lock, and on the first load of S3's model it merges S3's
-    extra definitions into the cached copy in place. Every use of the loader therefore happens
-    inside `building()`, which holds this object's lock while one client is built. A built
-    client reads the loader again only for paginators and waiters, which `FlatFileClient`
-    never uses. The lock is taken under `FlatFileClient`'s own lock and takes no other lock,
-    and no network call or wait happens while it is held.
+    It fills its cache without a lock, on the first load of S3's model it merges S3's extra
+    definitions into the cached copy in place, and boto3 writes its search paths. Every use of
+    the loader therefore happens inside `building()`, which holds this object's lock while one
+    client is built. A built client reads the loader again only for paginators and waiters,
+    which `FlatFileClient` never uses. The lock is taken under `FlatFileClient`'s own lock and
+    takes no other lock, and no network call or wait happens while it is held.
     """
 
     __slots__ = ("_loader", "_lock")
 
     def __init__(self) -> None:
-        """Create the holder; the loader itself is created by the first `building()`."""
+        """Create the holder and its loader; nothing is read until the first build."""
         self._lock = threading.Lock()
-        self._loader: botocore.loaders.Loader | None = None  # None until the first client
+        self._loader = botocore.loaders.create_loader()
 
     @contextlib.contextmanager
     def building(self) -> Iterator[botocore.loaders.Loader]:
         """Hold the lock for building one client and yield the shared loader.
 
         The caller registers the loader on the client's botocore session and builds the client
-        before leaving the block, so no two clients read the loader at once.
+        before leaving the block, so no two clients read the loader at once. On leaving, every
+        search path the build added that the loader already had is removed again (boto3 adds
+        its data directory on each session), even if the build failed.
 
         Yields:
-            The process-wide loader, created on the first call.
+            The process-wide loader.
         """
         with self._lock:
-            if self._loader is None:
-                self._loader = botocore.loaders.create_loader()
-            yield self._loader
+            paths = self._loader.search_paths
+            before = list(paths)
+            try:
+                yield self._loader
+            finally:
+                kept = list(before)
+                for path in paths[len(before) :]:
+                    if path not in kept:
+                        kept.append(path)
+                paths[:] = kept
 
 
 _MODEL_LOADER: Final = _ModelLoader()
@@ -692,7 +706,8 @@ class FlatFileClient:
         lock. The session reads botocore's model files through the process-wide loader
         (`_ModelLoader`), whose lock is held, under the client's lock, while the client is
         built: the first client of the process parses the files, and every later one reuses
-        them.
+        them. The boto3 session appends boto3's data directory to the shared loader's search
+        paths; leaving the loader's block removes that copy again once the path is listed.
 
         Args:
             bundle: The certificate bundle (`ca_file()`) that verifies the endpoint and an
