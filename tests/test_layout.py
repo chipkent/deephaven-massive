@@ -1385,6 +1385,7 @@ _WIRE_VOCABULARY = frozenset(
         "WireType",
         "WireUnit",
         "encode_value",
+        "origin_of",
         "provenance",
         "source",
         "sources",
@@ -1392,6 +1393,11 @@ _WIRE_VOCABULARY = frozenset(
 )
 _WIRE_CLIENTS = frozenset(
     {
+        "Cancel",
+        "RequestGovernor",
+        "BucketState",
+        "BASIC_REQUESTS_PER_MINUTE",
+        "RATE_WINDOW",
         "RestClient",
         "Page",
         "to_batch",

@@ -12,16 +12,23 @@ the `IngestPorts` protocol it defines (`rest()`, `streams()`, `flat_files()`).
 clients to the core once (`SessionCore.attach`). Each client is created on first use and its
 close is registered with the core (`SessionCore.on_close`), so it closes with the session, or
 on the reaper thread if the session is collected without `close()`.
+
+One thing is not per session: the REST `RequestGovernor`, which every session of the process
+with the same API key and REST origin shares, as Massive counts their requests together.
+`SessionClients` takes its lease when it is created (`_ingest/rate_limits.py`), feeds the
+governor's state to `m.rate_limits()`, and releases the lease with the session.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import weakref
 from typing import TYPE_CHECKING
 
 from deephaven_massive import _massive
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
 from deephaven_massive._ingest.ws import CONNECTION_SETTINGS, WsConnections, WsTransport
@@ -31,10 +38,9 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.request import HostDecision
     from deephaven_massive._enums import AssetClass, ChannelFamily
-    from deephaven_massive._massive import FlatFileClient
+    from deephaven_massive._massive import Cancel, FlatFileClient
     from deephaven_massive._tables.core import (
         FlatFileTransport,
-        RestTransport,
         SessionCore,
         StreamTransport,
     )
@@ -58,17 +64,36 @@ class SessionClients:
     core's `registry_lock`, and the clients themselves are thread-safe.
     """
 
-    __slots__ = ("_core", "_flat_files", "_label", "_rest", "_streams")
+    __slots__ = ("_core", "_flat_files", "_label", "_lease", "_rest", "_streams")
 
     def __init__(self, core: SessionCore) -> None:
-        """Bind the clients to their session; no client is created yet.
+        """Bind the clients to their session and take the session's lease on its REST governor.
+
+        No client is created yet. The lease comes from the process's registry
+        (`rate_limits.GOVERNORS`), keyed by the configuration's API key and REST base URL,
+        declaring its `rest_basic_subscriptions`; its release is registered as a session
+        closer. The governor's listener and the source of the `m.rate_limits()` rows are the
+        core's diagnostics, which hold no reference to the core.
 
         Args:
-            core: The session's core, for its configuration, its `registry_lock`, and its
-                closers.
+            core: The session's core, for its configuration, its `registry_lock`, its
+                closers, and its diagnostics.
         """
         self._core = weakref.ref(core)
         self._label = core.label
+        config = core.config
+        diagnostics = core.diagnostics
+        self._lease = rate_limits.GOVERNORS.lease(
+            api_key=config.api_key,
+            base_url=config.rest_base_url,
+            basic=config.rest_basic_subscriptions,
+            label=core.label,
+            listener=diagnostics.rate_limits_changed,
+        )
+        core.on_close(self._lease.release)
+        diagnostics.watch_rate_limits(
+            functools.partial(rate_limits.rate_limit_pull, self._lease.governor)
+        )
         # Created by the first flat-file read (`flat_files`), under the core's `registry_lock`.
         self._flat_files: FlatFileClient | None = None
         # Created by the first stream (`streams`), under the core's `registry_lock`.
@@ -91,14 +116,17 @@ class SessionClients:
             raise MassiveError(f"{self._label} is closed")
         return core
 
-    def rest(self) -> RestTransport:
+    def rest(self) -> RestEndpoints:
         """Return a REST transport bound to the session's core and its shared REST state.
 
-        Each call gets a new, lightweight `RestEndpoints`. The first call creates the
-        session's `RestState`: it creates the `_massive.RestClient` outside every lock (the
-        constructor reads the proxy and certificate settings, but makes no request), installs
-        it under the core's `registry_lock` unless a racing call installed one first (the
-        loser's client is closed at once), and registers the state's close with
+        Each call gets a new, lightweight `RestEndpoints`, typed as such rather than as the
+        `RestTransport` port so that the futures calendar's `fetch_rows`, which names the wire
+        layer's `Cancel` and so stays out of the port, is reachable here. The first call creates the
+        session's `RestState`: it creates the `_massive.RestClient` outside every lock, on the
+        session's shared governor and with the session's `RateLimitWarnings` as its refusal
+        hook (the constructor reads the proxy and certificate settings, but makes no
+        request), installs it under the core's `registry_lock` unless a racing call installed
+        one first (the loser's client is closed at once), and registers the state's close with
         `SessionCore.on_close` after releasing the lock. So the client closes, and every poller
         stops, with the session, or at once if the session closed meanwhile. The closer refers
         to the state only, never to the core.
@@ -114,11 +142,14 @@ class SessionClients:
             state = self._rest
         if state is None:
             config = core.config
+            warnings = rate_limits.RateLimitWarnings(core.label, config.rest_basic_subscriptions)
             candidate = RestState(
                 _massive.RestClient(
                     config.api_key,
                     base_url=config.rest_base_url,
                     max_concurrency=config.max_concurrency,
+                    governor=self._lease.governor,
+                    on_refused=warnings.refused,
                 ),
                 core.label,
             )
@@ -215,7 +246,9 @@ class SessionClients:
         """
         self.rest().record_verdict(asset_class, family, decision)
 
-    def _fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+    def _fetch_rows(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+    ) -> list[dict[str, object]]:
         """Return every raw row of a REST path through the session's REST transport.
 
         The WebSocket transport's futures schedule calendar reads the futures contracts and
@@ -224,11 +257,13 @@ class SessionClients:
         Args:
             template: The path template; it takes no path parameter.
             query: The query parameters, by wire name.
+            bucket: The rate governor bucket the requests are charged to.
+            cancel: The lookup's token: its lane, and the end of its waits once set.
 
         Returns:
             The rows of every page.
         """
-        return self.rest().fetch_rows(template, query)
+        return self.rest().fetch_rows(template, query, bucket=bucket, cancel=cancel)
 
     def flat_files(self) -> FlatFileTransport:
         """Return a flat-file transport for one `history()` call.

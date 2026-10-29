@@ -35,6 +35,7 @@ EXPECTED_EXPORTS = [
     "Locale",
     "ConditionDataType",
     "Sip",
+    "Subscription",
     "TickerType",
     "SymbolConvention",
     "OnError",
@@ -72,7 +73,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 37
+    assert len(EXPECTED_EXPORTS) == 38
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 
@@ -133,13 +134,13 @@ def test_public_names_come_from_private_modules() -> None:
         assert obj.__module__.startswith("deephaven_massive._"), obj
 
 
-def test_eighteen_enums_are_exported() -> None:
+def test_nineteen_enums_are_exported() -> None:
     enums = [
         n
         for n in dm.__all__
         if isinstance(getattr(dm, n), type) and issubclass(getattr(dm, n), StrEnum)
     ]
-    assert len(enums) == 18
+    assert len(enums) == 19
 
 
 def test_exception_hierarchy() -> None:

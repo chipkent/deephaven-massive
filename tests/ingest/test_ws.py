@@ -31,7 +31,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._ingest import futures_calendar, ws
-from deephaven_massive._massive import Status, StatusKind, Transport, WsState
+from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
@@ -2375,7 +2375,7 @@ def test_the_calendar_never_reads_through_a_freed_session(ws_session: WsSession)
             return None
 
         @staticmethod
-        def fetch_rows(path: str, _query: object) -> list[dict[str, object]]:
+        def fetch_rows(path: str, _query: object, **_charging: object) -> list[dict[str, object]]:
             reads.append(path)
             return []
 
@@ -2384,7 +2384,7 @@ def test_the_calendar_never_reads_through_a_freed_session(ws_session: WsSession)
     group.sessions = cast("set[ws.WsConnections]", {_Freed()})
     try:
         with pytest.raises(dm.MassiveError, match="connection group has closed"):
-            group._fetch_rows("/futures/v1/contracts", {})
+            group._fetch_rows("/futures/v1/contracts", {}, bucket="futures", cancel=Cancel())
     finally:
         group.sessions = real  # before the session's close leaves the group
     assert reads == []
@@ -2407,7 +2407,7 @@ def test_the_calendar_outlives_the_session_that_made_it(ws_session: WsSession) -
     other.close()
     assert not calendar._thread.is_alive()  # the group's last session closed it
     with pytest.raises(dm.MassiveError, match="connection group has closed"):
-        group._fetch_rows("/futures/v1/contracts", {})
+        group._fetch_rows("/futures/v1/contracts", {}, bucket="futures", cancel=Cancel())
     del theirs
 
 

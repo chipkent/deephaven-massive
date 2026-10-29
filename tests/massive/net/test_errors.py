@@ -1,5 +1,8 @@
+import ssl
+
 import pytest
 
+from deephaven_massive._massive.net import errors
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 
 ALL_CLASSES = [WireError, WireAuthError, WireEntitlementError]
@@ -47,3 +50,55 @@ def test_the_hierarchy() -> None:
     assert not issubclass(WireAuthError, WireEntitlementError)
     assert not issubclass(WireEntitlementError, WireAuthError)
     assert issubclass(WireError, Exception)
+
+
+def test_a_certificate_failure_is_recognised_however_it_is_wrapped() -> None:
+    cert = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    assert errors.is_tls_failure(cert)
+    as_argument = OSError(cert)
+    assert errors.is_tls_failure(as_argument)
+    as_cause = ConnectionError("wrapped")
+    as_cause.__cause__ = cert
+    assert errors.is_tls_failure(as_cause)
+    as_context = RuntimeError("during handling")
+    as_context.__context__ = as_argument
+    assert errors.is_tls_failure(as_context)
+
+
+def test_other_failures_are_not_tls_failures() -> None:
+    assert not errors.is_tls_failure(ConnectionResetError("reset"))
+    assert not errors.is_tls_failure(ssl.SSLError("handshake failure"))
+    assert not errors.is_tls_failure(ValueError(ValueError("nested"), "text"))
+
+
+def test_a_cycle_of_exceptions_ends_the_search() -> None:
+    first = ValueError("first")
+    second = ValueError(first)
+    first.__context__ = second
+    assert not errors.is_tls_failure(first)
+    assert not errors.is_proxy_auth_failure(first)
+
+
+def test_a_proxy_credential_refusal_is_recognised_however_it_is_wrapped() -> None:
+    # http.client's report of a CONNECT answered with 407, wrapped as urllib3 and botocore do.
+    refused = OSError("Tunnel connection failed: 407 Proxy Authentication Required")
+    assert errors.is_proxy_auth_failure(refused)
+    as_argument = ConnectionError("Unable to connect to proxy", refused)
+    assert errors.is_proxy_auth_failure(as_argument)
+    as_context = RuntimeError("Failed to connect to proxy URL")
+    as_context.__context__ = as_argument
+    assert errors.is_proxy_auth_failure(as_context)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("Tunnel connection failed: 403 Forbidden"),
+        OSError("Tunnel connection failed: 4070 Unknown"),
+        ValueError("Tunnel connection failed: 407 Proxy Authentication Required"),
+        ConnectionRefusedError(61, "Connection refused"),
+    ],
+    ids=["another-status", "a-longer-status", "not-an-os-error", "refused"],
+)
+def test_other_failures_are_not_proxy_credential_refusals(error: BaseException) -> None:
+    assert not errors.is_proxy_auth_failure(error)

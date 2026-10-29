@@ -32,6 +32,14 @@ Interface:
       dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
+    - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
+      start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
+      API key, and a snapshot of one subscription's state for diagnostics.
+    - `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`: a Basic subscription's limit (5 requests
+      per minute) and the seconds a finished request holds its slot (61).
+    - `Cancel`: the cancellation token that ends a request's waits.
+    - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, which keys the
+      governor the library shares. It is part of `net` and loads no client.
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
       part of `spec` and loads no client: the REST client encodes every request with it, and
       the library's filter check calls it so a value it accepts always encodes.
@@ -60,6 +68,10 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "BASIC_REQUESTS_PER_MINUTE",
+    "RATE_WINDOW",
+    "BucketState",
+    "Cancel",
     "DriftReport",
     "Field",
     "FlatFile",
@@ -70,6 +82,7 @@ __all__ = [
     "ReadColumn",
     "ReadPlan",
     "Reject",
+    "RequestGovernor",
     "RestClient",
     "RestPath",
     "Source",
@@ -85,6 +98,7 @@ __all__ = [
     "WsState",
     "encode_value",
     "object_key",
+    "origin_of",
     "provenance",
     "source",
     "sources",
@@ -93,6 +107,11 @@ __all__ = [
 
 # Each name of the interface, and the module that defines it.
 _EXPORTS: dict[str, str] = {
+    "BASIC_REQUESTS_PER_MINUTE": "deephaven_massive._massive.rest.governor",
+    "RATE_WINDOW": "deephaven_massive._massive.rest.governor",
+    "BucketState": "deephaven_massive._massive.rest.governor",
+    "Cancel": "deephaven_massive._massive.net.cancel",
+    "RequestGovernor": "deephaven_massive._massive.rest.governor",
     "FlatFile": "deephaven_massive._massive.flatfiles.reader",
     "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
     "Page": "deephaven_massive._massive.rest.response",
@@ -120,6 +139,7 @@ _EXPORTS: dict[str, str] = {
     "WireType": "deephaven_massive._massive.spec.types",
     "WireUnit": "deephaven_massive._massive.spec.types",
     "object_key": "deephaven_massive._massive.flatfiles.layout",
+    "origin_of": "deephaven_massive._massive.net.origins",
     "to_batch": "deephaven_massive._massive.rest.batch",
     "encode_value": "deephaven_massive._massive.spec.values",
 }
@@ -130,13 +150,21 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.flatfiles.client import FlatFileClient
     from deephaven_massive._massive.flatfiles.layout import object_key
     from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
+    from deephaven_massive._massive.net.cancel import Cancel
     from deephaven_massive._massive.net.errors import (
         WireAuthError,
         WireEntitlementError,
         WireError,
     )
+    from deephaven_massive._massive.net.origins import origin_of
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
+    from deephaven_massive._massive.rest.governor import (
+        BASIC_REQUESTS_PER_MINUTE,
+        RATE_WINDOW,
+        BucketState,
+        RequestGovernor,
+    )
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec import provenance, source, sources
     from deephaven_massive._massive.spec.types import (

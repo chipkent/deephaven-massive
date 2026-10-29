@@ -9,6 +9,8 @@ WebSocket, and flat-file clients all build on it:
 - `net.codec`: the JSON decoder (orjson when installed, else a strict standard-library path).
 - `net.retry`: the retry schedule, the `Retry-After` parser, TLS-failure detection, and the
   injectable `Clock` every wait goes through.
+- `net.cancel`: `Cancel`, the token that ends a request's waits, which follows other tokens.
+- `net.origins`: `origin_of`, the scheme, host, and port a URL reaches.
 
 Attributes:
     USER_AGENT: The `User-Agent` every client sends, `deephaven-massive/<version>`, where the
