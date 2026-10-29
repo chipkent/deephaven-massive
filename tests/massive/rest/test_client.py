@@ -24,7 +24,7 @@ from deephaven_massive._massive.net.errors import (
 )
 from deephaven_massive._massive.rest import client as client_module
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.rest.governor import Permit, RequestGovernor
+from deephaven_massive._massive.rest.governor import Admission, Permit, RequestGovernor
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
@@ -1024,7 +1024,7 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
     rest = _client(fake_rest, governor=governor)
     cancel = Cancel()
     # A short pause makes the request queue, so its admission sends a change notice.
-    refused = governor.acquire("stocks", Cancel(), lane=object())
+    refused = governor.admission("stocks", lane=object()).acquire(Cancel())
     governor.refused(refused, retry_after=1.0, message="slow down", request_id=None)
 
     def admitted() -> None:  # the change notice of the admission sets the token
@@ -1152,9 +1152,9 @@ class _RecordingGovernor(RequestGovernor):
         self.lanes: list[object] = []
 
     @override
-    def acquire(self, bucket: str, cancel: Cancel, *, lane: Hashable) -> Permit:
+    def admission(self, bucket: str, *, lane: Hashable) -> Admission:
         self.lanes.append(lane)
-        return super().acquire(bucket, cancel, lane=lane)
+        return super().admission(bucket, lane=lane)
 
 
 def test_a_call_without_a_token_is_a_lane_of_its_own_and_a_token_shares_one(
@@ -1239,4 +1239,26 @@ def test_an_attempt_that_failed_on_the_wire_keeps_its_slot(
     with pytest.raises(WireError):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert governor.snapshot()[0].recent == 4  # each attempt may have reached Massive
+    rest.close()
+
+
+def test_an_interrupt_just_after_the_grant_leaves_no_permit_held(
+    fake_rest: FakeRestServer, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ctrl-C landing between the grant's return and anything after it: the claim's exit
+    # still reports the permit, so a pause's probe can never be lost this way.
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    real = Admission.acquire
+
+    def interrupted(self: Admission, cancel: Cancel) -> Permit:
+        real(self, cancel)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Admission, "acquire", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert fake_rest.requests == []
+    state = governor.snapshot()[0]
+    assert (state.attempts, state.in_flight) == (1, 0)
     rest.close()

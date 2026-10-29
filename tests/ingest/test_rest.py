@@ -711,15 +711,13 @@ def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
     # The list is crypto reference data: its pages count against the currencies subscription,
     # and they take one turn at a time among the bucket's other reads, as one read does.
     admitted: list[tuple[str, object]] = []
-    acquire = _massive.RequestGovernor.acquire
+    admission = _massive.RequestGovernor.admission
 
-    def recording(
-        governor: _massive.RequestGovernor, bucket: str, cancel: _massive.Cancel, *, lane: object
-    ) -> object:
+    def recording(governor: _massive.RequestGovernor, bucket: str, *, lane: object) -> object:
         admitted.append((bucket, lane))
-        return acquire(governor, bucket, cancel, lane=lane)
+        return admission(governor, bucket, lane=lane)
 
-    monkeypatch.setattr(_massive.RequestGovernor, "acquire", recording)
+    monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
     second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
     first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
     fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
@@ -2634,14 +2632,28 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
     governor = governor_of(m)
     for _ in range(4):  # one slot is left
         governor.done(
-            governor.acquire("currencies", _massive.Cancel(), lane=object()), answered=True
+            governor.admission("currencies", lane=object()).acquire(_massive.Cancel()),
+            answered=True,
         )
     refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
     for pair in ("EUR/USD", "GBP/USD", "AUD/USD"):
         fake_rest.reply(f"/v1/conversion/{pair}", refused)
-    try:
-        with pytest.raises(dm.EntitlementError, match="upgrade"):
+    errors: list[BaseException] = []
+
+    def read() -> None:
+        try:
             fetch(m, CONVERSION, symbols=["C:EURUSD", "C:GBPUSD", "C:AUDUSD"])
+        except dm.EntitlementError as error:
+            errors.append(error)
+
+    try:
+        # On its own thread, so a call left waiting for a slot fails the test, not hangs it.
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(TIMEOUT)
+        assert not reader.is_alive(), "the calls waiting for a slot were not stopped"
+        assert len(errors) == 1
+        assert "upgrade" in str(errors[0])
         assert len(fake_rest.requests) == 1  # the others gave up their places unsent
         assert next(s for s in governor.snapshot() if s.bucket == "currencies").waiting == 0
     finally:
@@ -2727,7 +2739,9 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
     m = dm.MassiveSession(config)
     governor = governor_of(m)
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+        governor.done(
+            governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
     q = query(m, DIVIDENDS, symbols=["AAPL"])
     assert isinstance(q, Query)
     left = threading.Event()

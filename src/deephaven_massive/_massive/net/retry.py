@@ -45,6 +45,7 @@ __all__ = [
     "SYSTEM_CLOCK",
     "TRANSIENT_STATUSES",
     "TRANSIENT_WAITS",
+    "UNTIMED_CHUNK",
     "Clock",
     "SystemClock",
     "rate_limit_wait",
@@ -132,14 +133,23 @@ class SystemClock:
 
         Args:
             event: Ends the wait early when set, such as a client's closed event.
-            seconds: The longest the wait lasts; `math.inf` waits for `event` alone, since
-                `threading.Event.wait` refuses an infinite timeout.
+            seconds: The longest the wait lasts; `math.inf` waits for `event` alone, in
+                chunks of `UNTIMED_CHUNK` seconds, so Ctrl-C interrupts it on every operating
+                system (an untimed lock wait may ignore it on Windows).
 
         Returns:
             True if `event` was set, False if the time ran out.
         """
-        return event.wait(None if math.isinf(seconds) else seconds)
+        if not math.isinf(seconds):
+            return event.wait(seconds)
+        while not event.wait(UNTIMED_CHUNK):
+            pass
+        return True
 
+
+UNTIMED_CHUNK = 0.5
+"""Seconds of each wait of `SystemClock` without a deadline: short enough that Ctrl-C ends it
+promptly on every operating system."""
 
 SYSTEM_CLOCK = SystemClock()
 """The clock every client uses unless a test passes another."""
