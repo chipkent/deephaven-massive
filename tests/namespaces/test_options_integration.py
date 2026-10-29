@@ -1,17 +1,18 @@
 """Live checks of options data against Massive: underlyings, deliverables, and bar stamps.
 
-Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
-the evidence, not a pass, answers the question. Raw rows come from the wire REST client,
-because "a key is missing" and "a key holds an empty list" look the same once the library has
-read them; the library's own answer is recorded beside them. How to run these tests is in
-`docs/live-tests.md`.
+Each test records what Massive sent (`evidence`). A test marked `settles` asserts only that the
+requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
+asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
+from the wire REST client, because "a key is missing" and "a key holds an empty list" look the same
+once the library has read them; the library's own answer is recorded beside them. How to run these
+tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
@@ -37,7 +38,7 @@ pytestmark = pytest.mark.integration
 # Fixture types, repeated in each live module: test modules may not import from conftest.
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
-HalfDayReport: TypeAlias = "Callable[[str, str], list[str]]"
+MinuteSpanReport: TypeAlias = "Callable[[str, date], int]"
 RestRows: TypeAlias = (
     "Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]]"
 )
@@ -83,11 +84,24 @@ _ADJUSTED: tuple[tuple[str, str, date], ...] = (
     ("DELL1", "DELL", date(2021, 11, 15)),
     ("FF1", "FF", date(2024, 4, 15)),
     ("AAPL7", "AAPL", date(2014, 6, 10)),
-    ("AAPL", "AAPL", date(2026, 6, 1)),
-    ("SPX", "SPX", date(2026, 6, 1)),
 )
-"""(contract root, underlying, a day the contracts were listed): three adjusted roots after a
-spin-off, a special dividend, and a split, then a standard equity root and an index root."""
+"""(contract root, underlying, a day the contracts were listed): three adjusted roots, after a
+spin-off, a special dividend, and a split. Adjusted roots are rare and named by hand, so the
+older ones lie beyond a short history; the test reads them only when the plan reaches back."""
+
+_HISTORY_DAYS = 3 * 365
+"""How far back a listing day may lie before the test needs the plans probe to say the
+options history reaches three years."""
+
+
+class _Plans(Protocol):
+    """The part of the run's plans (the `live_plans` fixture) this module reads."""
+
+    @property
+    def three_years(self) -> Mapping[str, bool | None]:
+        """Whether each class's history reaches three years back; None when not known."""
+        ...
+
 
 _OCC_TAIL = 15
 """Characters of an OCC symbol after its root: the expiry (6), the type (1), the strike (8)."""
@@ -266,6 +280,8 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    live_plans: _Plans,
+    recent_monday: date,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
@@ -273,30 +289,48 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
 
     Lists the contracts of the adjusted roots `DELL1` (as of 2021-11-15, after a spin-off),
     `FF1` (2024-04-15, a special dividend), and `AAPL7` (2014-06-10, the 7:1 split), and of
-    standard `AAPL` and `SPX` contracts (2026-06-01), looked up by underlying (following pages
-    until the root is passed) and by root, and records `additional_underlyings` (or
-    `<missing>`), `cfi`, `correction`, and `shares_per_contract` of up to three of each, and
-    the library's columns for the first. The 2014 and 2021 days need a plan with that much
-    history. Reading it: standard contracts without `additional_underlyings` (or with `[]`)
-    and adjusted ones with a non-empty list mean null and `[]` both mark a standard
-    deliverable; an adjusted contract with neither means only `Cfi` or the root's trailing
-    digit can tell. A root found by neither lookup, with the page counts showing the listing
-    was read past it, is not kept by Massive for that day.
+    standard `AAPL` and `SPX` contracts (the most recent published Monday), looked up by
+    underlying (following pages until the root is passed) and by root, and records
+    `additional_underlyings` (or `<missing>`), `cfi`, `correction`, and `shares_per_contract`
+    of up to three of each, and the library's columns for the first. A root listed more than
+    three years ago is read only when the plans probe found that the options history reaches
+    that far, and a lookup the plan refuses for its timeframe is recorded and skipped; either
+    way the line says "outside the plan's history". Reading it: standard contracts without
+    `additional_underlyings` (or with `[]`) and adjusted ones with a non-empty list mean null
+    and `[]` both mark a standard deliverable; an adjusted contract with neither means only
+    `Cfi` or the root's trailing digit can tell. A root found by neither lookup, with the page
+    counts showing the listing was read past it, is not kept by Massive for that day.
+
+    Raises:
+        WireEntitlementError: When a lookup is refused for any reason but its timeframe; the
+            plans hold Options Starter, so the test fails.
     """
+    reach = recent_monday - timedelta(days=_HISTORY_DAYS)
+    deep = live_plans.three_years["options"] is True
     found = 0
-    for root, underlying, listed in _ADJUSTED:
+    roots = (*_ADJUSTED, ("AAPL", "AAPL", recent_monday), ("SPX", "SPX", recent_monday))
+    for root, underlying, listed in roots:
         evidence(f"{root} (underlying {underlying}, as of {listed}):")
-        matching = [
-            row
-            for expired in (False, True)
-            for lookup in dict.fromkeys((underlying, root))
-            for row in _root_contracts(
-                live_rest,
-                root,
-                query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
-                evidence=evidence,
-            )
-        ]
+        if listed < reach and not deep:
+            evidence(f"    outside the plan's history: {listed} is before {reach}")
+            continue
+        try:
+            matching = [
+                row
+                for expired in (False, True)
+                for lookup in dict.fromkeys((underlying, root))
+                for row in _root_contracts(
+                    live_rest,
+                    root,
+                    query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
+                    evidence=evidence,
+                )
+            ]
+        except WireEntitlementError as error:
+            if "timeframe" not in str(error).lower():
+                raise
+            evidence(f"    outside the plan's history: {error}")
+            continue
         rows = list({str(row["ticker"]): row for row in matching}.values())
         found += bool(rows)
         evidence(f"    {len(rows)} contracts of root {root}")
@@ -317,38 +351,6 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
     assert found
 
 
-@pytest.mark.needs("options:starter")
-@pytest.mark.settles("half-day stamps")
-@pytest.mark.timeout(100)
-def test_half_day_option_bars_and_their_stamps(
-    live_rest: RestClient, *, half_day_report: HalfDayReport, evidence: Evidence
-) -> None:
-    """How REST stamps an option contract's bars on a half trading day (13:00 New York close).
-
-    Picks one SPY contract listed on 2025-11-28 and expiring after 2025-12-24, and records its
-    range day bar and first and last minute bars on both half days, in UTC and New York time.
-    Reading it: options trade until 13:00 (or 13:15 for index options) on a half day; the
-    stamps show whether the library's day label holds for them.
-    """
-    contracts = live_rest.get(
-        source(Transport.REST, _CONTRACTS),
-        {},
-        {
-            "underlying_ticker": "SPY",
-            "as_of": date(2025, 11, 28),
-            "expiration_date.gte": date(2026, 1, 16),
-            "limit": 1,
-        },
-        bucket="options",
-    ).rows
-    assert contracts, "no SPY contract listed on 2025-11-28"
-    ticker = str(contracts[0]["ticker"])
-    lines = half_day_report("optionsTicker", ticker)
-    for line in lines:
-        evidence(line)
-    assert lines
-
-
 _DAY_FILE = "us_options_opra/day_aggs_v1"
 _SPY_PREV = "/v2/aggs/ticker/{stocksTicker}/prev"
 _SPX_SPELLINGS = ("SPX", "I:SPX", "SPXW")
@@ -356,31 +358,35 @@ _SPX_SPELLINGS = ("SPX", "I:SPX", "SPXW")
 under any of them."""
 
 
-def _december_expiry(year: int) -> date:
-    """Return the third Friday of December: a monthly expiration, never a market holiday.
+def _monthly_expiry_after(day: date) -> date:
+    """Return the third Friday of the month after a day's: a standard monthly expiration.
+
+    Monthly contracts of SPY and SPXW are listed months ahead, so on a half day and the day
+    before it the next month's are listed and trading, with weeks left to expiry.
 
     Returns:
-        The date, between December 15 and 21.
+        The date, between the 15th and the 21st of the next month.
     """
-    first = date(year, 12, 1)
+    first = (day.replace(day=1) + timedelta(days=32)).replace(day=1)
     return first + timedelta(days=(4 - first.weekday()) % 7 + 14)
 
 
-def _stamp_candidates(range_bars: RangeBars, full_day: date) -> dict[str, list[str]]:
+def _stamp_candidates(range_bars: RangeBars, days: tuple[date, date]) -> dict[str, list[str]]:
     """Return SPY and SPXW calls that were listed on the stamp days, nearest strike first.
 
-    The calls expire on the third Friday of December of the stamp days' year, after the half
-    day. SPY strikes are taken every $5 around SPY's close of the full day, and SPXW strikes
-    every 25 points around ten times it (SPX trades near ten times SPY); each list ends with
-    the two neighbouring strikes, in case the nearest did not trade.
+    The calls expire on the third Friday of the month after the half day's. SPY strikes are
+    taken every $5 around SPY's close of the full day, and SPXW strikes every 25 points around
+    ten times it (SPX trades near ten times SPY); each list ends with the two neighbouring
+    strikes, in case the nearest did not trade.
 
     Returns:
         The candidates, by root.
     """
+    full_day, half_day = days
     bars = range_bars("SPY", "day", (full_day, full_day))
     assert len(bars) == 1, f"SPY range 1-day bars of {full_day}: {bars}"
     close = float(bars[0]["c"])
-    code = f"{_december_expiry(full_day.year):%y%m%d}"
+    code = f"{_monthly_expiry_after(half_day):%y%m%d}"
 
     def candidates(root: str, level: float, step: int) -> list[str]:
         strike = round(level / step) * step
@@ -517,31 +523,35 @@ def test_option_day_and_week_bar_stamps_from_rest(
     day_bar_report: DayBarReport,
     prev_bar_report: PrevBarReport,
     period_bar_report: PeriodBarReport,
+    minute_span_report: MinuteSpanReport,
     library_stamps: LibraryStamps,
     evidence: Evidence,
 ) -> None:
-    """How REST stamps a SPY and an SPXW contract's 1-day and week bars.
+    """How REST stamps a SPY and an SPXW contract's 1-day, minute, and week bars.
 
-    The days are those of the most recent finished Thanksgiving week: its Wednesday, a full
-    trading day, and its Friday, a half day (13:00 close; 13:15 for SPXW). For a SPY and an
-    SPXW call expiring that December, struck near SPY's Wednesday close (the first strike
-    with a range bar on both days), it records each stamp in UTC and New York time: the range
-    endpoint's 1-day bars around both days and the week bars of Thanksgiving week and the week
-    before. `/prev` serves only the most recent completed trading day, so it is read for a SPY
-    and an SPXW call listed now (from the contracts reference), beside the range bars of that
-    day, with whether it is a half day and which day's bar it matches. The library's windows
-    for the same requests follow. Reading it: range stamps at 00:00 New York time and a
-    `/prev` stamp at 16:00 (16:15 for SPXW; 13:00 or 13:15 after a half day) confirm the
-    library's day label; any other stamp is refused with a `MassiveError`, shown in the
-    library lines.
+    The days are the most recent half day whose week has ended (13:00 close; 13:15 for SPXW)
+    and the full trading day before it. For a SPY and an SPXW call expiring on the next month's
+    third Friday, struck near SPY's close of the full day (the first
+    strike with a range bar on both days), it records each stamp in UTC and New York time:
+    the range endpoint's 1-day bars around both days, the first and last minute bar of each
+    day, and the week bars of the half day's week and the week before. `/prev` serves only the
+    most recent completed trading day, so it is read for a SPY and an SPXW call listed now
+    (from the contracts reference), beside the range bars of that day, with whether it is a
+    half day and which day's bar it matches. The library's windows for the same requests
+    follow. Reading it: range stamps at 00:00 New York time, a last minute bar at 12:59 (13:14
+    for SPXW) on the half day, and a `/prev` stamp at 16:00 (16:15 for SPXW; 13:00 or 13:15
+    after a half day) confirm the library's day label; any other stamp is refused with a
+    `MassiveError`, shown in the library lines.
     """
     days = stamp_days["day"]
-    candidates = _stamp_candidates(range_bars, days[0])
+    candidates = _stamp_candidates(range_bars, days)
     complete: dict[str, bool] = {}
     for root, tickers in candidates.items():
         for ticker in tickers:
             if day_bar_report(ticker, days, {}):
                 continue
+            for day in days:
+                minute_span_report(ticker, day)
             complete[root] = _stamp_contract_weeks(
                 live_session,
                 ticker,
@@ -588,17 +598,16 @@ def test_option_day_bar_stamps_of_the_day_file(
 ) -> None:
     """How `us_options_opra/day_aggs_v1` stamps a SPY and an SPXW contract's 1-day bars.
 
-    Uses the candidates of the REST stamp test (calls expiring that December, struck near
-    SPY's Wednesday close) and, for each root, the first strike the file holds on both the
-    Wednesday (a full day) and the Friday (a half day) of the most recent finished
-    Thanksgiving week. Records its file rows, each `window_start` in UTC and New York time,
-    beside the range endpoint's bars around those days and which day's bar each matches with
-    the largest relative error, and the library's `history(source=FLAT_FILES)` windows.
-    Reading it: a stamp at 00:00 New York time and a match on the same day confirm one day
-    label for the files and REST.
+    Uses the candidates of the REST stamp test (next-month calls struck near SPY's close of the
+    full day) and, for each root, the first strike the file holds on both the most recent half
+    day whose week has ended and the full trading day before it. Records its file rows, each
+    `window_start` in UTC and New York time, beside the range endpoint's bars around those
+    days and which day's bar each matches with the largest relative error, and the library's
+    `history(source=FLAT_FILES)` windows. Reading it: a stamp at 00:00 New York time and a
+    match on the same day confirm one day label for the files and REST.
     """
     days = stamp_days["day"]
-    roots = _stamp_candidates(range_bars, days[0])
+    roots = _stamp_candidates(range_bars, days)
     files: dict[str, dict[date, list[StampedBar]]] = {t: {} for c in roots.values() for t in c}
     for day in days:
         result = flat_file_tickers(_DAY_FILE, day, list(files))
@@ -618,31 +627,58 @@ def test_option_day_bar_stamps_of_the_day_file(
     assert all(chosen.values()), f"the day files hold no candidate on both days: {roots}"
 
 
-_NVDA_CONTRACT = "O:NVDA240621C00120000"
-"""An NVDA call expiring after its 10-for-1 split of 2024-06-10, under its post-split strike."""
-
-
-@pytest.mark.needs("options:basic")
+@pytest.mark.needs("options:basic", "stocks:basic")
 @pytest.mark.settles("57")
-@pytest.mark.requests(2)
+@pytest.mark.requests(10)
 @pytest.mark.timeout(100)
 def test_option_bars_across_the_underlyings_split(
-    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    recent_splits: Callable[[dm.MassiveSession], list[Any]],
+    table_rows: TableRows,
+    evidence: Evidence,
 ) -> None:
     """Whether option bars are split-adjusted for their underlying's split.
 
-    Records an NVDA call's day bars from 2024-06-05 to 2024-06-12 with `adjusted=true` and
-    `adjusted=false`. Reading it: prices before 2024-06-10 that differ by the split's ratio mean
-    options are adjusted in full like stocks; equal prices, or no bars before the split under
-    the post-split ticker, mean the contract was renamed instead, and the docstrings must say
-    so.
+    Finds the year's most recent forward splits (`m.stocks.splits`) and, for the first whose
+    underlying lists a call as of the execution date expiring a week or more after it, records
+    that contract's day bars from three days before the split to two days after, with
+    `adjusted=true` and `adjusted=false`. Reading it: prices before the split that differ by
+    its ratio mean options are adjusted in full like stocks; equal prices, or no bars before
+    the split under the post-split ticker, mean the contract was renamed instead, and the
+    docstrings must say so. Skips when no recent split has a listed option.
     """
+    contracts = source(Transport.REST, _CONTRACTS)
+    found = None
+    for split in recent_splits(live_session)[:3]:
+        query = {
+            "underlying_ticker": split.symbol,
+            "as_of": split.executed,
+            "contract_type": "call",
+            "expiration_date.gte": split.executed + timedelta(days=7),
+            "limit": 1,
+        }
+        for expired in (False, True):
+            rows = live_rest.get(contracts, {}, query | {"expired": expired}, bucket="options").rows
+            if rows:
+                found = split, str(rows[0]["ticker"])
+                break
+        if found:
+            break
+        evidence(f"{split.symbol}: no call listed as of {split.executed}; next")
+    if found is None:
+        pytest.skip("no recent forward split whose underlying lists an option")
+    split, contract = found
+    evidence(f"{contract}: a call on {split.symbol}, split {split.ratio}:1 on {split.executed}")
     # A request that fails raises; an empty result is evidence in itself (a renamed contract).
     for adjusted in (True, False):
         rows = table_rows(
-            live_session.options.bars(_NVDA_CONTRACT, dm.Timespan.DAY, adjusted=adjusted).history(
-                date(2024, 6, 5), date(2024, 6, 12), source=dm.HistorySource.REST
+            live_session.options.bars(contract, dm.Timespan.DAY, adjusted=adjusted).history(
+                split.executed - timedelta(days=3),
+                split.executed + timedelta(days=2),
+                source=dm.HistorySource.REST,
             )
         )
         closes = [(r["Date"], r["Close"], r["Volume"]) for r in rows]
-        evidence(f"{_NVDA_CONTRACT} adjusted={adjusted}: (Date, Close, Volume) {closes}")
+        evidence(f"{contract} adjusted={adjusted}: (Date, Close, Volume) {closes}")

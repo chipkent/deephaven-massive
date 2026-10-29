@@ -1,10 +1,11 @@
 """Live checks of futures data against Massive: sessions, bar labels, snapshots, and tickers.
 
-Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
-the evidence, not a pass, answers the question. Raw rows come from the wire REST client where
-the library filters or relabels the very rows in question; the library's own answer is
-recorded beside them. Every request names one contract or a few products. How to run these
-tests is in `docs/live-tests.md`.
+Each test records what Massive sent (`evidence`). A test marked `settles` asserts only that the
+requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
+asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
+from the wire REST client where the library filters or relabels the very rows in question; the
+library's own answer is recorded beside them. Every request names one contract or a few products.
+How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import logging
 import re
 import time
 from collections import Counter
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -42,12 +43,6 @@ Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
-
-_CONTRACT = "ESH6"
-"""The front E-mini S&P 500 contract in the first quarter of 2026."""
-
-_HOLIDAY_SESSION = date(2026, 1, 20)
-"""The session after Martin Luther King Day 2026."""
 
 _PRODUCTS = ("ES", "NQ", "CL", "NG", "GC", "SI", "ZN", "ZC", "6E")
 """Products of all four venues whose schedules the weekday check reads."""
@@ -79,6 +74,7 @@ def _page(client: RestClient, path: str, *, query: Mapping[str, object]) -> list
 
 def _aggregates(
     client: RestClient,
+    contract: str,
     resolution: str,
     *,
     start: datetime,
@@ -86,7 +82,7 @@ def _aggregates(
     evidence: Evidence,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
-    """Read the raw bars of the test contract at one resolution; record a refusal.
+    """Read the raw bars of one contract at one resolution; record a rejection.
 
     Returns:
         The bars, oldest first; empty when Massive rejects the request (an unknown
@@ -96,7 +92,7 @@ def _aggregates(
         WireEntitlementError: When the request is refused for want of a plan.
     """
     query = {
-        "ticker": _CONTRACT,
+        "ticker": contract,
         "resolution": resolution,
         "window_start.gte": start,
         "window_start.lt": end,
@@ -158,27 +154,33 @@ def test_the_session_after_a_holiday_and_year_candles(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    recent_holiday: Callable[[str], date],
+    front_contract: Callable[[str, date], str],
     table_rows: TableRows,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
     """When the session after a holiday opens, and how year candles and their filters behave.
 
-    Records the ES schedule around Martin Luther King Day 2026, the last minute bar before the
-    2026-01-20 session and its first minute bars (read raw, from 2026-01-16), the library's
-    minute bars of that session, and the 1-year candles of `ESH6` from 2025-01-01 and from
-    mid-year 2025-06-15. Reading it: a session opening at or before the previous regular open,
-    with its bars kept by the library, confirms the 4-day margin covers it; a 2025 candle
-    returned for the mid-year filter means `window_start` filters match the candle's start
-    (snap), its absence that they do not.
+    Takes the most recent Martin Luther King Day and the ES contract that was front then.
+    Records the ES schedule around the holiday, the last minute bar before the session after
+    it and that session's first minute bars (read raw, from the Friday before), the library's
+    minute bars of that session, and the contract's 1-year candles from January 1 and from
+    mid-June of the year before. Reading it: a session opening at or before the previous
+    regular open, with its bars kept by the library, confirms the 4-day margin covers it; a
+    candle of the year before returned for the mid-year filter means `window_start` filters
+    match the candle's start (snap), its absence that they do not.
     """
+    holiday = recent_holiday("martin luther king day")
+    session_day = holiday + timedelta(days=1)
+    contract = front_contract("ES", holiday)
     schedule = _page(
         live_rest,
         _SCHEDULES,
         query={
             "product_code": "ES",
-            "session_end_date.gte": date(2026, 1, 15),
-            "session_end_date.lte": date(2026, 1, 21),
+            "session_end_date.gte": holiday - timedelta(days=5),
+            "session_end_date.lte": session_day + timedelta(days=1),
             "limit": 100,
         },
     )
@@ -186,41 +188,44 @@ def test_the_session_after_a_holiday_and_year_candles(
         evidence(f"ES schedule: {event}")
     raw = _aggregates(
         live_rest,
+        contract,
         "1min",
-        start=datetime(2026, 1, 16, tzinfo=UTC),
-        end=datetime(2026, 1, 20, 12, tzinfo=UTC),
+        start=_midnight(holiday - timedelta(days=3)),
+        end=_midnight(session_day) + timedelta(hours=12),
         evidence=evidence,
         limit=50_000,
     )
-    session = [bar for bar in raw if bar.get("session_end_date") == _HOLIDAY_SESSION.isoformat()]
-    before = [bar for bar in raw if bar.get("session_end_date") != _HOLIDAY_SESSION.isoformat()]
+    session = [bar for bar in raw if bar.get("session_end_date") == session_day.isoformat()]
+    before = [bar for bar in raw if bar.get("session_end_date") != session_day.isoformat()]
     if before:
         last = before[-1]
         evidence(
-            f"last minute bar before the holiday session: "
+            f"{contract} last minute bar before the holiday session: "
             f"{instant_text(int(last['window_start']))} (session {last.get('session_end_date')})"
         )
     for bar in session[:3]:
-        evidence(
-            f"first minute bars of {_HOLIDAY_SESSION}: {instant_text(int(bar['window_start']))}"
-        )
-    minutes = table_rows(
-        live_session.futures.bars(_CONTRACT).history(_HOLIDAY_SESSION, _HOLIDAY_SESSION)
-    )
-    evidence(f"library minute bars of {_HOLIDAY_SESSION}: {len(minutes)} rows")
+        evidence(f"first minute bars of {session_day}: {instant_text(int(bar['window_start']))}")
+    minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
+    evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
     if minutes:
         evidence(f"    first {instant_text(minutes[0]['Timestamp'])} {minutes[0]}")
         evidence(f"    last {instant_text(minutes[-1]['Timestamp'])}")
-    for start in (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 6, 15, tzinfo=UTC)):
+    year = holiday.year - 1
+    for start in (date(year, 1, 1), date(year, 6, 15)):
         candles = _aggregates(
-            live_rest, "1year", start=start, end=datetime(2027, 1, 1, tzinfo=UTC), evidence=evidence
+            live_rest,
+            contract,
+            "1year",
+            start=_midnight(start),
+            end=_midnight(date(year + 2, 1, 1)),
+            evidence=evidence,
         )
         shown = [
             (instant_text(int(bar["window_start"])), bar.get("session_end_date")) for bar in candles
         ]
-        evidence(f"1year candles from {start:%Y-%m-%d}: {shown}")
+        evidence(f"1year candles from {start}: {shown}")
     assert schedule
-    assert session, f"no minute bar of the {_HOLIDAY_SESSION} session among {len(raw)} read"
+    assert session, f"no minute bar of the {session_day} session among {len(raw)} read"
 
 
 @pytest.mark.needs("futures:basic")
@@ -230,22 +235,21 @@ def test_the_session_after_a_holiday_and_year_candles(
 def test_futures_sessions_end_only_on_weekdays(
     live_session: dm.MassiveSession,
     *,
+    recent_month: tuple[date, date],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Whether a futures session can end on a Saturday or Sunday.
 
-    Reads every schedule event of March 2026 for nine products across the four venues and
-    records the weekday count of `SessionEndDate` (ISO text) and every weekend session. Reading
-    it: none confirms that requesting weekday sessions only is complete; any weekend session
-    means the library's session iteration must include those days.
+    Reads every schedule event of the most recent whole month for nine products across the
+    four venues and records the weekday count of `SessionEndDate` (ISO text) and every weekend
+    session. Reading it: none confirms that requesting weekday sessions only is complete; any
+    weekend session means the library's session iteration must include those days.
     """
+    start, end = recent_month
     rows = table_rows(
         live_session.futures.schedules(
-            product_code=list(_PRODUCTS),
-            start=date(2026, 3, 1),
-            end=date(2026, 3, 31),
-            limit=_SCHEDULE_LIMIT,
+            product_code=list(_PRODUCTS), start=start, end=end, limit=_SCHEDULE_LIMIT
         ).fetch()
     )
     ended = [
@@ -256,7 +260,7 @@ def test_futures_sessions_end_only_on_weekdays(
     days = Counter(day.strftime("%a") for _, day in ended)
     weekend = sorted({(product, day.isoformat()) for product, day in ended if day.weekday() >= 5})
     cut = " (cut short at the limit)" if len(rows) == _SCHEDULE_LIMIT else ""
-    evidence(f"schedules 2026-03 of {_PRODUCTS}: {len(rows)} events{cut}")
+    evidence(f"schedules {start}..{end} of {_PRODUCTS}: {len(rows)} events{cut}")
     evidence(f"session end weekdays {dict(days)}")
     evidence(f"sessions ending on a Saturday or Sunday: {weekend[:50]}")
     assert rows
@@ -270,44 +274,51 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    recent_month: tuple[date, date],
+    front_contract: Callable[[str, date], str],
     table_rows: TableRows,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
     """Which session labels a bar of several sessions, and what the bars align to.
 
-    Records, for `ESH6` in the first quarter of 2026, every 1-session bar's `window_start` and
-    `session_end_date`, then 2-session bars requested from 2026-01-01 and from 2026-01-03 (one
-    session later), and 2-month bars from 2026-01-01 and from 2026-02-01, side by side. Reading
-    it: compare each 2-session bar's `session_end_date` with the 1-session list: its first or
-    its last session is the label. Pairs that stay the same for both starts align to a calendar;
-    pairs that shift with the start align to `{from}`, and dates cannot select them. A refused
-    resolution is recorded and the rest still run.
+    Reads the three whole months ending with the most recent one, for the ES contract that
+    was front at their end (it trades through all three). Records every 1-session bar's
+    `window_start` and `session_end_date`, then 2-session bars requested from the first day
+    and from two days later, and 2-month bars from the first day and from a month later, side
+    by side. Reading it: compare each 2-session bar's `session_end_date` with the 1-session
+    list: its first or its last session is the label. Pairs that stay the same for both
+    starts align to a calendar; pairs that shift with the start align to `{from}`, and dates
+    cannot select them. A refused resolution is recorded and the rest still run.
     """
-    end = datetime(2026, 3, 21, tzinfo=UTC)
+    contract = front_contract("ES", recent_month[1])
+    first = recent_month[0].replace(day=1)
+    for _ in range(2):
+        first = (first - timedelta(days=1)).replace(day=1)
+    start = _midnight(first)
+    end = _midnight(recent_month[1] + timedelta(days=1))
+    later_month = _midnight((first + timedelta(days=32)).replace(day=1))
     requests = (
-        ("1session", datetime(2026, 1, 1, tzinfo=UTC)),
-        ("2session", datetime(2026, 1, 1, tzinfo=UTC)),
-        ("2session", datetime(2026, 1, 3, tzinfo=UTC)),
-        ("1month", datetime(2026, 1, 1, tzinfo=UTC)),
-        ("2month", datetime(2026, 1, 1, tzinfo=UTC)),
-        ("2month", datetime(2026, 2, 1, tzinfo=UTC)),
+        ("1session", start),
+        ("2session", start),
+        ("2session", start + timedelta(days=2)),
+        ("1month", start),
+        ("2month", start),
+        ("2month", later_month),
     )
     shown = 0
-    for resolution, start in requests:
-        bars = _aggregates(live_rest, resolution, start=start, end=end, evidence=evidence)
+    for resolution, since in requests:
+        bars = _aggregates(live_rest, contract, resolution, start=since, end=end, evidence=evidence)
         shown += len(bars)
         labels = [
             (instant_text(int(bar["window_start"])), bar.get("session_end_date")) for bar in bars
         ]
         evidence(
-            f"{resolution} from {start:%Y-%m-%d}: {len(bars)} bars; "
+            f"{contract} {resolution} from {since:%Y-%m-%d}: {len(bars)} bars; "
             f"(window_start, session_end_date) {labels}"
         )
     library = table_rows(
-        live_session.futures.bars(_CONTRACT, dm.Timespan.SESSION, multiplier=2).history(
-            datetime(2026, 1, 1, tzinfo=UTC), end
-        )
+        live_session.futures.bars(contract, dm.Timespan.SESSION, multiplier=2).history(start, end)
     )
     windows = [
         (instant_text(r["TimestampStart"]), instant_text(r["TimestampEnd"]), r["Date"])
@@ -366,33 +377,43 @@ def _chicago(nanos: int) -> str:
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_session_labels_around_the_roll_and_a_holiday(
-    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+    live_session: dm.MassiveSession,
+    *,
+    recent_monday: date,
+    recent_holiday: Callable[[str], date],
+    front_contract: Callable[[str, date], str],
+    table_rows: TableRows,
+    evidence: Evidence,
 ) -> None:
     """Which session Massive labels rows with around 17:00 Chicago time and after a holiday.
 
-    Records, per minute, the `Date` (Massive's `session_end_date`) of `ESH6` minute bars from
-    15:30 to 17:30 Chicago time on Monday 2026-03-02, of `ZCK6` (CBOT, whose pre-open starts at
-    16:45) over the same hour, and of `ESM6` around Good Friday 2026 (Thursday 2026-04-02 from
-    16:00 Chicago time to Monday 2026-04-06 09:00), beside the session the 17:00 Chicago rule
+    Records, per minute, the `Date` (Massive's `session_end_date`) of the front ES contract's
+    minute bars from 15:30 to 17:30 Chicago time on the most recent published Monday, of the
+    front corn contract (CBOT, whose pre-open starts at 16:45) over the same hours, and of the
+    ES contract front around the most recent Good Friday (from 16:00 Chicago time on the
+    Thursday before to 09:00 on the Monday after), beside the session the 17:00 Chicago rule
     gives. Reading it: labels that change at 17:00 confirm the WebSocket rule; a label that
     changes at 16:45 for ZC, or Thursday evening rows labelled Monday, are what the schedule
     correction must catch.
     """
+    monday = datetime(recent_monday.year, recent_monday.month, recent_monday.day, tzinfo=_CHICAGO)
+    good_friday = recent_holiday("good friday")
+    thursday = good_friday - timedelta(days=1)
     windows = (
+        (front_contract("ES", recent_monday), monday + timedelta(hours=15, minutes=30)),
+        (front_contract("ZC", recent_monday), monday + timedelta(hours=15, minutes=30)),
+    )
+    spans = [(contract, start, start + timedelta(hours=2)) for contract, start in windows]
+    holiday_start = datetime(thursday.year, thursday.month, thursday.day, 16, tzinfo=_CHICAGO)
+    spans.append(
         (
-            "ESH6",
-            datetime(2026, 3, 2, 21, 30, tzinfo=UTC),
-            datetime(2026, 3, 2, 23, 30, tzinfo=UTC),
-        ),
-        (
-            "ZCK6",
-            datetime(2026, 3, 2, 21, 30, tzinfo=UTC),
-            datetime(2026, 3, 2, 23, 30, tzinfo=UTC),
-        ),
-        ("ESM6", datetime(2026, 4, 2, 21, 0, tzinfo=UTC), datetime(2026, 4, 6, 14, 0, tzinfo=UTC)),
+            front_contract("ES", good_friday),
+            holiday_start,
+            holiday_start + timedelta(days=4, hours=-7),
+        )
     )
     found = 0
-    for contract, start, end in windows:
+    for contract, start, end in spans:
         rows = table_rows(
             live_session.futures.bars(contract, dm.Timespan.MINUTE).history(start, end)
         )
@@ -410,39 +431,59 @@ def test_session_labels_around_the_roll_and_a_holiday(
 
 @pytest.mark.needs("futures:starter")
 @pytest.mark.settles("58", "59")
-@pytest.mark.timeout(100)
+@pytest.mark.timeout(160)
 def test_streamed_futures_dates_and_one_second_ends(
     live_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
     *,
+    front_contract: Callable[[str, date], str],
     wait_rows: WaitRows,
+    wait_acked: Callable[[dm.MassiveSession, int, float], int],
+    market_status: Callable[[str], str],
     stream_report: Report,
-    table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Which session the library gives streamed futures rows, and how long a one-second bar is.
 
-    Streams `ESH6` trades and one-second bars until their first rows arrive, and records each
-    row's `Date`, the `m.streams()` errors (a schedule miss shows there), and the one-second
-    bars' `TimestampStart` and `TimestampEnd`, with the WARNING the library logs when Massive's
-    `e` is not the start plus one second. Reading it: no miss and one-second windows confirm the
-    calendar and the documented length; the WARNING means Massive's bars span more, as its
-    documented sample suggests, and the library keeps the later end.
+    Streams the front ES contract's trades and one-second bars and asserts that Massive
+    acknowledged both topics, whatever the hour. Massive's market status has no futures
+    field, so rows are required only while the stock market's regular session is open, when
+    CME's equity futures always trade; otherwise the test skips after the acknowledgement.
+    Records each row's `Date`, the `m.streams()` errors (a schedule miss shows there), and the
+    one-second bars' `TimestampStart` and `TimestampEnd`, with the WARNING the library logs
+    when Massive's `e` is not the start plus one second. Reading it: no miss and one-second
+    windows confirm the calendar and the documented length; the WARNING means Massive's bars
+    span more, as its documented sample suggests, and the library keeps the later end.
     """
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
-    trades = live_session.futures.trades(_CONTRACT).append_only()
-    seconds = live_session.futures.bars(_CONTRACT, dm.Timespan.SECOND).append_only()
+    contract = front_contract("ES", datetime.now(_CHICAGO).date())
+    trades = live_session.futures.trades(contract).append_only()
+    seconds = live_session.futures.bars(contract, dm.Timespan.SECOND).append_only()
+    acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
+    status = market_status("futures")
     deadline = time.monotonic() + _STREAM_WAIT
-    rows = wait_rows(live_session, trades, deadline)
-    bars = wait_rows(live_session, seconds, deadline)
+    rows = wait_rows(live_session, trades, deadline) if status == "open" else []
+    bars = wait_rows(live_session, seconds, deadline) if status == "open" else []
     for line in stream_report(live_session):
         evidence(line)
     live_session.release(trades)
     live_session.release(seconds)
-    evidence(f"trade Dates: {sorted({str(r['Date']) for r in rows})}")
+    evidence(f"{contract} trade Dates: {sorted({str(r['Date']) for r in rows})}")
     spans = [(r["TimestampStart"], (r["TimestampEnd"] - r["TimestampStart"]) / 1e9) for r in bars]
     evidence(f"one-second bars (start, end - start in s): {spans[:5]}")
     evidence(
         f"end warnings: {[r.getMessage() for r in caplog.records if 'one-second' in r.message]}"
     )
-    assert rows or bars, "no futures row arrived in 60 s"
+    assert acked >= 2, f"Massive acknowledged {acked} of the 2 topics"
+    if status != "open":
+        pytest.skip("the futures market's status is unknown outside the stock session")
+    assert rows or bars, f"no futures row arrived in {_STREAM_WAIT:.0f} s"
+
+
+def _midnight(day: date) -> datetime:
+    """Return 00:00 UTC of a day.
+
+    Returns:
+        The instant.
+    """
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)

@@ -1,14 +1,15 @@
 """Live checks of Massive's REST rate limit: the refusal's text and which requests it counts.
 
 Massive limits each class on its free Basic plan to 5 REST requests per minute and answers
-HTTP 429 beyond that. These tests deliberately draw a few refusals from a class the run
-declares Basic (`MASSIVE_LIVE_PLANS`; Indices is preferred, since a run needs it least), so
-they need at least one class left on Basic, and the run puts them first, while that class's
-minute is unspent. They run with no other client of the key.
+HTTP 429 beyond that. The test here deliberately draws refusals from a class the key holds on
+Basic (Indices is preferred, since a run needs it least), so it needs at least one class left
+on Basic, and the run puts it first. It runs with no other client of the key.
 
-Each test first lets a minute pass, so earlier requests no longer count, then sends single raw
+The test first lets a minute pass, so earlier requests no longer count, then sends single raw
 requests (one attempt each, no retry) and records each answer's status, its rate-limit
-headers, and its message. How to run these tests is in `docs/live-tests.md`.
+headers, and its message. Which requests count against which limit is recorded, never
+asserted: the library's own rules for data outside every subscription may change while the
+evidence stays the same. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -42,15 +43,6 @@ _LIMIT = 5
 
 _MINUTE = 61.0
 """Seconds a test lets pass first, so earlier requests have left the limit's window."""
-
-_BY_CLASS: dict[str, Request] = {
-    "stocks": ("/v2/aggs/ticker/{stocksTicker}/prev", {"stocksTicker": "AAPL"}, {}),
-    "options": ("/v3/reference/options/contracts", {}, {"underlying_ticker": "AAPL", "limit": 1}),
-    "indices": ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": "I:SPX"}, {}),
-    "currencies": ("/v2/aggs/ticker/{forexTicker}/prev", {"forexTicker": "C:EURUSD"}, {}),
-    "futures": ("/futures/v1/products", {}, {"limit": 1}),
-}
-"""A cheap request of each subscription's own data."""
 
 _UNASSIGNED: tuple[Request, ...] = (
     ("/v1/marketstatus/now", {}, {}),
@@ -102,114 +94,38 @@ def send(live_config: MassiveConfig) -> Iterator[Callable[[Request], tuple[int, 
     pool.clear()
 
 
-def _pause() -> None:
-    """Let the rate limit's window of earlier requests pass."""
+@pytest.mark.needs("some:basic")
+@pytest.mark.settles("65", "66", "67")
+@pytest.mark.timeout(330)
+def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
+    send: Callable[[Request], tuple[int, str]],
+    *,
+    basic_class: str,
+    by_class: Mapping[str, Request],
+    evidence: Evidence,
+) -> None:
+    """The text of a Basic refusal, what it counts, and when a spent minute frees its requests.
+
+    One sequence after a single pause of 61 s, so earlier requests have left Massive's window:
+
+    1. Sends the Basic class's own requests one after another until the first HTTP 429, and
+       records each answer's status, rate-limit headers, and time since the first request,
+       and the refusal's full text: the message the rate governor's match must contain, and
+       whether its headers say when to retry.
+    2. Sends ten requests of data outside every subscription (market status, ticker types,
+       treasury yields), and records each answer: answered ones say that data is not charged
+       to the spent class, and a refusal after five that it has a Basic limit of its own.
+    3. Sends the class's request every 5 s until one is answered, for at most 150 s from the
+       first request, and records when: about 60 s after the first request means a window
+       that slides from each request, one at a minute boundary a fixed window, and one later
+       than 60 s after the last answered request means refused requests count against it.
+
+    The evidence answers each question; the test asserts only that the class was refused
+    within its first seven requests, which a class on Basic always is. A failure there means
+    the class is not on Basic, and the rest of the evidence would say nothing.
+    """
+    name, request = basic_class, by_class[basic_class]
     threading.Event().wait(_MINUTE)
-
-
-@pytest.mark.needs("some:basic")
-@pytest.mark.settles("65")
-@pytest.mark.timeout(100)
-def test_text_of_the_rate_limit_refusal(
-    send: Callable[[Request], tuple[int, str]],
-    *,
-    basic_class: str,
-    evidence: Evidence,
-) -> None:
-    """The exact status, headers, and message of a Basic subscription's rate-limit refusal.
-
-    Sends seven requests of the named subscription's data within a minute and records each
-    answer. Reading it: the 429's message is the text that marks a Basic refusal, so the rate
-    governor's match must contain it; its headers show whether Massive says when to retry.
-    Fails when no request is refused: the class is then not on Basic, as declared.
-    """
-    name, request = basic_class, _BY_CLASS[basic_class]
-    _pause()
-    statuses = []
-    for number in range(1, _LIMIT + 3):
-        status, described = send(request)
-        statuses.append(status)
-        evidence(f"{name} request {number} of {request[0]}: HTTP {status}; {described}")
-    assert 429 in statuses, f"no request was refused: is {name} on Basic, as declared?"
-
-
-@pytest.mark.needs("some:basic")
-@pytest.mark.settles("66")
-@pytest.mark.timeout(100)
-def test_requests_without_a_subscription_after_the_limit_is_reached(
-    send: Callable[[Request], tuple[int, str]],
-    *,
-    basic_class: str,
-    evidence: Evidence,
-) -> None:
-    """Whether requests of data outside every subscription count against a Basic limit.
-
-    Spends the named Basic subscription's minute (until its first 429), then sends one request
-    each of market status, ticker types, and treasury yields. Reading it: all three answered
-    means data outside the subscriptions is not charged to the spent subscription; refusals
-    mean it is, and the rate governor must charge it there. Fails when the limit is never
-    reached: the class is then not on Basic, as declared, and the later answers say nothing.
-    """
-    name, request = basic_class, _BY_CLASS[basic_class]
-    _pause()
-    refused = False
-    for number in range(1, _LIMIT + 3):
-        status, described = send(request)
-        evidence(f"{name} request {number}: HTTP {status}; {described}")
-        if status == 429:
-            refused = True
-            break
-    if not refused:
-        pytest.fail(f"the {name} limit was not reached, although {name} is declared Basic")
-    for unassigned in _UNASSIGNED:
-        status, described = send(unassigned)
-        evidence(f"then {unassigned[0]}: HTTP {status}; {described}")
-
-
-@pytest.mark.needs("some:basic")
-@pytest.mark.settles("66")
-@pytest.mark.timeout(100)
-def test_requests_without_a_subscription_alone(
-    send: Callable[[Request], tuple[int, str]],
-    *,
-    basic_class: str,
-    evidence: Evidence,
-) -> None:
-    """Whether data outside every subscription has a per-minute limit of its own.
-
-    Sends ten requests of market status, ticker types, and treasury yields within a minute,
-    with no subscription's data in between. Reading it: all answered means such data is not
-    rate-limited; a refusal after five means it has a Basic limit of its own, which the rate
-    governor must pace as a bucket of its own.
-    """
-    _pause()
-    for number in range(1, 2 * _LIMIT + 1):
-        unassigned = _UNASSIGNED[number % len(_UNASSIGNED)]
-        status, described = send(unassigned)
-        evidence(f"request {number} of {unassigned[0]}: HTTP {status}; {described}")
-
-
-@pytest.mark.needs("some:basic")
-@pytest.mark.settles("67")
-@pytest.mark.timeout(260)
-def test_when_a_spent_minute_frees_its_requests(
-    send: Callable[[Request], tuple[int, str]],
-    *,
-    basic_class: str,
-    evidence: Evidence,
-) -> None:
-    """Whether Massive's minute slides from each request, and whether refusals count against it.
-
-    Sends the named Basic subscription's requests one after another until the first 429, then
-    one request every 5 s until one is answered (for at most 150 s from the first request),
-    recording each answer's time since the first request. Reading it: the first answer about
-    60 s after the first request means a window that slides from each request; one at a
-    minute boundary means a fixed window; one later than 60 s after the last answered request
-    means the refused probes counted against the limit. Fails when no request is refused: the
-    class is then not on Basic, as declared.
-    """
-    name, request = basic_class, _BY_CLASS[basic_class]
-    _pause()
     start = time.monotonic()
     refused = False
     for number in range(1, _LIMIT + 3):
@@ -219,8 +135,15 @@ def test_when_a_spent_minute_frees_its_requests(
             evidence(f"the first refusal: {described}")
             refused = True
             break
-    if not refused:
-        pytest.fail(f"the {name} limit was not reached, although {name} is declared Basic")
+        evidence(f"    {described}")
+    assert refused, f"no {name} request was refused: is {name} on Basic?"
+    for number in range(1, 2 * _LIMIT + 1):
+        unassigned = _UNASSIGNED[number % len(_UNASSIGNED)]
+        status, described = send(unassigned)
+        evidence(
+            f"unassigned request {number} of {unassigned[0]} at {time.monotonic() - start:.1f} s:"
+            f" HTTP {status}; {described}"
+        )
     while time.monotonic() - start < _PROBE_FOR:
         threading.Event().wait(_PROBE_EVERY)
         status, described = send(request)
@@ -229,3 +152,27 @@ def test_when_a_spent_minute_frees_its_requests(
             break
     else:
         evidence(f"still refused {_PROBE_FOR:.0f} s after the first request")
+
+
+@pytest.fixture
+def by_class(index_symbol: str) -> dict[str, Request]:
+    """Return a cheap request of each subscription's own data.
+
+    Args:
+        index_symbol: `I:SPX`, or `I:NDX` when Indices is on Basic, which excludes SPX: a
+            refused index would answer 403, never the 429 the test waits for.
+
+    Returns:
+        The request, by class.
+    """
+    return {
+        "stocks": ("/v2/aggs/ticker/{stocksTicker}/prev", {"stocksTicker": "AAPL"}, {}),
+        "options": (
+            "/v3/reference/options/contracts",
+            {},
+            {"underlying_ticker": "AAPL", "limit": 1},
+        ),
+        "indices": ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": index_symbol}, {}),
+        "currencies": ("/v2/aggs/ticker/{forexTicker}/prev", {"forexTicker": "C:EURUSD"}, {}),
+        "futures": ("/futures/v1/products", {}, {"limit": 1}),
+    }

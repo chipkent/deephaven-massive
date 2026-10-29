@@ -414,8 +414,10 @@ marker list: pytest's `strict` setting already rejects an unregistered marker.
 [`docs/live-tests.md`](../../docs/live-tests.md) is the runbook for them. The live tests that deliberately exceed Massive's subscription and connection
 limits also carry `integration_limits`, and the smoke tier (every dataset and verb once,
 checked automatically) carries `integration_smoke`: `-m integration` deselects both, and only
-`-m integration_limits` or `-m integration_smoke` runs them. `MASSIVE_LIVE_PLANS` declares the
-key's plans, and each test's `needs` marker skips it when they fall short. The exceptions to the mirror rule, and no
+`-m integration_limits` or `-m integration_smoke` runs them. The first live test of a run
+probes the key's plans (cached for the New York day in the git-ignored `.live-plans.json`;
+`MASSIVE_LIVE_PLANS` overrides the probe), and each test's `needs` marker skips it when they
+fall short. The exceptions to the mirror rule, and no
 others:
 
 - `tests/conftest.py`: starts the embedded JVM in `pytest_configure`, before collection, and
@@ -5548,7 +5550,7 @@ document already reflects them.
     `m.rate_limits()` diagnostics table, one row per bucket. There is no plan enum and no
     user-created governor object: a key holds up to five tiers, and the only REST fact a tier
     carries is its limit. Live tests share one real-clock governor per key for the run, with
-    the classes `MASSIVE_LIVE_PLANS` leaves on Basic declared ([section 13.4](#134-rest),
+    the classes the run's plans leave on Basic declared ([section 13.4](#134-rest),
     [section 17](#17-diagnostics), [section 19.1](#191-the-rest-client)).
 
 ## 23. Open verification items

@@ -1,10 +1,11 @@
 """Live checks of crypto bars against Massive: day cuts, minute rebuilds, weeks, and pair sets.
 
-Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
-the evidence, not a pass, answers the question. Raw rows come from the wire REST and flat-file
-clients, because the library moves or refuses the very stamps in question; the library's own
-answer to the same request is recorded beside them. How to run these tests is in
-`docs/live-tests.md`.
+Each test records what Massive sent (`evidence`). A test marked `settles` asserts only that the
+requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
+asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
+from the wire REST and flat-file clients, because the library moves or refuses the very stamps in
+question; the library's own answer to the same request is recorded beside them. How to run these
+tests is in `docs/live-tests.md`.
 
 The library's rule under test: a crypto bar of one day covers one UTC day and is stamped at
 00:00 UTC of it, from every source; a 1-day bar stamped anywhere else in its day but its first
@@ -41,6 +42,7 @@ FlatFileTickers: TypeAlias = (
 )
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
+WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
@@ -50,9 +52,6 @@ _RANGE = "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{t
 _PREV = "/v2/aggs/ticker/{cryptoTicker}/prev"
 _GROUPED = "/v2/aggs/grouped/locale/global/market/crypto/{date}"
 _DAY_FILE = "global_crypto/day_aggs_v1"
-_FILE_DAY = date(2026, 6, 1)
-"""A past Monday whose flat files are published, inside a Basic plan's two years of history."""
-
 _MS = 1_000_000
 _DAY_NS = 86_400 * 1_000_000_000
 _STREAM_WAIT = 60.0
@@ -216,6 +215,7 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
 def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     live_session: dm.MassiveSession,
     *,
+    recent_monday: date,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
     table_rows: TableRows,
@@ -224,20 +224,20 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
 ) -> None:
     """Whether the `global_crypto/day_aggs_v1` row of a day is the REST range bar of that day.
 
-    Records the file's `X:BTCUSD` row of 2026-06-01 with its `window_start`, the REST range
-    bars around that day, and, for each, whether it is the same bar (open and close equal, the
-    rest within 1e-6) with each field's relative error. Reading it: a file row stamped at
-    00:00 or 23:59:59.999 UTC of its day and equal to the range bar of the same UTC day
-    confirms one day cut for both sources; a file row equal to no REST bar, or to a bar of
-    another day, means the two sources cut days differently.
+    Records the file's `X:BTCUSD` row of the most recent published Monday with its `window_start`,
+    the REST range bars around that day, and, for each, whether it is the same bar (open and close
+    equal, the rest within 1e-6) with each field's relative error. Reading it: a file row stamped at
+    00:00 or 23:59:59.999 UTC of its day and equal to the range bar of the same UTC day confirms one
+    day cut for both sources; a file row equal to no REST bar, or to a bar of another day, means the
+    two sources cut days differently.
     """
-    read = flat_file_tickers(_DAY_FILE, _FILE_DAY, [_PAIR])
-    assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
+    read = flat_file_tickers(_DAY_FILE, recent_monday, [_PAIR])
+    assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
     rows, extra = read
     for row in rows:
         stamp = row["window_start"]
         shown = "<missing>" if stamp is None else instant_text(int(stamp))
-        evidence(f"{_DAY_FILE} {_FILE_DAY}: window_start={shown} row={row}")
+        evidence(f"{_DAY_FILE} {recent_monday}: window_start={shown} row={row}")
     evidence(f"{_DAY_FILE} undocumented headers: {sorted(extra)}")
     ranged = rest_rows(
         _RANGE,
@@ -245,8 +245,8 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
             "cryptoTicker": _PAIR,
             "multiplier": 1,
             "timespan": "day",
-            "from": _FILE_DAY - timedelta(days=1),
-            "to": _FILE_DAY + timedelta(days=1),
+            "from": recent_monday - timedelta(days=1),
+            "to": recent_monday + timedelta(days=1),
         },
         {"sort": "asc"},
     )
@@ -263,7 +263,7 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
             )
     flat = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: flat.history(_FILE_DAY, _FILE_DAY, source=dm.HistorySource.FLAT_FILES),
+        lambda: flat.history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES),
         table_rows,
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
@@ -271,7 +271,7 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
 
 
 @pytest.mark.needs("currencies:basic")
-@pytest.mark.settles("38")
+@pytest.mark.verifies("38")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days(
@@ -280,15 +280,15 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Which day the REST crypto day bar covers: the UTC day or the New York day.
+    """Whether the REST crypto day bar covers the UTC day, as the library assumes.
 
     Rebuilds `/prev`'s day of `X:BTCUSD` from REST minute bars twice, over the UTC day and
     over the New York day (midnight to the next midnight in New York, so a 23- or 25-hour day
-    is right), and records both beside `/prev` and the range bar. Reading it: `/prev` equal to
-    the UTC rebuild confirms the UTC day; equal to the New York rebuild means REST crypto days
-    are New York days, a different bar from the flat file's, and the source of crypto day bars
-    needs an owner decision; equal to neither means another cut (compare the stamps and the
-    minute coverage).
+    is right), and records both beside `/prev` and the range bar. Passes when `/prev` equals
+    the UTC rebuild, the library's day cut. A failure means another cut: `/prev` equal to the
+    New York rebuild means REST crypto days are New York days, a different bar from the flat
+    file's, and the source of crypto day bars needs an owner decision; equal to neither means
+    another cut (compare the stamps and the minute coverage).
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -330,10 +330,9 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
         evidence(f"range t={instant_text(bar['t'] * _MS)} ohlcv={_ohlcv(bar)}")
     evidence(f"rebuilt over the UTC day {day}: {by_utc}")
     evidence(f"rebuilt over the New York day {day} ({ny_start} to {ny_end}): {by_new_york}")
-    evidence(
-        f"/prev equals the UTC rebuild: {_same(by_utc, _ohlcv(prev))}; "
-        f"equals the New York rebuild: {_same(by_new_york, _ohlcv(prev))}"
-    )
+    utc, new_york = _same(by_utc, _ohlcv(prev)), _same(by_new_york, _ohlcv(prev))
+    evidence(f"/prev equals the UTC rebuild: {utc}; equals the New York rebuild: {new_york}")
+    assert utc, f"/prev is not the UTC day's rebuild (the New York day's: {new_york})"
 
 
 @pytest.mark.needs("currencies:starter", "s3")
@@ -341,21 +340,22 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
 @pytest.mark.timeout(100)
 def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     *,
+    recent_monday: date,
     rest_rows: RestRows,
     flat_file_tickers: FlatFileTickers,
     evidence: Evidence,
 ) -> None:
     """Whether grouped daily and `global_crypto/day_aggs_v1` list the same pairs on a day.
 
-    Records the pairs only one of them holds on 2026-06-01. Reading it: equal sets mean
-    `dm.ALL` crypto day bars hold the same pairs from either source; otherwise the difference
-    belongs in the documentation of `dm.ALL` day bars.
+    Records the pairs only one of them holds on the most recent published Monday. Reading it: equal
+    sets mean `dm.ALL` crypto day bars hold the same pairs from either source; otherwise the
+    difference belongs in the documentation of `dm.ALL` day bars.
     """
-    grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": _FILE_DAY}, {})}
-    read = flat_file_tickers(_DAY_FILE, _FILE_DAY, None)
-    assert read is not None, f"{_DAY_FILE} has no file for {_FILE_DAY}"
+    grouped = {str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {})}
+    read = flat_file_tickers(_DAY_FILE, recent_monday, None)
+    assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
     filed = {str(row["ticker"]) for row in read[0]}
-    evidence(f"{_FILE_DAY}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
+    evidence(f"{recent_monday}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
     evidence(f"only in grouped daily: {sorted(grouped - filed)}")
     evidence(f"only in the flat file: {sorted(filed - grouped)}")
     assert grouped
@@ -363,44 +363,49 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
 
 
 @pytest.mark.needs("currencies:basic")
-@pytest.mark.settles("33")
+@pytest.mark.verifies("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_crypto_week_bars_start_on_monday_or_sunday(
     live_session: dm.MassiveSession,
     *,
-    week_bar_report: Callable[[str, str], list[str]],
+    recent_week: tuple[date, date],
+    week_bar_report: Callable[[str, str, str], tuple[list[str], int, list[str]]],
     table_rows: TableRows,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Which seven days a crypto week bar covers, whatever day it is stamped on.
+    """Whether a crypto week bar covers the calendar week from Monday 00:00 UTC.
 
-    For each raw week bar of `X:BTCUSD` around 2026-02-23 to 2026-03-22, records its stamp and
-    the candidate windows whose hour-bar volume is closest to its own; `MATCH` marks the
-    bucket. Reading it: a Monday 00:00 UTC match confirms calendar weeks, as the library
-    assumes; any other start means the library's crypto week windows need that start. The last
-    line shows which bars the library's `history()` keeps.
+    For each raw week bar of `X:BTCUSD` over the four weeks ending with the most recent week without
+    a holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
+    own; `MATCH` marks the bucket. Passes when every bar of those weeks matches the week from Monday
+    00:00 UTC, the calendar week the library assumes; a failure names the bars whose bucket starts
+    elsewhere (such as a Sunday start), and the library's crypto week windows must start there. The
+    last line shows which bars the library's `history()` keeps.
     """
-    lines = week_bar_report("cryptoTicker", _PAIR)
+    lines, checked, misses = week_bar_report("cryptoTicker", _PAIR, "UTC")
     for line in lines:
         evidence(line)
+    first, last = recent_week[0] - timedelta(days=7), recent_week[1]
     kept = live_session.crypto.bars(_PAIR, dm.Timespan.WEEK).history(
-        date(2026, 3, 2), date(2026, 3, 15), source=dm.HistorySource.REST
+        first, last, source=dm.HistorySource.REST
     )
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
-    evidence(f"library history 2026-03-02..2026-03-15 keeps the bars stamped {stamps}")
-    assert len(lines) > 1
+    evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
+    assert checked >= 3, f"only {checked} week bars of the four weeks"
+    assert not misses, f"week bars whose bucket is not Monday 00:00 UTC: {misses}"
 
 
 @pytest.mark.needs("currencies:business")
-@pytest.mark.settles("3")
-@pytest.mark.timeout(100)
+@pytest.mark.verifies("3")
+@pytest.mark.timeout(160)
 def test_fmv_frames_convert_to_a_current_instant(
     live_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
     *,
     wait_rows: WaitRows,
+    wait_acked: WaitAcked,
     stream_report: Report,
     instant_text: Text,
     evidence: Evidence,
@@ -409,12 +414,14 @@ def test_fmv_frames_convert_to_a_current_instant(
 
     `FMV` `t` is documented in nanoseconds while the sample shows milliseconds, so the
     library reads it by magnitude and logs once which unit it saw. Streams `X:BTCUSD`'s fair
-    market value (the cheapest Business plan is Currencies Business) and records the first
-    rows, their age, and that log line. Reading it: an instant within a day of now and the
-    logged unit settle the question.
+    market value (the cheapest Business plan is Currencies Business), asserts that Massive
+    acknowledged the topic, and records the first rows, their age, and that log line. Crypto
+    trades around the clock, so rows are required. Passes when the first row's instant is
+    within a day of now; the logged unit settles which unit Massive sends.
     """
     caplog.set_level(logging.INFO, logger="deephaven_massive")
     table = live_session.crypto.fmv(_PAIR).append_only()
+    acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
     rows = wait_rows(live_session, table, time.monotonic() + _STREAM_WAIT)
     for line in stream_report(live_session):
         evidence(line)
@@ -425,5 +432,6 @@ def test_fmv_frames_convert_to_a_current_instant(
     for row in rows[:3]:
         stamp = int(row["Timestamp"])
         evidence(f"FMV row: Timestamp={instant_text(stamp)} age_s={(now - stamp) / 1e9:.1f} {row}")
-    assert rows, "no FMV frame arrived in 60 s"
+    assert acked, "Massive acknowledged no FMV topic"
+    assert rows, f"no FMV frame arrived in {_STREAM_WAIT:.0f} s"
     assert abs(now - int(rows[0]["Timestamp"])) < _DAY_NS

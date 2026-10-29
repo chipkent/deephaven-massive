@@ -30,12 +30,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 _DAY_FILE = "us_stocks_sip/day_aggs_v1"
-_DAY = date(2026, 6, 1)
-"""A past Monday whose stock file is published."""
-
-_WEEKEND = date(2026, 5, 31)
-"""The Sunday before it, which has no stock file."""
-
 _DAYS = 10
 """How many weekdays back the publication check reads."""
 
@@ -86,9 +80,13 @@ def test_when_each_days_file_was_published(
 
 
 @pytest.mark.needs("stocks:starter", "s3")
-@pytest.mark.settles("16")
+@pytest.mark.verifies("16")
 def test_a_weekend_key_is_missing_not_refused(
-    live_flat_files: FlatFileClient, *, live_s3_config: MassiveConfig, evidence: Evidence
+    live_flat_files: FlatFileClient,
+    *,
+    recent_monday: date,
+    live_s3_config: MassiveConfig,
+    evidence: Evidence,
 ) -> None:
     """Whether a key with no file answers 404 `NoSuchKey` (missing), not 403 or another 404.
 
@@ -96,9 +94,9 @@ def test_a_weekend_key_is_missing_not_refused(
     every weekend into an entitlement error; and a front end that rewrites 404 bodies (Massive
     serves an HTML "404 Not Found" page for a path it does not route) would hide S3's
     `NoSuchKey`, which the client requires before it calls a key missing, so every range that
-    holds a weekend would raise. First opens the existing 2026-06-01 stock file, so the
-    credentials are known to reach the dataset. Then requests the Sunday before directly, to
-    record the status, S3's error code, and the content type, and opens it through the
+    holds a weekend would raise. First opens the existing stock file of the most recent published
+    Monday, so the credentials are known to reach the dataset. Then requests the Sunday before
+    directly, to record the status, S3's error code, and the content type, and opens it through the
     client. Passes when the Sunday's key is missing.
 
     Raises:
@@ -106,11 +104,13 @@ def test_a_weekend_key_is_missing_not_refused(
             answers a 404 that is not `NoSuchKey`; the answer is recorded first, and fails
             the test.
     """
-    control = live_flat_files.open(object_key(_DAY_FILE, _DAY))
-    evidence(f"control {_DAY}: {'exists' if control is not None else 'missing'}")
-    assert control is not None, f"the {_DAY} stock file must exist for the check to mean anything"
+    control = live_flat_files.open(object_key(_DAY_FILE, recent_monday))
+    evidence(f"control {recent_monday}: {'exists' if control is not None else 'missing'}")
+    assert control is not None, (
+        f"the {recent_monday} stock file must exist for the check to mean anything"
+    )
     control.close()
-    key = object_key(_DAY_FILE, _WEEKEND)
+    key = object_key(_DAY_FILE, (recent_monday - timedelta(days=1)))
     s3, _proxy = live_flat_files._client_for(key)
     answer, code = "exists", None
     try:
