@@ -1081,8 +1081,10 @@ def test_slots_of_an_unpaced_bucket_change_nothing_with_time() -> None:
     assert governor.next_change() == RATE_WINDOW
 
 
-def test_concurrent_paced_requests_on_the_automatic_clock_take_their_windows() -> None:
-    # No wait without a deadline moves virtual time, so the starts are exactly the windows.
+def test_concurrent_paced_requests_on_the_automatic_clock_do_not_race_virtual_time() -> None:
+    # No wait without a deadline moves virtual time: only a slot's release does, so time
+    # advances by windows. (A start is read after the grant, when another thread's wait may
+    # already have moved the clock, so the exact starts are not asserted.)
     clock = FakeClock()
     governor = _governor(clock, basic={"stocks"})
     lane = object()
@@ -1102,8 +1104,11 @@ def test_concurrent_paced_requests_on_the_automatic_clock_take_their_windows() -
     for thread in threads:
         thread.join(TIMEOUT)
         assert not thread.is_alive()
-    assert sorted(starts) == [0.0] * 5 + [61.0] * 5 + [122.0] * 5 + [183.0] * 5
-    assert all(wait in {61.0, 122.0, 183.0, math.inf} or wait < 61.0 for wait in clock.waits)
+    assert sorted(starts)[:5] == [0.0] * 5
+    assert len(starts) == 20
+    assert all(wait == math.inf or 0 < wait <= RATE_WINDOW for wait in clock.waits)
+    # 20 requests at 5 a window need three more windows; a slot answered late may need one more.
+    assert clock.monotonic() <= 4 * RATE_WINDOW
 
 
 def test_refusals_without_the_basic_words_never_pace_a_bucket_however_many() -> None:
