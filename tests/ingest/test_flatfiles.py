@@ -1076,7 +1076,10 @@ class RestRecorder:
     def __init__(self) -> None:
         self.calls: list[tuple[DatasetSpec, Request, HistoryWindow]] = []
 
-    def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
+    def history(
+        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+    ) -> Table:
+        assert call > 0
         self.calls.append((spec, request, window))
         # A table in the dataset's schema, as the REST transport returns.
         return dh_arrow.to_table(
@@ -1904,7 +1907,8 @@ def test_reader_threads_enter_the_session_context(
 
     monkeypatch.setattr(flatfiles, "dataset_table", recorded)
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    reader = f"{session._core.label} flat files"
+    # The readers are named after the session and the call: the call's id is its first.
+    reader = f"{session._core.thread_prefix} call-1 files_"
     assert all(context for _, context in seen)
     assert any(name.startswith(reader) for name, _ in seen)
 

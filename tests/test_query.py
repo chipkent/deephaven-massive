@@ -1,6 +1,7 @@
 """Tests for the query classes, the verbs' synchronous validation, and their columns' order."""
 
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -126,13 +127,16 @@ class Recorder:
     # an empty table in the dataset's schema, as a transport does when no row matches.
     def __init__(self, catalog: Catalog) -> None:
         self.calls: list[tuple[str, DatasetSpec, Request, dict[str, Any]]] = []
+        # The call id each static verb passed, in call order.
+        self.call_ids: list[int] = []
         self._catalog = catalog
 
     def _record(self, verb: str, spec: DatasetSpec, request: Request, **extra: object) -> Table:
         self.calls.append((verb, spec, request, dict(extra)))
         return dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
 
-    def fetch(self, spec: DatasetSpec, request: Request) -> Table:
+    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+        self.call_ids.append(call)
         return self._record("fetch", spec, request)
 
     def poll(
@@ -147,7 +151,9 @@ class Recorder:
         window: HistoryWindow,
         *,
         dates: Sequence[date] | None = None,
+        call: int,
     ) -> Table:
+        self.call_ids.append(call)
         return self._record("history", spec, request, window=window, dates=dates)
 
 
@@ -288,6 +294,68 @@ def test_poll_mode_is_an_enum(massive_session: dm.MassiveSession, rest: Recorder
         TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.UPSERT$"
     ):
         news(massive_session).poll(30, mode=cast("PollMode", "upsert"))
+
+
+# `call 2 done: 0 rows in 0.001 s`, with the elapsed time made predictable.
+_ELAPSED = re.compile(r"\d+\.\d{3} s")
+
+
+def _calls(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [_ELAPSED.sub("<s> s", m) for m in caplog.messages if m.startswith("call ")]
+
+
+def test_each_static_verb_is_one_logged_call(
+    massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    bars = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.DAY)
+    assert isinstance(bars, HistoryLatestQuery)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+        news(massive_session).fetch()
+        trades(massive_session).fetch()
+        bars.fetch()
+        trades(massive_session).history("2025-03-03", "2025-03-04", source=HistorySource.REST)
+    query = repr(trades(massive_session))
+    assert _calls(caplog) == [
+        f"call 1 start: {news(massive_session)!r}.fetch()",
+        "call 1 done: 0 rows in <s> s",
+        f"call 2 start: {query}.fetch()",
+        "call 2 done: 0 rows in <s> s",
+        f"call 3 start: {bars!r}.fetch()",
+        "call 3 done: 0 rows in <s> s",
+        (
+            f"call 4 start: {query}.history('2025-03-03', '2025-03-04', "
+            "source=<HistorySource.REST: 'rest'>)"
+        ),
+        "call 4 done: 0 rows in <s> s",
+    ]
+    # The transport gets the id, and names its worker threads after it.
+    assert rest.call_ids == [1, 2, 3, 4]
+
+
+def test_a_failed_call_logs_its_error(
+    massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    every = trades(massive_session, dm.ALL)
+    with (
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
+        pytest.raises(ValueError, match="needs explicit symbols") as info,
+    ):
+        every.fetch()
+    assert _calls(caplog) == [
+        f"call 1 start: {every!r}.fetch()",
+        f"call 1 failed after <s> s: ValueError: {info.value}",
+    ]
+
+
+def test_a_history_call_through_flat_files_passes_its_id(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flat = Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert flat.call_ids == [1]
 
 
 def test_latest_fetch_rejects_all(massive_session: dm.MassiveSession, rest: Recorder) -> None:
@@ -713,6 +781,20 @@ def test_verbs_raise_while_holding_the_update_graph_lock(
     update_graph = massive_session._core.exec_ctx.update_graph
     with shared_lock(update_graph), pytest.raises(ValueError, match="update-graph lock"):
         q.fetch()
+
+
+def test_a_static_verb_on_the_update_graph_logs_nothing(
+    massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The thread check comes first: a refused verb takes no call id and logs no call line.
+    q = trades(massive_session)
+    update_graph = massive_session._core.exec_ctx.update_graph
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"), shared_lock(update_graph):
+        for verb in (q.fetch, lambda: q.history("2025-03-03", source=HistorySource.REST)):
+            with pytest.raises(ValueError, match="update-graph lock"):
+                verb()
+    assert [r.getMessage() for r in caplog.records if r.levelno < logging.WARNING] == []
+    assert rest.call_ids == []
 
 
 def test_verbs_raise_after_close(massive_session: dm.MassiveSession) -> None:

@@ -1,0 +1,74 @@
+name: Bug report
+description: Something deephaven-massive did wrong, or a table that hung, failed, or looks wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A log of the failing run lets us reproduce and fix the bug without guessing. Before you
+        run the code below again, turn the library's log on in one of two ways:
+
+        - in a running console: `import deephaven_massive as dm; dm.enable_debug_logging()`
+          (or `dm.enable_debug_logging("/tmp/massive.log")` to write it to a file);
+        - or set `DEEPHAVEN_MASSIVE_LOG=DEBUG` in the worker's environment (and optionally
+          `DEEPHAVEN_MASSIVE_LOG_FILE=/path/to/massive.log`) and restart the worker.
+
+        The lines appear in the Deephaven log panel, in the server or container log, or in the
+        file you named.
+  - type: textarea
+    id: code
+    attributes:
+      label: The code you ran
+      description: The smallest script or console input that shows the problem.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened, and what you expected
+      description: The error and its traceback, the rows you got, or what hung.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: The log of the run, with DEBUG on
+      description: >-
+        Everything from the `logging deephaven_massive at DEBUG` line, and the
+        `deephaven-massive <version>, Python ...` line that follows it, to the failure.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: m.streams() and m.connections()
+      description: >-
+        Printed after the problem, with `m` your session:
+        `print(m.streams().to_string(num_rows=1000))` and
+        `print(m.connections().to_string(num_rows=1000))`.
+      render: text
+  - type: markdown
+    attributes:
+      value: |
+        **If something hung**, run this from a second console on the same worker while it
+        hangs, and paste its output below:
+
+        ```python
+        import sys, threading, traceback
+
+        names = {thread.ident: thread.name for thread in threading.enumerate()}
+        for ident, frame in sys._current_frames().items():
+            print(f"--- {names.get(ident, ident)}")
+            print("".join(traceback.format_stack(frame)))
+        ```
+
+        Also paste the Java threads: `jstack <pid>` of the Deephaven server process (in Docker,
+        `docker exec <container> jstack 1`).
+  - type: textarea
+    id: hang
+    attributes:
+      label: If something hung, every thread's stack
+      description: The output of the snippet above, and of `jstack`.
+      render: text
