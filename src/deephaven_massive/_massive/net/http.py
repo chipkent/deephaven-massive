@@ -16,39 +16,136 @@ same way for REST (urllib3), WebSocket (websockets), and flat files (boto3):
   proxy URL are sent as `Proxy-Authorization` (`proxy_credentials` splits them out for
   urllib3, which would not send them itself) and never appear in a log or an error.
 
-The functions read the environment on every call and keep no state, so they are safe from
-any thread. This module imports only the standard library and `certifi`.
+The functions read the environment on every call, so they are safe from any thread and see a
+changed variable at once. The one piece of state is the cache of TLS contexts behind
+`ssl_context`: one context per consumer and certificate setting, built once per process
+under a lock. This module imports only the standard library and `certifi`.
 """
 
 from __future__ import annotations
 
 import base64
+import enum
 import os
 import ssl
+import threading
 import urllib.request
+from pathlib import Path
+from typing import Final
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import certifi
 
-__all__ = ["ca_file", "https_proxy", "proxy_credentials", "ssl_context"]
+__all__ = ["TlsConsumer", "ca_file", "https_proxy", "proxy_credentials", "ssl_context"]
 
 
-def ssl_context() -> ssl.SSLContext:
-    """Return a new client TLS context that verifies certificates and host names.
+class TlsConsumer(enum.Enum):
+    """The library a TLS context is built for; each gets its own shared contexts.
 
-    The REST client hands it to urllib3 and the WebSocket client to `websockets`. Each call
-    builds a fresh context, so a caller may adjust its own without affecting another client.
+    urllib3 writes its verification mode and ALPN list onto the context it is given before
+    every connection it opens. Keeping urllib3's contexts apart from those of `websockets`
+    means those writes never touch a context a WebSocket handshake is using.
+    """
+
+    URLLIB3 = "urllib3"
+    """The REST client's pools, and the refresh's downloads."""
+
+    WEBSOCKETS = "websockets"
+    """The WebSocket client's connections."""
+
+
+_ALPN_PROTOCOLS: Final = ("http/1.1",)
+"""The application protocols offered in the TLS handshake: REST and the WebSocket upgrade are
+both HTTP/1.1, and urllib3 sets the same list before each connection anyway."""
+
+_CONTEXTS_LOCK: Final = threading.Lock()
+"""Guards `_CONTEXTS`. A leaf lock: no other lock is taken while it is held."""
+
+_CONTEXTS: Final[dict[tuple[object, ...], ssl.SSLContext]] = {}
+"""The TLS context built for each consumer and certificate setting (see `ssl_context`);
+guarded by `_CONTEXTS_LOCK`."""
+
+
+def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
+    """Return the process's client TLS context for `consumer` and the current settings.
+
+    The REST client hands it to urllib3 (for Massive and for an HTTPS proxy) and the
+    WebSocket client to `websockets`. Building a context reads and parses a certificate
+    bundle, a few milliseconds of CPU, so contexts are shared: one is built per process for
+    each consumer and each certificate setting, and returned to every later caller with the
+    same pair. A configured context is safe to share between threads and connections (CPython
+    guards each context's OpenSSL state with its own lock), so callers must not reconfigure
+    it; urllib3 writes the same verification mode and ALPN list on its own contexts before
+    each connection, which changes nothing.
+
+    The certificate setting is everything that shapes the context: the values of
+    `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `SSLKEYLOGFILE`, and the identity of the file and the
+    directory the first two name (modification time, size, and inode, or nothing when the path
+    does not exist). A certificate file created, replaced, or edited after the first call, or a
+    directory whose certificates change, therefore gets a new context on the next call, so
+    fixing `SSL_CERT_FILE` as an error message advises takes effect for clients created
+    afterwards without restarting. The proxy settings never shape the context, so they are not
+    part of the key. Contexts for settings no longer in use stay cached until the process ends.
+
+    The file and directory are examined before the module lock is taken. The first call for a
+    key builds the context under the lock, reading the bundle from local disk while it is
+    held, so concurrent first calls build exactly one; later calls take the lock only to look
+    the context up.
+
+    Args:
+        consumer: The library that will use the context. urllib3 and `websockets` never share
+            one, because urllib3 writes to the contexts it is given.
 
     Returns:
+        A context that verifies certificates and host names and offers ALPN `http/1.1`:
         `ssl.create_default_context()` when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set to a
-        non-empty value (OpenSSL then loads those locations), otherwise a default context
-        that trusts only `certifi`'s bundle. OpenSSL silently skips an `SSL_CERT_FILE` or
-        `SSL_CERT_DIR` it cannot read, so a wrong path shows up as a certificate verification
-        failure on the first connection, which the clients report naming `SSL_CERT_FILE`.
+        non-empty value (OpenSSL then loads those locations), otherwise a default context that
+        trusts only `certifi`'s bundle. Either way it writes TLS secrets to `SSLKEYLOGFILE`
+        when that is set, as the standard library does. OpenSSL silently skips an
+        `SSL_CERT_FILE` or `SSL_CERT_DIR` it cannot read, so a wrong path shows up as a
+        certificate verification failure on the first connection, which the clients report
+        naming `SSL_CERT_FILE`.
     """
-    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
-        return ssl.create_default_context()
-    return ssl.create_default_context(cafile=certifi.where())
+    cert_file = os.environ.get("SSL_CERT_FILE", "")
+    cert_dir = os.environ.get("SSL_CERT_DIR", "")
+    key = (
+        consumer,
+        cert_file,
+        _identity(cert_file),
+        cert_dir,
+        _identity(cert_dir),
+        os.environ.get("SSLKEYLOGFILE", ""),
+    )
+    with _CONTEXTS_LOCK:
+        context = _CONTEXTS.get(key)
+        if context is None:
+            if cert_file or cert_dir:
+                context = ssl.create_default_context()
+            else:
+                context = ssl.create_default_context(cafile=certifi.where())
+            context.set_alpn_protocols(_ALPN_PROTOCOLS)
+            _CONTEXTS[key] = context
+        return context
+
+
+def _identity(path: str) -> tuple[int, ...]:
+    """Return what tells one version of a file or directory from another.
+
+    Args:
+        path: The path from `SSL_CERT_FILE` or `SSL_CERT_DIR`; empty when the variable is
+            unset.
+
+    Returns:
+        The modification time in nanoseconds, the size, and the inode, or `()` when the path is
+        empty or names nothing that can be examined.
+    """
+    if not path:
+        return ()
+    try:
+        status = Path(path).stat()
+    except OSError:
+        return ()
+    return (status.st_mtime_ns, status.st_size, status.st_ino)
 
 
 def ca_file() -> str:
