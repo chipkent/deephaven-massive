@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 from deephaven.dherror import DHError
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
+from deephaven_massive._enums import UnknownSymbols
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import HostDecision, Request, StreamKey
+    from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode
     from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.liveness import StreamHandle
@@ -203,6 +205,26 @@ class RestTransport(Protocol):
         Args:
             asset_class: The asset class of the stream.
             family: The channel family, `TICK` or `FMV`.
+        """
+        ...
+
+    def crypto_pair(self, symbol: str) -> tuple[str, str]:
+        """Return a crypto ticker's base and quote, looking them up in Massive if needed.
+
+        Called by the WebSocket transport for each crypto ticker of a stream, before it starts
+        or on its lookup worker. The first such call of the session blocks while it reads
+        Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page, listed
+        and delisted pairs), which the session then keeps; a failed read is read again by the
+        next call.
+
+        Args:
+            symbol: A canonical crypto ticker.
+
+        Returns:
+            `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`.
+
+        A failed read, or a ticker the list does not hold, raises a `MassiveError` naming the
+        ticker.
         """
         ...
 
@@ -493,6 +515,23 @@ class SessionCore:
             closers=self._closers,
         )
         finalizer.atexit = False
+
+    def dataset_schema(self, spec: DatasetSpec) -> Schema:
+        """Return a dataset's schema in this session: `Catalog.dataset_schema` with `RawSymbol`.
+
+        Every result, `columns()` table, and transport plan of the session reads its columns
+        here, so they agree on whether the `RawSymbol` column exists: it does when the
+        session's `unknown_symbols` is `WARN` and the dataset reads its symbol from rows.
+
+        Args:
+            spec: The dataset.
+
+        Returns:
+            The cached schema. A bad dataset raises what `Catalog.dataset_schema` raises.
+        """
+        return self.catalog.dataset_schema(
+            spec, raw_symbol=self.config.unknown_symbols is UnknownSymbols.WARN
+        )
 
     @property
     def closed(self) -> bool:

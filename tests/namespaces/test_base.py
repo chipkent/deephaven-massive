@@ -32,6 +32,7 @@ from deephaven_massive._namespaces.base import (
     bar_query_class,
     build_query,
     list_params,
+    one_or_any_of,
     optional_text,
     query_class,
     require_bool,
@@ -184,15 +185,17 @@ def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     massive_session: dm.MassiveSession,
 ) -> None:
     # Indicators, reference data, and the unified snapshot span asset classes.
-    q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "i:spx", "aapl", "C:EURUSD"])
+    q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "I:SPX", "AAPL", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
+    with pytest.raises(ValueError, match=r"'i:spx' is an index ticker \(prefix I:\)"):
+        build(massive_session, INDICATOR, symbols=["i:spx"])
 
 
 def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) -> None:
     q = build(
         massive_session,
         DIVIDENDS,
-        symbols=["msft", "AAPL"],
+        symbols=["MSFT", "AAPL"],
         start="2025-01-01",
         end="2025-06-30",
         params={"sort": "ex_dividend_date", "limit": None, "tickers": ["B", "A"]},
@@ -226,9 +229,13 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         asset_class=AssetClass.FOREX,
         channels={None: "C"},
     )
-    assert build(massive_session, fx, symbols="EUR/USD")._request.symbols == ("C:EURUSD",)
+    assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
+    with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
+        build(massive_session, fx, symbols="EUR/USD")
     # A dataset without an asset class reads the class from each prefix; none is a stock.
-    assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("AAPL",)
+    assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        build(massive_session, INDICATOR, symbols="aapl")
 
 
 def test_all_where_the_dataset_cannot_serve_it(massive_session: dm.MassiveSession) -> None:
@@ -846,6 +853,21 @@ def test_require_bool() -> None:
     for bad in (0, 1, "true", None):
         with pytest.raises(TypeError, match=rf"^flag must be a bool, not {type(bad).__name__}$"):
             require_bool("flag", bad)
+
+
+def test_one_or_any_of_sends_one_value_alone_and_a_sequence_as_any_of() -> None:
+    assert one_or_any_of("code", None, every="every code") == {"code": None, "code.any_of": None}
+    assert one_or_any_of("code", "ES", every="every code") == {"code": "ES", "code.any_of": None}
+    assert one_or_any_of("code", ["ES", "NQ"], every="every code") == {
+        "code": None,
+        "code.any_of": ("ES", "NQ"),
+    }
+    with pytest.raises(ValueError, match=r"^code is empty; pass None for every code$"):
+        one_or_any_of("code", (), every="every code")
+    with pytest.raises(
+        TypeError, match=r"^code must be a str, a sequence of str, or None, not int$"
+    ):
+        one_or_any_of("code", 5, every="every code")
 
 
 def test_optional_text() -> None:

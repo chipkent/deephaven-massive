@@ -528,7 +528,7 @@ def test_topic_helpers() -> None:
     assert is_wildcard("T.*")
     assert not is_wildcard("T.AAPL")
     assert channel_of("C.EUR-USD") == "C"
-    assert stream_topics(AssetClass.FOREX, "C", ["C:EURUSD"]) == {"C.EUR-USD"}
+    assert stream_topics(AssetClass.FOREX, "C", ["C:EURUSD"], pairs={}) == {"C.EUR-USD"}
 
 
 def test_every_resolution_is_reported_while_the_step_is_in_flight() -> None:

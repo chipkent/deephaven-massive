@@ -9,15 +9,17 @@ the fake WebSocket server (one documented frame lands in `blink()` per channel),
 S3 server (one block of each flat-file prefix round-trips through `history()`).
 """
 
+from __future__ import annotations
+
 import csv
 import io
 import itertools
 import json
 import string
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
@@ -25,26 +27,16 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
-from deephaven.table import Table
 from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
-from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.schema import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import ChannelFamily, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._enums import ChannelFamily
 from deephaven_massive._massive import (
-    DriftReport,
-    Reject,
     RestPath,
-    Source,
-    Status,
     Transport,
-    WireError,
-    WsState,
     source,
     to_batch,
 )
@@ -62,10 +54,15 @@ from deephaven_massive._query import (
 from deephaven_massive._tables.liveness import new_scope
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
-# themselves come from the `fake_rest` and `fake_ws_server` fixtures.
+# and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
 from tests._fakes.rest import FakeRestServer, Reply
-from tests._fakes.s3 import FakeS3
-from tests._fakes.ws import FakeMassiveServer
+
+if TYPE_CHECKING:
+    from deephaven.table import Table
+
+    from deephaven_massive._datasets.request import Request
+    from tests._fakes.s3 import FakeS3
+    from tests._fakes.ws_session import WsSession
 
 Fixture = Callable[[str, str], bytes]
 
@@ -265,11 +262,13 @@ def test_no_dataset_keeps_a_stand_in_for_its_keys() -> None:
 # --- Factories -------------------------------------------------------------------------------
 
 
-def test_trades_normalizes_every_pair_form(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.trades(["eth-usd", "BTC/USD", "X:BTCUSD"])
+def test_trades_take_massive_tickers_only(massive_session: dm.MassiveSession) -> None:
+    q = massive_session.crypto.trades(["X:ETHUSD", "X:BTCUSD", "X:BTCUSD"])
     assert type(q) is StreamHistoryLatestQuery
     assert request_of(q).symbols == ("X:BTCUSD", "X:ETHUSD")
-    assert massive_session.crypto.trades("BTC-USD") == massive_session.crypto.trades("X:BTCUSD")
+    for spelling in ("BTC-USD", "BTC/USD", "x:btcusd"):
+        with pytest.raises(ValueError, match=r"use 'X:BTCUSD' .*dm\.canonical_symbol_crypto"):
+            massive_session.crypto.trades(spelling)
 
 
 @pytest.mark.parametrize("method", ["trades", "quotes", "fmv", "snapshots"])
@@ -286,13 +285,13 @@ def test_the_streams_and_snapshots_accept_all(
 def test_the_single_class_factories(
     massive_session: dm.MassiveSession, method: str, expected: type
 ) -> None:
-    q: QueryBase = getattr(massive_session.crypto, method)("SOL-USD")
+    q: QueryBase = getattr(massive_session.crypto, method)("X:SOLUSD")
     assert type(q) is expected
     assert request_of(q).symbols == ("X:SOLUSD",)
 
 
 def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
-    watch = new_table([string_col("Symbol", ["BTC-USD"])])
+    watch = new_table([string_col("Symbol", ["X:BTCUSD"])])
     q = massive_session.crypto.quotes(watch)
     assert isinstance(request_of(q).symbols, SymbolTable)
 
@@ -313,7 +312,7 @@ def test_bars_pick_their_class(
     massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, type]
 ) -> None:
     timespan, multiplier, expected = case
-    q = massive_session.crypto.bars("BTC-USD", timespan, multiplier=multiplier)
+    q = massive_session.crypto.bars("X:BTCUSD", timespan, multiplier=multiplier)
     assert type(q) is expected
     request = request_of(q)
     assert (request.timespan, request.multiplier, request.adjusted) == (timespan, multiplier, None)
@@ -334,13 +333,13 @@ def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) ->
 def test_bar_arguments_are_checked(massive_session: dm.MassiveSession) -> None:
     bars = massive_session.crypto.bars
     with pytest.raises(ValueError, match=r"Timespan\.SESSION exists only for futures"):
-        bars("BTC-USD", dm.Timespan.SESSION)
+        bars("X:BTCUSD", dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars("BTC-USD", "minute")  # type: ignore[call-overload]  # a plain string is refused
+        bars("X:BTCUSD", "minute")  # type: ignore[call-overload]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
-        bars("BTC-USD", dm.Timespan.HOUR, multiplier=0)
+        bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)
     with pytest.raises(TypeError, match="adjusted"):
-        bars("BTC-USD", adjusted=True)  # type: ignore[call-overload]  # crypto bars have none
+        bars("X:BTCUSD", adjusted=True)  # type: ignore[call-overload]  # crypto bars have none
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
@@ -354,18 +353,18 @@ def test_movers(massive_session: dm.MassiveSession) -> None:
 
 
 def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.daily_open_close(["BTC-USD", "ETH-USD"], "2026-01-02")
+    q = massive_session.crypto.daily_open_close(["X:BTCUSD", "X:ETHUSD"], "2026-01-02")
     assert type(q) is Query
     request = request_of(q)
     assert request.symbols == ("X:BTCUSD", "X:ETHUSD")
     assert request.params == (("date", date(2026, 1, 2)),)
     # Crypto has no corporate actions: no adjustment choice is stored or sent.
     assert request.adjusted is None
-    same = massive_session.crypto.daily_open_close("BTC-USD", date(2026, 1, 2))
+    same = massive_session.crypto.daily_open_close("X:BTCUSD", date(2026, 1, 2))
     assert request_of(same).params == (("date", date(2026, 1, 2)),)
     with pytest.raises(TypeError, match="adjusted"):
         massive_session.crypto.daily_open_close(
-            "BTC-USD",
+            "X:BTCUSD",
             "2026-01-02",
             adjusted=False,  # type: ignore[call-arg]  # crypto open/close has none
         )
@@ -383,8 +382,8 @@ def test_daily_open_close_refuses_a_time(
 ) -> None:
     # The day is a calendar date: which UTC day an instant names is left to no guess.
     with pytest.raises(ValueError, match=r"^crypto\.daily_open_close: date is a calendar date"):
-        massive_session.crypto.daily_open_close("BTC-USD", moment)
-    q = massive_session.crypto.daily_open_close("BTC-USD", "2026-01-03")
+        massive_session.crypto.daily_open_close("X:BTCUSD", moment)
+    q = massive_session.crypto.daily_open_close("X:BTCUSD", "2026-01-03")
     assert request_of(q).params == (("date", date(2026, 1, 3)),)
 
 
@@ -399,11 +398,11 @@ def test_daily_open_close_arguments_are_checked(massive_session: dm.MassiveSessi
     ):
         daily(dm.ALL, "2026-01-02")
     with pytest.raises(ValueError, match="date"):
-        daily("BTC-USD", datetime(2026, 1, 2, 12))  # noqa: DTZ001  # a naive time is refused
+        daily("X:BTCUSD", datetime(2026, 1, 2, 12))  # noqa: DTZ001  # a naive time is refused
     with pytest.raises(ValueError, match="date"):
-        daily("BTC-USD", "January 2")
+        daily("X:BTCUSD", "January 2")
     with pytest.raises(TypeError):
-        daily("BTC-USD", 20260102)  # type: ignore[arg-type]  # not a date
+        daily("X:BTCUSD", 20260102)  # type: ignore[arg-type]  # not a date
 
 
 def exhausted() -> Iterator[str]:
@@ -439,7 +438,7 @@ def test_a_symbol_that_is_no_crypto_pair_is_refused(
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="Symbol column"):
-        massive_session.crypto.fmv(new_table([string_col("Pair", ["BTC-USD"])]))
+        massive_session.crypto.fmv(new_table([string_col("Pair", ["X:BTCUSD"])]))
 
 
 # --- Verb-time errors that need no transport -------------------------------------------------
@@ -461,7 +460,7 @@ def test_rest_history_needs_explicit_symbols(massive_session: dm.MassiveSession)
 
 
 def test_flat_file_history_states_its_constraints(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.bars("BTC-USD", dm.Timespan.HOUR)
+    q = massive_session.crypto.bars("X:BTCUSD", dm.Timespan.HOUR)
     with pytest.raises(
         ValueError,
         match=r"crypto\.bars cannot be read from flat files: .*hold only 1-minute, 1-day bars",
@@ -524,6 +523,7 @@ def test_ws_frames_carry_exactly_the_generated_fields(
         ("global_crypto/trades_v1", "global_crypto_trades_v1_2023-03-28.csv"),
         ("global_crypto/minute_aggs_v1", "global_crypto_minute_aggs_v1_2023-03-28.csv"),
         ("global_crypto/day_aggs_v1", "global_crypto_day_aggs_v1_2023-03-28.csv"),
+        ("global_crypto/trades_v1", "global_crypto_trades_v1_dashed.csv"),
     ],
 )
 def test_flat_file_fixtures_have_the_generated_header(
@@ -574,8 +574,14 @@ def test_trades_fetch_reads_the_last_trade_of_each_pair(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, "/v1/last/crypto/BTC/USD", load_fixture(OWNER, "last_trade.json"))
-    out = rows(rest_session.crypto.trades("BTC-USD").fetch())
-    assert sent(fake_rest) == [("/v1/last/crypto/BTC/USD", {})]
+    serve_pairs(fake_rest)
+    out = rows(rest_session.crypto.trades("X:BTCUSD").fetch())
+    assert sent(fake_rest) == [
+        # The pair's split: Massive's listed crypto tickers, then the delisted ones.
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
+        ("/v1/last/crypto/BTC/USD", {}),
+    ]
     [row] = out
     supplied = {
         "Symbol": "X:BTCUSD",
@@ -596,7 +602,7 @@ def test_trades_history_over_rest_bounds_the_utc_day(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, "/v3/trades/X:BTCUSD", load_fixture(OWNER, "trades.json"))
-    q = rest_session.crypto.trades("BTC-USD")
+    q = rest_session.crypto.trades("X:BTCUSD")
     out = rows(q.history("2021-07-01", "2021-07-01", source=dm.HistorySource.REST))
     midnight = int(datetime(2021, 7, 1, tzinfo=UTC).timestamp()) * NS
     assert sent(fake_rest) == [
@@ -639,7 +645,7 @@ def test_daily_bars_fetch_reads_the_previous_day(
     for stamp in (NOV_15, NOV_15 + DAY_MS - 1):  # each request takes the next reply
         serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", restamp(prev, stamp))
     for _ in range(2):
-        out = rows(rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY).fetch())
+        out = rows(rest_session.crypto.bars("X:BTCUSD", dm.Timespan.DAY).fetch())
         # Either cut of the UTC day is stamped at its start.
         assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
             ("X:BTCUSD", NOV_15 * MS, 16035.9, 15954.2111)
@@ -651,7 +657,7 @@ def test_a_daily_bar_stamped_inside_its_utc_day_fails_loudly(
 ) -> None:
     # The documented sample sits at midnight New York time, 05:00 UTC: another day cut.
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
-    q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
+    q = rest_session.crypto.bars("X:BTCUSD", dm.Timespan.DAY)
     with pytest.raises(
         dm.MassiveError,
         match=(
@@ -671,19 +677,26 @@ def test_a_daily_bar_stamped_inside_its_utc_day_fails_loudly(
         )
 
 
+# X:BTCXYZ is in no ticker list: this path's {from}/{to} are the range, not the pair's two
+# currencies, so it needs no split and reads no ticker list.
+@pytest.mark.parametrize("symbol", ["X:BTCUSD", "X:BTCXYZ"])
 def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    symbol: str,
 ) -> None:
     start = int(datetime(2020, 6, 1, tzinfo=UTC).timestamp()) * 1000
     end = start + 2 * DAY_MS - 1
-    path = f"/v2/aggs/ticker/X:BTCUSD/range/1/day/{start}/{end}"
+    path = f"/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
     serve(fake_rest, path, restamp(load_fixture(OWNER, "range.json"), start, start + DAY_MS))
-    q = rest_session.crypto.bars("BTC-USD", dm.Timespan.DAY)
+    q = rest_session.crypto.bars(symbol, dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
-        ("X:BTCUSD", start * MS, 9557.9, 1),
-        ("X:BTCUSD", (start + DAY_MS) * MS, 10096.87, 1),
+        (symbol, start * MS, 9557.9, 1),
+        (symbol, (start + DAY_MS) * MS, 10096.87, 1),
     ]
 
 
@@ -708,7 +721,7 @@ def test_snapshots_send_the_pairs_or_nothing_for_all(
 ) -> None:
     path = "/v2/snapshot/locale/global/markets/crypto/tickers"
     serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
-    out = rows(rest_session.crypto.snapshots(["FSN-USD", "BTC-USD"]).fetch())
+    out = rows(rest_session.crypto.snapshots(["X:FSNUSD", "X:BTCUSD"]).fetch())
     rows(rest_session.crypto.snapshots(dm.ALL).fetch())
     assert sent(fake_rest) == [(path, {"tickers": ["X:BTCUSD,X:FSNUSD"]}), (path, {})]
     [row] = out
@@ -726,7 +739,7 @@ def test_a_long_snapshot_list_is_split_into_requests_of_250(
     path = "/v2/snapshot/locale/global/markets/crypto/tickers"
     serve(fake_rest, path, load_fixture(OWNER, "snapshots.json"))
     codes = ["".join(letters) for letters in itertools.product(string.ascii_uppercase, repeat=3)]
-    rest_session.crypto.snapshots([f"{code}-USD" for code in codes[:251]]).fetch()
+    rest_session.crypto.snapshots([f"X:{code}USD" for code in codes[:251]]).fetch()
     sizes = sorted(len(query["tickers"][0].split(",")) for _, query in sent(fake_rest))
     assert sizes == [1, 250]
 
@@ -748,9 +761,15 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
 ) -> None:
     path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
     serve(fake_rest, path, load_fixture(OWNER, "open_close.json"))
-    q = rest_session.crypto.daily_open_close("BTC-USD", "2020-10-09")
+    serve_pairs(fake_rest)
+    q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
     [row] = rows(q.fetch())
-    assert sent(fake_rest) == [(path, {})]
+    assert sent(fake_rest) == [
+        # The pair's split: Massive's listed crypto tickers, then the delisted ones.
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
+        (path, {}),
+    ]
     # The body's `BTC-USD` is canonical in `Symbol`; the trades stay JSON text.
     assert (row["Symbol"], row["Day"], row["Open"], row["Close"], row["IsUtc"]) == (
         "X:BTCUSD",
@@ -765,63 +784,6 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
 # --- End to end: WebSocket -----------------------------------------------------------------------
 
 TIMEOUT = 15.0
-
-
-class WsSession:
-    """A session whose WebSocket connections reach the fake Massive server."""
-
-    def __init__(self, server: FakeMassiveServer) -> None:
-        self.server = server
-        self.session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
-        core = self.session._core
-        connections = ws.WsConnections(
-            core,
-            resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "a test"),
-            record_verdict=lambda *_: None,
-            client_factory=self.client,
-        )
-        cast("Any", core._ports)._streams = connections
-        core.on_close(connections.close)
-
-    def client(
-        self,
-        url: str,
-        *,
-        sources: Sequence[Source],
-        on_open: Callable[[int], None],
-        on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
-        on_state: Callable[[WsState, float | WireError | None], None],
-    ) -> _massive.WsClient:
-        return _massive.WsClient(
-            self.server.url("/" + url.split("/", 3)[3]),
-            api_key="test-key",
-            sources=sources,
-            on_open=on_open,
-            on_status=on_status,
-            on_data=on_data,
-            on_state=on_state,
-            reconnect_backoff=0.05,
-            max_reconnect_backoff=0.1,
-        )
-
-    def subscribed(self, topic: str) -> None:
-        def named(server: FakeMassiveServer) -> bool:
-            if not server.connections or server.connections[-1].auth is None:
-                return False
-            frames = [json.loads(f) for f in server.connections[-1].frames]
-            return any(
-                f["action"] == "subscribe" and topic in f["params"].split(",") for f in frames
-            )
-
-        self.server.wait_for(named, TIMEOUT)
-
-
-@pytest.fixture
-def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[WsSession]:
-    harness = WsSession(fake_ws_server)
-    yield harness
-    harness.session.close()
 
 
 def landed(table: Table) -> tuple[Callable[[], list[dict[str, Any]]], Callable[[], None]]:
@@ -874,17 +836,17 @@ def test_a_documented_frame_lands_in_blink(
     expected: dict[str, object],
 ) -> None:
     channel = topic.split(".", 1)[0]
-    symbol = topic.split(".", 1)[1]
+    symbol = str(dm.canonical_symbol_crypto(topic.split(".", 1)[1]))
     namespace = ws_session.session.crypto
     if dataset == "bars_second":
-        query: StreamQuery = namespace.bars(symbol, dm.Timespan.SECOND)
+        query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.SECOND))
     else:
         query = getattr(namespace, dataset)(symbol)
     blink = query.blink()
     seen, stop = landed(blink)
     ws_session.subscribed(topic)
     frames = json.loads(load_fixture(OWNER, "ws_frames.json"))[channel]
-    ws_session.server.send(json.dumps(frames))
+    ws_session.publish(*frames)
     wait_for(lambda: len(seen()) == 1)
     stop()
     [row] = seen()
@@ -922,7 +884,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
     ("make", "prefix", "expected"),
     [
         (
-            lambda c: c.trades(["BTC-USD", "ETH-USD"]),
+            lambda c: c.trades(["X:BTCUSD", "X:ETHUSD"]),
             "global_crypto/trades_v1",
             [
                 ("X:BTCUSD", 1679961600212544000, 27142.85),
@@ -931,7 +893,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             ],
         ),
         (
-            lambda c: c.bars("BTC-USD"),
+            lambda c: c.bars("X:BTCUSD"),
             "global_crypto/minute_aggs_v1",
             [
                 ("X:BTCUSD", 1679961600000000000, 27139.64),
@@ -989,3 +951,79 @@ def test_a_flat_file_day_bar_stamped_inside_its_utc_day_fails_loudly(
         r"stamped 2023-03-28T04:00:00",
     ):
         q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES)
+
+
+def test_a_flat_file_that_dashes_its_pairs_is_read(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Fixture,
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    # Massive's knowledge base says the crypto files write `X:BTC-USD`: the filter must look
+    # for that spelling, and the rows hold the canonical ticker.
+    text = load_fixture(OWNER, "global_crypto_trades_v1_dashed.csv").decode()
+    fake_s3.put("global_crypto/trades_v1/2023/03/2023-03-28.csv.gz", make_csv_gz(text))
+    flat = dm.HistorySource.FLAT_FILES
+
+    def symbols(symbols: object) -> list[tuple[str, float]]:
+        q = s3_session.crypto.trades(cast("Any", symbols))
+        table = q.history("2023-03-28", "2023-03-28", source=flat)
+        return [(r["Symbol"], r["Price"]) for r in rows(table)]
+
+    assert symbols("X:BTCUSD") == [("X:BTCUSD", 27142.85)]
+    assert symbols("X:BTCPYUSD") == [("X:BTCPYUSD", 27140.12)]  # the quote is not split off
+    assert symbols(dm.ALL) == [
+        ("X:BTCUSD", 27142.85),
+        ("X:ETHUSD", 1772.6),
+        ("X:BTCPYUSD", 27140.12),
+    ]
+
+
+PAIRS = {
+    symbol: (symbol[2:-3], "USD")
+    for symbol in (
+        "X:ADAUSD",
+        "X:ARDRUSD",
+        "X:BCDUSD",
+        "X:BTCUSD",
+        "X:DRNUSD",
+        "X:ETHUSD",
+        "X:FSNUSD",
+        "X:LINKUSD",
+        "X:NGCUSD",
+        "X:SOLUSD",
+    )
+} | {"X:BTCPYUSD": ("BTC", "PYUSD")}
+"""The pairs these tests use, as Massive's crypto ticker list splits them."""
+
+
+def serve_pairs(server: FakeRestServer) -> None:
+    # The list itself, for a path that takes a pair as two currencies.
+    rows_ = [
+        {"ticker": t, "market": "crypto", "base_currency_symbol": b, "currency_symbol": q}
+        for t, (b, q) in PAIRS.items()
+    ]
+    empty = Reply({"status": "OK", "results": []})  # no delisted pair
+    server.reply("/v3/reference/tickers", Reply({"status": "OK", "results": rows_}), empty)
+
+
+def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Any X: ticker is Massive's; only a stream needs the pair split for its topic, and
+    # Massive's crypto ticker list does not hold this one, so the stream is refused.
+    empty = Reply({"status": "OK", "results": []})
+    fake_rest.reply("/v3/reference/tickers", empty, empty)
+    q = rest_session.crypto.trades("X:BTCXYZ")
+    assert request_of(q).symbols == ("X:BTCXYZ",)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^cannot stream 'X:BTCXYZ': 'X:BTCXYZ' cannot be split into its two currencies: "
+        r"Massive's reference data does not list it$",
+    ):
+        q.blink()
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
+    ]

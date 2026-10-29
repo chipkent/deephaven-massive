@@ -57,7 +57,7 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
 
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._massive import WireUnit
 
 if TYPE_CHECKING:
@@ -500,14 +500,14 @@ def futures_bar_request(span: DaySpan) -> TimeRange:
     return TimeRange(lower.astimezone(UTC), upper.astimezone(UTC))
 
 
-def trades_at_weekends(asset_class: AssetClass | None) -> bool:
+def trades_at_weekends(asset_class: AssetClass | ClassFromPrefix) -> bool:
     """Tell whether an asset class trades at weekends, so its Saturdays and Sundays hold data.
 
     Forex trades from Sunday evening UTC and crypto every day; stocks, options, indices,
     futures sessions, and data of no class do not.
 
     Args:
-        asset_class: The class, or None.
+        asset_class: The class, or `ClassFromPrefix.ANY` for data of no one class.
 
     Returns:
         True for forex and crypto.
@@ -546,7 +546,7 @@ class _Periods:
         timespan: The bar unit: `DAY`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
     """
 
-    asset_class: AssetClass | None
+    asset_class: AssetClass | ClassFromPrefix
     timespan: Timespan
 
     def day_of(self, moment: datetime) -> date:
@@ -700,7 +700,11 @@ def _round_to_unit(moment: datetime, seconds: int, *, up: bool) -> datetime:
 
 
 def bar_starts(
-    asset_class: AssetClass | None, span: TimeRange, *, timespan: Timespan, multiplier: int
+    asset_class: AssetClass | ClassFromPrefix,
+    span: TimeRange,
+    *,
+    timespan: Timespan,
+    multiplier: int,
 ) -> TimeRange:
     """Return the range of bar starts whose whole bar lies in a range.
 
@@ -714,7 +718,8 @@ def bar_starts(
     they are sessions, which open at 17:00 Chicago time on the day before.
 
     Args:
-        asset_class: The class whose days apply (`day_class`), or None for New York days.
+        asset_class: The class whose days apply (`day_class`), or `ClassFromPrefix.ANY` for New
+            York days.
         span: The range the bars must lie in. Pass an end no later than now, so a bar that
             has not finished yet is left out.
         timespan: The bar unit.
@@ -813,24 +818,26 @@ def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff:
     return now.astimezone(UTC) >= published.astimezone(UTC)
 
 
-def day_zone(asset_class: AssetClass | None) -> tzinfo:
+def day_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
     """Return the zone whose calendar days an asset class's dates and instants are read in.
 
     New York for stocks, options, indices, and data of no class; UTC for forex and crypto;
     Chicago for futures, whose sessions roll there.
 
     Args:
-        asset_class: The class, or None.
+        asset_class: The class, or `ClassFromPrefix.ANY` for data of no one class.
 
     Returns:
         The zone.
     """
     if asset_class is AssetClass.FUTURES:
         return CHICAGO
-    return NEW_YORK if asset_class is None else DAY_ZONES[asset_class]
+    return NEW_YORK if asset_class is ClassFromPrefix.ANY else DAY_ZONES[asset_class]
 
 
-def day_class(spec: DatasetSpec, classes: Iterable[AssetClass] = ()) -> AssetClass | None:
+def day_class(
+    spec: DatasetSpec, classes: Iterable[AssetClass] = ()
+) -> AssetClass | ClassFromPrefix:
     """Return the asset class whose day rules a request of a dataset follows.
 
     A dataset with an asset class follows its class. A dataset without one reads its days in
@@ -846,13 +853,13 @@ def day_class(spec: DatasetSpec, classes: Iterable[AssetClass] = ()) -> AssetCla
             empty when the request has none.
 
     Returns:
-        The class, or None for New York days.
+        The class, or `ClassFromPrefix.ANY` for New York days.
     """
-    if spec.asset_class is not None:
+    if spec.asset_class is not ClassFromPrefix.ANY:
         return spec.asset_class
     shared = set(classes)
     if not spec.fetch_paths_by_class or len(shared) != 1:
-        return None
+        return ClassFromPrefix.ANY
     return shared.pop()
 
 
@@ -894,7 +901,7 @@ _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {
 """One step of each timestamp unit a `datetime` can express exactly; nanoseconds cannot be."""
 
 
-def day_start(asset_class: AssetClass | None, day: date) -> datetime:
+def day_start(asset_class: AssetClass | ClassFromPrefix, day: date) -> datetime:
     """Return the instant a date starts under an asset class's day rules.
 
     A calendar day starts at midnight in the class's day zone (`day_zone`; New York without
@@ -902,7 +909,7 @@ def day_start(asset_class: AssetClass | None, day: date) -> datetime:
     day before its `session_end_date` (`futures_session_open`).
 
     Args:
-        asset_class: The class whose rules apply (`day_class`), or None.
+        asset_class: The class whose rules apply (`day_class`), or `ClassFromPrefix.ANY`.
         day: The date.
 
     Returns:
@@ -914,7 +921,7 @@ def day_start(asset_class: AssetClass | None, day: date) -> datetime:
 
 
 def instant_bound(
-    asset_class: AssetClass | None,
+    asset_class: AssetClass | ClassFromPrefix,
     name: str,
     value: date,
     *,
@@ -931,7 +938,8 @@ def instant_bound(
     the instant back one unit of the parameter, so the range is exactly the same.
 
     Args:
-        asset_class: The class whose day rules apply (`day_class`), or None for New York days.
+        asset_class: The class whose day rules apply (`day_class`), or `ClassFromPrefix.ANY` for New
+            York days.
         name: The parameter's wire name, such as `"timestamp.gte"`.
         value: The bound.
         unit: The unit a timestamp parameter counts in; None for a date parameter, which

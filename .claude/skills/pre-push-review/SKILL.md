@@ -1,16 +1,23 @@
 ---
 name: pre-push-review
-description: Review a branch locally, as a hostile top-1% reviewer, and fix what you find before any push that triggers CI and the review bots (opening a PR, or pushing a batch of fixes to one). Use it every time before such a push.
+description: "Mandatory gate before any push that runs paid CI and the review bots. Use this skill whenever the user asks to open, create, or ship a PR, or to push commits to a branch that already has a PR. That includes pushing review fixes, addressing reviewer or bot comments (coderabbit, the owner), updating a PR description, or \"push the batch\". Invoke it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is already green. The skill does a hostile self-review of the diff, checks that the tests would catch a regression, checks the docs and the PR description, drafts replies to review threads, fixes every finding, and only then pushes once. Skip it for pushing a work-in-progress branch that has no PR (backups), for reviewing someone else's PR, for debugging CI, and for general questions."
 ---
 
 # Review locally before you push
 
-Every push to a branch with an open PR runs the full CI matrix and the review bots, and both cost
-money (AGENTS.md hard rule 15). Find the problems here, where they are free, so the push that
-follows is the last one for that batch.
+Every push to a branch with an open PR runs the review bots and every CI job its changes affect
+(the full test matrix whenever code or a test input changes), and both cost money. Find the
+problems here, where they are free, so the push that follows is the last one for that batch.
 
 Run this review **after** `./scripts/check.sh` (full) is green and **before** the push that opens
-the PR or delivers a batch of fixes. Fix every finding, rerun the full check, and then push once.
+the PR or delivers a batch of fixes. Fix every finding, rerun the full check, and then push once,
+with the review fixes, any merge of `main`, and the description edits together. A branch with no
+PR runs no CI, so pushing it only to keep work safe is fine; open its PR when it is ready.
+
+A green check proves only what the tests already pin. This review looks for what they do not:
+code in the wrong place, a choice hidden behind `None`, a test that passes for wrong code, a lock
+whose scope changed, and words that no longer match the code. Write each finding down as you go
+(file and line, what is wrong, the fix), so none is lost between reading and fixing.
 
 ## 1. Read the whole diff as a reviewer, not as its author
 
@@ -21,7 +28,9 @@ git diff origin/main...HEAD
 ```
 
 Read it hunting for defects, with the spec open: the PR's `PLAN.md` section, every `DESIGN.md`
-section it implements, and `AGENTS.md`. For each changed file ask:
+section it implements, and `AGENTS.md`. In the `--stat`, look first at deleted lines under
+`tests/`: a deleted or weakened test is a finding unless the diff adds one that pins the same
+property. For each changed file ask:
 
 - **Correctness.** Does every branch do what the spec says? Empty inputs, one element, many,
   `None`, boundaries (midnight, day zones, nanosecond limits), errors from the network and from
@@ -29,57 +38,84 @@ section it implements, and `AGENTS.md`. For each changed file ask:
   forever?
 - **Contract.** Does every public signature, default, column and error match `DESIGN.md`
   exactly? A change to one updates `DESIGN.md` first.
-- **Concurrency** (any code that runs off the caller's thread). The Deephaven invariants in
+- **Concurrency** (any code that runs off the caller's thread, and any change to a `with ...lock:`
+  block). Write down what now runs under each lock the diff touches: a constructor that reads
+  files or settings counts as blocking work. The Deephaven invariants in
   `AGENTS.md`: execution context entered; update-graph lock before `registry_lock`, which stays a
   leaf; nothing blocking in a listener; results in their own liveness scope; no reliance on
   `dict`/`set` atomicity. Look for a state written before the operation that can still fail.
+  A lock change ships with a test that races two threads through it.
 - **Layers and boundaries.** `tests/test_layout.py` passes, but also: does the change put logic
   in the layer that owns it, or work around a shared bug locally? Report shared bugs instead of
-  patching around them.
-- **Generated data.** No hand-written schema, no edit to `spec/*.json`; hand input only in the
-  refresh hand-input files, each entry with a reason.
+  patching around them. Did the diff widen `tests/test_layout.py` to make itself pass? Undo that
+  and ask the owner.
+- **Placement and organization.** For every function, class and module the diff adds or moves,
+  assume it is in the wrong place until you can argue otherwise. Would a newcomer look for it in
+  this file and package? Do the module's name and docstring describe everything in it, or is it a
+  grab-bag of unrelated concerns? Does it duplicate a helper that already exists elsewhere? Is it
+  in the layer and package that own the concept? Should the module be split, merged or renamed?
+  Do the tests mirror the new location? Fix a misplaced item by moving it in the same PR, not by
+  noting it.
+- **Duplicates and private imports.** For every new helper, `git grep -n` for the concept (the
+  format it parses, the rule it applies), not only for its name. An import of another module's
+  private name (`from x import _helper`) is a sign the new code sits in the wrong module.
+- **Explicit choices.** A parameter whose `None` selects a mode or a behavior (`convention=None`
+  meaning "the default convention") should take an explicit enum member as its default instead.
+  `None` means only a value that is genuinely absent.
+- **Generated data.** No hand-written schema, no edit to `spec/*.json`, `docs/datasets/`, or
+  `vendor/massive/`; hand input only in the refresh hand-input files, each entry with a reason.
 - **Secrets.** No key, secret or proxy password can reach a message, `repr` or log record.
 
 ## 2. Prove the tests would catch a regression
 
 For each behaviour the diff adds or fixes, break the code on purpose (invert a condition, drop a
 call, return early, swap an order) and confirm a test fails. Restore the code after each attempt.
-A change that no test catches needs a test, or it is dead code to delete. Run new concurrency
-tests several times, and on the free-threaded build when the code is threaded:
+For a function that computes a value, also return a wrong value of the right type (off by one,
+two fields swapped): a test that only checks that something is returned, or that nothing
+raises, passes for wrong code. A change that no test catches needs a test, or it is dead code to
+delete. Run new concurrency tests several times, and on the free-threaded build when the code is
+threaded (its own environment, `.venv-314t`, so `.venv` survives):
 
 ```bash
-PYTHON_GIL=0 uv run --python 3.14t pytest <the new test files> -q
+PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the new test files> -q
 ```
 
 ## 3. Check the words
 
 - Docstrings meet the documentation standard in `AGENTS.md`: every argument, return, exception
-  and side effect, and examples that run. They describe the code as it is now.
-- `DESIGN.md`, `PLAN.md` and `AGENTS.md` say exactly what the code does.
-- No planning references in code, comments, tests or messages.
-- The PR description meets "Pull request descriptions" in `AGENTS.md`. Read it twice: as a
-  very intelligent reviewer arriving with no context, and as a less experienced user reading it
-  much later to learn what the feature does. Check that:
-  - the Summary alone lets either reader explain the PR to someone else: it gives the big
-    picture (what the library is for, which feature the PR is about, what a user does with it,
-    and where the PR fits in the overall work), the background with every term defined, exactly
-    what the PR does step by step (every user-visible change and every rule it adds or
-    changes), why it matters with a concrete example, and what the reader should check or
-    decide, with no file names, internal names, or decision numbers;
-  - Summary, Why, What changes, Decisions, How it works, Verification, and Follow-ups are present
-    in that order; Decisions lists every departure from the plan with its reason or says
-    "None"; What changes shows before and after wherever the public API or a result changes;
-    How it works carries the engineering detail (approach, main modules and functions, anything
-    subtle), organized by idea;
-  - it has no review-finding labels, agent identifiers, commit-by-commit narration,
-    first-person process, stale counts, or undefined terms;
-  - it describes the branch as it will be after this push, rewritten rather than appended to;
-  - `Closes #<issue>` (or `Refs #<issue>`, or "No tracking issue.") sits on its own line, then
-    the required footer.
+  and side effect, and examples that run. They describe the code as it is now: reread the
+  docstring and comments of every function whose body changed.
+- `DESIGN.md`, `PLAN.md`, `AGENTS.md`, and `docs/dev/` say exactly what the code does.
+- No planning references in code, comments, tests or messages:
+  `git diff origin/main...HEAD -- src tests scripts .github | grep -nE '^\+.*(DESIGN|PLAN|§)'`.
+- The PR description meets `docs/dev/pull-requests.md`: read that page, then go through its
+  "Checklist before a push". The common misses: file or function names in the Summary, a
+  missing section instead of "None", review labels or first-person narration, no issue line.
+- **An open question in the description is a finding** ("should this return X?", "happy to
+  switch"). Answer it from `AGENTS.md`, `DESIGN.md` and the code, and record the choice and its
+  reason under Decisions; if only the owner can decide, stop and ask before the push. Never
+  answer one by overturning an `AGENTS.md` rule, such as dates being ISO strings.
+- Fix the description with `gh pr edit <n> --body-file <file>` in the same batch as the push.
 
-  Fix the description with `gh pr edit <n> --body-file <file>` in the same batch as the push.
+## 4. Check the conversation
 
-## 4. Fix, then push once
+On a PR that already has reviews, every comment has a reply: the commit that fixes it and a
+summary of the fix, or why nothing changes. Read the review bodies and the conversation comments
+(`gh pr view <n> --comments`), then list the inline threads with their comment counts and last
+authors:
+
+```bash
+gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved comments(last:1){totalCount nodes{author{login} url}}}}}}}' \
+  -F o=chipkent -F r=deephaven-massive -F n=<n> \
+  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | .comments | "\(.totalCount) \(.nodes[0].author.login) \(.nodes[0].url)"'
+```
+
+A thread with a single comment, or whose last comment is a bot's, still needs an answer, resolved
+or not. `gh` posts under the owner's account, so a last comment with the owner's login may be
+your reply or a new question from the owner: open it and check. Draft the replies now and post
+them right after the push, naming the commit.
+
+## 5. Fix, then push once
 
 Fix every finding, rerun `./scripts/check.sh` (full), and push once. Put anything you
 deliberately left alone, with its reason, in the PR description so the reviewer does not

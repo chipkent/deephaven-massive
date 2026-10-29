@@ -18,6 +18,7 @@ ENV = (
     "POLYGON_API_KEY",
     "MASSIVE_S3_ACCESS_KEY_ID",
     "MASSIVE_S3_SECRET_ACCESS_KEY",
+    "MASSIVE_UNKNOWN_SYMBOLS",
 )
 
 
@@ -83,6 +84,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.rest_base_url == "https://api.massive.com"
     assert base.s3_endpoint_url == "https://files.massive.com"
     assert base.s3_bucket == "flatfiles"
+    assert base.unknown_symbols is dm.UnknownSymbols.FAIL
 
 
 def test_defaults_live_in_exactly_one_place() -> None:
@@ -188,6 +190,42 @@ def test_ws_hosts_types(base: MassiveConfig) -> None:
         _replace(base, ws_hosts={AssetClass.STOCKS: 5})
     with pytest.raises(TypeError, match="ws_hosts must be a mapping"):
         _replace(base, ws_hosts=["delayed.massive.com"])
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("warn", dm.UnknownSymbols.WARN),
+        (" WARN ", dm.UnknownSymbols.WARN),
+        ("fail", dm.UnknownSymbols.FAIL),
+    ],
+)
+def test_unknown_symbols_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, text: str, expected: dm.UnknownSymbols
+) -> None:
+    monkeypatch.setenv("MASSIVE_UNKNOWN_SYMBOLS", text)
+    assert MassiveConfig(api_key="k").unknown_symbols is expected
+
+
+def test_an_unknown_symbols_setting_out_of_the_environment_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MASSIVE_UNKNOWN_SYMBOLS", "ignore")
+    with pytest.raises(
+        ValueError, match=r"^MASSIVE_UNKNOWN_SYMBOLS must be 'fail' or 'warn', not 'ignore'$"
+    ):
+        MassiveConfig(api_key="k")
+
+
+def test_unknown_symbols_is_the_enum(base: MassiveConfig) -> None:
+    assert _replace(base, unknown_symbols=dm.UnknownSymbols.WARN).unknown_symbols is (
+        dm.UnknownSymbols.WARN
+    )
+    with pytest.raises(
+        TypeError,
+        match=r"^unknown_symbols must be dm\.UnknownSymbols, e\.g\. dm\.UnknownSymbols\.WARN$",
+    ):
+        _replace(base, unknown_symbols="warn")
 
 
 def test_publish_cutoff_is_a_wall_clock_time(base: MassiveConfig) -> None:

@@ -23,7 +23,9 @@ the envelope keys (`spec.types.ENVELOPE_KEYS`) are left out of its fields. Withi
 `$ref` is resolved, `allOf` is merged, a `oneOf` or `anyOf` with one branch is that branch
 (`openapi`), and nested objects are flattened into dotted wire keys (`day.c`), in the order
 the served document lists them (which is the vendor's documented order; Massive serves every
-object's keys alphabetically, and the snapshot never re-sorts them).
+object's keys alphabetically, and the snapshot never re-sorts them). Each leaf keeps the
+description of every object it was flattened out of (`fields.RawField.notes`), so its
+column's description carries the object's notes.
 
 **Fields** are named, typed, given their units and conversions, and checked against the
 response's example and each field's own `example` by the rules every transport shares
@@ -299,8 +301,12 @@ class _PathGenerator(SourceFields):
         is_required: bool,
         out: list[RawField],
         skip: frozenset[str],
+        notes: tuple[tuple[str, str], ...] = (),
     ) -> None:
         """Append the leaves of an object schema to `out`, nested objects flattened.
+
+        Every nested object adds its description (`""` when it has none), under the object's
+        wire key, to the notes of every leaf below it (`fields.RawField.notes`).
 
         Args:
             node: The resolved object schema.
@@ -309,6 +315,7 @@ class _PathGenerator(SourceFields):
             out: Where the leaves go.
             skip: Keys of this object to leave out (the envelope keys of a single-object
                 body); each must have its envelope type.
+            notes: The objects enclosing this one, outermost first; none for the row.
         """
         required_here = required(node)
         for name, child in (properties(node) or {}).items():
@@ -320,8 +327,16 @@ class _PathGenerator(SourceFields):
             child_required = is_required and name in required_here
             if properties(schema) is not None:
                 self.objects.add(wire_key)
+                # Every object is passed on, described or not: an empty note adds nothing
+                # unless a `DESCRIPTION_FIXES` entry gives the object a text.
+                note = (wire_key, text(schema, "description"))
                 self.flatten(
-                    schema, wire_key + ".", is_required=child_required, out=out, skip=frozenset()
+                    schema,
+                    wire_key + ".",
+                    is_required=child_required,
+                    out=out,
+                    skip=frozenset(),
+                    notes=(*notes, note),
                 )
             else:
                 self.wire_keys.add(wire_key)
@@ -332,6 +347,7 @@ class _PathGenerator(SourceFields):
                         schema,
                         required=child_required,
                         where=f"{self.path} {wire_key}",
+                        notes=notes,
                     )
                 )
 

@@ -21,7 +21,7 @@ from deephaven_massive._massive.refresh.fields import (
 )
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi
-from deephaven_massive._massive.spec.types import WireType, WireUnit
+from deephaven_massive._massive.spec.types import Field, WireType, WireUnit
 
 if TYPE_CHECKING:
     from deephaven_massive._massive.refresh.openapi import Json, JsonObject
@@ -256,3 +256,197 @@ def test_a_key_fix_is_stale_once_the_example_stops_sending_its_key(rows: list[Js
     assert item is not None
     rules.check_examples([item], rows, documented=True, where="here")
     assert ("stale-entry", "event_type") in [(p.gate, p.key) for p in rules.problems]
+
+
+# The notes of enclosing objects.
+
+_SESSION_NOTE = "Prices are omitted until the [regular open](/docs/hours)."
+_SESSION_TEXT = "Prices are omitted until the regular open (https://massive.com/docs/hours)."
+
+
+def test_a_field_carries_the_notes_of_its_enclosing_objects_outermost_first() -> None:
+    raw = RawField(
+        "session.bars.close",
+        {"type": "number", "description": "The close price."},
+        required=False,
+        notes=(("session", _SESSION_NOTE), ("session.bars", "One bar per\n  minute.")),
+    )
+    item = _rules().field(raw)
+    assert item is not None
+    assert item.description == (
+        f"The close price. From the `session` object: {_SESSION_TEXT} "
+        "From the `session.bars` object: One bar per minute."
+    )
+
+
+@pytest.mark.parametrize(
+    ("own", "expected"),
+    [
+        ("The close price", "The close price. From the `day` object: The daily bar."),
+        ("Is it open?", "Is it open? From the `day` object: The daily bar."),
+        ("", "From the `day` object: The daily bar."),
+    ],
+)
+def test_a_note_follows_a_whole_sentence_of_the_fields_own_text(own: str, expected: str) -> None:
+    raw = RawField(
+        "day.close",
+        {"type": "number", "description": own},
+        required=False,
+        notes=(("day", "The daily bar."),),
+    )
+    item = _rules().field(raw)
+    assert item is not None
+    assert item.description == expected
+
+
+def test_a_field_without_notes_keeps_its_own_text_unchanged() -> None:
+    raw = RawField("close", {"type": "number", "description": "Close"}, required=True)
+    item = _rules().field(raw)
+    assert item is not None
+    assert item.description == "Close"
+
+
+def test_a_description_fix_replaces_only_the_fields_own_text_and_keeps_the_notes() -> None:
+    # The fix quotes the field's own text, never the notes, and every text it gives,
+    # per asset class included, gets the notes.
+    fix = overrides.DescriptionFix(
+        vendor="Per whole share.", asset_classes={"options": "Per share."}, reason="test"
+    )
+    hand = dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "last.price"): fix})
+    raw = RawField(
+        "last.price",
+        {"type": "number", "description": "Per whole share."},
+        required=False,
+        notes=(("last", "Only on some plans."),),
+    )
+    rules = _rules(hand)
+    item = rules.field(raw)
+    assert item is not None
+    assert rules.problems == []
+    note = "From the `last` object: Only on some plans."
+    assert item.description == f"Per whole share. {note}"
+    assert item.class_descriptions == (("options", f"Per share. {note}"),)
+
+
+def _note_fixed(fix: overrides.DescriptionFix) -> HandInput:
+    return dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "last"): fix})
+
+
+def _in_last(rules: SourceFields, name: str, own: str = "") -> Field:
+    raw = RawField(
+        f"last.{name}",
+        {"type": "number", "description": own},
+        required=False,
+        notes=(("last", "The most recent quote."),),
+    )
+    item = rules.field(raw)
+    assert item is not None
+    return item
+
+
+def test_a_description_fix_under_an_objects_key_corrects_its_note() -> None:
+    fix = overrides.DescriptionFix(
+        vendor="The most recent quote.", text="The most recent trade.", reason="test"
+    )
+    rules = _rules(_note_fixed(fix))
+    item = _in_last(rules, "price", "The price.")
+    assert item.description == "The price. From the `last` object: The most recent trade."
+    assert rules.problems == []
+    assert rules.use().described_keys == {"last"}
+
+
+def test_a_stale_description_fix_on_an_object_is_reported_once_and_keeps_the_note() -> None:
+    fix = overrides.DescriptionFix(vendor="Reworded.", text="The trade.", reason="test")
+    rules = _rules(_note_fixed(fix))
+    first = _in_last(rules, "price")
+    _in_last(rules, "size")
+    assert first.description == "From the `last` object: The most recent quote."
+    assert [(p.gate, p.key) for p in rules.problems] == [("stale-entry", "last")]
+
+
+def test_per_asset_class_texts_combine_a_fields_own_and_its_notes() -> None:
+    # A class listed by the field's entry or by a note's entry gets its own text; each part
+    # it does not list keeps the shared text.
+    note_fix = overrides.DescriptionFix(
+        vendor="The most recent quote.",
+        asset_classes={"crypto": "The latest crypto trade."},
+        reason="test",
+    )
+    field_fix = overrides.DescriptionFix(
+        vendor="Per share.", asset_classes={"options": "Per contract."}, reason="test"
+    )
+    hand = dataclasses.replace(
+        _EMPTY,
+        description_fixes={
+            ("us_x/trades_v1", "last"): note_fix,
+            ("us_x/trades_v1", "last.price"): field_fix,
+        },
+    )
+    item = _in_last(_rules(hand), "price", "Per share.")
+    note = "From the `last` object:"
+    assert item.description == f"Per share. {note} The most recent quote."
+    assert item.class_descriptions == (
+        ("crypto", f"Per share. {note} The latest crypto trade."),
+        ("options", f"Per contract. {note} The most recent quote."),
+    )
+
+
+def test_every_part_closes_its_last_sentence_before_the_next() -> None:
+    raw = RawField(
+        "event.change.ticker",
+        {"type": "string", "description": "The new ticker"},
+        required=False,
+        notes=(("event", "Details about an event"), ("event.change", "A ticker change")),
+    )
+    item = _rules().field(raw)
+    assert item is not None
+    assert item.description == (
+        "The new ticker. From the `event` object: Details about an event. "
+        "From the `event.change` object: A ticker change."
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixed_key", "expected"),
+    [
+        # Moved out of `details` to the top of the row: no object encloses it any more.
+        ("ticker", "The ticker."),
+        # Moved within `details`: `details` still encloses it, `details.codes` does not.
+        ("details.ticker", "The ticker. From the `details` object: The contract details."),
+        # A key that merely starts with an object's name is not inside it.
+        ("details_ticker", "The ticker."),
+    ],
+)
+def test_a_key_fix_keeps_only_the_notes_of_the_objects_that_still_enclose_the_field(
+    fixed_key: str, expected: str
+) -> None:
+    fix = overrides.KeyFix(wire_key=fixed_key, reason="test")
+    hand = dataclasses.replace(_EMPTY, key_fixes={("us_x/trades_v1", "details.codes.t"): fix})
+    raw = RawField(
+        "details.codes.t",
+        {"type": "string", "description": "The ticker."},
+        required=False,
+        notes=(("details", "The contract details."), ("details.codes", "The codes.")),
+    )
+    item = _rules(hand).field(raw)
+    assert item is not None
+    assert (item.wire_key, item.description) == (fixed_key, expected)
+
+
+def test_an_undescribed_objects_note_given_for_some_classes_adds_nothing_to_the_rest() -> None:
+    fix = overrides.DescriptionFix(
+        vendor="", asset_classes={"options": "The contract's last minute."}, reason="test"
+    )
+    hand = dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "last"): fix})
+    raw = RawField(
+        "last.price",
+        {"type": "number", "description": "The price"},
+        required=False,
+        notes=(("last", ""),),
+    )
+    item = _rules(hand).field(raw)
+    assert item is not None
+    assert item.description == "The price"
+    assert item.class_descriptions == (
+        ("options", "The price. From the `last` object: The contract's last minute."),
+    )

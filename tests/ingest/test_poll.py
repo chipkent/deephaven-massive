@@ -26,6 +26,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode
+from deephaven_massive._errors import PermanentError
 from deephaven_massive._ingest import poll
 from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, open_poll
 from deephaven_massive._massive import DriftReport, Transport
@@ -433,7 +434,7 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
-    watch.add(new_table([string_col("Symbol", ["msft", "AAPL", "not a symbol!"])]))
+    watch.add(new_table([string_col("Symbol", ["MSFT", "AAPL", None])]))
     script.drift = DriftReport(missing=frozenset({"ticker"}))  # every cycle: shown once
     script.rows()
     table = start(
@@ -448,6 +449,63 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     assert script.symbols[-1] == ("AAPL", "IBM", "MSFT")
     assert stream_rows()[0]["SchemaDrift"] == "REST:ticker-"
     del table
+
+
+def test_a_failing_upstream_watchlist_fails_the_poll(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    source = input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["AAPL"])]))
+    watch = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+    until(lambda: bool(watch.j_table.isFailed()))
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert "the symbol table failed, so the result can no longer follow it" in row["Error"]
+    assert script.symbols == [("AAPL",)]
+
+
+def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    watch.add(new_table([string_col("Symbol", ["msft"])]))
+    until(lambda: watch.size == 2)
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("stocks.dividends poll(): a symbol table holds 'msft'")
+    assert (
+        "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.NULL)"
+        in (row["Error"])
+    )
+    assert script.symbols == [("AAPL",)]
 
 
 # --- Lifetime ------------------------------------------------------------------------------------
@@ -717,9 +775,15 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
     dh_to_pylist: ToPylist,
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
-    watch = new_table([string_col("Symbol", ["aapl"])])
+    watch = new_table([string_col("Symbol", ["AAPL"])])
     q = build_query(rest_session._core, DIVIDENDS, symbols=watch)
     assert isinstance(q, Query)
+    bad = build_query(
+        rest_session._core, DIVIDENDS, symbols=new_table([string_col("Symbol", ["aapl"])])
+    )
+    assert isinstance(bad, Query)
+    with pytest.raises(ValueError, match=r"^a symbol table holds 'aapl'"):
+        bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
     assert "ticker.any_of=AAPL" in fake_rest.requests[0].target
@@ -1183,3 +1247,52 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
     rendered = row["Error"].removeprefix(prefix)
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    # Under WARN a row Massive spelled in a way the library cannot read keeps a null Symbol
+    # and its text in RawSymbol; keyed on Symbol, it neither fails the null-key check nor
+    # merges with another such row, and REPLACE removes it by its text.
+    monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    spec = dataclasses.replace(FEED, poll_keys=("Symbol",))
+    rows = [
+        {"id": "a", "ticker": "AAPL"},
+        {"id": "b", "ticker": "@@1"},
+        {"id": "c", "ticker": "@@2"},
+    ]
+    fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
+    )
+    with dm.MassiveSession(config) as m:
+        q = build_query(m._core, spec, symbols=["AAPL"])
+        assert isinstance(q, Query)
+        table = q.poll(60, mode=mode)
+        expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
+
+        def held() -> list[tuple[str, str | None, str | None]]:
+            return sorted((r["Id"], r["Symbol"], r["RawSymbol"]) for r in dh_to_pylist(table))
+
+        until(lambda: held() == expected)
+        next_cycle(clock)  # @@2 leaves: REPLACE removes its row alone; the others keep it
+        until(lambda: len(fake_rest.requests) == 2)
+        until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
+        assert m._core.diagnostics.barrier().wait(30.0)
+        assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
+        assert not table.j_table.isFailed()
+
+
+def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:
+    # A poll() table fails on a PermanentError, its fatal set names only the base.
+    for error in (poll.RowDataError, poll.UnsupportedParameterError, poll.SymbolRowError):
+        assert issubclass(error, PermanentError)
+    assert (dm.AuthenticationError, dm.EntitlementError, PermanentError) == poll._FATAL
