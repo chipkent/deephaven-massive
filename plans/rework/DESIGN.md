@@ -3886,7 +3886,14 @@ refresh gate and the catalog gates. What each change does:
 ## 20. Quality gates
 
 Every change must pass `scripts/check.sh full`, and every CI job including the free-threaded
-3.14t job. The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
+3.14t job. A pull request runs only the CI jobs its changed files can affect. The whole test
+matrix, 3.14t and the lowest-direct job included, runs when a file changes under `src/`,
+`tests/`, `scripts/`, `vendor/`, or `docs/datasets/`, or when `pyproject.toml` or
+`.gitattributes` changes. A change to a workflow runs every job, and so does every push to
+`main`; a change to documents alone (plans, the rest of `docs/`, `AGENTS.md`, `.claude/`) runs
+none. The single required check, `ci-ok`, passes only when every job the change selected passed
+and every other job was skipped.
+The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
 
 - **Coverage:** 100% statement and branch coverage. `pragma: no cover` needs a written reason
   and owner approval.
