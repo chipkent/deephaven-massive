@@ -29,15 +29,15 @@ a few cheap requests per class:
 
 | What it asks | What an answer means |
 |---|---|
-| a snapshot of one liquid ticker (AAPL, one SPY option, `I:NDX`, `C:EURUSD`, one ES contract) | Starter or above; refused means Basic |
-| that ticker's trades, then its quotes (stocks and options) | Developer (trades), Advanced (quotes) |
+| a snapshot of one liquid ticker (AAPL, SPY's option chain, `I:NDX`, `C:EURUSD`, one ES contract) | Starter or above; refused means Basic |
+| that ticker's trades, then its quotes (stocks, and the chain's contract with the most volume that day) | Developer (trades), Advanced (quotes); an empty answer counts as access, since the plan refuses with a 403 |
 | that contract's trades (futures) | Developer or above; Developer and Advanced both include quotes, so futures never read as Advanced |
 | a non-null `fmv` in the snapshot (stocks, options, currencies) | Business; for stocks and options always the base Business plan, since its REST trades and quotes answer too (at end-of-day recency), so only a declaration names the trades and quotes expansion |
 | a real-time indices snapshot | Advanced |
 | one file of every flat-file prefix | which flat files the S3 credentials reach: only a file that opens counts |
 
-An answer counts only with at least one row, since every probe asks for a liquid ticker. An
-empty answer proves nothing either way, so the probe stops and the run asks you to declare
+A snapshot counts only with at least one row, since every probe asks for a liquid ticker. An
+empty snapshot proves nothing either way, so the probe stops and the run asks you to declare
 the plans instead. For the same reason the probe does not run from 03:30 to 04:30 New York
 time, while Massive clears and refills its snapshots and a Business plan's `fmv` can be
 missing. A stocks or options Business plan is not an Advanced plan: without the

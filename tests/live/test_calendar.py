@@ -150,3 +150,8 @@ def test_memorial_day_is_the_last_monday_of_may() -> None:
 def test_a_week_whose_monday_is_a_holiday_is_skipped() -> None:
     # Martin Luther King Jr. Day 2026 is Monday, January 19.
     assert calendar.recent_week(date(2026, 1, 26)) == (date(2026, 1, 12), date(2026, 1, 18))
+
+
+def test_a_week_whose_friday_is_a_holiday_is_skipped() -> None:
+    # Good Friday 2026 is April 3.
+    assert calendar.recent_week(date(2026, 4, 6)) == (date(2026, 3, 23), date(2026, 3, 29))

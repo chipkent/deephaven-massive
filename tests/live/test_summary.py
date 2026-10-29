@@ -66,3 +66,15 @@ def test_no_lines_without_a_question() -> None:
 
 def test_numbered_items_sort_first() -> None:
     assert sorted(["b", "10", "2", "a"], key=summary.item_order) == ["2", "10", "a", "b"]
+
+
+def test_a_question_with_a_failed_test_is_not_verified() -> None:
+    settled = {"passes": ((), ("7",), ()), "fails": ((), ("7",), ())}
+    lines = summary.question_lines(
+        settled, {"passes": "passed", "fails": "failed"}, None, narrowed=False
+    )
+    assert lines == [
+        "verified 0 of 1: ",
+        "ran, evidence to read, 0 of 1: ",
+        "1 not verified (failed or skipped): 7",
+    ]

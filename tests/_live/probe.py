@@ -131,24 +131,29 @@ def store_plans(
     path.write_text(json.dumps(stored, indent=2) + "\n", encoding="utf-8")
 
 
-def entitled(client: RestClient, request: Request) -> Rows | None:
+def entitled(client: RestClient, request: Request, *, rows_prove: bool = True) -> Rows | None:
     """Send one probe request and tell a refusal apart from an answer that proves access.
 
     A refusal is an HTTP 403, a 200 whose envelope says `NOT_AUTHORIZED`, or a snapshot whose
     every row carries an `error` (Massive answers a ticker the plan excludes with such a row).
-    An answer proves access only with at least one row: each probe asks for a liquid ticker,
-    which always has some. Any other failure propagates: a probe that cannot tell must not
-    guess a plan.
+    A snapshot proves access only with at least one row: each probe asks for a liquid ticker,
+    which always has some, so an empty snapshot proves nothing. A trades or quotes answer
+    proves access even when empty, since the plan refuses those with a 403, and a contract can
+    go a while without a trade. Any other failure propagates: a probe that cannot tell must
+    not guess a plan.
 
     Args:
         client: The probe's REST client.
         request: The request.
+        rows_prove: Whether only an answer with rows proves access (snapshots); False lets an
+            empty 200 count as access (trades and quotes).
 
     Returns:
         The rows without error rows, or None when the request was refused.
 
     Raises:
-        PlanProbeError: When Massive answered without a row, which proves nothing either way.
+        PlanProbeError: When a snapshot answered without a row, which proves nothing either
+            way.
     """
     path, path_params, query = request
     try:
@@ -160,7 +165,7 @@ def entitled(client: RestClient, request: Request) -> Rows | None:
     rows = [row for row in page.rows if row.get("error") is None]
     if page.rows and not rows:
         return None
-    if not rows:
+    if not rows and rows_prove:
         msg = f"{path} {dict(path_params)} {dict(query)} answered without a row"
         raise PlanProbeError(msg)
     return rows
@@ -193,8 +198,8 @@ def _trades_and_quotes(
     """
     trades, quotes = paths
     return (
-        entitled(client, (trades, params, {"limit": 1})) is not None,
-        entitled(client, (quotes, params, {"limit": 1})) is not None,
+        entitled(client, (trades, params, {"limit": 1}), rows_prove=False) is not None,
+        entitled(client, (quotes, params, {"limit": 1}), rows_prove=False) is not None,
     )
 
 
@@ -238,8 +243,43 @@ def _stocks_plan(client: RestClient) -> str:
     return _equity_plan(rows, _trades_and_quotes(client, paths, {"stockTicker": "AAPL"}))
 
 
+_CHAIN_PAGE: Final = 250
+"""How many contracts of SPY's chain the options probe reads to find a busy one."""
+
+
+def _contract_of(row: dict[str, Any]) -> str:
+    """Return the ticker of an option chain row, or `""` when it names none.
+
+    Args:
+        row: A row of the chain snapshot.
+
+    Returns:
+        Its `details.ticker`, or `""`.
+    """
+    details = row.get("details")
+    return str(details.get("ticker") or "") if isinstance(details, dict) else ""
+
+
+def _day_volume(row: dict[str, Any]) -> float:
+    """Return the day's volume of an option chain row, 0 when it has none.
+
+    Args:
+        row: A row of the chain snapshot.
+
+    Returns:
+        Its `day.volume`.
+    """
+    day = row.get("day")
+    volume = day.get("volume") if isinstance(day, dict) else None
+    return float(volume) if isinstance(volume, int | float) else 0.0
+
+
 def _options_plan(client: RestClient) -> str:
-    """Probe the Options plan: one contract of SPY's chain (Starter), its trades, and quotes.
+    """Probe the Options plan: SPY's chain (Starter), then its busiest contract's trades and quotes.
+
+    The busiest contract of a page of the chain, by the day's volume, is the one asked about,
+    so its trades and quotes are as likely as any to answer with rows; an empty answer counts
+    as access all the same (`entitled`).
 
     Args:
         client: The probe's REST client.
@@ -252,15 +292,19 @@ def _options_plan(client: RestClient) -> str:
     """
     rows = entitled(
         client,
-        ("/v3/snapshot/options/{underlyingAsset}", {"underlyingAsset": "SPY"}, {"limit": 1}),
+        (
+            "/v3/snapshot/options/{underlyingAsset}",
+            {"underlyingAsset": "SPY"},
+            {"limit": _CHAIN_PAGE},
+        ),
     )
     if rows is None:
         return "basic"
-    details = [row.get("details") for row in rows]
-    contracts = [str(d["ticker"]) for d in details if isinstance(d, dict) and d.get("ticker")]
-    if not contracts:
-        msg = f"SPY's chain names no contract: {rows}"
+    named = [row for row in rows if _contract_of(row)]
+    if not named:
+        msg = f"SPY's chain names no contract: {rows[:3]}"
         raise PlanProbeError(msg)
+    contracts = [_contract_of(max(named, key=_day_volume))]
     paths = ("/v3/trades/{optionsTicker}", "/v3/quotes/{optionsTicker}")
     return _equity_plan(rows, _trades_and_quotes(client, paths, {"optionsTicker": contracts[0]}))
 
@@ -325,7 +369,7 @@ def _futures_plan(client: RestClient) -> str:
         msg = f"the ES snapshot names no contract: {rows}"
         raise PlanProbeError(msg)
     trades = ("/futures/v1/trades/{ticker}", {"ticker": contracts[0]}, {"limit": 1})
-    return "developer" if entitled(client, trades) is not None else "starter"
+    return "developer" if entitled(client, trades, rows_prove=False) is not None else "starter"
 
 
 PLAN_PROBES: Final[Mapping[str, Callable[[RestClient], str]]] = {

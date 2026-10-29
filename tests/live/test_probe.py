@@ -171,7 +171,7 @@ def test_a_snapshot_of_only_error_rows_is_a_refusal(
 
 @pytest.mark.parametrize(
     "empty",
-    ["/v2/snapshot/locale/us/markets/stocks/tickers", "/v3/trades/AAPL", "/v3/snapshot/indices"],
+    ["/v2/snapshot/locale/us/markets/stocks/tickers", "/v3/snapshot/indices"],
 )
 def test_an_answer_without_a_row_stops_the_probe(
     empty: str, fake_rest: FakeRestServer, client: RestClient
@@ -296,3 +296,39 @@ def test_a_snapshot_with_fmv_reads_as_base_business_whatever_trades_answer(
 ) -> None:
     _script(fake_rest, dict.fromkeys(plans.TIERS, "basic") | {name: "business_expansion"})
     assert probe.probe_tiers(client, now=_NOON)[name] == "business"
+
+
+@pytest.mark.parametrize(
+    ("empty", "name", "plan"),
+    [
+        ("/v3/trades/AAPL", "stocks", "developer"),
+        ("/v3/quotes/AAPL", "stocks", "advanced"),
+        ("/futures/v1/trades/ESZ6", "futures", "developer"),
+    ],
+)
+def test_an_empty_trades_or_quotes_answer_counts_as_access(
+    empty: str, name: str, plan: str, *, fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    # A contract can go a while without a trade; the plan refuses trades and quotes with a 403.
+    _script(fake_rest, dict.fromkeys(plans.TIERS, "basic") | {name: plan})
+    fake_rest.reply_first(empty, Reply(envelope([])))
+    assert probe.probe_tiers(client, now=_NOON)[name] == plan
+
+
+def test_the_options_probe_asks_about_the_busiest_contract(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    _script(fake_rest, dict.fromkeys(plans.TIERS, "basic"))
+    chain = [
+        {"details": {"ticker": "O:SPY261218C00900000"}, "day": {}},
+        {"details": {"ticker": "O:SPY261218C00650000"}, "day": {"volume": 125000}},
+        {"details": {}, "day": {"volume": 999999}},
+        {"details": {"ticker": "O:SPY261218C00600000"}, "day": {"volume": 300}},
+    ]
+    fake_rest.reply_first("/v3/snapshot/options/SPY", Reply(envelope(chain)))
+    # Only the busiest named contract is scripted: asking about another one would answer 404.
+    fake_rest.reply("/v3/trades/O%3ASPY261218C00650000", _OK)
+    fake_rest.reply("/v3/quotes/O%3ASPY261218C00650000", _REFUSED)
+    assert probe.probe_tiers(client, now=_NOON)["options"] == "developer"
+    asked = [r.target for r in fake_rest.requests if r.target.startswith("/v3/snapshot/options")]
+    assert asked == ["/v3/snapshot/options/SPY?limit=250"]

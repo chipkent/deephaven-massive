@@ -24,6 +24,7 @@ def test_the_index_session_opens_at_half_past_nine_in_new_york() -> None:
         ("indices=starter", "indices", timedelta(minutes=15), True),
         ("indices=advanced", "indices", timedelta(0), True),
         ("futures=starter", "futures", timedelta(minutes=9), False),
+        ("futures=developer", "futures", timedelta(minutes=9, seconds=59), False),
         ("futures=developer", "futures", timedelta(minutes=10), True),
         ("futures=advanced", "futures", timedelta(seconds=1), True),
     ],
