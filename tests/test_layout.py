@@ -45,11 +45,11 @@ naming a network library outside `_massive` (a logger name such as `"urllib3"` p
 `caplog.at_level`, say) is flagged on purpose: details of those libraries belong inside the
 wire package.
 
-Last, the file enforces the library's layers. Every module under `src/` is in one of six
+Then the file enforces the library's layers. Every module under `src/` is in one of six
 layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`, `_enums`, `_errors`,
 `_types`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`), and API (the root
-`__init__`, `_session`, `_query`, and `_namespaces/`); a module in no known layer is itself a
-violation. Then:
+`__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/`); a module in no known layer is
+itself a violation. Then:
 
 - every import, relative import, resolvable literal dynamic import, and module-name string,
   inside `if TYPE_CHECKING:` or not, targets the module's own layer or a lower one;
@@ -71,6 +71,21 @@ violation. Then:
 
 The tests are outside the layers: they may import any module and keep only the wire interface
 rule.
+
+Last, three logging rules, over every module under `src/`, backstop the test that plants
+secrets in the fake servers and searches every record for them:
+
+- no argument of a logging call (`<name ending in log or logger>.debug(...)`, `.info`,
+  `.warning`, `.error`, `.exception`, `.critical`, `.log`) names the API key, the S3 secret, the
+  REST client's headers, or the WebSocket authentication frame (`api_key`, `_api_key`,
+  `secret_access_key`, `_secret_access_key`, `s3_secret_access_key`, `_headers`, `auth_frame`),
+  as a name or an attribute, however deep in the expression;
+- every `threading.Thread` is created with `name=`, and every `ThreadPoolExecutor` with a
+  thread name prefix (by keyword or as its second argument), so each log line's thread says
+  which session and which call or stream wrote it;
+- no logging call runs inside a `with` block over a leaf lock (a name ending in `lock`, other
+  than the flush and publish locks, which are not leaf locks), since a log call may block on
+  its handler's I/O; a function only defined inside the block does not count.
 
 Each rule is a pure function over relative paths (and, for the boundary and the layers, source
 text), so it is checked both against the real tree and against a synthetic tree that breaks it.
@@ -1330,7 +1345,7 @@ def test_only_this_file_may_name_the_snapshot_files() -> None:
 _RANKS = {"wire": 0, "vocabulary": 1, "datasets": 2, "tables": 3, "ingest": 4, "api": 5}
 # The root modules of the vocabulary and of the API; every other root module is in no layer.
 _VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_types"})
-_API_MODULES = frozenset({"__init__", "_session", "_query"})
+_API_MODULES = frozenset({"__init__", "_debug_log", "_session", "_query"})
 # The packages that are each one layer.
 _LAYER_PACKAGES = {
     "_massive": "wire",
@@ -2319,3 +2334,259 @@ def test_the_live_marker_check_runs_before_deselection() -> None:
     ]
     decorators = [ast.unparse(decorator) for decorator in hook.decorator_list]
     assert decorators == ["pytest.hookimpl(tryfirst=True)"]
+
+
+# The logging rules.
+
+# The logging methods whose arguments end up in a record.
+_LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
+# The names that hold a secret, or a value that embeds one.
+_SECRET_NAMES = frozenset(
+    {
+        "api_key",
+        "_api_key",
+        "secret_access_key",
+        "_secret_access_key",
+        "s3_secret_access_key",
+        "_headers",
+        "auth_frame",
+    }
+)
+
+
+def _name_of(node: ast.expr) -> str | None:
+    """Return the last name of a name or attribute expression (`self._log` gives `_log`)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _is_log_call(call: ast.Call) -> bool:
+    """Tell whether a call is a logging call.
+
+    Args:
+        call: Any call.
+
+    Returns:
+        True for `<receiver>.<method>(...)` with a logging method, on a receiver whose last name
+        ends in `log`, `logger`, or `logging` (`logger`, `_log`, `_LOGGER`, `logging`,
+        `self._logger`).
+    """
+    if not isinstance(call.func, ast.Attribute) or call.func.attr not in _LOG_METHODS:
+        return False
+    receiver = _name_of(call.func.value)
+    return receiver is not None and receiver.lower().rstrip("_").endswith(
+        ("log", "logger", "logging")
+    )
+
+
+def _thread_name_problem(call: ast.Call) -> str | None:
+    """Return why a thread or pool creation is unnamed, or None when it is named or neither."""
+    created = _name_of(call.func)
+    keywords = {keyword.arg for keyword in call.keywords}
+    if created == "Thread" and "name" not in keywords:
+        return "threading.Thread without name="
+    # The prefix is ThreadPoolExecutor's second positional argument.
+    pool_named = "thread_name_prefix" in keywords or len(call.args) > 1
+    if created == "ThreadPoolExecutor" and not pool_named:
+        return "ThreadPoolExecutor without a thread name prefix"
+    return None
+
+
+def logging_violations(path: PurePosixPath, source: str) -> list[str]:
+    """Return every breach of the logging rules in one source module.
+
+    Args:
+        path: The module's path, for the messages.
+        source: Its source text.
+
+    Returns:
+        One `"<path>:<line>: <problem>"` per breach, in line order.
+    """
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_log_call(node):
+            arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+            secrets = sorted(
+                {
+                    name
+                    for argument in arguments
+                    for inner in ast.walk(argument)
+                    if isinstance(inner, ast.expr) and (name := _name_of(inner)) in _SECRET_NAMES
+                }
+            )
+            found.extend(f"{path}:{node.lineno}: a logging call names {name}" for name in secrets)
+        problem = _thread_name_problem(node)
+        if problem is not None:
+            found.append(f"{path}:{node.lineno}: {problem}")
+    found.extend(f"{path}:{line}: {problem}" for line, problem in _logs_under_a_leaf_lock(source))
+    return sorted(found, key=lambda message: int(message.split(":")[1]))
+
+
+# The two locks that are not leaf locks: a flush calls Deephaven, and may log, under them.
+_NON_LEAF_LOCKS = frozenset({"_flush_lock", "_publish_lock"})
+
+
+def _calls_in(statements: list[ast.stmt]) -> list[ast.Call]:
+    """Return the calls a block makes itself, leaving out functions it only defines.
+
+    Args:
+        statements: The block.
+
+    Returns:
+        Every call in it, outside nested `def`, `async def`, `class`, and `lambda` bodies.
+    """
+    calls: list[ast.Call] = []
+    pending: list[ast.AST] = list(statements)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            continue
+        if isinstance(node, ast.Call):
+            calls.append(node)
+        pending.extend(ast.iter_child_nodes(node))
+    return calls
+
+
+def _logs_under_a_leaf_lock(source: str) -> list[tuple[int, str]]:
+    """Return each logging call made while a leaf lock is held, by a `with` on it.
+
+    A leaf lock is any lock taken by `with <name ending in lock>:` other than the flush and
+    publish locks: `registry_lock` and every other lock of the library is held only for a
+    short, non-blocking update, and a log call may block on its handler's I/O.
+
+    Args:
+        source: A module's source text.
+
+    Returns:
+        `(line, problem)` per logging call, naming the lock.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.With | ast.AsyncWith):
+            continue
+        locks = [
+            name
+            for item in node.items
+            if (name := _name_of(item.context_expr)) is not None
+            and name.lower().endswith("lock")
+            and name not in _NON_LEAF_LOCKS
+        ]
+        found.extend(
+            (call.lineno, f"a logging call under the leaf lock {locks[0]}")
+            for call in _calls_in(node.body)
+            if locks and _is_log_call(call)
+        )
+    return found
+
+
+def test_the_tree_keeps_the_logging_rules() -> None:
+    found = [
+        message
+        for file in sorted(_SRC.rglob("*.py"))
+        for message in logging_violations(
+            PurePosixPath(file.relative_to(_ROOT).as_posix()), file.read_text()
+        )
+    ]
+    assert found == []
+
+
+def _logging_check(source: str) -> list[str]:
+    return logging_violations(PurePosixPath("src/deephaven_massive/_query.py"), source)
+
+
+@pytest.mark.parametrize(
+    ("source", "name"),
+    [
+        ("logger.debug('%s', api_key)\n", "api_key"),
+        ("_log.info('%s', self._api_key)\n", "_api_key"),
+        ("logger.warning('%s', config.s3_secret_access_key)\n", "s3_secret_access_key"),
+        ("self._logger.error('%s', self._secret_access_key)\n", "_secret_access_key"),
+        ("logging.exception('%s', secret_access_key)\n", "secret_access_key"),
+        ("_LOGGER.critical('%s', dict(self._headers))\n", "_headers"),
+        ("logger.log(10, '%s', auth_frame(key))\n", "auth_frame"),
+        ("logger.debug('%s', extra={'k': f'{api_key}'})\n", "api_key"),
+    ],
+)
+def test_a_logging_call_must_not_name_a_secret(source: str, name: str) -> None:
+    assert _logging_check(source) == [
+        f"src/deephaven_massive/_query.py:1: a logging call names {name}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "logger.debug('%s', redact(text, key))\n",
+        "connection.error(api_key)\n",
+        "errors.warning(api_key)\n",
+        "secret = config.s3_secret_access_key\nlogger.info('%s', secret is None)\n",
+    ],
+)
+def test_other_calls_and_names_pass_the_logging_rule(source: str) -> None:
+    # A receiver that is not a logger makes no logging call, and a secret read outside a
+    # logging call is for the planted-secret test to catch.
+    assert _logging_check(source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "with self.registry_lock:\n    logger.debug('x')\n",
+        "with core.registry_lock, other:\n    if a:\n        _log.info('x')\n",
+        "with self._lock:\n    logger.warning('x')\n",
+    ],
+)
+def test_no_logging_call_runs_under_a_leaf_lock(source: str) -> None:
+    [found] = _logging_check(source)
+    assert re.fullmatch(
+        r"src/deephaven_massive/_query\.py:\d: a logging call under the leaf lock .*", found
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "with self.registry_lock:\n    x = 1\nlogger.debug('after')\n",
+        "with self._publish_lock:\n    logger.error('x')\n",
+        "with self._flush_lock:\n    logger.error('x')\n",
+        "with self.registry_lock:\n    callback = lambda: logger.debug('later')\n",
+        "with self.registry_lock:\n    def later():\n        logger.debug('later')\n",
+        "with open(path) as f:\n    logger.debug('x')\n",
+    ],
+)
+def test_logging_outside_a_leaf_lock_passes(source: str) -> None:
+    assert _logging_check(source) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "problem"),
+    [
+        ("threading.Thread(target=f)\n", "threading.Thread without name="),
+        ("Thread(target=f, daemon=True)\n", "threading.Thread without name="),
+        ("ThreadPoolExecutor(4)\n", "ThreadPoolExecutor without a thread name prefix"),
+        (
+            "futures.ThreadPoolExecutor(max_workers=4)\n",
+            "ThreadPoolExecutor without a thread name prefix",
+        ),
+    ],
+)
+def test_every_thread_and_pool_must_be_named(source: str, problem: str) -> None:
+    assert _logging_check(source) == [f"src/deephaven_massive/_query.py:1: {problem}"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "threading.Thread(target=f, name='massive #1 reaper')\n",
+        "ThreadPoolExecutor(4, 'massive #1 call-7 rest')\n",
+        "ThreadPoolExecutor(max_workers=4, thread_name_prefix='massive #1 poll-3 rest')\n",
+        "threading.Lock()\n",
+    ],
+)
+def test_named_threads_and_pools_pass(source: str) -> None:
+    assert _logging_check(source) == []

@@ -49,6 +49,7 @@ from deephaven_massive._massive.net.http import (
     ssl_context,
 )
 from deephaven_massive._massive.net.origins import origin_of
+from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
@@ -232,12 +233,14 @@ class RestClient:
 
     The session creates one on first use, with plain arguments and the governor its API key
     shares, and closes it when the session closes. Every request is a GET with
-    `Authorization: Bearer <key>`; the key never appears in a URL or a log. Requests go to the
-    base URL's host only: a `next_url` that points elsewhere is refused. Every attempt first
-    takes a permit of its subscription's bucket from the `RequestGovernor` (which paces a
-    Basic subscription and pauses one Massive refused); transient failures are retried per
-    `net.retry`, and failures are raised as `WireError`, `WireAuthError`, or
-    `WireEntitlementError`; no urllib3 or JSON exception escapes.
+    `Authorization: Bearer <key>`; the key never appears in a URL or a log, and a response body
+    that echoes it has it replaced with `***` before it is decoded (`net.redaction`), so no row,
+    error, or log line can quote it. Requests go to the base URL's host only: a `next_url` that
+    points elsewhere is refused. Every attempt first takes a permit of its subscription's bucket
+    from the `RequestGovernor` (which paces a Basic subscription and pauses one Massive
+    refused); transient failures are retried per `net.retry`, and failures are raised as
+    `WireError`, `WireAuthError`, or `WireEntitlementError`; no urllib3 or JSON exception
+    escapes.
 
     Example:
         ::
@@ -309,6 +312,8 @@ class RestClient:
         self._governor = governor
         self._clock = governor.clock
         self._on_refused = on_refused
+        # Cleans every response body of a key the server echoes (`net.redaction`).
+        self._redactor = Redactor(api_key)
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "User-Agent": USER_AGENT,
@@ -356,12 +361,11 @@ class RestClient:
         Errors: `WireError` when the request fails after its retries, Massive keeps refusing
         it for longer than the governor waits (status 429), TLS verification fails, the proxy
         refuses its credentials (status 407, never retried), the body is not a valid page or
-        decompresses to more than `MAX_BODY_BYTES` (never retried), the client is closed, or
-        `cancel` is set; `WireAuthError` for 401; `WireEntitlementError` for 403 or a
-        `NOT_AUTHORIZED` envelope. Parameters that do not
-        fit the path raise `ValueError`, and a value of a type its kind does not accept raises
-        `TypeError` (see `rest.query`). An unknown `bucket` raises `ValueError` when the
-        request would start.
+        decompresses to more than `MAX_BODY_BYTES` or not at all (never retried), the client is
+        closed, or `cancel` is set; `WireAuthError` for 401; `WireEntitlementError` for 403 or
+        a `NOT_AUTHORIZED` envelope. Parameters that do not fit the path raise `ValueError`,
+        and a value of a type its kind does not accept raises `TypeError` (see `rest.query`).
+        An unknown `bucket` raises `ValueError` when the request would start.
 
         Args:
             rest_path: The path, from the spec.
@@ -530,7 +534,7 @@ class RestClient:
 
         A failure that is not retryable raises `WireError`: a status that is neither 200, 429,
         nor a transient 5xx (`http_error` chooses the subclass), a body that decompresses to
-        more than `MAX_BODY_BYTES` (`_oversized`), and from `_permit`,
+        more than `MAX_BODY_BYTES` or does not decompress (`_unreadable`), and from `_permit`,
         `_unanswered`, and `_refused` a closed client or a cancelled caller, a failed TLS
         verification, a proxy that refused its credentials (HTTP 407), or a bucket Massive
         kept refusing for longer than the governor waits (status 429).
@@ -572,26 +576,41 @@ class RestClient:
             if _never_sent(error):
                 self._governor.release(permit)  # no connection, so nothing reached Massive
             return self._unanswered(request, error)
+        body: bytearray | None = None
+        unreadable: WireError | None = None
         try:
             body = self._body(response)
-        except urllib3.exceptions.HTTPError as error:  # the body broke off or would not decode
+        except urllib3.exceptions.DecodeError as error:  # a subclass of HTTPError: first
+            unreadable = self._unreadable(request, response, f"does not decompress ({error})")
+        except urllib3.exceptions.HTTPError as error:  # the body broke off or timed out
+            if response.status == HTTPStatus.TOO_MANY_REQUESTS:
+                # Massive refused before the body broke off: the refusal stands.
+                self._refused(permit, http_error(response.status, b"", request), response)
+                return _REFUSED
             return self._unanswered(request, error)
-        elapsed = self._clock.monotonic() - started
-        if response.status == HTTPStatus.TOO_MANY_REQUESTS:
-            # A refusal pauses the bucket even when its body is too large to read.
-            self._refused(
-                permit,
-                http_error(response.status, b"" if body is None else body, request),
-                response,
-            )
-            if body is None:
-                raise self._oversized(request, response)
-            return _REFUSED
-        self._governor.done(permit, answered=True)  # an oversized body is still an answer
         if body is None:
-            raise self._oversized(request, response)
+            if unreadable is None:
+                unreadable = self._unreadable(
+                    request,
+                    response,
+                    f"decompresses to more than {MAX_BODY_BYTES} bytes, the most the client reads",
+                )
+            # The status arrived whole, so the governor hears of it: a refusal pauses the bucket,
+            # and any other status is an answer.
+            if response.status == HTTPStatus.TOO_MANY_REQUESTS:
+                self._refused(permit, http_error(response.status, b"", request), response)
+            else:
+                self._governor.done(permit, answered=True)
+            raise unreadable
+        elapsed = self._clock.monotonic() - started
+        # Cleaned before anything reads it, so no row, error, or log line can quote the key.
+        data = self._redactor.received(body)
+        if response.status == HTTPStatus.TOO_MANY_REQUESTS:
+            self._refused(permit, http_error(response.status, data, request), response)
+            return _REFUSED
+        self._governor.done(permit, answered=True)
         if response.status == HTTPStatus.OK:
-            page = decode_page(body, job.rest_path, request)
+            page = decode_page(data, job.rest_path, request)
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
                 request.target,
@@ -600,7 +619,7 @@ class RestClient:
                 elapsed,
             )
             return page
-        failure = http_error(response.status, body, request)
+        failure = http_error(response.status, data, request)
         _log.debug(
             "GET %s -> %d (request_id %s) in %.3f s",
             request.target,
@@ -620,15 +639,14 @@ class RestClient:
         memory. A body read in full returns its connection to the pool for reuse; a body
         abandoned part way, by the cap or by an error, closes its connection first, because
         the unread rest of the body would otherwise be read as the next response. urllib3's
-        own errors pass through unchanged (an `HTTPError` when the body breaks off, times out,
-        or does not decompress), for `_send` to treat as an attempt that got no answer.
+        own errors pass through unchanged for `_send`: a `DecodeError` when the body does not
+        decompress, another `HTTPError` when it breaks off or times out.
 
         Args:
             response: The response, its body not yet read.
 
         Returns:
-            The decompressed body, or None when it passes `MAX_BODY_BYTES` (`_send` then
-            raises `_oversized`).
+            The decompressed body, or None when it passes `MAX_BODY_BYTES`.
         """
         body = bytearray()
         whole = False
@@ -645,23 +663,25 @@ class RestClient:
             response.release_conn()
         return body if whole else None
 
-    def _oversized(self, request: Request, response: BaseHTTPResponse) -> WireError:
-        """Return the error of a response whose body decompresses past `MAX_BODY_BYTES`.
+    def _unreadable(self, request: Request, response: BaseHTTPResponse, reason: str) -> WireError:
+        """Return the error of a response whose body arrived but cannot be read.
 
-        It is never retried: a reply that large is no page of Massive's, and the same request
-        would bring the same reply.
+        A body unreadable for its content, one that does not decompress or decompresses past
+        `MAX_BODY_BYTES`, is never retried: it is no page of Massive's, and the same request
+        would bring the same reply. (A body that breaks off or times out is a transient
+        failure instead, retried like a reset.)
 
         Args:
             request: The request.
             response: The response, for its status.
+            reason: What is wrong with the body, completing "the response from <host> ...".
 
         Returns:
-            A `WireError` with the response's status that names the request and the cap,
+            A `WireError` with the response's status that names the request and the reason,
             never the body.
         """
         return WireError(
-            f"GET {request.target}: the response from {self._host} decompresses to more "
-            f"than {MAX_BODY_BYTES} bytes, the most the client reads",
+            f"GET {request.target}: the response from {self._host} {reason}",
             status=response.status,
             host=self._host,
             path=request.target,

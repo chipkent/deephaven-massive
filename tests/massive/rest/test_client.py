@@ -297,14 +297,78 @@ def test_a_body_of_exactly_the_cap_is_read(
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
 
 
-def test_a_body_that_does_not_decompress_is_retried(
+def test_a_body_that_does_not_decompress_is_never_retried(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     corrupt = Reply(b"not gzip at all", headers={"Content-Encoding": "gzip"})
     fake_rest.reply("/v3/trades/AAPL", corrupt, _ok())
+    with pytest.raises(WireError, match="does not decompress") as caught:
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert caught.value.status == 200
+    assert "not gzip" not in caught.value.message  # the body itself is never quoted
+    assert clock.waits == []
+    assert len(fake_rest.requests) == 1
+
+
+def test_a_body_that_breaks_off_is_retried(
+    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    cut = Reply(envelope([{"i": 9}] * 100), cut_after=50)
+    fake_rest.reply("/v3/trades/AAPL", cut, _ok())
     assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
     assert clock.waits == pytest.approx([0.55])
     assert len(fake_rest.requests) == 2
+
+
+def test_a_429_whose_body_breaks_off_is_still_a_refusal(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    cut = Reply({"message": "slow down " * 50}, status=429, cut_after=20)
+    fake_rest.reply("/v3/trades/AAPL", cut, _ok())
+    assert rest.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    assert clock.waits == [15.0]  # the refusal's pause, not a transient retry's
+    assert governor.snapshot()[0].refusals == 1
+    rest.close()
+
+
+def test_a_429_whose_body_does_not_decompress_is_a_refusal_that_fails(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    corrupt = Reply(b"not gzip", status=429, headers={"Content-Encoding": "gzip"})
+    fake_rest.reply("/v3/trades/AAPL", corrupt)
+    with pytest.raises(WireError, match="does not decompress") as caught:
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert caught.value.status == 429
+    state = governor.snapshot()[0]
+    assert (state.refusals, state.in_flight) == (1, 0)
+    assert len(fake_rest.requests) == 1
+    rest.close()
+
+
+@pytest.mark.parametrize("escaped", [False, True], ids=["plain", "escaped"])
+def test_a_streamed_body_is_cleaned_of_the_key_before_any_error_or_log(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    escaped: bool,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    # Small reads, so the key straddles the pieces the body arrives in.
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 5)
+    spelled = "\\u0073" + _KEY[1:] if escaped else _KEY  # `s` as a JSON escape
+    body = f'{{"status":"ERROR","request_id":"r1","message":"bad key {spelled}"}}'.encode()
+    fake_rest.reply("/v3/trades/AAPL", Reply(body, status=400, gzip=True))
+    with pytest.raises(WireError) as caught:
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert "bad key ***" in caught.value.message
+    every = [caught.value.message, *(r.getMessage() for r in caplog.records)]
+    assert not any(_KEY in text or _KEY[1:] in text for text in every)
 
 
 def test_get_returns_the_page_with_its_envelope(

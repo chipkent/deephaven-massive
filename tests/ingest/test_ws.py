@@ -15,10 +15,12 @@ import gc
 import importlib
 import json
 import logging
+import re
 import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -28,14 +30,18 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.request import HostDecision
+from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
-from deephaven_massive._ingest import futures_calendar, ws
+from deephaven_massive._ingest import futures_calendar, hosts, poll, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
+
+# Imported, not taken from a fixture: no shared fixture provides the manual clock that
+# `poll.open_poll` needs for the thread-name test's poller, which must not cycle on its own.
+from tests._fakes.clock import FakeClock
 
 # Plain constants of the ws_session, which no fixture can hand over; sessions come from fixtures.
 from tests._fakes.ws_session import REALTIME, TIMEOUT
@@ -44,6 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import TypeAlias
 
+    import pyarrow as pa
     from deephaven.table import Table
 
     from deephaven_massive._tables.core import SessionCore
@@ -1350,7 +1357,9 @@ def test_a_connection_that_does_not_end_is_reported(
 
 
 def test_the_default_factory_builds_real_clients(ws_session: WsSession) -> None:
-    factory = ws._WsClientFactory("test-key", backoff=15.0, max_backoff=30.0)
+    factory = ws._WsClientFactory(
+        "test-key", backoff=15.0, max_backoff=30.0, thread_prefix="massive #7"
+    )
     client = factory(
         "wss://socket.test/stocks",
         sources=[],
@@ -1360,6 +1369,7 @@ def test_the_default_factory_builds_real_clients(ws_session: WsSession) -> None:
         on_state=lambda *_: None,
     )
     assert isinstance(client, _massive.WsClient)
+    assert client._thread.name == "massive #7 ws socket.test/stocks"
     client.close()
     client.start()
     assert client.join(TIMEOUT)
@@ -2191,10 +2201,29 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
 
 
 def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
-    ws_session: WsSession,
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A connection out of the registry (a fatal failure retired it) still carries the session's
-    # stream until the stream shuts down; the session's close closes it too.
+    # stream until the stream shuts down; the session's close closes it too, reaching it through
+    # the stream's lease. The close fails the stream's table first, and the next update cycle
+    # shuts the blink table down, whose callback returns that lease: on a slow machine before
+    # the close takes the session's leases. The callback is held here until the close is done,
+    # so the close always finds the lease. (Had the callback come first, nothing would close the
+    # connection but its idle close; in the library only a fatal failure retires a connection
+    # this way, and the failure ends the connection by itself.)
+    shut_down = ws_session.connections._shut_down
+    lock = threading.Lock()
+    held: list[int] = []
+    holding = True
+
+    def hold(stream_id: int) -> None:
+        with lock:
+            if holding:
+                held.append(stream_id)
+                return
+        shut_down(stream_id)
+
+    monkeypatch.setattr(ws_session.connections, "_shut_down", hold)
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
@@ -2203,6 +2232,11 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
     )
     ws_session.close()
     assert connection.join(TIMEOUT)
+    with lock:  # a callback held so far is passed on now, and a later one goes straight through
+        holding = False
+        late = list(held)
+    for stream_id in late:
+        shut_down(stream_id)
     del result
 
 
@@ -2466,7 +2500,7 @@ def test_a_watchlist_row_of_an_ambiguous_pair_is_looked_up_off_the_update_graph(
     ws_session.subscribed("XT.DOT-USD")  # a later row, looked up on the lookup worker
     (_, caller), (_, worker) = lookups(ws_session)
     assert caller == threading.current_thread().name
-    assert worker.startswith(f"{ws_session.session._core.label} crypto pairs")
+    assert worker.startswith(f"{ws_session.session._core.thread_prefix} crypto pairs")
     watchlist.add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))  # Massive does not list it
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
@@ -2736,3 +2770,91 @@ def test_buffered_rows_are_shown_until_they_are_published(
 
     wait_for(lambda: shown() == 0)
     ws_session.session.release(result)
+
+
+# --- thread names --------------------------------------------------------------------------------
+
+_DIVIDENDS_PATH = "/stocks/v1/dividends"
+_DIVIDENDS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="stocks.dividends",
+    asset_class=AssetClass.STOCKS,
+    fetch_path=_DIVIDENDS_PATH,
+    symbol_param="ticker.any_of",
+    keys={(Transport.REST, _DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
+
+
+def test_every_library_thread_is_named_after_its_session_or_connection_group(
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every thread the library starts, recorded by name. The session's own (its writer and
+    # reaper, a poller and its pool) carry the session's prefix; those of the connections,
+    # which serve every session of their group (a client and its flush thread, a verdict's move
+    # and delayed start, the futures schedule worker), carry the group's label.
+    started: list[str] = []
+    start = threading.Thread.start
+
+    def recording(thread: threading.Thread) -> None:
+        started.append(thread.name)
+        start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", recording)
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.wait(lambda s: s.opens == 2)  # moved to the delayed host, after a delay
+    core = custom_session.session._core
+    pooled = threading.Event()
+
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int]:
+        executor.submit(pooled.set).result(TIMEOUT)
+        return core.catalog.dataset_schema(_DIVIDENDS).arrow_schema().empty_table(), 1
+
+    table = poll.open_poll(
+        core,
+        spec=_DIVIDENDS,
+        request=Request(symbols=("AAPL",)),
+        interval=timedelta(seconds=60),
+        mode=dm.PollMode.REPLACE,
+        read=read,
+        pollers=poll.Pollers(core.label),
+        host="api.test",
+        path=_DIVIDENDS_PATH,
+        clock=FakeClock(manual=True),
+    )
+    assert pooled.wait(TIMEOUT)
+    # The host decision's reader would name a fan-out pool after the hosts.
+    readers: list[str] = []
+
+    def decide(*_: object, fetch: Callable[..., object], **__: object) -> HostDecision:
+        readers.append(cast("Any", fetch).func.__self__.threads)
+        return REALTIME
+
+    monkeypatch.setattr(hosts, "decide", decide)
+    core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    prefix, group = core.thread_prefix, custom_session.connections.group.label
+    assert re.fullmatch(r"massive #\d+", prefix), prefix
+    assert re.fullmatch(r"massive group #\d+", group), group
+    assert readers == [f"{prefix} hosts rest"]
+    mine = {name.removeprefix(f"{prefix} ") for name in started if name.startswith(f"{prefix} ")}
+    shared = {name.removeprefix(f"{group} ") for name in started if name.startswith(f"{group} ")}
+    assert len(mine) + len(shared) == len(set(started)), started
+    assert {"diagnostics", "reaper"} <= mine
+    assert {
+        "ws 127.0.0.1/futures",  # the client of each connection, on the fake server
+        "flush socket.test/futures",
+        "move socket.test/futures",
+        "start delayed.test/futures",
+        "flush delayed.test/futures",
+        "futures schedules",
+    } <= shared
+    polls = sorted(role for role in mine if role.startswith("poll-"))
+    assert len(polls) == 2
+    assert re.fullmatch(r"poll-\d+", polls[0])
+    assert polls[1] == f"{polls[0]} rest_0"
+    custom_session.session.release(result)
+    custom_session.session.release(table)

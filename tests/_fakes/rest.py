@@ -44,6 +44,7 @@ from urllib.parse import urlsplit
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
+    import io
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
@@ -72,6 +73,8 @@ class Reply:
             slow server does. The rest is dropped quietly if the client has closed the
             connection by then.
         hold_after: How many bytes of the (compressed) body `hold` sends before it waits.
+        cut_after: When set, announce the whole body's length but send only this many bytes
+            of it, then close the connection: a body that breaks off.
     """
 
     body: object = b""
@@ -81,6 +84,7 @@ class Reply:
     gzip: bool = False
     hold: threading.Event | None = None
     hold_after: int = 0
+    cut_after: int | None = None
 
     def payload(self) -> bytes:
         """Return the body's bytes, compressed when `gzip` is set."""
@@ -314,20 +318,8 @@ class FakeRestServer:
                 for name, value in reply.headers.items():
                     self.send_header(name, value)
                 self.end_headers()
-                if reply.hold is None:
-                    self.wfile.write(data)
-                    return
-                self.wfile.write(data[: reply.hold_after])
-                self.wfile.flush()
-                reply.hold.wait(10)
-                # The client may have hung up while the tail waited: send the tail if it can,
-                # and never read another request from this connection.
-                self.close_connection = True
-                try:
-                    self.wfile.write(data[reply.hold_after :])
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
+                if not _write_body(self.wfile, reply, data):
+                    self.close_connection = True
 
             def do_CONNECT(self) -> None:
                 fake._record(
@@ -356,6 +348,35 @@ class FakeRestServer:
                 self.close_connection = True
 
         return Handler
+
+
+def _write_body(out: io.BufferedIOBase, reply: Reply, data: bytes) -> bool:
+    """Send a reply's body as its `cut_after` and `hold` options say.
+
+    Args:
+        out: The connection's output stream.
+        reply: The reply.
+        data: The body's bytes, as `Reply.payload` returns them.
+
+    Returns:
+        True when the connection may serve another request; False when it must close: the
+        body was cut short, or its tail was held back, by when the client may have hung up.
+    """
+    if reply.cut_after is not None:
+        out.write(data[: reply.cut_after])
+        return False
+    if reply.hold is None:
+        out.write(data)
+        return True
+    out.write(data[: reply.hold_after])
+    out.flush()
+    reply.hold.wait(10)
+    try:  # send the tail if the client still listens
+        out.write(data[reply.hold_after :])
+        out.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    return False
 
 
 def _relay(client: socket.socket, upstream: socket.socket) -> None:
