@@ -15,10 +15,10 @@ clients do the waiting, through a `Clock`, so tests replace time with a fake and
   (a number of seconds or an HTTP date), and without a usable header 15, 30, then 60 seconds
   by the number of refusals in the run.
 - **TLS certificate failures** are never retried: the certificate will not change between
-  attempts. `is_tls_failure` recognises one however deeply a library wrapped it.
+  attempts. `net.errors.is_tls_failure` recognises one however deeply a library wrapped it.
 - **Proxy credential refusals** (a proxy answering a tunnel request with HTTP 407) are never
   retried either: the same credentials would be refused again, and a corporate proxy may lock
-  the account after a few refusals. `is_proxy_auth_failure` recognises one.
+  the account after a few refusals. `net.errors.is_proxy_auth_failure` recognises one.
 
 Everything else (401, 403, 404, a body that is not JSON) is not retryable, and the clients
 fail at once. The functions here are pure and keep no state, so they are safe from any
@@ -28,7 +28,6 @@ thread. This module imports only the standard library.
 from __future__ import annotations
 
 import logging
-import ssl
 import time
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -36,7 +35,6 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Iterator
 
 __all__ = [
     "JITTER",
@@ -48,9 +46,6 @@ __all__ = [
     "TRANSIENT_WAITS",
     "Clock",
     "SystemClock",
-    "is_proxy_auth_failure",
-    "is_tls_failure",
-    "linked_errors",
     "rate_limit_wait",
     "retry_after_seconds",
     "transient_wait",
@@ -207,68 +202,3 @@ def rate_limit_wait(refusal: int, retry_after: float | None) -> float:
     if retry_after is not None:
         return retry_after
     return RATE_LIMIT_WAITS[min(refusal, len(RATE_LIMIT_WAITS)) - 1]
-
-
-def is_tls_failure(error: BaseException) -> bool:
-    """Return whether `error` is, or wraps, a failed TLS certificate verification.
-
-    HTTP libraries wrap `ssl.SSLCertVerificationError` in their own exceptions, as an argument
-    (urllib3's `SSLError`) or as the cause or context of a later one, so the search follows all
-    three.
-
-    Args:
-        error: The exception a request raised.
-
-    Returns:
-        True when an `ssl.SSLCertVerificationError` is found among `error`, its arguments, its
-        `__cause__`, and its `__context__`, recursively.
-    """
-    return any(isinstance(item, ssl.SSLCertVerificationError) for item in linked_errors(error))
-
-
-_PROXY_AUTH_REFUSED = "Tunnel connection failed: 407 "
-"""How `http.client` words a tunnel request the proxy answered with HTTP 407."""
-
-
-def is_proxy_auth_failure(error: BaseException) -> bool:
-    """Return whether `error` is, or wraps, a proxy's refusal of the client's credentials.
-
-    An HTTPS request through a proxy first asks it for a tunnel (`CONNECT`). A proxy that
-    rejects the credentials answers HTTP 407, which `http.client` raises as
-    `OSError("Tunnel connection failed: 407 <reason>")`, its only report of the status (every
-    supported Python words it so); urllib3 wraps that in its `ProxyError` and botocore in its
-    `ProxyConnectionError`.
-
-    Args:
-        error: The exception a request raised.
-
-    Returns:
-        True when an `OSError` whose message starts `Tunnel connection failed: 407 ` is found
-        among `error`, its arguments, its `__cause__`, and its `__context__`, recursively.
-    """
-    return any(
-        isinstance(item, OSError) and str(item).startswith(_PROXY_AUTH_REFUSED)
-        for item in linked_errors(error)
-    )
-
-
-def linked_errors(error: BaseException) -> Iterator[BaseException]:
-    """Yield `error` and every exception linked to it, each once.
-
-    Args:
-        error: The exception to start from.
-
-    Yields:
-        `error`, then the exceptions among its arguments, its `__cause__`, and its
-        `__context__`, recursively; a cycle ends the search.
-    """
-    seen: set[int] = set()
-    pending = [error]
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        yield current
-        linked = (current.__cause__, current.__context__, *current.args)
-        pending.extend(item for item in linked if isinstance(item, BaseException))

@@ -35,15 +35,17 @@ import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.cancel import Cancel
-from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.errors import (
+    WireError,
+    is_proxy_auth_failure,
+    is_tls_failure,
+    linked_errors,
+)
 from deephaven_massive._massive.net.http import https_proxy, proxy_credentials, ssl_context
 from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
-    is_proxy_auth_failure,
-    is_tls_failure,
-    linked_errors,
     retry_after_seconds,
     transient_wait,
 )
@@ -721,7 +723,7 @@ the tunnel request)."""
 def _never_sent(error: BaseException) -> bool:
     """Tell whether a failed attempt never reached Massive, so its slot can be freed at once.
 
-    The cause may be wrapped, so the whole chain is searched (`net.retry.linked_errors`). A TLS
+    The cause may be wrapped, so the whole chain is searched (`net.errors.linked_errors`). A TLS
     error on its own does not count: without a proxy it may come after the request was sent,
     and only one inside a `ProxyError` happened before the tunnel existed.
 

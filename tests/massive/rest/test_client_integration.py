@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -57,6 +58,12 @@ _UNASSIGNED: tuple[Request, ...] = (
     ("/fed/v1/treasury-yields", {}, {"limit": 1}),
 )
 """Requests of data that belongs to no subscription: market status, reference, economy."""
+
+_PROBE_EVERY = 5.0
+"""Seconds between the probes that look for the end of a refusal."""
+
+_PROBE_FOR = 150.0
+"""Seconds after the first request when the probes stop, refused or not."""
 
 _RATE_HEADERS = ("retry-after", "ratelimit", "rate-limit")
 """Substrings of the response headers recorded with each answer."""
@@ -101,7 +108,7 @@ def _pause() -> None:
 
 
 @pytest.mark.needs("some:basic")
-@pytest.mark.settles("429 text")
+@pytest.mark.settles("50")
 @pytest.mark.timeout(100)
 def test_text_of_the_rate_limit_refusal(
     send: Callable[[Request], tuple[int, str]],
@@ -127,7 +134,7 @@ def test_text_of_the_rate_limit_refusal(
 
 
 @pytest.mark.needs("some:basic")
-@pytest.mark.settles("rate bucket")
+@pytest.mark.settles("51")
 @pytest.mark.timeout(100)
 def test_requests_without_a_subscription_after_the_limit_is_reached(
     send: Callable[[Request], tuple[int, str]],
@@ -160,7 +167,7 @@ def test_requests_without_a_subscription_after_the_limit_is_reached(
 
 
 @pytest.mark.needs("some:basic")
-@pytest.mark.settles("rate bucket")
+@pytest.mark.settles("51")
 @pytest.mark.timeout(100)
 def test_requests_without_a_subscription_alone(
     send: Callable[[Request], tuple[int, str]],
@@ -180,3 +187,45 @@ def test_requests_without_a_subscription_alone(
         unassigned = _UNASSIGNED[number % len(_UNASSIGNED)]
         status, described = send(unassigned)
         evidence(f"request {number} of {unassigned[0]}: HTTP {status}; {described}")
+
+
+@pytest.mark.needs("some:basic")
+@pytest.mark.settles("52")
+@pytest.mark.timeout(260)
+def test_when_a_spent_minute_frees_its_requests(
+    send: Callable[[Request], tuple[int, str]],
+    *,
+    basic_class: str,
+    evidence: Evidence,
+) -> None:
+    """Whether Massive's minute slides from each request, and whether refusals count against it.
+
+    Sends the named Basic subscription's requests one after another until the first 429, then
+    one request every 5 s until one is answered (for at most 150 s from the first request),
+    recording each answer's time since the first request. Reading it: the first answer about
+    60 s after the first request means a window that slides from each request; one at a
+    minute boundary means a fixed window; one later than 60 s after the last answered request
+    means the refused probes counted against the limit. Fails when no request is refused: the
+    class is then not on Basic, as declared.
+    """
+    name, request = basic_class, _BY_CLASS[basic_class]
+    _pause()
+    start = time.monotonic()
+    refused = False
+    for number in range(1, _LIMIT + 3):
+        status, described = send(request)
+        evidence(f"{name} request {number} at {time.monotonic() - start:.1f} s: HTTP {status}")
+        if status == 429:
+            evidence(f"the first refusal: {described}")
+            refused = True
+            break
+    if not refused:
+        pytest.fail(f"the {name} limit was not reached, although {name} is declared Basic")
+    while time.monotonic() - start < _PROBE_FOR:
+        threading.Event().wait(_PROBE_EVERY)
+        status, described = send(request)
+        evidence(f"probe at {time.monotonic() - start:.1f} s: HTTP {status}; {described}")
+        if status != 429:
+            break
+    else:
+        evidence(f"still refused {_PROBE_FOR:.0f} s after the first request")

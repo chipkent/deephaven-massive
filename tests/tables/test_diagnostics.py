@@ -774,31 +774,22 @@ def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> Non
 
 
 def test_a_busy_queue_does_not_hold_back_a_due_rate_limit_pull(
-    dh_exec_ctx: ExecutionContext,
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A queue that never goes quiet never lets the timed wait expire. Stand that in
+    # deterministically: the wait never times out, so only the batch itself can pull.
+    monkeypatch.setattr(Diagnostics, "_rate_wait", lambda _self: None)
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
     source = _RateSource()
-    source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.05)]  # due in 50 ms
-    flooding = threading.Event()
-    done = threading.Event()
-
-    def flood() -> None:  # stream rows keep the writer's queue from ever going quiet
-        while not done.is_set():
-            diagnostics.write(STREAM)
-            flooding.set()
-
-    flooder = threading.Thread(target=flood, daemon=True)
+    source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]  # due at once
     try:
         diagnostics.watch_rate_limits(source)
-        flooder.start()
-        assert flooding.wait(TIMEOUT)
         assert source.pulled.acquire(timeout=TIMEOUT)  # the first pull
-        assert source.pulled.acquire(timeout=TIMEOUT)  # and the due one, despite the flood
+        diagnostics.write(STREAM)  # a batch handled after the due time
+        assert source.pulled.acquire(timeout=TIMEOUT)  # pulls the rows too
     finally:
-        done.set()
-        flooder.join(TIMEOUT)
         diagnostics.release()
-    assert not flooder.is_alive()
+    assert source.pulls == 2
 
 
 def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(

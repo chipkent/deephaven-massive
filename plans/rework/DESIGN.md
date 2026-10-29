@@ -2455,9 +2455,13 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   reads (`subscription_of(dates.day_class(spec, its symbols' classes))`: the dataset's class,
   or for a dataset with a path per symbol class the class its request's symbols share), and a
   host-decision probe to the subscription of the class it decides, whatever path it reads.
-  The session's read of Massive's crypto ticker list goes to `currencies`, its pages in one
-  lane of their own. Datasets Massive assigns to no subscription (cross-market reference data, economy, partner
-  data, the unified snapshot) go to the `other` bucket, which is never paced.
+  A request with no class of its own whose `market` filter names one (`m.reference.tickers`)
+  goes to that class's subscription: `crypto` and `fx` to `currencies`, `stocks` and `otc` to
+  `stocks`, `indices` to `indices`. The session's own read of Massive's crypto ticker list
+  goes to `currencies` too, its pages in one lane of their own, so it and a user's
+  `tickers(market=dm.Market.CRYPTO)` count against the same limit. Other datasets Massive
+  assigns to no subscription (cross-market reference data, economy, partner data, the
+  unified snapshot) go to the `other` bucket, which is never paced.
 - **Sharing.** One `RequestGovernor` ([section 19.1](#191-the-rest-client)) per (SHA-256 of the
   API key, REST scheme, host, and port) serves every session of the process that uses them
   (`_ingest/rate_limits.py`, `GOVERNORS`). The registry keeps the digest, never the key. A
@@ -3078,7 +3082,9 @@ src/deephaven_massive/_massive/
 __init__.py          lazy interface: __all__ and re-exports only
 net/                 shared by every client; imports nothing else in _massive
   __init__.py        USER_AGENT; re-exports
-  errors.py          WireError, WireAuthError, WireEntitlementError
+  errors.py          WireError, WireAuthError, WireEntitlementError; linked_errors (an
+                     exception's whole chain of arguments, causes, and contexts), and
+                     is_tls_failure and is_proxy_auth_failure, which search it
   http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); proxy from HTTPS_PROXY/NO_PROXY
   cancel.py          Cancel: a one-way threading.Event that follows parent tokens and runs
                      callbacks when set
@@ -3087,8 +3093,9 @@ net/                 shared by every client; imports nothing else in _massive
                      key both compare origins with it
   retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; 15/30/60 s 429
                      pauses; RATE_LIMIT_PATIENCE, 10 minutes),
-                     retryable classification; TLS never retried; Clock (injectable, tests
-                     never sleep); an unusable Retry-After is logged at WARNING, never 0
+                     retryable classification; TLS never retried (net.errors finds it);
+                     Clock (injectable, tests never sleep); an unusable Retry-After is logged
+                     at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
@@ -3298,7 +3305,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   errors wait 0.5, 1, then 2 s, each with up to 20% upward jitter. A TLS certificate failure
   (`ssl.SSLCertVerificationError`) is never retried: it raises `WireError` at once, naming
   `SSL_CERT_FILE`. Nor is a proxy's refusal of its credentials (HTTP 407 to the tunnel request,
-  `net.retry.is_proxy_auth_failure`): repeating them can lock a corporate account, so it raises
+  `net.errors.is_proxy_auth_failure`): repeating them can lock a corporate account, so it raises
   `WireError(status=407)` at once, naming `HTTPS_PROXY`. A connection reset in the middle of
   paging retries **that page** (its `next_url`), never the first page. Redirects are never
   followed (a 3xx is a `WireError`), so the bearer key never leaves the REST host. Every wait
@@ -3537,7 +3544,7 @@ returns.
   - A TLS failure (botocore's `SSLError`, or any error `is_tls_failure` recognises). A
     certificate failure's message names `SSL_CERT_FILE`.
   - A proxy's refusal of the client's credentials (HTTP 407 to the tunnel request, which
-    `net.retry.is_proxy_auth_failure` recognises). Repeating credentials the proxy refused can
+    `net.errors.is_proxy_auth_failure` recognises). Repeating credentials the proxy refused can
     lock a corporate account; the `WireError` has status 407 and names `HTTPS_PROXY`.
   - A failure partway through an object's body. The reader has already handed blocks on, so
     the client cannot repeat the request by itself: the read fails with a `WireError`, and the
@@ -4904,6 +4911,6 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 47 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 48 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
 | 48 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
 | 49 | Whether Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, read with `active=true` and with `active=false`) holds every pair, delisted ones included, its WebSocket channels and the last-trade and daily open/close paths serve, with a `base_currency_symbol` and `currency_symbol` that join to the ticker | Any `X:` ticker is canonical; wherever a pair must be split (a stream, `/v1/last/crypto/{from}/{to}`, `/v1/open-close/crypto/{from}/{to}/{date}`) the split comes only from that list, both reads once per session (a ticker in both keeps its listed row), and a pair the list does not hold, or whose currencies do not join to it, is refused there; every other path serves it | `tests/ingest/test_ws.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_crypto.py`: `X:DOTUSD`, `X:SHIBUSD`, `X:USDTUSD`, `X:BTCPYUSD`, and `X:ETHWBTC` subscribe the topic the list gives, `X:BTCXYZ`, unlisted, is refused, and a delisted `X:FTTUSD` splits from the delisted read | `tests/namespaces/test_crypto_integration.py`: both reads of the list; record every row whose currencies do not join to its ticker, and stream a sample of pairs to confirm their topics |
-| 50 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/ingest/test_rest_integration.py` (Basic key): six requests within a minute; record the 429's body and headers |
-| 51 | Whether the datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count against a subscription's limit, and which | They go to the unpaced `other` bucket; a 429 there pauses it as any unpaced bucket | `tests/ingest/test_rest.py`: such a request is charged to `other` | `tests/ingest/test_rest_integration.py` (Basic key): five stocks requests, then one reference request; record whether it is refused |
-| 52 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/ingest/test_rest_integration.py` (Basic key): requests at measured intervals; record when the first 429 comes and when requests succeed again |
+| 50 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/massive/rest/test_client_integration.py` (a class on Basic): seven requests within a minute; record each answer's status, rate-limit headers, and message |
+| 51 | Whether the datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count against a subscription's limit, and which | They go to the unpaced `other` bucket, except a request whose `market` filter names a class, which goes to that class's subscription; a 429 in `other` pauses it as any unpaced bucket | `tests/ingest/test_rest.py`: such a request is charged to `other`, and one filtered by market to the market's subscription | `tests/massive/rest/test_client_integration.py` (a class on Basic): spend the class's minute, then one request each of market status, ticker types, and treasury yields; and ten such requests alone within a minute; record which are refused |
+| 52 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/massive/rest/test_client_integration.py` (a class on Basic): requests until the first 429, then one every 5 s; record when the first is answered again |

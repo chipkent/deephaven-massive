@@ -109,6 +109,7 @@ from deephaven_massive._datasets.timestamps import (
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
+    Market,
     Subscription,
     Timespan,
     UnknownSymbols,
@@ -1943,12 +1944,26 @@ class RestEndpoints:
         )
 
 
+_MARKET_CLASSES: Final[dict[str, AssetClass]] = {
+    Market.STOCKS: AssetClass.STOCKS,
+    Market.OTC: AssetClass.STOCKS,
+    Market.INDICES: AssetClass.INDICES,
+    Market.FX: AssetClass.FOREX,
+    Market.CRYPTO: AssetClass.CRYPTO,
+}
+"""The asset class whose data a request's `market` filter selects (OTC tickers are stocks)."""
+
+
 def call_bucket(spec: DatasetSpec, call: Call) -> str:
     """Return the governor bucket a planned request is charged to: its Massive subscription.
 
     The request reads the data of the class `dates.day_class` gives it (the dataset's class, or
     for a dataset with a path per symbol class the class its symbols share), and that class's
-    subscription covers it. A request of no class is charged to `rate_limits.OTHER`.
+    subscription covers it. A request with no class of its own whose `market` filter names
+    one, such as `m.reference.tickers(market=dm.Market.CRYPTO)`, reads that class's data and
+    is charged to its subscription (`crypto` and `fx` to currencies, `stocks` and `otc` to
+    stocks), as the session's own read of the crypto ticker list is. Any other request of no
+    class is charged to `rate_limits.OTHER`.
 
     Args:
         spec: The dataset.
@@ -1958,7 +1973,11 @@ def call_bucket(spec: DatasetSpec, call: Call) -> str:
         The bucket's name, such as `"stocks"`, `"currencies"`, or `"other"`.
     """
     classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
-    return bucket_of(subscription_of(day_class(spec, classes)))
+    asset_class = day_class(spec, classes)
+    market = call.query.get("market")
+    if asset_class is ClassFromPrefix.ANY and isinstance(market, str):
+        asset_class = _MARKET_CLASSES.get(market, ClassFromPrefix.ANY)
+    return bucket_of(subscription_of(asset_class))
 
 
 def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) -> list[str]:

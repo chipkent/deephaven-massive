@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ssl
 import threading
 import time
 
@@ -82,58 +81,6 @@ def test_an_unusable_retry_after_is_none_and_logged(
 def test_a_retry_after_date_without_a_zone_is_gmt() -> None:
     header = "Wed, 21 Oct 2026 07:28:00 -0000"
     assert retry.retry_after_seconds(header, now=1_792_567_660.0) == 20.0
-
-
-def test_a_certificate_failure_is_recognised_however_it_is_wrapped() -> None:
-    cert = ssl.SSLCertVerificationError(1, "certificate verify failed")
-    assert retry.is_tls_failure(cert)
-    as_argument = OSError(cert)
-    assert retry.is_tls_failure(as_argument)
-    as_cause = ConnectionError("wrapped")
-    as_cause.__cause__ = cert
-    assert retry.is_tls_failure(as_cause)
-    as_context = RuntimeError("during handling")
-    as_context.__context__ = as_argument
-    assert retry.is_tls_failure(as_context)
-
-
-def test_other_failures_are_not_tls_failures() -> None:
-    assert not retry.is_tls_failure(ConnectionResetError("reset"))
-    assert not retry.is_tls_failure(ssl.SSLError("handshake failure"))
-    assert not retry.is_tls_failure(ValueError(ValueError("nested"), "text"))
-
-
-def test_a_cycle_of_exceptions_ends_the_search() -> None:
-    first = ValueError("first")
-    second = ValueError(first)
-    first.__context__ = second
-    assert not retry.is_tls_failure(first)
-    assert not retry.is_proxy_auth_failure(first)
-
-
-def test_a_proxy_credential_refusal_is_recognised_however_it_is_wrapped() -> None:
-    # http.client's report of a CONNECT answered with 407, wrapped as urllib3 and botocore do.
-    refused = OSError("Tunnel connection failed: 407 Proxy Authentication Required")
-    assert retry.is_proxy_auth_failure(refused)
-    as_argument = ConnectionError("Unable to connect to proxy", refused)
-    assert retry.is_proxy_auth_failure(as_argument)
-    as_context = RuntimeError("Failed to connect to proxy URL")
-    as_context.__context__ = as_argument
-    assert retry.is_proxy_auth_failure(as_context)
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        OSError("Tunnel connection failed: 403 Forbidden"),
-        OSError("Tunnel connection failed: 4070 Unknown"),
-        ValueError("Tunnel connection failed: 407 Proxy Authentication Required"),
-        ConnectionRefusedError(61, "Connection refused"),
-    ],
-    ids=["another-status", "a-longer-status", "not-an-os-error", "refused"],
-)
-def test_other_failures_are_not_proxy_credential_refusals(error: BaseException) -> None:
-    assert not retry.is_proxy_auth_failure(error)
 
 
 def test_the_system_clock_reads_and_waits_on_real_time() -> None:

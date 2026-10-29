@@ -17,13 +17,32 @@ and a `message`. The library outside `_massive` never shows these to users: `_er
 turns each one into the public `MassiveError`, `AuthenticationError`, or `EntitlementError`
 with the same message, `status`, and `request_id`.
 
+The clients classify what their HTTP libraries raise before they wrap it, and those libraries
+nest the root cause as an argument, a `__cause__`, or a `__context__`. `linked_errors` walks
+that whole chain, and `is_tls_failure` and `is_proxy_auth_failure` find the two failures no
+client retries in it: a certificate that did not verify, and a proxy that refused the
+credentials.
+
 This module imports only the standard library. It is part of `net`, the layer every client
-shares.
+shares. Its functions are pure, so they are safe from any thread.
 """
 
 from __future__ import annotations
 
-__all__ = ["WireAuthError", "WireEntitlementError", "WireError"]
+import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+__all__ = [
+    "WireAuthError",
+    "WireEntitlementError",
+    "WireError",
+    "is_proxy_auth_failure",
+    "is_tls_failure",
+    "linked_errors",
+]
 
 
 class WireError(Exception):
@@ -141,3 +160,71 @@ class WireEntitlementError(WireError):
             )
             assert error.status == 403
     """
+
+
+def is_tls_failure(error: BaseException) -> bool:
+    """Return whether `error` is, or wraps, a failed TLS certificate verification.
+
+    HTTP libraries wrap `ssl.SSLCertVerificationError` in their own exceptions, as an argument
+    (urllib3's `SSLError`) or as the cause or context of a later one, so the search follows all
+    three.
+
+    Args:
+        error: The exception a request raised.
+
+    Returns:
+        True when an `ssl.SSLCertVerificationError` is found among `error`, its arguments, its
+        `__cause__`, and its `__context__`, recursively.
+    """
+    # The class is looked up, not imported: naming the errors must load no network module, and
+    # no instance of it can exist before `ssl` is loaded (an empty tuple matches nothing).
+    verification = getattr(sys.modules.get("ssl"), "SSLCertVerificationError", ())
+    return any(isinstance(item, verification) for item in linked_errors(error))
+
+
+_PROXY_AUTH_REFUSED = "Tunnel connection failed: 407 "
+"""How `http.client` words a tunnel request the proxy answered with HTTP 407."""
+
+
+def is_proxy_auth_failure(error: BaseException) -> bool:
+    """Return whether `error` is, or wraps, a proxy's refusal of the client's credentials.
+
+    An HTTPS request through a proxy first asks it for a tunnel (`CONNECT`). A proxy that
+    rejects the credentials answers HTTP 407, which `http.client` raises as
+    `OSError("Tunnel connection failed: 407 <reason>")`, its only report of the status (every
+    supported Python words it so); urllib3 wraps that in its `ProxyError` and botocore in its
+    `ProxyConnectionError`.
+
+    Args:
+        error: The exception a request raised.
+
+    Returns:
+        True when an `OSError` whose message starts `Tunnel connection failed: 407 ` is found
+        among `error`, its arguments, its `__cause__`, and its `__context__`, recursively.
+    """
+    return any(
+        isinstance(item, OSError) and str(item).startswith(_PROXY_AUTH_REFUSED)
+        for item in linked_errors(error)
+    )
+
+
+def linked_errors(error: BaseException) -> Iterator[BaseException]:
+    """Yield `error` and every exception linked to it, each once.
+
+    Args:
+        error: The exception to start from.
+
+    Yields:
+        `error`, then the exceptions among its arguments, its `__cause__`, and its
+        `__context__`, recursively; a cycle ends the search.
+    """
+    seen: set[int] = set()
+    pending = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        linked = (current.__cause__, current.__context__, *current.args)
+        pending.extend(item for item in linked if isinstance(item, BaseException))

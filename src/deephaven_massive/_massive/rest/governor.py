@@ -411,7 +411,8 @@ class RequestGovernor:
             governor = RequestGovernor(("stocks", "options", "other"))
             governor.declare({"stocks"})  # Basic: 5 requests per minute
             closed = Cancel()
-            permit = governor.acquire("stocks", closed)  # blocks while no slot is free
+            # Blocks while no slot is free; the lane keys the requests that take turns together.
+            permit = governor.acquire("stocks", closed, lane=object())
             try:
                 ...  # send the request
             finally:

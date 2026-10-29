@@ -33,6 +33,7 @@ from deephaven_massive._enums import (
     ClassFromPrefix,
     Direction,
     HistorySource,
+    Market,
     Order,
     PollMode,
     Recency,
@@ -42,6 +43,7 @@ from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._massive import RestPath, Transport
+from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
@@ -2410,6 +2412,33 @@ def test_each_request_is_charged_to_its_subscription() -> None:
     # A dataset with a path per symbol class follows the class its request's symbols share.
     assert rest.call_bucket(NEWS_BY_CLASS, rest.Call({}, {}, "C:EURUSD")) == "currencies"
     assert rest.call_bucket(SMA, rest.Call({}, {}, "AAPL")) == "stocks"
+
+
+@pytest.mark.parametrize(
+    ("market", "bucket"),
+    [
+        (Market.CRYPTO, "currencies"),
+        (Market.FX, "currencies"),
+        (Market.STOCKS, "stocks"),
+        (Market.OTC, "stocks"),
+        (Market.INDICES, "indices"),
+    ],
+)
+def test_a_request_of_no_class_is_charged_to_the_market_it_filters(
+    market: Market, bucket: str
+) -> None:
+    # A user's crypto ticker listing and the session's own read of it share one bucket.
+    call = rest.Call({}, {"market": market, "active": True})
+    assert rest.call_bucket(reference.TICKERS, call) == bucket
+    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": str(market)})) == bucket
+
+
+def test_a_request_of_no_class_and_no_market_is_charged_to_other() -> None:
+    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"active": True})) == "other"
+    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": None})) == "other"
+    # A dataset of one class keeps its class, whatever a market filter says.
+    call = rest.Call({}, {"ticker.any_of": ("AAPL",), "market": Market.CRYPTO})
+    assert rest.call_bucket(DIVIDENDS, call) == "stocks"
 
 
 def test_a_session_charges_reads_and_host_decisions_to_their_buckets(
