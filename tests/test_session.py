@@ -46,6 +46,7 @@ from deephaven_massive._tables.liveness import (
     StreamHandle,
     new_scope,
 )
+from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
@@ -477,15 +478,14 @@ def test_a_session_closed_while_a_stream_opens(
     fake_streams: FakeStreamTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Closing:
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-            massive_session.close()
-            return handle
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        massive_session.close()
+        return handle
 
-    closing = Closing()
+    closing = transport_of(open_stream)()
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: closing)
     with pytest.raises(dm.MassiveError, match="was closed while a stream was opening"):
         stream_query(massive_session).blink()

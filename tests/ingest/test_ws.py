@@ -32,7 +32,7 @@ from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
-from deephaven_massive._tables.diagnostics import Diagnostics
+from deephaven_massive._tables.diagnostics import Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
+    from deephaven_massive._tables.core import SessionCore
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
 
@@ -1913,6 +1914,63 @@ def test_a_stream_waiting_for_a_slot_says_so(
     del capped, every
 
 
+def freed(core: weakref.ref[SessionCore]) -> bool:
+    # Bounded wait in Python, not in one C-level wait: a free-threaded build merges a reference
+    # dropped on another thread into its creator's count only while the creator runs Python.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(int(TIMEOUT / 0.02)):
+        if core() is None:
+            return True
+        pause.wait(0.02)
+    return core() is None
+
+
+def test_a_session_moved_by_a_verdict_is_freed_without_the_cyclic_collector(
+    fake_ws_server: FakeMassiveServer,
+) -> None:
+    # The old connection keeps the moved stream routed for its final flush; neither that nor
+    # anything else may keep the session once nothing uses it, cycles or not.
+    harness: WsSession = importlib.import_module("tests._fakes.ws_session").WsSession(
+        fake_ws_server, decide=unknown_futures
+    )
+    gc.collect()
+    gc.disable()
+    try:
+        harness.connections.group.reconnect_backoff = 0.01
+        fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
+        result = harness.query(FUTURES, ["ESZ5"]).blink()
+        harness.wait(lambda s: s.opens == 2)
+        harness.subscribed("T.ESZ5")
+        successor = harness.connection("wss://delayed.test/futures")
+        core = weakref.ref(harness.session._core)
+        harness.session.release(result)
+        del result, harness.session, harness.connections
+        assert freed(core)
+        assert successor.join(TIMEOUT)  # the session's closer closed it
+    finally:
+        gc.enable()
+
+
+def test_a_closed_session_that_shared_a_connection_is_freed_once_its_table_is_dropped(
+    ws_session: WsSession,
+) -> None:
+    # The closed session created the shared connection, which keeps serving the other one.
+    other = join(ws_session)
+    theirs = ws_session.query(TRADES, ["AAPL"], other).append_only()
+    ws_session.subscribed("T.AAPL")
+    mine = ws_session.query(TRADES, ["AAPL"]).append_only()
+    core = weakref.ref(other._core)
+    gc.collect()
+    gc.disable()
+    try:
+        other.close()
+        del other, theirs
+        assert freed(core)
+    finally:
+        gc.enable()
+    ws_session.session.release(mine)
+
+
 def test_an_inline_sessions_derived_table_keeps_running(
     fake_ws_server: FakeMassiveServer, dh_exec_ctx: object, rows_when: RowsWhen
 ) -> None:
@@ -2021,21 +2079,35 @@ def test_a_java_held_callback_of_a_freed_session_does_nothing() -> None:
     ws._weakly(cast("weakref.ref[ws.WsConnections]", gone), "_shut_down", 1)
 
 
-def test_closing_a_session_drops_its_streams_from_an_ended_connection(
-    ws_session: WsSession,
+def test_an_ended_connection_holds_no_stream(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Another session still leases the connection, but its loop has ended: the closing
-    # session's stream is dropped directly, since no post can reach the loop any more.
+    # The client's terminal state lets every stream go on the loop thread, and the flush
+    # thread clears its routes when it ends; a call that reaches the connection after that is
+    # ignored, so no stream (nor, through it, a session) is left on a connection that is gone.
     other = join(ws_session)
     mine = ws_session.query(TRADES, ["AAPL"]).blink()
     theirs = ws_session.query(TRADES, ["MSFT"], other).blink()
     ws_session.subscribed("T.AAPL", "T.MSFT")
     connection = ws_session.connection()
+    stream = cast("ws._Stream", ws_session.on_loop(connection, lambda: connection._streams[1]))
+    # A freed session shows no row: an update for its stream is dropped.
+    monkeypatch.setattr(stream.sink, "_core", lambda: None)
+    ws_session.on_loop(
+        connection, lambda: connection._update_streams({1: StreamUpdate(deferred=1)})
+    )
+    monkeypatch.undo()
     connection.close()
     assert connection.join(TIMEOUT)
-    other.close()
-    assert 2 not in connection._streams
-    assert 1 in connection._streams  # the other session's stream stays until it ends
+    assert connection._streams == {}
+    assert connection.flusher.routes.sinks() == ()
+    # The loop has ended: what still reaches the connection (here called directly, as no
+    # post can run) leaves nothing behind.
+    connection.add_stream(stream)
+    connection.adopt([stream])
+    connection.check_idle()
+    assert connection._streams == {}
+    other.close()  # its stream's release finds the loop gone
     ws_session.session.release(mine)
     del theirs
 

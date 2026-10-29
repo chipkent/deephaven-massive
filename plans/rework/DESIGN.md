@@ -601,8 +601,11 @@ forbidden on the UG thread ([section 18](#18-concurrency-model)).
 nothing else keeps anything alive. A session lives while the user holds it (`m`, a query, a
 namespace), and while it has a running stream, a running `poll()` table, or a diagnostics table
 someone holds ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). Only those hold
-the session strongly; nothing else in the library does, and no reference cycle runs through
-it, so it is freed by reference counting, even with `gc.disable()`. So
+the session strongly; nothing else in the library does, and the library forms no reference
+cycle through it, so an unused session is freed by reference counting, even with
+`gc.disable()`. (A caller can still form one: an exception raised out of a call keeps the
+frames of that call, and with them the session they had in hand, until the cyclic collector
+breaks the cycle between the exception and its traceback; that is ordinary Python.) So
 `t = dm.MassiveSession().stocks.trades("AAPL").append_only().where("Price > 100")` keeps
 ticking for as long as `t` is in use, although the session object and the intermediate result
 were dropped at once.
@@ -698,8 +701,10 @@ return result
   every method that changes one of them updates the set in the same `registry_lock` section.
   The set is what keeps a session with a running stream or poll alive after the user dropped
   every reference to it: nothing else in the library holds a core strongly (connections,
-  flushers, pollers, and the clients hold it weakly; a registered stream's sink holds it, but
-  a registered stream keeps the core in the set anyway). A core that leaves the set is handed
+  flushers, stream sinks, pollers, and the clients hold it weakly). A sink can outlive its
+  stream's record in a container cleaned up later (the routes of a connection a verdict moved
+  the stream off, which its flush thread clears when it ends), so a strong reference there
+  would keep a finished session alive; a sink whose core is gone reports nothing. A core that leaves the set is handed
   to the reaper as a job argument, so its last reference is not dropped under the lock. The
   thread that took it out still holds it while it returns, so the final release may also land
   there, on whatever thread that is; that is safe because a core's finalizer only queues work
@@ -811,7 +816,10 @@ Three documented behaviours that users will notice:
    shows the stream `RELEASED` with `RowsPublished` still rising; then the connection closes
    `IDLE_GRACE` after its last stream and the session cleans up. The library never calls
    `System.gc()` to shorten the delay, because a collection pauses every query in the worker;
-   `m.close()` stops everything at once.
+   `m.release(t)` before deriving in a script, or `m.close()`, stops it at once. The same holds
+   for a `poll()` table derived in the console, which until then keeps making its REST requests:
+   on the Basic tier those come out of the five a minute that every session of the account
+   shares.
 3. A table open in a UI panel is exported and stays live until the panel closes, regardless of
    `del`.
 
@@ -2466,9 +2474,12 @@ has not ended. `m.close()` closes only the connections no other session leases; 
 one it removes the session's streams (their routes at once, their topics through the loop) and
 leaves the connection to the other sessions. Removing the routes also breaks the cycle between
 Python and Java that a stream's publisher, its shutdown callback, and the connection's routes
-would otherwise form; for the same reason, a stream on a connection whose loop has already ended
-(it was closed, or failed fatally) is dropped from the connection's state directly, once the
-loop can no longer touch it, instead of through a post to the loop that would never run.
+would otherwise form. A connection's loop-confined state is never touched from another thread:
+the client's terminal state (`CLOSED` or `FAILED`), its last callback on the loop, clears the
+connection's streams, and a call posted after it is dropped or ignored, so a post that lands
+just before the loop closes cannot leave a stream behind. The flush thread clears the routes
+when it ends, after its final flush, which also lets go of the streams a verdict moved off the
+connection.
 
 **Waiting for a slot.** While a connection is `WAITING_SLOT`, every stream on it shows in its
 `Error`: "waiting for a WebSocket slot on <host><path>: another connection with this API key,
@@ -2977,7 +2988,7 @@ without the GIL.
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every lock) | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
-| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
+| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under the connection group's lock; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
@@ -3065,6 +3076,13 @@ The WebSocket flush adds two locks above `registry_lock`: a connection's **flush
 stream's **publish lock**, then `registry_lock`. Nothing takes the flush or the publish lock
 while holding `registry_lock` or the UG lock, so the order has no cycle.
 
+Two leaf locks complete the order. The **live set's lock** is taken only under
+`registry_lock`, never the other way round. A **connection group's lock** (the registries of
+the WebSocket connections that sessions with one key share) is a leaf of its own: a watchlist
+listener takes it on a UG thread, so the order there is UG lock, then the group's lock; it is
+never held together with `registry_lock`, and nothing blocks, sends, or calls Deephaven under
+it.
+
 ### 18.4 Free-threaded specifics
 
 `PYTHON_GIL=0` jobs run the full suite, including the Deephaven integration tests (the embedded
@@ -3085,15 +3103,19 @@ does not affect it, but it is why the Deephaven integration tests must run on th
 builds rather than unit tests alone.
 
 **Deferred frees across threads.** A free-threaded build counts references with biased
-reference counting: a reference dropped on a thread other than the one that created the object
-is queued to the creating thread, which merges it only when it next runs Python code, or when a
-cyclic collection runs. So when the reaper drops the last reference to a core that the user's
-thread created, the core is freed, and its connections, clients, and threads close, only once
-that thread next runs Python code, or at the next cyclic collection, whichever comes first; in
-a console whose commands run on the thread that created the session, that is the next command.
-A thread blocked in a C call such as `Thread.join()` or `Event.wait()` merges nothing. This is a property of the runtime, not
-a race: nothing is lost, only delayed, and `m.close()` stays immediate. Tests that wait for a
-session to be freed therefore poll in Python, never inside one C-level wait.
+reference counting: a reference dropped on a thread other than the one that created the
+referencing object's count is queued to that object's creating thread, which merges it only
+when it next runs Python code, or when a cyclic collection runs. The creating thread is often
+the user's (the core), but can be a library or a Java thread (a record version the reaper or a
+shutdown callback made). So when the last reference to a core goes on another thread, the core
+is freed, and its connections, clients, and threads close, only once that creating thread next
+runs Python code, or at the next cyclic collection, whichever comes first; in a console whose
+commands run on the thread that created the session, that is the next command. A thread
+blocked in a C call such as `Thread.join()` or `Event.wait()` merges nothing. This is a
+property of the runtime, not a race: nothing is lost, only delayed, and `m.close()` stays
+immediate. The library keeps the delay short by holding a core strongly only from the live
+set and the user's objects. Tests that wait for a session to be freed therefore poll in Python,
+never inside one C-level wait.
 
 ## 19. Wire clients and the spec snapshot
 

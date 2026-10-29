@@ -55,6 +55,7 @@ from deephaven_massive._tables.liveness import (
     new_scope,
 )
 from deephaven_massive._types import override
+from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
@@ -241,17 +242,16 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
 ) -> None:
     core = massive_session._core
 
-    class FailingDuringOpen:
-        # The server's rejection arrives on the WebSocket thread before the open returns.
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-            if stream_id == 1:
-                core.fail_stream(stream_id, "not authorized")
-            return handle
+    # The server's rejection arrives on the WebSocket thread before the open returns.
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        if stream_id == 1:
+            core.fail_stream(stream_id, "not authorized")
+        return handle
 
-    monkeypatch.setattr(core, "stream_transport", FailingDuringOpen)
+    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     q = stream_query(massive_session)
     # As if the failure had come just after the open: no result, and the hold is released.
     with pytest.raises(dm.MassiveError, match=r"^test\.trades stream 1 failed: not authorized$"):
@@ -361,13 +361,12 @@ def test_an_interrupt_before_the_opened_stream_is_stored_releases_it(
     armed: list[bool] = []
     real_entered = entered
 
-    class Arming:
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-            armed.append(True)
-            return handle
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        armed.append(True)
+        return handle
 
     @contextlib.contextmanager
     def interrupting_entered(exec_ctx: ExecutionContext) -> Iterator[ExecutionContext]:
@@ -377,7 +376,7 @@ def test_an_interrupt_before_the_opened_stream_is_stored_releases_it(
             armed.clear()
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(core, "stream_transport", Arming)
+    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     monkeypatch.setattr(_core, "entered", interrupting_entered)
     with pytest.raises(KeyboardInterrupt):
         stream_query(massive_session).blink()
@@ -428,17 +427,16 @@ def test_an_open_that_raises_leaves_no_row(
     # raises: the record is deleted, and no row, stale for ever, is left in m.streams().
     core = massive_session._core
 
-    class ReportThenRaise:
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            if report == "fail":
-                core.fail_stream(stream_id, "not authorized")
-            else:
-                core.update_streams({stream_id: StreamUpdate(rows_published=3)})
-            raise RuntimeError("socket closed")
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        if report == "fail":
+            core.fail_stream(stream_id, "not authorized")
+        else:
+            core.update_streams({stream_id: StreamUpdate(rows_published=3)})
+        raise RuntimeError("socket closed")
 
-    monkeypatch.setattr(core, "stream_transport", ReportThenRaise)
+    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     with pytest.raises(RuntimeError, match="socket closed"):
         stream_query(massive_session).blink()
     assert core._streams == {}
@@ -455,15 +453,14 @@ def test_an_update_made_during_the_open_is_kept(
     # A reactive stream's seed reported by the transport before its open returns.
     core = massive_session._core
 
-    class UpdatingDuringOpen:
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-            core.update_streams({stream_id: StreamUpdate(symbol_count=7, rows_published=3)})
-            return handle
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        core.update_streams({stream_id: StreamUpdate(symbol_count=7, rows_published=3)})
+        return handle
 
-    monkeypatch.setattr(core, "stream_transport", UpdatingDuringOpen)
+    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     result = stream_query(massive_session).append_only()
     columns = ("StreamId", "SymbolCount", "RowsPublished", "Host", "State")
     assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
@@ -1260,17 +1257,16 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
     # is released.
     core = massive_session._core
 
-    class FailingDuringOpen:
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-            fake_streams.publishers[stream_id].publish_failure(RuntimeError("entitlement"))
-            assert fake_streams.shutdown[stream_id].wait(TIMEOUT)
-            core.fail_stream(stream_id, "entitlement")
-            return handle
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        fake_streams.publishers[stream_id].publish_failure(RuntimeError("entitlement"))
+        assert fake_streams.shutdown[stream_id].wait(TIMEOUT)
+        core.fail_stream(stream_id, "entitlement")
+        return handle
 
-    monkeypatch.setattr(core, "stream_transport", FailingDuringOpen)
+    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     for verb in ("blink", "append_only"):
         with pytest.raises(dm.MassiveError, match="failed: entitlement"):
             getattr(stream_query(massive_session), verb)()
@@ -1444,15 +1440,14 @@ def test_stream_drift_recorded_during_the_open_is_kept(
 ) -> None:
     core = massive_session._core
 
-    class DriftingDuringOpen:
-        def open_stream(
-            self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-        ) -> StreamHandle:
-            handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-            core.record_stream_drift(stream_id, "WS", HALTED)  # the row is not written yet
-            return handle
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        core.record_stream_drift(stream_id, "WS", HALTED)  # the row is not written yet
+        return handle
 
-    monkeypatch.setattr(core, "stream_transport", DriftingDuringOpen)
+    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     result = stream_query(massive_session).append_only()
     assert [(r["StreamId"], r["SchemaDrift"]) for r in stream_rows()] == [(1, "WS:halted+")]
     massive_session.release(result)

@@ -2019,6 +2019,7 @@ def test_a_close_during_a_request_reports_the_close(
             query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when)
     finally:
         m.close()
+        fake_s3.before_answer = None  # the fake lives in a cycle: it must not keep the session
     # Closed by the close, then once more as the in-flight request returned, which drops any
     # connection pool that request opened.
     assert fake_s3.closes == 2

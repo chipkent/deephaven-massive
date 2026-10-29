@@ -333,6 +333,27 @@ def test_a_reactive_stream_starts_with_no_symbols(massive_session: dm.MassiveSes
     assert not sink.receives("AAPL")
 
 
+def test_a_reactive_streams_handle_holds_its_watch(massive_session: dm.MassiveSession) -> None:
+    # Deephaven holds a table's listeners only weakly: the session's record of the stream holds
+    # the watch through the handle, whatever else keeps it reachable, and stops it through it.
+    core = massive_session._core
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    opened = open_stream_tables(
+        ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL),
+        core.catalog.dataset_schema(TRADES),
+        SymbolTable(watchlist),
+        core=core,
+        stream_id=1,
+        host="socket.test",
+        path="/stocks",
+        on_shutdown=lambda: None,
+        on_symbols=lambda *_: None,
+    )
+    assert opened.watch is not None
+    assert opened.handle.stop_watch == opened.watch.stop
+    opened.handle.scope.release()
+
+
 def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
@@ -535,6 +556,29 @@ def test_routes_forget_a_stream_once(flusher: Flusher, massive_session: dm.Massi
     assert flusher.routes.sinks() == ()
 
 
+def test_a_sink_whose_session_is_gone_reports_nothing(
+    *,
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    drain: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A sink outlives its stream's record in a container cleaned up later (the routes of a
+    # connection a verdict moved the stream off): with its session freed, it still publishes
+    # and fails its own table, and reports nothing.
+    sink, _ = make_sink(massive_session._core, ALL)
+    monkeypatch.setattr(sink, "_core", lambda: None)
+    flusher.routes.add("T", sink)
+    flusher.rows("T", [trade("AAPL")])
+    flusher.drift("T", DriftReport(extra=frozenset({"zz"})))
+    flusher.flush()
+    assert sink.rows_published == 1
+    sink.fail_later("never queued")
+    drain()
+    assert not sink.failed
+    assert sink.fail(MassiveError("its table still fails"))
+
+
 def test_one_flusher_reports_each_stream_to_its_own_session(
     massive_session: dm.MassiveSession, flusher: Flusher, stream_rows: Callable[[], Any]
 ) -> None:
@@ -548,7 +592,7 @@ def test_one_flusher_reports_each_stream_to_its_own_session(
         flusher.rows("T", [trade("AAPL")])
         flusher.flush()
         assert (mine.rows_published, theirs.rows_published) == (1, 1)
-        assert (mine.core, theirs.core) == (massive_session._core, other._core)
+        assert (mine.core(), theirs.core()) == (massive_session._core, other._core)
     finally:
         other.close()
 

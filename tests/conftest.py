@@ -26,11 +26,12 @@ import os
 import sys
 import threading
 import time
+import types
 from collections import Counter, deque
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias, cast
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
@@ -323,9 +324,11 @@ def massive_session() -> Iterator[MassiveSession]:
     session.close()
 
 
-_LIBRARY_THREADS: Final = ("MassiveSession #", "massive-ws ", "massive-flush ", "massive-move ")
-"""The name prefixes of the library's threads: a session's reaper, diagnostics writer, and
-pollers, and a connection's client, flush, and verdict-move threads."""
+_LIBRARY_THREADS: Final = ("MassiveSession #", "massive")
+"""The name prefixes of the library's threads: a session's reaper, diagnostics writer, pollers,
+and crypto-pair worker (`MassiveSession #N ...`), and a connection's client, flush, and
+verdict-move threads (`massive-ws ...`, `massive-flush ...`, `massive-move ...`). The bare
+`massive` prefix also matches the `massive #N ...` names of the session-named threads."""
 
 
 @pytest.fixture(autouse=True)
@@ -335,13 +338,17 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     A session is in the live set exactly while it has a running stream or poll or a held
     diagnostics view, so a test that ends with one has leaked a table, or the library has. A
     session the test created that is still alive at the end, in the live set or not, is held
-    by something that should have let it go.
+    by something that should have let it go. Only what the test itself started counts, so one
+    leak fails its own test and not every test after it.
+
     Autouse, and named to sort first (pytest orders autouse fixtures by name), so it is set up
     first and runs after every other fixture's teardown (a closed `massive_session` included).
-    When something is left, it collects garbage and waits, event-driven and bounded, for the
-    library threads to end and the background work to land, and fails naming what is still
-    left. Only what the test itself
-    started counts, so one leak fails its own test and not every test after it.
+    The library frees an unused session by reference counting alone, so the check runs with
+    the cyclic collector off and polls, bounded and in Python, until nothing is left. Each
+    look after the first collects with `gc.DEBUG_SAVEALL`, which keeps what it would free in
+    `gc.garbage`: a session found there is reachable only through a reference cycle, which
+    reference counting never frees, and the test fails with "freed only by the cyclic
+    collector", unless the cycle is an exception's traceback (`_held_by_tracebacks`).
     """
     before = _running()
     yield
@@ -350,29 +357,135 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     funcargs: dict[str, object] | None = getattr(request.node, "funcargs", None)
     if funcargs:
         funcargs.clear()
-    deadline = time.monotonic() + 30.0
-    pause = threading.Event()  # never set; only paces the bounded wait
-    collect = False  # most tests leave nothing: a full collection per test would be slow
-    while True:
-        _drop_logged_objects(request.node)  # a library thread may still be logging
-        if collect:
-            gc.collect()
-        collect = True
-        sessions, alive, groups, threads = _running()
-        sessions, alive = sessions - before[0], alive - before[1]
-        groups, threads = groups - before[2], threads - before[3]
-        if not sessions and not alive and not groups and not threads:
-            return
-        if time.monotonic() > deadline:
-            pytest.fail(
-                f"left running after the test: sessions {sorted(sessions)}, alive sessions "
-                f"{sorted(alive)}, {len(groups)} connection groups, threads "
-                f"{sorted(t.name for t in threads)}"
-            )
-        for thread in threads:  # wait on the threads themselves, briefly each
-            thread.join(0.05)
-        if not threads:
-            pause.wait(0.05)
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        cyclic: set[str] = set()
+        deadline = time.monotonic() + 30.0
+        pause = threading.Event()  # never set; only paces the bounded wait
+        first = True
+        while True:
+            _drop_logged_objects(request.node)  # a library thread may still be logging
+            if not first:
+                cyclic |= _collect_cycles(before)
+            first = False
+            sessions, alive, groups, threads = _new(before)
+            if not sessions and not alive and not groups and not threads:
+                break
+            if time.monotonic() > deadline:
+                pytest.fail(f"left running after the test: {_left(before)}")
+            for thread in threads:  # wait on the threads themselves, briefly each
+                thread.join(0.05)
+            if not threads:
+                pause.wait(0.05)
+        if cyclic:
+            pytest.fail(f"freed only by the cyclic collector: sessions {sorted(cyclic)}")
+    finally:
+        if enabled:
+            gc.enable()
+
+
+_Running: TypeAlias = "tuple[set[str], set[str], set[object], set[threading.Thread]]"
+
+
+def _new(before: _Running) -> _Running:
+    """Return what of the library runs now that did not run before the test.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The new live sessions, alive sessions, connection groups, and threads.
+    """
+    sessions, alive, groups, threads = _running()
+    return sessions - before[0], alive - before[1], groups - before[2], threads - before[3]
+
+
+def _left(before: _Running) -> str:
+    """Name what a test left running, for a failure message.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The text.
+    """
+    sessions, alive, groups, threads = _new(before)
+    return (
+        f"sessions {sorted(sessions)}, alive sessions {sorted(alive)}, {len(groups)} connection "
+        f"groups, threads {sorted(t.name for t in threads)}"
+    )
+
+
+def _collect_cycles(before: _Running) -> set[str]:
+    """Collect garbage, and name the sessions the test started that only a cycle held.
+
+    Collects with `gc.DEBUG_SAVEALL`, so what the collector would free stays in `gc.garbage`
+    to be inspected; then empties it, which frees it. A session in that garbage was reachable
+    only through a reference cycle, which reference counting never frees.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The labels of those sessions, except the ones a traceback's frames held.
+    """
+    session = importlib.import_module("deephaven_massive._session")
+    _, alive, _, _ = _new(before)
+    with session._keys_lock:
+        cores = [ref() for ref in session._open_sessions]
+    wanted = {id(core): core.label for core in cores if core is not None and core.label in alive}
+    del cores
+    gc.set_debug(gc.DEBUG_SAVEALL)
+    try:
+        gc.collect()
+        garbage = list(gc.garbage)
+        gc.garbage.clear()
+    finally:
+        gc.set_debug(0)
+    cyclic = {id(item) for item in garbage} & set(wanted)
+    if not cyclic:
+        return set()
+    excused = _held_by_tracebacks(garbage, cyclic)
+    del garbage
+    return {wanted[key] for key in cyclic - excused}
+
+
+def _held_by_tracebacks(garbage: list[object], wanted: set[int]) -> set[int]:
+    """Return which of some objects the frames of a garbage traceback hold.
+
+    A raised exception whose traceback holds the frame that raised it is a reference cycle
+    (the frame holds the exception it caught, or the exception holds the frame), and a frame
+    holds its locals: a session that a failing call had in hand lives until the collector
+    breaks that cycle. That is how Python works, not a leak of the library, so the check
+    forgives it.
+
+    Args:
+        garbage: What the collector found unreachable.
+        wanted: The ids of the objects to look for.
+
+    Returns:
+        The ids of those reachable, within a few references, from the locals of a frame in
+        `garbage`: a finished frame is garbage only when a traceback (or the exception it
+        caught) holds it in a cycle.
+    """
+    found: set[int] = set()
+    seen: set[int] = set()
+    frontier: list[object] = []
+    for item in garbage:
+        if type(item) is types.FrameType:
+            frontier.extend(item.f_locals.values())
+    for _ in range(4):  # a frame's `self` or argument, then what that holds
+        following: list[object] = []
+        for item in frontier:
+            if id(item) in seen or issubclass(type(item), (type, types.ModuleType)):
+                continue
+            seen.add(id(item))
+            if id(item) in wanted:
+                found.add(id(item))
+            following.extend(gc.get_referents(item))
+        frontier = following
+    return found
 
 
 def _drop_logged_objects(item: pytest.Item) -> None:
@@ -405,7 +518,8 @@ def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
     with session._keys_lock:
         cores = [ref() for ref in session._open_sessions]
     alive = {each.label for each in cores if each is not None}
-    groups: set[object] = set(ws._groups.values())
+    with ws._groups_lock:
+        groups: set[object] = set(ws._groups.values())
     threads = {
         t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
     }
@@ -461,6 +575,7 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
 
         def make(**options: object) -> WsSession:
             session: WsSession = module.WsSession(fake_ws_server, **options)
+            sessions.callback(_drop_session, session)  # last: after the close below
             sessions.callback(session.close)
             return session
 
@@ -470,6 +585,20 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
     while (left := _client_threads()) and time.monotonic() < deadline:
         pause.wait(0.02)
     assert not left, f"threads outlived their session: {left}"
+
+
+def _drop_session(harness: WsSession) -> None:
+    """Drop a closed wrapper's session and transport, once the test is done with them.
+
+    The wrapper and the transport refer to each other (the transport holds the wrapper's bound
+    methods), so without this the session would live until the cyclic collector broke that
+    cycle.
+
+    Args:
+        harness: The wrapper.
+    """
+    vars(harness).pop("session", None)
+    vars(harness).pop("connections", None)
 
 
 _CLIENT_THREADS_TIMEOUT: Final = 15.0

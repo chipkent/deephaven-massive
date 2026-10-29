@@ -50,14 +50,9 @@ happens outside). The loop thread makes no Java call: every failure goes to a fl
 for a stream whose connection failed while it opened, to the opening caller. A stream's
 blink-table shutdown callback takes the locks only to update the registries and then posts the
 release of the stream's topics to its connection's loop; it never sends and never calls Java.
-The transport and the group hold the session cores weakly. A connection reaches a session's
-core only through the sinks of that session's registered streams, and a registered stream keeps
-its session in the live set anyway; so a session with no stream left, dropped without `close()`,
-is still freed and its closer runs.
-
-The module is one subject, the connections sessions stream over, though it is long:
-a `Connection`, the `ConnectionGroup` that shares it, and each session's `WsConnections`
-call one another at run time, so splitting them would make an import cycle.
+Nothing here holds a session's core strongly: the transport, the group, the connections, and
+the streams' sinks refer to it weakly, so a session with no stream left, dropped without
+`close()`, is freed by reference counting and its closer runs.
 """
 
 from __future__ import annotations
@@ -338,6 +333,7 @@ class Connection:
         self._drift: str | None = None
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
         self._stalled = False
+        self._ended = False
         self._moving = False
         self._backlog_timer: Timer | None = None
         self._change_scheduled = False
@@ -469,9 +465,13 @@ class Connection:
     def add_stream(self, stream: _Stream) -> None:
         """Take a new stream's topics: declare its channel's keys, then reconcile.
 
+        Ignored once the client has ended: nothing would ever release the stream there.
+
         Args:
             stream: The stream.
         """
+        if self._ended:
+            return
         self._register_stream(stream)
         self._after_change(opened=(stream.stream_id,))
 
@@ -512,23 +512,6 @@ class Connection:
         self._deferred_shown.pop(stream_id, None)
         self.subscriptions.remove(stream.topics, static=stream.static)
         self._after_change()
-
-    def forget(self, stream_id: int) -> None:
-        """Drop a stream from a connection whose loop has ended; any thread.
-
-        The loop-confined state is safe to touch once the loop thread is done with it: after
-        `post` reported the loop closed, or after `join` saw the thread end. A stream left there
-        would keep its sink, and through the publisher's shutdown callback, which the JVM holds,
-        its session, for as long as the process runs: neither Python nor Java could collect
-        that cycle.
-
-        Args:
-            stream_id: The stream.
-        """
-        self._streams.pop(stream_id, None)
-        self._early.pop(stream_id, None)
-        self._deferred_shown.pop(stream_id, None)
-        self.flusher.routes.remove(stream_id)
 
     def change_symbols(
         self, stream_id: int, added: frozenset[str], removed: frozenset[str]
@@ -605,6 +588,8 @@ class Connection:
             opened: The streams just added (or adopted), whose topics now count against the
                 options cap through the admitted set instead of as pending.
         """
+        if self._ended:  # the client has ended: nothing to reconcile or to close
+            return
         self.subscriptions.reconcile()
         self._show_deferred(opened=opened)
         if not self._streams and self._idle is None:
@@ -627,7 +612,8 @@ class Connection:
         change that still arrives here is forwarded. The streams stay routed on this
         connection as well, until its flush thread ends: its last flush applies the failures it
         has queued and publishes the rows it has buffered (a stream's publish lock keeps the two
-        flush threads from interleaving on one stream).
+        flush threads from interleaving on one stream), and then the thread clears its routes,
+        so this connection holds none of the moved streams once it has ended.
 
         Only the streams that still hold a lease go there (the move pointed each lease at
         `successor`). A stream whose lease is gone (its blink table shut down, or its session
@@ -669,6 +655,8 @@ class Connection:
         """
         with self._lock:
             self.awaiting.difference_update(s.stream_id for s in streams)
+        if self._ended:  # it failed or closed first; its failure already failed the routes
+            return
         for stream in streams:
             self._register_stream(stream)
         update = StreamUpdate(host=self.decision.host, path=self.path)
@@ -757,6 +745,13 @@ class Connection:
             self.subscriptions.ended()
         self._state = ConnectionState(state.value)
         self._write_row()
+        if state in {WsState.CLOSED, WsState.FAILED}:
+            # The client's last callback: the loop runs nothing that would release these, so
+            # it lets them go now. A call posted later is dropped, or ignored (`_ended`).
+            self._ended = True
+            self._streams.clear()
+            self._early.clear()
+            self._deferred_shown.clear()
 
     def _failed(self, error: WireError) -> None:
         """Fail every stream after a fatal failure, and leave the registry.
@@ -977,8 +972,9 @@ class Connection:
         """
         by_core: dict[SessionCore, dict[int, StreamUpdate]] = {}
         for stream_id, update in updates.items():
-            core = self._streams[stream_id].sink.core
-            by_core.setdefault(core, {})[stream_id] = update
+            core = self._streams[stream_id].sink.core()
+            if core is not None:  # a freed session shows no row
+                by_core.setdefault(core, {})[stream_id] = update
         for core, changes in by_core.items():
             core.update_streams(changes)
 
@@ -1877,8 +1873,9 @@ class WsConnections:
             cast("SessionCore", self._core()).stream_shut_down(stream_id)
             with self._lock:
                 connection = self._forget(stream_id)
-            if connection is not None and not connection.post(connection.release_stream, stream_id):
-                connection.forget(stream_id)  # its loop has ended (`Connection.forget`)
+            if connection is not None:
+                # A loop that has ended holds no stream any more (`Connection._on_state`).
+                connection.post(connection.release_stream, stream_id)
         except Exception:
             logger.exception("%s: the shutdown of stream %d failed", self._label, stream_id)
 
@@ -2019,7 +2016,7 @@ class WsConnections:
         failed their tables) and their topics are released on the connections that stay; the
         unused connections are closed (which interrupts a backoff wait at once) and each is
         joined for at most `JOIN_TIMEOUT` seconds, with a WARNING for one that has not ended.
-        A connection whose loop has ended keeps no stream of the session (`Connection.forget`).
+        A connection whose loop has ended keeps no stream (`Connection._on_state`).
         Last, the session leaves the group.
         """
         with self._lock:
@@ -2030,10 +2027,8 @@ class WsConnections:
         self._lookups.shutdown(wait=False, cancel_futures=True)
         for stream_id, connection in mine:
             connection.flusher.routes.remove(stream_id)
-            if connection not in closing and not connection.post(
-                connection.release_stream, stream_id
-            ):
-                connection.forget(stream_id)  # its loop has ended (`Connection.forget`)
+            if connection not in closing:  # an ended loop holds no stream (`_on_state`)
+                connection.post(connection.release_stream, stream_id)
         for connection in closing:
             connection.close()
         for connection in closing:
@@ -2044,10 +2039,6 @@ class WsConnections:
                     connection.url,
                     JOIN_TIMEOUT,
                 )
-                continue
-            for stream_id, owner in mine:  # its loop has ended: nothing else touches it now
-                if owner is connection:
-                    connection.forget(stream_id)
         self.group.detach(self)
 
     def _leave(self) -> tuple[list[tuple[int, Connection]], list[Connection]]:

@@ -410,10 +410,14 @@ class StreamSink:
 
     Created by `open_stream_tables` on the caller thread and added to the connection's routing
     table by the transport; removed when the stream's blink table has shut down, or when its
-    session closes. It holds its session's core strongly: the sink belongs to a stream the
-    session's registry holds, which keeps the session alive anyway, and a flush thread shared by
-    several sessions needs to know which one each stream reports to. Two locks keep it
-    consistent whichever thread reaches it:
+    session closes. It refers to its session's core weakly (`core()`): a flush thread shared by
+    several sessions needs to know which one each stream reports to, but a sink can outlive its
+    stream's record in a container that is cleaned up later (the routes of a connection a
+    verdict moved the stream off, until its flush thread ends), and a strong reference there
+    would keep a finished session alive. While the stream is registered its record keeps the
+    session in the live set, so the core is there whenever the stream still matters; once it is
+    gone, the sink skips what it would have reported to it. Two locks keep it consistent
+    whichever thread reaches it:
 
     - its leaf lock guards the symbol set, which the connection's loop replaces (`set_symbols`)
       when a reactive symbol table changes;
@@ -431,20 +435,19 @@ class StreamSink:
 
     Attributes:
         stream_id: The stream's id.
-        core: The stream's session.
         plan: How the stream's dataset reads its channel.
         publisher: The stream's publisher.
     """
 
     __slots__ = (
         "__weakref__",
+        "_core",
         "_filter",
         "_filter_version",
         "_lock",
         "_publish_lock",
         "_symbols",
         "_version",
-        "core",
         "failed",
         "plan",
         "publisher",
@@ -472,7 +475,7 @@ class StreamSink:
                 receives every row of the channel.
         """
         self.stream_id: Final = stream_id
-        self.core: Final = core
+        self._core: Final = weakref.ref(core)
         self.plan: Final = plan
         self.publisher: Final = publisher
         self._lock = threading.Lock()
@@ -484,6 +487,14 @@ class StreamSink:
         self._filter_version = -1
         self.rows_published = 0
         self.failed = False
+
+    def core(self) -> SessionCore | None:
+        """Return the stream's session core, or None once it has been freed.
+
+        Returns:
+            The core.
+        """
+        return self._core()
 
     def set_symbols(self, symbols: frozenset[str]) -> None:
         """Replace the symbols a reactive stream receives. Any thread; never blocks.
@@ -577,7 +588,8 @@ class StreamSink:
         with self._publish_lock:
             if self.failed:
                 return False
-            closed = self.core.fail_stream(self.stream_id, str(error))
+            core = self._core()
+            closed = None if core is None else core.fail_stream(self.stream_id, str(error))
             if closed is None:
                 logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
             self.publisher.publish_failure(
@@ -603,7 +615,9 @@ class StreamSink:
         def fail() -> None:
             self.fail(failure)
 
-        self.core.defer(fail)
+        core = self._core()
+        if core is not None:  # a freed session has no stream left to fail
+            core.defer(fail)
 
 
 class _Routes:
@@ -656,6 +670,11 @@ class _Routes:
                     routes[channel] = kept
             self._routes = routes
         return found
+
+    def clear(self) -> None:
+        """Stop routing rows to any stream: the flush thread has ended and reads no more."""
+        with self._lock:
+            self._routes = {}
 
     def sinks(self) -> tuple[StreamSink, ...]:
         """Return every routed stream.
@@ -876,6 +895,9 @@ class Flusher:
 
         Anything else that escapes a flush ends the thread: it is logged at CRITICAL, every
         routed stream is failed with a `MassiveError` naming the thread, and it is re-raised.
+        However the thread ends, it clears the routes last: nothing reads them any more, and a
+        stream left there (one a verdict moved to another connection, which this thread kept
+        routed for its final flush) would be held by a connection that is gone.
         """
         try:
             while not self._stop.wait(self._interval):
@@ -895,6 +917,8 @@ class Flusher:
                     except Exception:
                         logger.exception("%s: could not fail a stream", self._thread.name)
             raise
+        finally:
+            self.routes.clear()
 
     def _flush_logged(self) -> None:
         """Flush once, logging a failure at ERROR instead of raising it."""
@@ -934,7 +958,9 @@ class Flusher:
                     self._report_drift(routes.get(item.channel, ()), item.drift)
             by_core: dict[SessionCore, dict[int, StreamUpdate]] = {}
             for sink, update in updates.items():
-                by_core.setdefault(sink.core, {})[sink.stream_id] = update
+                core = sink.core()
+                if core is not None:  # a freed session shows no row
+                    by_core.setdefault(core, {})[sink.stream_id] = update
             for core, changes in by_core.items():
                 core.update_streams(changes)
 
@@ -1015,10 +1041,11 @@ class Flusher:
             sinks: The channel's streams.
             drift: The drift.
         """
-        for core, dataset in dict.fromkeys((sink.core, sink.plan.dataset) for sink in sinks):
+        live = [(core, sink) for sink in sinks if (core := sink.core()) is not None]
+        for core, dataset in dict.fromkeys((core, sink.plan.dataset) for core, sink in live):
             core.drift.report(dataset, Transport.WS, drift)
-        for sink in sinks:
-            sink.core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
+        for core, sink in live:
+            core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
 
 
 def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
