@@ -21,6 +21,7 @@ from deephaven.column import string_col
 from deephaven.dherror import DHError
 from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _namespaces, _session
@@ -42,6 +43,7 @@ from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Query, StreamQuery
+from deephaven_massive._tables import core as _core
 from deephaven_massive._tables.liveness import (
     StreamHandle,
     new_scope,
@@ -51,10 +53,13 @@ from tests._fakes.stream import transport_of
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from deephaven.table import Table
+    from deephaven.update_graph import UpdateGraph
 
     from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.diagnostics import Diagnostics
     from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0
@@ -373,6 +378,38 @@ def test_close_marks_streams_closed_and_warns_once(
     assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
     assert fake_streams.failed == {1: closed}
     massive_session.release(live)  # release() keeps working after close()
+
+
+def test_a_held_view_reads_the_final_rows_as_close_returns(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The final rows reach the diagnostics table in an update cycle, and a view of it updates
+    # later in that cycle: close() waits for that cycle to end, after it released the
+    # diagnostics, so the view reads CLOSED the moment close() returns, with no polling.
+    core = massive_session._core
+    result = stream_query(massive_session).append_only()
+    view = massive_session.streams()
+    steps: list[str] = []
+    diagnostics = type(core.diagnostics)
+    release = diagnostics.release
+
+    def released(self: Diagnostics) -> None:
+        release(self)
+        steps.append("released")
+
+    def waited(update_graph: UpdateGraph) -> AbstractContextManager[None]:
+        steps.append("waited for the cycle")
+        return cast("AbstractContextManager[None]", shared_lock(update_graph))
+
+    monkeypatch.setattr(diagnostics, "release", released)
+    monkeypatch.setattr(_core, "shared_lock", waited)
+    massive_session.close()
+    (row,) = dh_arrow.to_arrow(view).to_pylist()
+    assert row["State"] == "CLOSED"
+    assert steps == ["released", "waited for the cycle"]
+    del result, view
 
 
 def test_close_fails_derived_tables_and_marks_their_stream_closed(

@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import itertools
 import logging
 import threading
 import time
@@ -145,9 +146,15 @@ CONNECTION_SETTINGS: Final = (
     "reconnect_backoff",
     "max_reconnect_backoff",
     "flush_interval",
+    "rest_base_url",
 )
-"""The `MassiveConfig` fields that shape a WebSocket connection. A connection carries one value
-of each, so only sessions whose values are all equal share connections (`ConnectionGroup`)."""
+"""The `MassiveConfig` fields that shape a group's WebSocket connections. A connection carries
+one value of each, so only sessions whose values are all equal share connections
+(`ConnectionGroup`). `rest_base_url` is one because the group's futures schedule calendar reads
+through any of its sessions' REST clients, which must all read the same API."""
+
+_group_numbers: Final = itertools.count(1)
+"""Numbers the connection groups of the process, for their threads' names."""
 
 _BACKLOG_ROW_DELAY: Final = 1.0
 """Seconds after a connection's row showed buffered rows that it is written again."""
@@ -1113,7 +1120,9 @@ def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -
     The blink table's shutdown callback and a watchlist's change callback are held from Java
     until the JVM collects the publisher or the listener. Holding the session's connections
     strongly there would keep a finished session alive until the next JVM collection. While a
-    stream runs, its session (and so its `WsConnections`) is alive anyway.
+    stream runs, its session (and so its `WsConnections`) is alive anyway. `WsConnections`
+    holds its core only weakly too, so this is defense in depth: it keeps the transport, not
+    only the session, from waiting for the JVM.
 
     Args:
         owner_ref: The session's `WsConnections`, weakly.
@@ -1243,10 +1252,11 @@ class ConnectionGroup:
     connections rather than to a session: the connections by URL, the connection and the
     session of each stream, the record of `NO_ACK` topics, the crypto pairs its sessions
     looked up, and the server's real-time verdict (`reroute`), which moves a connection with
-    every session's streams. It holds no session core. Its lock, a leaf lock (`lock`), guards
-    all of it and each connection's leases, users, failure, and options-cap bookkeeping; no
-    Deephaven call, network call, or wait happens under it, and a session's `registry_lock` is
-    never taken with it.
+    every session's streams and is kept by (class, family) for every session's later streams.
+    It holds no session core. Its lock, a leaf lock (`lock`), guards all of it and each
+    connection's leases, users, failure, and options-cap bookkeeping; no Deephaven call,
+    network call, or wait happens under it, and a session's `registry_lock` is never taken
+    with it.
 
     Example:
         ::
@@ -1278,6 +1288,7 @@ class ConnectionGroup:
             pinned: The classes whose host its sessions pin with `MassiveConfig.ws_hosts`.
         """
         self.key: Final = key
+        self.label: Final = f"massive group #{next(_group_numbers)}"
         self.lock: Final = threading.RLock()
         self.factory: Final = factory
         self.ack_timeout: Final = ack_timeout
@@ -1294,6 +1305,10 @@ class ConnectionGroup:
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.
         self.pairs: dict[str, tuple[str, str]] = {}
+        # The server's real-time verdicts by (class, family): the key's entitlement, which every
+        # session of the group shares, so a session that never leased the moved connection
+        # uses the delayed host too (`WsConnections._decide`).
+        self.verdicts: dict[tuple[AssetClass, ChannelFamily], HostDecision] = {}
 
     @classmethod
     def attach(
@@ -1388,7 +1403,7 @@ class ConnectionGroup:
             self._fetch_rows,
             contracts_path=contracts_path,
             schedules_path=schedules_path,
-            label="massive connection group",
+            label=self.label,
         )
         with self.lock:
             found = self._calendar
@@ -1418,7 +1433,7 @@ class ConnectionGroup:
             MassiveError: If no session of the group is open, or the read fails.
         """
         with self.lock:
-            open_ = [owner for owner in self.sessions if not owner.closed]
+            open_ = [o for o in self.sessions if not o.closed and o.core() is not None]
         if not open_:
             raise MassiveError("every session of the WebSocket connection group has closed")
         return open_[0].fetch_rows(path, query)
@@ -1525,6 +1540,7 @@ class ConnectionGroup:
         """
         asset_class = connection.asset_class
         with self.lock:
+            self.verdicts[asset_class, ChannelFamily.TICK] = decision
             users = self._open_users(connection)
         self._record_verdict(connection, users, decision)
         url = f"wss://{decision.host}{connection.path}"
@@ -1612,9 +1628,12 @@ class ConnectionGroup:
             owners: The sessions.
             decision: The delayed host's decision.
         """
+        key = (connection.asset_class, ChannelFamily.TICK)
         for owner in owners:
+            with owner.group.lock:
+                owner.verdicts_recorded.add(key)
             try:
-                owner.record_verdict(connection.asset_class, ChannelFamily.TICK, decision)
+                owner.record_verdict(*key, decision)
             except Exception:
                 logger.exception("could not record the real-time verdict for %s", connection.url)
 
@@ -1694,6 +1713,8 @@ class WsConnections:
         self._mine: set[int] = set()
         self._row_owners: dict[tuple[AssetClass, ChannelFamily], Connection] = {}
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
+        # The group's verdicts this session has recorded with its REST transport.
+        self.verdicts_recorded: set[tuple[AssetClass, ChannelFamily]] = set()
         # One worker, started on the first crypto watchlist change: a pair is looked up off
         # the update-graph thread, and no change of a stream overtakes another.
         self._lookups: Final = ThreadPoolExecutor(1, f"{core.label} crypto pairs")
@@ -1758,7 +1779,7 @@ class WsConnections:
             elif isinstance(symbols, tuple):
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
-        decision = self._resolve(asset_class, spec.family)
+        decision = self._decide(asset_class, spec.family)
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
             if asset_class is AssetClass.FUTURES and wanted:
@@ -1794,6 +1815,33 @@ class WsConnections:
             self._abandon(connection, stream_id)
             raise
         return opened.handle
+
+    def _decide(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
+        """Return the host of a (class, family): the group's verdict, or the session's decision.
+
+        A real-time verdict any session of the group received settles the host for all of
+        them, without a request: the session records it with its REST transport the first
+        time (`record_verdict`), so its later decisions agree. Otherwise the session's own
+        decision stands (`resolve_host`, which may make one REST request).
+
+        Args:
+            asset_class: The class.
+            family: The channel family.
+
+        Returns:
+            The host decision.
+        """
+        key = (asset_class, family)
+        with self._lock:
+            verdict = self.group.verdicts.get(key)
+            first = verdict is not None and key not in self.verdicts_recorded
+            if first:
+                self.verdicts_recorded.add(key)
+        if verdict is None:
+            return self._resolve(asset_class, family)
+        if first:
+            self.record_verdict(asset_class, family, verdict)
+        return verdict
 
     def _plan(self, core: SessionCore, spec: DatasetSpec, channel: str) -> ChannelPlan:
         """Return the cached plan of a (dataset, channel), building it on first use.

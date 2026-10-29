@@ -382,10 +382,9 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     the first look finds nothing, it collects with `gc.DEBUG_SAVEALL`, at most once a second,
     which keeps what it would free in `gc.garbage`: a session a cycle there holds
     (`_held_by_cycles`) is one reference counting never frees, and the test fails with "freed
-    only by the cyclic collector", unless the cycle is an exception's traceback
-    (`_held_by_tracebacks`). What is still alive or running after a second may be what a
-    test's formula handed to the JVM, so the check then asks the JVM to collect once before it
-    waits on.
+    only by the cyclic collector", unless the cycle runs through an exception's traceback. A
+    test marked `jvm_held`, whose own formula hands its frame's locals to the JVM, gets one JVM
+    collection for what is still alive or running after a second.
     """
     before = _running()
     yield
@@ -403,6 +402,7 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
         pause = threading.Event()  # never set; only paces the bounded wait
         next_collect = started + 0.04  # after a first look, then at most once a second: slow
         jvm_collected = False
+        jvm_held = request.node.get_closest_marker("jvm_held") is not None
         while True:
             _drop_logged_objects(request.node)  # a library thread may still be logging
             if time.monotonic() > next_collect:
@@ -413,7 +413,7 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
                 break
             if time.monotonic() > deadline:
                 pytest.fail(f"left running after the test: {_left(before)}")
-            if not jvm_collected and time.monotonic() > started + 1.0:
+            if jvm_held and not jvm_collected and time.monotonic() > started + 1.0:
                 # A formula a test ran (`t.update("...")`) copies its frame's locals into the
                 # query scope through jpy, and a session, a result, or a table derived from it
                 # among them lives until the JVM collects them: that is Deephaven's, not a leak
@@ -475,7 +475,7 @@ def _collect_cycles(before: _Running) -> set[str]:
         before: What ran when the test started.
 
     Returns:
-        The labels of those sessions, except the ones a traceback's frames held.
+        The labels of those sessions, except the ones only a traceback's frames held.
     """
     session = importlib.import_module("deephaven_massive._session")
     _, alive, _, _ = _new(before)
@@ -490,15 +490,32 @@ def _collect_cycles(before: _Running) -> set[str]:
         gc.garbage.clear()
     finally:
         gc.set_debug(0)
-    cyclic = _held_by_cycles(garbage) & set(wanted)
-    if not cyclic:
-        return set()
-    excused = _held_by_tracebacks(garbage, cyclic)
+    # A raised exception and the frames of its traceback form a cycle, and a frame holds its
+    # locals: a session a failing call had in hand lives until the collector breaks that
+    # cycle. That is how Python works, not a leak, so the references out of frames and
+    # tracebacks are not followed, and only a session another cycle holds is named.
+    cyclic = _held_by_cycles(garbage, follow=_not_a_traceback) & set(wanted)
     del garbage
-    return {wanted[key] for key in cyclic - excused}
+    return {wanted[key] for key in cyclic}
 
 
-def _held_by_cycles(garbage: list[object]) -> set[int]:
+def _not_a_traceback(item: object) -> bool:
+    """Tell whether the references out of an object count: not out of a frame or traceback.
+
+    Args:
+        item: A garbage object.
+
+    Returns:
+        False for a frame or a traceback.
+    """
+    return type(item) not in {types.FrameType, types.TracebackType}
+
+
+_RESTORES_METHODS: Final = pytest.version_tuple < (9, 2)
+"""Whether this pytest restores a patched method as an attribute of its own instance."""
+
+
+def _held_by_cycles(garbage: list[object], *, follow: Callable[[object], bool]) -> set[int]:
     """Return the ids of the garbage that a reference cycle holds.
 
     Not everything the collector finds is held by a cycle. On a free-threaded build a reference
@@ -508,28 +525,35 @@ def _held_by_cycles(garbage: list[object]) -> set[int]:
     counted, and what nothing else in the garbage refers to is let go, repeatedly, as
     reference counting would let it go; what remains is held by a cycle.
 
+    pytest before 9.2 restores a patched method by setting it on its own instance: a bound
+    method under its own name in the instance's `__dict__`, a cycle of the test tool's. On such
+    a pytest that one reference is not counted; any other self-reference is.
+
     Args:
         garbage: What the collector found unreachable.
+        follow: Whether the references out of an object count.
 
     Returns:
         The ids of the objects reference counting alone would never free.
     """
     ids = {id(item) for item in garbage}
-    # pytest before 9.2 restores a patched method as an attribute of its own instance, a bound
-    # method in the instance's `__dict__`: a cycle of the test tool's, which is not counted.
-    owners = {id(vars(item)): id(item) for item in garbage if _has_dict(item)}
+    owners = (
+        {id(vars(item)): item for item in garbage if _has_dict(item)} if _RESTORES_METHODS else {}
+    )
     holds: dict[int, list[int]] = {}
     held = dict.fromkeys(ids, 0)
     for item in garbage:
-        owner = owners.get(id(item))
-        referents = [
-            id(each)
-            for each in gc.get_referents(item)
-            if id(each) in ids
-            and not (type(each) is types.MethodType and id(each.__self__) == owner)
-        ]
-        holds[id(item)] = referents
-        for key in referents:
+        referents: list[object]
+        if not follow(item):
+            referents = []
+        elif id(item) in owners:
+            owner = owners[id(item)]
+            attributes = cast("dict[str, object]", item).items()
+            referents = [v for k, v in attributes if not _restored_method(owner, k, v)]
+        else:
+            referents = gc.get_referents(item)
+        holds[id(item)] = [id(each) for each in referents if id(each) in ids]
+        for key in holds[id(item)]:
             held[key] += 1
     free = [key for key, count in held.items() if not count]
     while free:
@@ -538,6 +562,25 @@ def _held_by_cycles(garbage: list[object]) -> set[int]:
             if not held[key]:
                 free.append(key)
     return {key for key, count in held.items() if count}
+
+
+def _restored_method(owner: object, name: str, value: object) -> bool:
+    """Tell whether an instance attribute is a method pytest restored onto its own instance.
+
+    Args:
+        owner: The instance.
+        name: The attribute's name.
+        value: Its value.
+
+    Returns:
+        True for a bound method of `owner`, under its own name, of the class's own function.
+    """
+    return (
+        type(value) is types.MethodType
+        and value.__self__ is owner
+        and value.__name__ == name
+        and value.__func__ is getattr(type(owner), name, None)
+    )
 
 
 def _has_dict(item: object) -> bool:
@@ -556,43 +599,6 @@ def _has_dict(item: object) -> bool:
     except TypeError:
         return False
     return True
-
-
-def _held_by_tracebacks(garbage: list[object], wanted: set[int]) -> set[int]:
-    """Return which of some objects the frames of a garbage traceback hold.
-
-    A raised exception whose traceback holds the frame that raised it is a reference cycle
-    (the frame holds the exception it caught, or the exception holds the frame), and a frame
-    holds its locals: a session that a failing call had in hand lives until the collector
-    breaks that cycle. That is how Python works, not a leak of the library, so the check
-    forgives it.
-
-    Args:
-        garbage: What the collector found unreachable.
-        wanted: The ids of the objects to look for.
-
-    Returns:
-        The ids of those reachable, within a few references, from the locals of a frame in
-        `garbage`: a finished frame is garbage only when a traceback (or the exception it
-        caught) holds it in a cycle.
-    """
-    found: set[int] = set()
-    seen: set[int] = set()
-    frontier: list[object] = []
-    for item in garbage:
-        if type(item) is types.FrameType:
-            frontier.extend(item.f_locals.values())
-    for _ in range(4):  # a frame's `self` or argument, then what that holds
-        following: list[object] = []
-        for item in frontier:
-            if id(item) in seen or issubclass(type(item), (type, types.ModuleType)):
-                continue
-            seen.add(id(item))
-            if id(item) in wanted:
-                found.add(id(item))
-            following.extend(gc.get_referents(item))
-        frontier = following
-    return found
 
 
 def _drop_logged_objects(item: pytest.Item) -> None:

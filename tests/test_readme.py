@@ -131,6 +131,7 @@ def readme_server(
     session.close()
 
 
+@pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
 def test_the_split_adjustment_examples_run(
     *,
     readme_server: FakeRestServer,

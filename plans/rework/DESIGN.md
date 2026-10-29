@@ -576,7 +576,8 @@ Sessions in one process that use the same API key **share their WebSocket connec
 account, so two sessions with connections of their own would knock each other off and both
 stall in `WAITING_SLOT`. Sessions share only when the settings that shape a connection are
 equal: the API key, `ws_hosts`, `ack_timeout`, `reconnect_backoff`, `max_reconnect_backoff`,
-and `flush_interval`; they must also run on the same Deephaven update graph, because a
+`flush_interval`, and `rest_base_url` (the group's futures schedule calendar reads through any
+of its sessions' REST clients, which must read the same API); they must also run on the same Deephaven update graph, because a
 connection's flush thread enters one execution context for all its streams (a worker normally
 has one graph, so this rarely matters and is not warned about). A connection carries one value
 of each, so a session whose settings differ never joins another session's connection, and the
@@ -2476,7 +2477,10 @@ and symbol, more where a session spans several pages, so its line says "at least
      fails every stream that wants it, in every session, and a rejected key or a fatal
      handshake error fails every stream on the connection, in every session.
    - The server's real-time verdict moves the connection with every session's streams, and is
-     recorded in each such session's host decisions.
+     recorded in each such session's host decisions. The group keeps it by (class, family), so
+     a session of the group that never leased the moved connection takes the delayed host for
+     its first stream of the class too, records the verdict then, and never asks the
+     real-time host again.
    Diagnostics stay per session: each session's `m.connections()` shows the rows of the
    connections its streams use, and its `m.streams()` only its own streams.
 2. The host of a (class, family) is decided before its first connection, from configuration or
@@ -3390,6 +3394,13 @@ the WebSocket connections that sessions with one key share) is a leaf of its own
 listener takes it on a UG thread, so the order there is UG lock, then the group's lock; it is
 never held together with `registry_lock`, and nothing blocks, sends, or calls Deephaven under
 it.
+
+`m.close()` takes the shared UG lock once, last, after every closer has run and the diagnostics
+are released, with no library lock held, so a held `m.streams()` view reads the final rows as
+it returns. It never runs on a UG thread or under the UG lock (it raises `ValueError` there).
+The wait lasts as long as the current update cycle, without bound if a cycle hangs; a caller
+holding a lock of its own that a listener needs waits as it would on any auto-locking
+`t.snapshot()`.
 
 ### 18.4 Free-threaded specifics
 

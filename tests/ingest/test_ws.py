@@ -1164,6 +1164,33 @@ def test_retiring_a_replaced_connection_keeps_its_replacement(ws_session: WsSess
     ws_session.session.release(result)
 
 
+def test_a_verdict_settles_the_host_for_every_session_of_the_group(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    # The verdict is the key's: a session that never leased the moved connection opens its
+    # first stream of the class on the delayed host, without asking the real-time one again.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    other = join(custom_session)
+    mine = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    old = custom_session.connection("wss://socket.test/futures")
+    custom_session.connections.group._move(old, DELAYED)
+    assert len(custom_session.verdicts) == 1
+    decided = len(custom_session.decisions)
+    theirs = custom_session.query(FUTURES, ["NQZ5"], other).blink()
+    assert len(custom_session.decisions) == decided  # no decision asked for: the verdict's
+    with custom_session.connections.group.lock:
+        assert {c.url for c in custom_session.connections.group.streams.values()} == {
+            "wss://delayed.test/futures"
+        }
+    assert len(custom_session.verdicts) == 2  # recorded with the other session, once
+    again = custom_session.query(FUTURES, ["CLZ5"], other).blink()
+    assert len(custom_session.verdicts) == 2
+    custom_session.session.release(mine)
+    other.close()
+    del theirs, again
+
+
 def test_a_session_that_joins_during_a_move_records_the_verdict(
     make_ws_session: Callable[..., WsSession],
 ) -> None:
@@ -1186,6 +1213,7 @@ def test_a_session_that_joins_during_a_move_records_the_verdict(
 
     custom_session.connections.record_verdict = join_while_recording
     custom_session.connections.group._move(old, DELAYED)
+    custom_session.connections.record_verdict = record  # the closure would hold the sessions
     assert len(custom_session.verdicts) == 2  # the joining session's too
     with custom_session.connections.group.lock:
         assert {c.url for c in custom_session.connections.group.streams.values()} == {
@@ -1909,6 +1937,7 @@ OTHER_SETTINGS: dict[str, object] = {
     "reconnect_backoff": 45.0,
     "max_reconnect_backoff": 300.0,
     "flush_interval": 0.2,
+    "rest_base_url": "https://rest.example.com",
 }
 
 
