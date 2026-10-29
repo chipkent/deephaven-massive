@@ -344,7 +344,7 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
 ) -> None:
     # In a console command, which holds the update graph's lock, a paced read holds every live
     # table of the worker still while it runs: the least duration becomes a WARNING.
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 250, pauses_live_tables=True)
