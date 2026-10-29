@@ -1112,11 +1112,24 @@ def test_last_message_rows_are_throttled(harness: Harness, monkeypatch: pytest.M
     harness.wait(lambda h: any(s.message == "subscribed to: T.AAPL" for s in h.statuses))
     connection = harness.connection()
     harness.on_loop(connection, lambda: None)  # the acknowledgement's row write runs first
+    # An interval no test outlasts, and a last write one interval before the epoch: the first
+    # message is due a rewrite and the second, however late it arrives, is not.
+    interval = 10**18
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", interval)
     written: list[int] = []
-    monkeypatch.setattr(connection, "_write_row", lambda: written.append(1))
+
+    def write() -> None:
+        written.append(1)
+        connection._message_row_at = time.time_ns()  # what the real writer records
+
+    def reset() -> None:
+        connection._message_row_at = -interval
+
+    monkeypatch.setattr(connection, "_write_row", write)
+    harness.on_loop(connection, reset)
     harness.send(trade("AAPL"))
     harness.send(trade("AAPL"))
-    assert len(written) <= 1
+    assert written == [1]
     harness.session.release(result)
 
 
