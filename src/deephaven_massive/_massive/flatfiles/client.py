@@ -146,11 +146,12 @@ class _Retryable:
 
     Attributes:
         error: The error to raise if no retry is left.
-        cause: The botocore error behind it, chained as the raised error's cause.
+        cause: The botocore error behind it, chained as the raised error's cause; None when
+            its message quotes the secret, so the chain never shows it.
     """
 
     error: WireError
-    cause: Exception
+    cause: Exception | None
 
 
 class _Body:
@@ -496,9 +497,13 @@ class FlatFileClient:
         except ClientError as error:
             refusal = self._refusal(error, key=key, location=location, verb=verb)
             details = error.response.get("Error", {})
+            # botocore's own message quotes S3's words as sent; were the secret among them,
+            # chaining it would put the secret back in the traceback, so it is left out.
+            quotes_secret = redact(str(error), self._secret_access_key) != str(error)
+            cause = None if quotes_secret else error
             if refusal.status in TRANSIENT_STATUSES or details.get("Code") in _TRANSIENT_CODES:
-                return _Retryable(refusal, error)
-            raise refusal from error
+                return _Retryable(refusal, cause)
+            raise refusal from cause
         except BotoCoreError as error:
             if is_tls_failure(error):
                 raise WireError(
