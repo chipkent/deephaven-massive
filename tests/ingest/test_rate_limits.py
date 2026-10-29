@@ -190,6 +190,19 @@ def test_concurrent_leases_share_one_governor() -> None:
         thread.join(10)
     assert len({id(lease.governor) for lease in leases}) == 1
     assert len(registry) == 1
+    assert registry.leases() == 16
+
+
+def test_the_registry_counts_the_leases_not_yet_released() -> None:
+    registry = _registry(FakeClock())
+    one = _lease(registry)
+    other = _lease(registry, api_key="key-2")
+    assert registry.leases() == 2
+    one.release()
+    one.release()  # idempotent: counted once
+    assert registry.leases() == 1
+    other.release()
+    assert registry.leases() == 0
 
 
 # --- Warnings ------------------------------------------------------------------------------------

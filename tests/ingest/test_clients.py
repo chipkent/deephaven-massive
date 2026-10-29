@@ -12,7 +12,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import ChannelFamily, Recency
-from deephaven_massive._ingest import flatfiles, rate_limits, rest, ws
+from deephaven_massive._ingest import clients, flatfiles, rate_limits, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.core import SessionCore
 from tests._fakes.s3 import FakeS3
@@ -140,6 +140,28 @@ def test_host_decisions_go_through_the_rest_transport(
     ]
 
 
+def test_the_futures_calendar_reads_through_the_rest_transport(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The WebSocket transport's schedule calendar fetches rows through the session's REST.
+    calls: list[tuple[str, dict[str, object], str, object]] = []
+
+    class Rows:
+        def fetch_rows(
+            self, template: str, query: dict[str, object], *, bucket: str, cancel: object
+        ) -> list[dict[str, object]]:
+            calls.append((template, query, bucket, cancel))
+            return [{"ticker": "ESZ5", "product_code": "ES"}]
+
+    monkeypatch.setattr(SessionClients, "rest", lambda _: Rows())
+    lookup = _massive.Cancel()
+    rows = clients_of(session)._fetch_rows(
+        "/futures/v1/contracts", {"ticker.any_of": ("ESZ5",)}, bucket="futures", cancel=lookup
+    )
+    assert rows == [{"ticker": "ESZ5", "product_code": "ES"}]
+    assert calls == [("/futures/v1/contracts", {"ticker.any_of": ("ESZ5",)}, "futures", lookup)]
+
+
 def test_the_connections_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
     # The connections live as long as the session and their close is a session closer, which the
     # session's finalizer holds: a strong reference to the core would keep it alive forever.
@@ -208,6 +230,42 @@ def test_racing_first_rest_calls_keep_one_client(
         built[0].get(
             _massive.source(_massive.Transport.REST, "/v3/snapshot"), {}, {}, bucket="other"
         )
+
+
+def test_racing_first_stream_calls_keep_one_set_of_connections(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The connections are built outside the lock; a call that loses the race leaves its group.
+    built: list[ws.WsConnections] = []
+    real = ws.WsConnections
+
+    def factory(
+        core: SessionCore,
+        *,
+        resolve_host: Callable[..., HostDecision],
+        record_verdict: Callable[..., None],
+        fetch_rows: Callable[..., list[dict[str, object]]],
+        crypto_pair: Callable[[str], tuple[str, str]],
+    ) -> ws.WsConnections:
+        connections = real(
+            core,
+            resolve_host=resolve_host,
+            record_verdict=record_verdict,
+            fetch_rows=fetch_rows,
+            crypto_pair=crypto_pair,
+        )
+        built.append(connections)
+        if len(built) == 1:  # the other call installs its connections first
+            session._core.stream_transport()
+        return connections
+
+    monkeypatch.setattr(clients, "WsConnections", factory)
+    transport = session._core.stream_transport()
+    assert isinstance(transport, ws.WsTransport)
+    assert len(built) == 2
+    assert transport._connections is built[1]
+    assert built[0]._closed  # the loser closed at once
+    assert built[0] not in built[0].group.sessions
 
 
 def test_the_rest_state_does_not_keep_the_core_alive(fake_s3: FakeS3) -> None:

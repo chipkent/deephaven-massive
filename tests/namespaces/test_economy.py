@@ -99,7 +99,8 @@ def test_each_series_is_a_date_axis_list_endpoint(series: Series) -> None:
     assert "Symbol" not in schema.column_names
     assert "Timestamp" not in schema.column_names
     types = {c.name: c.type for c in schema.columns}
-    assert types["Date"] is ColumnType.LOCAL_DATE
+    assert types["Date"] is ColumnType.STRING  # the vendor's date, as ISO text
+    assert schema.column_names[-1] == "TimestampInsert"
     assert types[series.column] is ColumnType.DOUBLE
 
 
@@ -199,5 +200,5 @@ def test_each_series_fetches_its_vendor_sample(
         "limit": ["50000"],
     }
     assert len(out) == 1
-    assert out[0]["Date"] == series.day
+    assert out[0]["Date"] == series.day.isoformat()
     assert out[0][series.column] == series.value

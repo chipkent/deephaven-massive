@@ -4,8 +4,8 @@ A field's column is its wire key split into segments, each segment translated to
 long form (the generator decides each long name from the lexicons, identity keys, and `NAMES`
 entries), and the long names joined in PascalCase by `column_name`: `["prevDay", "vwap"]`
 becomes `PrevDayVwap`. Nothing else renames a field: a vendor `symbol` is generated as
-`Symbol`, and the library's dataset key rename, not the generator, makes the key columns
-(`KEY_COLUMNS`).
+`Symbol`, and the library's dataset key rename and time columns, not the generator, make the
+key columns (`KEY_COLUMNS`, `is_key_column`).
 
 The module also holds the two name tests the gates apply: whether a key is short
 (`is_short`, the `short-key` gate) and whether a long name is timestamp-like
@@ -23,10 +23,32 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["KEY_COLUMNS", "column_name", "is_short", "is_timestamp_like", "snake"]
+__all__ = [
+    "KEY_COLUMNS",
+    "column_name",
+    "is_key_column",
+    "is_short",
+    "is_timestamp_like",
+    "snake",
+]
 
-KEY_COLUMNS: Final = frozenset({"Symbol", "Timestamp", "Underlying"})
-"""The dataset key columns the library's key rename produces; a `NAMES` entry never coins one."""
+KEY_COLUMNS: Final = frozenset(
+    {
+        "Symbol",
+        "Underlying",
+        "Date",
+        "Timestamp",
+        "TimestampStart",
+        "TimestampEnd",
+        "TimestampInsert",
+    }
+)
+"""The columns the library's dataset key rename and time columns produce: `Symbol`,
+`Underlying`, a row's trading `Date`, `Timestamp`, a bar's window, and the arrival time. A
+`NAMES` entry never coins one, nor any other `Timestamp<Qualifier>` (`is_key_column`)."""
+
+_LIBRARY_TIMESTAMP: Final = re.compile(r"Timestamp(?:[A-Z][A-Za-z0-9]*)?")
+"""`Timestamp`, alone or followed by a qualifier: the names of the library's time columns."""
 
 # The boundaries between the words of a camel-case or PascalCase name.
 _WORD_BREAK: Final = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -36,6 +58,20 @@ _SHORT_KEY_LENGTH: Final = 3
 _TIMESTAMP_LIKE: Final = re.compile(
     r"timestamp|.+_timestamp|updated|.+_updated|window_start|window_end|.+_time"
 )
+
+
+def is_key_column(column: str) -> bool:
+    """Return whether a column name belongs to the library, so no `NAMES` entry may coin it.
+
+    Args:
+        column: A PascalCase column name.
+
+    Returns:
+        True for a name of `KEY_COLUMNS` and for `Timestamp` followed by any qualifier
+        (`TimestampStart`, `TimestampFoo`): the library's time columns take that form, so a
+        vendor field coined into it would be mistaken for one.
+    """
+    return column in KEY_COLUMNS or bool(_LIBRARY_TIMESTAMP.fullmatch(column))
 
 
 def column_name(long_names: Iterable[str]) -> str:

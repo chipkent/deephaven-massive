@@ -15,6 +15,7 @@ Trades of US-listed options contracts (OPRA), tick by tick.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
 | `Conditions` | int[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
@@ -30,9 +31,9 @@ Trades of US-listed options contracts (OPRA), tick by tick.
 | `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST | `f` |  |  |
 | `DecimalSize` | String | Always null for `options.trades`; supplied by `stocks.trades`. |  |  |  |  |
 | `ReportSequence` | long | Always null for `options.trades`; supplied by `futures.trades`. |  |  |  |  |
-| `SessionEndDate` | LocalDate | Always null for `options.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `Channel` | long | Always null for `options.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `options.trades`; supplied by `crypto.trades`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -50,6 +51,7 @@ Quotes of US-listed options contracts (OPRA), tick by tick.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | request | `ticker` | `sym` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `AskExchange` | long | The ask exchange ID | REST, flat files, WebSocket | `ask_exchange` | `ask_exchange` | `ax` |
@@ -67,10 +69,10 @@ Quotes of US-listed options contracts (OPRA), tick by tick.
 | `ReportSequence` | long | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `AskTimestamp` | Instant | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `BidTimestamp` | Instant | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `SessionEndDate` | LocalDate | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Channel` | long | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Exchange` | long | Always null for `options.quotes`; supplied by `futures.quotes`, `forex.quotes`, `crypto.quotes`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `options.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -87,15 +89,17 @@ Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `optionsTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given option contract." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
+| `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
-| `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
-| `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
-| `High` | double | The highest price for the symbol in the given time period. | REST, flat files, WebSocket | `h` | `high` | `h` |
-| `Low` | double | The lowest price for the symbol in the given time period. | REST, flat files, WebSocket | `l` | `low` | `l` |
+| `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST, flat files, WebSocket | `v` | `volume` | `v` |
+| `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `o` | `open` | `o` |
+| `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `c` | `close` | `c` |
+| `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `h` | `high` | `h` |
+| `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `l` | `low` | `l` |
 | `Transactions` | long | The number of transactions in the aggregate window. | REST, flat files | `n` | `transactions` |  |
-| `Vwap` | double | The volume weighted average price. | REST, WebSocket | `vw` |  | `vw` |
+| `Vwap` | double | The volume weighted average price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, WebSocket | `vw` |  | `vw` |
 | `Otc` | boolean | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
 | `DecimalVolume` | String | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
 | `AccumulatedVolume` | long | Today's accumulated volume. | WebSocket |  |  | `av` |
@@ -103,11 +107,10 @@ Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 | `OfficialOpen` | double | Today's official opening price. | WebSocket |  |  | `op` |
 | `DayVwap` | double | Today's volume weighted average price. | WebSocket |  |  | `a` |
 | `AverageTradeSize` | long | The average trade size for this aggregate window. | WebSocket |  |  | `z` |
-| `EndTimestamp` | Instant | The end timestamp of this aggregate window in Unix Milliseconds. | WebSocket |  |  | `e` |
-| `SessionEndDate` | LocalDate | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `DollarVolume` | double | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `SettlementPrice` | double | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `Exchange` | long | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -127,9 +130,11 @@ Massive's fair market value of US-listed options contracts, streamed in real tim
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | WebSocket | `sym` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
 Massive's documentation of this dataset:
 
@@ -158,7 +163,7 @@ The snapshot of every contract in one underlying's option chain.
 | `DayVwap` | double | The trading volume weighted average price for the contract of the day. From the `day` object: The most recent daily bar for this contract. | REST | `day.vwap` |
 | `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. | REST | `details.contract_type` |
 | `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. | REST | `details.exercise_style` |
-| `DetailsExpirationDate` | LocalDate | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. | REST | `details.expiration_date` |
+| `DetailsExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. | REST | `details.expiration_date` |
 | `DetailsSharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. | REST | `details.shares_per_contract` |
 | `DetailsStrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. | REST | `details.strike_price` |
 | `Fmv` | double | Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
@@ -190,6 +195,7 @@ The snapshot of every contract in one underlying's option chain.
 | `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan." | REST | `underlying_asset.ticker` |
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. | REST | `underlying_asset.value` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -208,7 +214,7 @@ The current snapshot of each requested options contract, with its greeks.
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). | REST | `break_even_price` |
 | `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. | REST | `details.contract_type` |
 | `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. | REST | `details.exercise_style` |
-| `DetailsExpirationDate` | LocalDate | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. | REST | `details.expiration_date` |
+| `DetailsExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. | REST | `details.expiration_date` |
 | `DetailsSharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. | REST | `details.shares_per_contract` |
 | `DetailsStrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. | REST | `details.strike_price` |
 | `Error` | String | The error while looking for this ticker. | REST | `error` |
@@ -276,6 +282,7 @@ The current snapshot of each requested options contract, with its greeks.
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. | REST | `underlying_asset.value` |
 | `Value` | double | Value of Index. | REST | `value` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -296,11 +303,12 @@ Reference data on options contracts: type, exercise style, expiration, and strik
 | `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". | REST | `contract_type` |
 | `Correction` | long | The correction number for this option contract. | REST | `correction` |
 | `ExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. | REST | `exercise_style` |
-| `ExpirationDate` | LocalDate | The contract's expiration date in YYYY-MM-DD format. | REST | `expiration_date` |
+| `ExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. | REST | `expiration_date` |
 | `PrimaryExchange` | String | The MIC code of the primary exchange that this contract is listed on. | REST | `primary_exchange` |
 | `SharesPerContract` | double | The number of shares per contract for this contract. | REST | `shares_per_contract` |
 | `StrikePrice` | double | The strike price of the option contract. | REST | `strike_price` |
 | `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." | REST | `underlying_ticker` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -316,16 +324,19 @@ The open, high, low, close, and volume of each options contract on one day.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The exchange symbol that this item is traded under." | REST | `symbol` |
+| `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a New York calendar day. From REST `from`: "The requested date." | REST | `from` |
+| `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. | REST |  |
+| `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. | REST |  |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST | `symbol` |
-| `AfterHours` | double | The close price of the ticker symbol in after hours trading. | REST | `afterHours` |
-| `Close` | double | The close price for the symbol in the given time period. | REST | `close` |
-| `From` | LocalDate | The requested date. | REST | `from` |
-| `High` | double | The highest price for the symbol in the given time period. | REST | `high` |
-| `Low` | double | The lowest price for the symbol in the given time period. | REST | `low` |
-| `Open` | double | The open price for the symbol in the given time period. | REST | `open` |
+| `AfterHours` | double | The close price of the ticker symbol in after hours trading. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `afterHours` |
+| `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `close` |
+| `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `high` |
+| `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `low` |
+| `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `open` |
 | `Otc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `otc` |
-| `PreMarket` | double | The open price of the ticker symbol in pre-market trading. | REST | `preMarket` |
-| `Volume` | double | The trading volume of the symbol in the given time period. | REST | `volume` |
+| `PreMarket` | double | The open price of the ticker symbol in pre-market trading. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `preMarket` |
+| `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST | `volume` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 

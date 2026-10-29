@@ -261,6 +261,18 @@ class GovernorRegistry:
         with self._lock:
             return len(self._entries)
 
+    def leases(self) -> int:
+        """Count the leases not yet released, over every governor.
+
+        Each open session holds one, so a count above the number of open sessions means a
+        session ended without releasing its lease.
+
+        Returns:
+            The number of leases held.
+        """
+        with self._lock:
+            return sum(len(entry.holders) for entry in self._entries.values())
+
     def lease(
         self,
         *,

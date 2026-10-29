@@ -82,8 +82,10 @@ uv build                                 # sdist and wheel
     `DESIGN.md` § 4.1 says where new code goes; read it before adding a module or a helper.
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.
 20. **Dates are ISO strings.** Every calendar-date column, vendor dates included, stores
-    `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read, even where `DESIGN.md` or
-    older code still says `LocalDate`: one type joins with every other date. Instants stay `Instant`s.
+    `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read: one type joins with every
+    other date. Instants stay `Instant`s. Every dataset table is built by `_tables/columns.py`
+    `dataset_table`, which shares one string per date, and the library owns the names `Date` and
+    `Timestamp*`.
 21. **No planning references outside `plans/`.** Code, comments, docstrings, test names, error
     messages, CI step names, and config never cite the planning documents, their sections,
     planned-PR names, or decision numbers. State the behavior or the reason directly.

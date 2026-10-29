@@ -108,7 +108,7 @@ def _pause() -> None:
 
 
 @pytest.mark.needs("some:basic")
-@pytest.mark.settles("50")
+@pytest.mark.settles("65")
 @pytest.mark.timeout(100)
 def test_text_of_the_rate_limit_refusal(
     send: Callable[[Request], tuple[int, str]],
@@ -134,7 +134,7 @@ def test_text_of_the_rate_limit_refusal(
 
 
 @pytest.mark.needs("some:basic")
-@pytest.mark.settles("51")
+@pytest.mark.settles("66")
 @pytest.mark.timeout(100)
 def test_requests_without_a_subscription_after_the_limit_is_reached(
     send: Callable[[Request], tuple[int, str]],
@@ -167,7 +167,7 @@ def test_requests_without_a_subscription_after_the_limit_is_reached(
 
 
 @pytest.mark.needs("some:basic")
-@pytest.mark.settles("51")
+@pytest.mark.settles("66")
 @pytest.mark.timeout(100)
 def test_requests_without_a_subscription_alone(
     send: Callable[[Request], tuple[int, str]],
@@ -190,7 +190,7 @@ def test_requests_without_a_subscription_alone(
 
 
 @pytest.mark.needs("some:basic")
-@pytest.mark.settles("52")
+@pytest.mark.settles("67")
 @pytest.mark.timeout(260)
 def test_when_a_spent_minute_frees_its_requests(
     send: Callable[[Request], tuple[int, str]],

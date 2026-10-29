@@ -18,13 +18,16 @@ a `ResultRecord`:
    submits a job to the `Reaper`.
 4. The `Reaper`, one daemon thread per session, runs the job: it releases the result scope and
    then calls the record's `on_released` callback, which for a stream decrements the stream's
-   held-result count (and at zero releases the stream scope) and for a `poll()` table stops
-   its poller. A failing job is logged at ERROR and the thread carries on.
+   held-result count (and at zero releases the stream scope), for a `poll()` table marks its
+   row released, and for a diagnostics view drops the session's count of held views. A
+   failing job is logged at ERROR and the thread carries on.
 
 Releasing a result scope drops the library's liveness reference only. A table the user derived
 from the result, an open UI panel, or a user liveness scope keeps the Java table alive, and with
-it the stream: topic reference counts are bound to the blink table's `on_shutdown_callback`,
-never to result records.
+it the stream or the poller: topic reference counts and pollers are bound to the blink table's
+`on_shutdown_callback`, never to result records. The owner callbacks hold the session core only
+weakly, so a result never keeps a session alive through its record; the session's live set does
+that (`_tables/core.py`).
 
 Threading: `make_result` runs on the caller thread (liveness scopes are thread-local). The
 registry's state is guarded by the session's `registry_lock`, a leaf lock under which no
@@ -49,6 +52,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from deephaven.table import Table
+
+    from deephaven_massive._errors import MassiveError
 
 __all__ = [
     "QueueWorker",
@@ -134,8 +139,10 @@ class StreamHandle:
     The transport creates the stream's `TablePublisher` and blink table inside `scope` (the
     stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
     registry record is dropped (`SessionCore.stream_shut_down`) and topic reference counts are
-    released. The session holds the handle while any result of the stream is held
-    and releases `scope` when the last one is released.
+    released. The session's registry record holds the handle until the record is deleted (its
+    holds released and its blink table shut down), and releases `scope` when the last result is
+    released. Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist
+    listener, which Deephaven itself keeps only weakly.
 
     Attributes:
         stream_id: The stream's identifier, minted by the session before the open and unique
@@ -145,6 +152,12 @@ class StreamHandle:
         scope: The stream scope that manages `blink` and the publisher.
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
+        fail: Fails the stream's table with the error and records the failure, once; returns
+            False when the stream had already failed. Takes the stream's publish lock and
+            makes a Deephaven call, so never call it under `registry_lock` or on an
+            update-graph thread (`StreamSink.fail`).
+        stop_watch: Stops a reactive stream's watchlist listener (a Deephaven call, run on the
+            reaper once the stream has shut down); None for a stream of fixed symbols.
     """
 
     stream_id: int
@@ -152,6 +165,8 @@ class StreamHandle:
     scope: LivenessScope
     host: str
     path: str
+    fail: Callable[[MassiveError], bool]
+    stop_watch: Callable[[], None] | None = None
 
 
 @dataclass(eq=False, slots=True)
@@ -165,8 +180,8 @@ class ResultRecord:
         record_id: A process-unique identifier, for logs.
         scope: The result scope that holds the result.
         on_released: Runs on the reaper thread after the scope is released: for a stream it
-            decrements the stream's held-result count, for a `poll()` table it stops the
-            poller.
+            decrements the stream's held-result count, for a `poll()` table it marks the row
+            released, and for a diagnostics view it drops the session's count of held views.
         finalizer: The collection finalizer on the result's Python wrapper, set by `track`
             right after the record is created; `finalizer.peek()` yields the wrapper while it
             is alive and None once it is collected.
@@ -197,11 +212,25 @@ class QueueWorker(Generic[_T]):
     on its own thread; an exception from `on_timeout` is logged like one from `handle`. No other
     thread or timer is involved, so nothing outlives the worker.
 
+    If something escapes that the thread cannot carry on after (a `KeyboardInterrupt` or
+    `SystemExit` raised by `handle`, or an exception from `on_exit`), `on_death` runs with it
+    before the thread ends, so the owner can fail what the thread served instead of leaving it
+    silently frozen.
+
     The thread holds no reference to its owner beyond its callables, so owners pass callables
     that do not keep a session alive.
     """
 
-    __slots__ = ("_exec_ctx", "_handle", "_on_exit", "_on_timeout", "_queue", "_timeout", "thread")
+    __slots__ = (
+        "_exec_ctx",
+        "_handle",
+        "_on_death",
+        "_on_exit",
+        "_on_timeout",
+        "_queue",
+        "_timeout",
+        "thread",
+    )
 
     def __init__(
         self,
@@ -212,6 +241,7 @@ class QueueWorker(Generic[_T]):
         on_exit: Callable[[], None] | None = None,
         timeout: Callable[[], float | None] | None = None,
         on_timeout: Callable[[], None] | None = None,
+        on_death: Callable[[BaseException], None] | None = None,
     ) -> None:
         """Create and start the worker thread.
 
@@ -225,12 +255,15 @@ class QueueWorker(Generic[_T]):
                 waits.
             on_timeout: Runs on the thread when a timed wait ends without an item; required
                 with `timeout`.
+            on_death: Runs on the dying thread, inside the execution context, with what ended
+                it, before it is re-raised; an exception it raises is logged and dropped.
         """
         self._exec_ctx = exec_ctx
         self._handle = handle
         self._on_exit = on_exit
         self._timeout = timeout
         self._on_timeout = on_timeout
+        self._on_death = on_death
         self._queue: queue.SimpleQueue[_T | None] = queue.SimpleQueue()
         self.thread: Final = threading.Thread(target=self._run, name=name, daemon=True)
         self.thread.start()
@@ -254,19 +287,25 @@ class QueueWorker(Generic[_T]):
         else that escapes, such as a `KeyboardInterrupt` or `SystemExit` raised by `handle` or
         an exception from `on_exit`, ends the thread: it is logged at CRITICAL first, because
         nothing would handle the queue again and the owner (the reaper or the diagnostics
-        writer) would otherwise stop silently, and then re-raised.
+        writer) would otherwise stop silently; then `on_death` runs, and the exception is
+        re-raised.
         """
-        try:
-            with entered(self._exec_ctx):
+        with entered(self._exec_ctx):
+            try:
                 while self._next_batch():
                     pass
                 if self._on_exit is not None:
                     self._on_exit()
-        except BaseException:
-            logger.critical(
-                "%s died; its queue is no longer handled", self.thread.name, exc_info=True
-            )
-            raise
+            except BaseException as death:
+                logger.critical(
+                    "%s died; its queue is no longer handled", self.thread.name, exc_info=True
+                )
+                if self._on_death is not None:
+                    try:
+                        self._on_death(death)
+                    except Exception:
+                        logger.exception("%s: handling its death failed", self.thread.name)
+                raise
 
     def _next_batch(self) -> bool:
         """Wait for an item, take everything queued behind it, and handle the batch.
@@ -314,15 +353,23 @@ class Reaper:
 
     __slots__ = ("_worker",)
 
-    def __init__(self, exec_ctx: ExecutionContext, name: str) -> None:
+    def __init__(
+        self,
+        exec_ctx: ExecutionContext,
+        name: str,
+        *,
+        on_death: Callable[[BaseException], None] | None = None,
+    ) -> None:
         """Create and start the reaper thread.
 
         Args:
             exec_ctx: The session's captured execution context, entered by the thread.
             name: The thread's name, for thread dumps.
+            on_death: Runs if the thread dies on something it cannot carry on after
+                (`QueueWorker`); the session passes a callback that fails its live tables.
         """
         self._worker: QueueWorker[Callable[[], None]] = QueueWorker(
-            exec_ctx, name, handle=_run_jobs
+            exec_ctx, name, handle=_run_jobs, on_death=on_death
         )
 
     @property
@@ -466,9 +513,10 @@ class ResultRegistry:
     def retire(self) -> None:
         """Stop the reaper once no tracked result remains; called when the session is collected.
 
-        A tracked result whose owner callback does not hold the session core (a `poll()`
-        table's poller, for example) can outlive the session. Stopping the reaper with the
-        session would leave such a result unreleased when it is collected, so the reaper is
+        Owner callbacks hold the session core only weakly, so a tracked result can outlive the
+        session: one `release()`d while its wrapper is still alive, for example. Stopping the
+        reaper with the session would leave such a result unreleased when it is collected, so
+        the reaper is
         stopped only once the registry is empty: now if it already is, otherwise by the job
         that forgets the last collected result. Takes no lock and makes no Java call (it runs
         in a garbage-collection finalizer): it only queues a job on the reaper.

@@ -1,0 +1,711 @@
+"""The futures session calendar of streamed rows: Massive's schedules, kept warm off the flush.
+
+Massive's REST and flat-file futures rows carry their session (`session_end_date`, the
+trading date); WebSocket futures messages carry none. The flush therefore dates each streamed
+futures row by the rule the library uses everywhere (the session ends at the next 17:00
+Chicago time, a Saturday's or Sunday's moving to Monday) and asks this calendar to correct it.
+The rule is wrong in two places, which the schedules (`/futures/v1/schedules`, on every
+futures plan) settle: a holiday folds its trading into the next session, which then opens
+days early, and a product whose pre-open starts before 17:00 Chicago time (16:45 on CBOT)
+already trades for the next session.
+
+`FuturesCalendar` keeps, per session:
+
+- the product of each contract (`/futures/v1/contracts`, looked up by `ticker.any_of`), and
+- each product's sessions from a week back to ten days ahead (`/futures/v1/schedules`): one
+  session per `session_end_date`, open from its first event (a pre-open or the open) to its
+  last (the close).
+
+Only a single contract ticker is looked up (`symbols.is_futures_contract`). Every other futures
+ticker is a spread or combination (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`,
+`6A:XF:AUDUSD:Q6`): `/futures/v1/contracts` lists none of them, and Massive documents no grammar
+that names their legs. Their rows keep the rule's date, which a holiday fold can make wrong, so
+the first batch that dates a spread's rows logs one WARNING for it.
+
+`correct` runs on the connection's flush thread and never waits: a row inside the session the
+rule gave it is kept, a row the schedules place in another session moves there, and a row in the
+gap between a close and the next session's first event keeps the rule's date. What the calendar
+is still loading (a contract or product asked for less than `LOAD_PATIENCE` ago) keeps the
+rule's date silently, so a stream's start raises no error. A row the calendar cannot place is a
+miss: past the last loaded session, a contract Massive's contracts do not list, a lookup that
+failed, or a contract or product still not loaded `LOAD_PATIENCE` after it was asked for. A
+miss keeps the rule's date, is logged at ERROR once per product (or contract) and session date,
+and is returned with every batch it occurs in, so the flush shows it in the `Error` of every
+stream that receives the contract, until that stream's rows all place again. A lookup that
+fails in any way, an answer the calendar cannot read included, makes its contracts' rows
+misses, and the worker carries on. A miss past the loaded sessions asks for a reload of its
+product, at most once per `RELOAD_SPACING`, and the sessions are reloaded once a day as the
+dates move on.
+
+**Rate limits.** Every lookup is charged to the futures subscription's rate governor bucket,
+in a lane of its own, so on a Basic subscription it waits its turn with the session's other
+futures reads. Each lookup listens to a cancellation token that follows the calendar's, which
+`close` sets: a lookup still waiting for the governor then stops at once.
+
+**Threads and locks.** One daemon worker thread makes every request, through the session's
+REST transport (`fetch`), and swaps in each new map whole under the calendar's leaf lock;
+`correct` and `watch` only read the maps and queue work under it, so the flush thread and the
+update-graph thread that reports a watchlist change never block on the network. The worker
+makes no Deephaven call. `close` stops it; a request on the wire finishes first, one waiting
+for the rate governor stops at once, and a lookup that fails because the session or the
+calendar closed under it is not logged.
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+import time
+from bisect import bisect_right
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, Protocol
+
+import pyarrow as pa
+
+from deephaven_massive._datasets.dates import futures_session
+from deephaven_massive._datasets.symbols import is_futures_contract
+from deephaven_massive._enums import Subscription
+from deephaven_massive._errors import MassiveError
+from deephaven_massive._ingest.rate_limits import bucket_of
+from deephaven_massive._massive import Cancel
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping
+
+__all__ = [
+    "LOAD_PATIENCE",
+    "RELOAD_SPACING",
+    "FuturesCalendar",
+    "RowFetch",
+    "ScheduledSession",
+]
+
+logger = logging.getLogger(__name__)
+
+_BUCKET: Final = bucket_of(Subscription.FUTURES)
+"""The rate governor bucket every lookup is charged to: the futures subscription's."""
+
+
+class RowFetch(Protocol):
+    """Reads every raw row of a REST path for a query, following its pages.
+
+    The session's REST transport implements it (`RestEndpoints.fetch_rows`), and the
+    WebSocket connection group passes it on to the calendar.
+    """
+
+    def __call__(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+    ) -> list[dict[str, object]]:
+        """Return the rows of every page.
+
+        Args:
+            template: The path template; it takes no path parameter.
+            query: The query parameters, by wire name.
+            bucket: The rate governor bucket the requests are charged to.
+            cancel: Ends the requests' waits for the rate governor when set; also their lane.
+
+        Returns:
+            The rows of every page, every key kept.
+
+        A failed or cancelled read raises its public `MassiveError`.
+        """
+        ...
+
+
+RELOAD_SPACING: Final = timedelta(minutes=10)
+"""The least time between two loads of one product's schedule, or two lookups of one
+contract: a miss asks for a reload, and a stream of misses must not spend the session's
+request budget (Basic keys allow 5 requests a minute)."""
+
+LOAD_PATIENCE: Final = timedelta(seconds=60)
+"""How long a contract's product or a product's schedule may be loading before its rows count
+as misses: long enough for a stream's first lookups through a rate-limited key, short enough
+that a stuck lookup shows in the streams' `Error` within a minute."""
+
+_RELOAD_DAILY: Final = timedelta(days=1)
+"""How old a product's loaded schedule may get before it is loaded again, so the sessions
+ahead of today stay loaded as the days pass."""
+_DAYS_BACK: Final = timedelta(days=7)
+_DAYS_AHEAD: Final = timedelta(days=10)
+_TICKERS_PER_REQUEST: Final = 100
+"""The most tickers one contracts lookup sends in `ticker.any_of`."""
+_PAGE: Final = 1000
+"""The largest page both paths serve (their documented `limit` maximum)."""
+_JOIN_TIMEOUT: Final = 5.0
+_STOP: Final = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _Known:
+    """What the calendar knew when one `correct` call began: a consistent snapshot.
+
+    Attributes:
+        products: The product of each contract looked up; None for a contract Massive's
+            contracts do not list.
+        sessions: Each loaded product's sessions, by first event.
+        failed: Why each contract or product failed to load, until it loads.
+        stale: The products whose schedule is a day old or older.
+        late: The contracts and products asked for at least `LOAD_PATIENCE` ago and still not
+            loaded.
+    """
+
+    products: Mapping[str, str | None]
+    sessions: Mapping[str, tuple[ScheduledSession, ...]]
+    failed: Mapping[str, str]
+    stale: frozenset[str]
+    late: frozenset[str]
+
+
+@dataclass(slots=True)
+class _Batch:
+    """What one `correct` call gathers as it places its rows, so each is done once per call.
+
+    Attributes:
+        misses: The batch's misses, `(symbol, key, rule date, reason)`, each once; their
+            messages are built and logged once per call (`FuturesCalendar._report`).
+        spreads: The spreads the batch holds, which are never looked up.
+        contracts: The contracts to look up.
+        products: The products whose schedules to load.
+        opens: Each product's session first events, for the bisection, built once per call.
+    """
+
+    misses: dict[tuple[str, str, str, str], None] = field(default_factory=dict)
+    spreads: set[str] = field(default_factory=set)
+    contracts: set[str] = field(default_factory=set)
+    products: set[str] = field(default_factory=set)
+    opens: dict[str, list[int]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledSession:
+    """One futures session of one product, from Massive's schedule.
+
+    Attributes:
+        day: The session's `session_end_date`, its trading date.
+        opens: Its first event (a pre-open or the open), epoch nanoseconds.
+        closes: Its last event (the close), epoch nanoseconds.
+    """
+
+    day: date
+    opens: int
+    closes: int
+
+
+def _ns(text: str) -> int:
+    """Return an ISO-8601 instant of a schedule as epoch nanoseconds.
+
+    Args:
+        text: Such as `2024-06-09T21:00:00+00:00`.
+
+    Returns:
+        The instant, to the microsecond.
+    """
+    moment = datetime.fromisoformat(text)
+    return (moment - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1) * 1000
+
+
+class FuturesCalendar:
+    """The futures session calendar of one session's WebSocket streams (see the module).
+
+    Created by the session's `WsConnections` with its first futures connection, and closed
+    with it. Thread-safe: the maps are immutable and replaced whole under one leaf lock, which
+    nothing holds while it waits; one worker thread makes every request.
+
+    Example:
+        ::
+
+            sessions = FuturesCalendar(
+                rest.fetch_rows,
+                contracts_path="/futures/v1/contracts",
+                schedules_path="/futures/v1/schedules",
+                label="MassiveSession #1",
+            )
+            sessions.watch(["ESZ5"])  # looks up ESZ5's product and its schedule
+            sessions.wait_idle(5.0)  # in a test: the lookups are done
+            dates, misses = sessions.correct(symbols, instants, rule_dates)
+            sessions.close()
+    """
+
+    def __init__(
+        self,
+        fetch: RowFetch,
+        *,
+        contracts_path: str,
+        schedules_path: str,
+        label: str,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        """Create the calendar and start its worker; no request is made yet.
+
+        Args:
+            fetch: Returns every row of a REST path for a query, following its pages, on the
+                session's REST client; it raises `MassiveError` on a failure. Each lookup
+                passes the futures bucket and a token that the calendar's close sets.
+            contracts_path: The REST path that maps a contract ticker to its product, the
+                `futures.contracts` dataset's (`/futures/v1/contracts`).
+            schedules_path: The REST path of each product's timed session events, the
+                `futures.schedules` dataset's (`/futures/v1/schedules`).
+            label: The session's label, for the worker's name and messages.
+            clock: The current time in seconds since the epoch; tests replace it.
+        """
+        self._fetch = fetch
+        self._contracts_path = contracts_path
+        self._schedules_path = schedules_path
+        self._label = label
+        self._clock = clock
+        self._lock = threading.Lock()
+        # Notified, under the lock, each time the worker has served what it took off the queue.
+        self._idle = threading.Condition(self._lock)
+        # Guarded by the lock; each map is immutable and replaced whole.
+        self._products: Mapping[str, str | None] = MappingProxyType({})
+        self._sessions: Mapping[str, tuple[ScheduledSession, ...]] = MappingProxyType({})
+        self._loaded: dict[str, float] = {}  # product -> when its schedule last loaded
+        self._asked: dict[str, float] = {}  # contract or product -> when last queued
+        self._failed: dict[str, str] = {}  # contract or product -> why its load failed
+        self._waiting: dict[str, float] = {}  # contract or product -> when first asked, unloaded
+        self._reported: set[tuple[str, date]] = set()
+        self._spreads: set[str] = set()  # spreads already logged
+        self._queued = 0  # requests put on the queue
+        self._served = 0  # requests the worker has finished
+        self._closed = False
+        # Set by `close`: every lookup's token follows it, so none waits on after the close.
+        self._stop = Cancel()
+        self._queue: queue.SimpleQueue[object] = queue.SimpleQueue()
+        self._thread = threading.Thread(
+            target=self._run, name=f"{label} futures schedules", daemon=True
+        )
+        self._thread.start()
+
+    # --- any thread ---------------------------------------------------------------------------
+
+    def watch(self, symbols: Iterable[str]) -> None:
+        """Ask for the products and schedules of contracts a stream will receive. Never blocks.
+
+        Called when a futures stream opens with explicit symbols and when a reactive symbol
+        table adds some, so their rows are usually placed from the first one.
+
+        Args:
+            symbols: Canonical futures symbols, contracts or spreads; spreads are not looked
+                up.
+        """
+        self._ask_contracts({symbol for symbol in symbols if is_futures_contract(symbol)})
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait until the worker has served every lookup queued so far, or the calendar closed.
+
+        For tests and diagnostics, which need the lookups `watch` and `correct` asked for to
+        be done; never call it on a flush or update-graph thread, which must not wait.
+
+        Args:
+            timeout: The most seconds to wait.
+
+        Returns:
+            True once idle or closed; False when `timeout` passed first.
+        """
+        with self._idle:
+            return self._idle.wait_for(
+                lambda: self._closed or self._served >= self._queued, timeout
+            )
+
+    def correct(
+        self, symbols: pa.Array, instants: pa.Array, dates: pa.Array
+    ) -> tuple[pa.Array, list[tuple[str, str]]]:
+        """Return streamed futures rows' session dates, corrected by the schedules.
+
+        Runs on a flush thread and never waits: what is not loaded yet is asked for and keeps
+        the rule's date. Each row whose instant lies inside the session the rule gave it keeps
+        it; the others are placed by their product's schedule.
+
+        Args:
+            symbols: The rows' canonical symbols, `string`.
+            instants: The rows' instants (a tick's time, a bar's start), epoch nanoseconds.
+            dates: The 17:00 Chicago rule's session dates, ISO text.
+
+        Returns:
+            The dates to keep, ISO text, one per row; and every miss of the batch, once each,
+            as `(symbol, message)`: a row the calendar cannot place, which keeps the rule's
+            date. A miss is logged at ERROR the first time it is seen, and returned with every
+            batch it occurs in, so every stream that receives the contract shows it.
+        """
+        now = self._clock()
+        day_old = now - _RELOAD_DAILY.total_seconds()
+        patience = LOAD_PATIENCE.total_seconds()
+        with self._lock:
+            known = _Known(
+                self._products,
+                self._sessions,
+                dict(self._failed),
+                frozenset(p for p, at in self._loaded.items() if at <= day_old),
+                frozenset(k for k, at in self._waiting.items() if now - at >= patience),
+            )
+        if known.stale:
+            self._ask_products(set(known.stale))
+        names = symbols.to_pylist()
+        moments = instants.to_pylist()
+        ruled = dates.to_pylist()
+        fixed: list[str | None] = list(ruled)
+        batch = _Batch()
+        for row, (symbol, moment, day) in enumerate(zip(names, moments, ruled, strict=True)):
+            if symbol is None or moment is None or day is None:
+                continue
+            if not is_futures_contract(symbol):
+                batch.spreads.add(symbol)
+                continue
+            fixed[row] = self._place(symbol, known, moment=moment, day=day, batch=batch)
+        self._note_spreads(batch.spreads)
+        if batch.contracts:
+            self._ask_contracts(batch.contracts)
+        if batch.products:
+            self._ask_products(batch.products)
+        return pa.array(fixed, pa.string()), self._report(batch)
+
+    def close(self) -> None:
+        """Stop the worker after its current request and wait a bounded time; idempotent.
+
+        A lookup still waiting for the rate governor stops at once; one on the wire finishes.
+        """
+        with self._idle:
+            if self._closed:
+                return
+            self._closed = True
+            self._idle.notify_all()  # `wait_idle` returns once closed
+        self._stop.set()
+        self._queue.put(_STOP)
+        self._thread.join(_JOIN_TIMEOUT)
+
+    # --- correction ---------------------------------------------------------------------------
+
+    def _place(
+        self,
+        symbol: str,
+        known: _Known,
+        *,
+        moment: int,
+        day: str,
+        batch: _Batch,
+    ) -> str:
+        """Return the session date of one contract's row, recording its miss in the batch.
+
+        Args:
+            symbol: The row's contract.
+            known: What the calendar knows.
+            moment: The row's instant, epoch nanoseconds.
+            day: The rule's date, ISO text.
+            batch: Gathers the call's misses and the lookups to ask for.
+
+        Returns:
+            The date to keep, ISO text.
+        """
+        if symbol not in known.products:
+            batch.contracts.add(symbol)
+            if symbol in known.late:
+                batch.misses[symbol, symbol, day, _NOT_LOADED] = None
+            return day
+        product = known.products[symbol]
+        if product is None:
+            batch.contracts.add(symbol)
+            why = known.failed.get(symbol, "Massive's futures contracts do not list it")
+            batch.misses[symbol, symbol, day, why] = None
+            return day
+        sessions = known.sessions.get(product)
+        if sessions is None:
+            batch.products.add(product)
+            reason = known.failed.get(product)
+            if reason is None and product in known.late:
+                reason = _NOT_LOADED
+            if reason is not None:
+                batch.misses[symbol, product, day, reason] = None
+            return day
+        opens = batch.opens.get(product)
+        if opens is None:
+            opens = batch.opens[product] = [s.opens for s in sessions]
+        index = bisect_right(opens, moment) - 1
+        if index >= 0 and moment < sessions[index].closes:
+            return sessions[index].day.isoformat()
+        if 0 <= index < len(sessions) - 1:
+            return day  # between a close and the next session's first event: no session
+        batch.products.add(product)
+        batch.misses[symbol, product, day, _outside(product, sessions, before=index < 0)] = None
+        return day
+
+    def _report(self, batch: _Batch) -> list[tuple[str, str]]:
+        """Build a batch's miss messages, and log each the first time per key and rule date.
+
+        One lock acquisition for the whole batch, and one message per distinct miss, however
+        many rows share it.
+
+        Args:
+            batch: The call's misses: `(symbol, key, rule date, reason)`, where the key is the
+                product, or the contract when its product is not known.
+
+        Returns:
+            The misses as `(symbol, message)`, in the order first seen.
+        """
+        if not batch.misses:
+            return []
+        out = []
+        logged = []
+        with self._lock:
+            for symbol, key, day, why in batch.misses:
+                message = (
+                    f"futures session of {symbol} not confirmed: {why}; its rows keep the "
+                    f"session the 17:00 Chicago rule gives them, {day}"
+                )
+                out.append((symbol, message))
+                reported = (key, date.fromisoformat(day))
+                if reported not in self._reported:
+                    self._reported.add(reported)
+                    logged.append(message)
+        for message in logged:
+            logger.error("%s: %s", self._label, message)
+        return out
+
+    def _note_spreads(self, spreads: set[str]) -> None:
+        """Warn, once per spread, that a spread's rows keep the rule's date.
+
+        Args:
+            spreads: Spread tickers seen.
+        """
+        if not spreads:
+            return
+        with self._lock:
+            new = sorted(spreads - self._spreads)
+            self._spreads.update(new)
+        for spread in new:
+            logger.warning(
+                "%s: futures spread %s is not looked up in the schedules; its rows keep the "
+                "session the 17:00 Chicago rule gives them, which a holiday can make wrong",
+                self._label,
+                spread,
+            )
+
+    # --- requests -----------------------------------------------------------------------------
+
+    def _ask_contracts(self, contracts: set[str]) -> None:
+        """Queue the product lookup of contracts without a product and not asked for lately.
+
+        A contract Massive's contracts did not list, or whose lookup failed, is asked for
+        again once `RELOAD_SPACING` has passed.
+
+        Args:
+            contracts: Contract tickers.
+        """
+        with self._lock:
+            products = self._products
+        found = {contract: product for contract, product in products.items() if product}
+        wanted = self._due(contracts, found)
+        if wanted:
+            self._put(("contracts", frozenset(wanted)))
+
+    def _ask_products(self, products: set[str]) -> None:
+        """Queue the schedule load of products not loaded lately.
+
+        Args:
+            products: Product codes.
+        """
+        wanted = self._due(products, {})
+        if wanted:
+            self._put(("schedules", frozenset(wanted)))
+
+    def _put(self, item: tuple[str, frozenset[str]]) -> None:
+        """Queue a lookup for the worker, counting it for `wait_idle`.
+
+        Args:
+            item: The kind (`"contracts"` or `"schedules"`) and its keys.
+        """
+        with self._lock:
+            self._queued += 1
+        self._queue.put(item)
+
+    def _due(self, keys: set[str], known: Mapping[str, object]) -> set[str]:
+        """Return the keys to ask for now, and mark them asked.
+
+        Args:
+            keys: Contracts or products.
+            known: The keys already answered, which need no request.
+
+        Returns:
+            The keys neither answered nor asked for within `RELOAD_SPACING`. Each starts its
+            `LOAD_PATIENCE` now, unless it is already waiting.
+        """
+        now = self._clock()
+        spacing = RELOAD_SPACING.total_seconds()
+        with self._lock:
+            if self._closed:
+                return set()
+            due = {
+                key
+                for key in keys
+                if key not in known and now - self._asked.get(key, -spacing) >= spacing
+            }
+            for key in due:
+                self._asked[key] = now
+                self._waiting.setdefault(key, now)
+        return due
+
+    def _run(self) -> None:
+        """Serve queued lookups until `close`, coalescing what is queued at once."""
+        while True:
+            item = self._queue.get()
+            items = [item]
+            while True:
+                try:
+                    items.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+            if any(entry is _STOP for entry in items):
+                return
+            contracts: set[str] = set()
+            products: set[str] = set()
+            for kind, keys in (entry for entry in items if isinstance(entry, tuple)):
+                (contracts if kind == "contracts" else products).update(keys)
+            try:
+                if contracts:
+                    products |= self._load_contracts(contracts)
+                if products:
+                    self._load_schedules(products)
+            except Exception as error:  # a defect or a malformed answer: the worker carries on
+                with self._lock:
+                    closed = self._closed
+                if not closed:
+                    logger.exception("%s: futures schedules: a lookup failed", self._label)
+                self._failure(contracts | products, f"looking it up failed: {error!r}")
+                with self._lock:
+                    unknown = {c: None for c in contracts if c not in self._products}
+                    self._products = MappingProxyType({**self._products, **unknown})
+            with self._idle:
+                self._served += len(items)
+                self._idle.notify_all()
+
+    def _load_contracts(self, contracts: set[str]) -> set[str]:
+        """Look up the products of contracts and publish them.
+
+        Args:
+            contracts: Contract tickers.
+
+        Returns:
+            The products found whose schedules are not loaded yet.
+        """
+        found: dict[str, str | None] = dict.fromkeys(contracts)
+        ordered = sorted(contracts)
+        try:
+            with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
+                for start in range(0, len(ordered), _TICKERS_PER_REQUEST):
+                    chunk = ordered[start : start + _TICKERS_PER_REQUEST]
+                    query = {"ticker.any_of": tuple(chunk), "limit": _PAGE}
+                    for row in self._fetch(
+                        self._contracts_path, query, bucket=_BUCKET, cancel=lane
+                    ):
+                        ticker, product = row.get("ticker"), row.get("product_code")
+                        if isinstance(ticker, str) and isinstance(product, str) and ticker in found:
+                            found[ticker] = found[ticker] or product
+        except MassiveError as error:
+            self._failure(contracts, f"looking up its product failed: {error}")
+            with self._lock:
+                unknown = {c: None for c in contracts if c not in self._products}
+                self._products = MappingProxyType({**self._products, **unknown})
+            return set()
+        now = self._clock()
+        with self._lock:
+            self._products = MappingProxyType({**self._products, **found})
+            for contract in contracts:
+                self._failed.pop(contract, None)
+                self._waiting.pop(contract, None)
+            loaded = set(self._sessions)
+            for product in found.values():
+                # A product found here is loaded at once, without `_due`: its patience starts.
+                if product is not None and product not in loaded:
+                    self._waiting.setdefault(product, now)
+        return {product for product in found.values() if product is not None} - loaded
+
+    def _load_schedules(self, products: set[str]) -> None:
+        """Load the sessions of products around today and publish them.
+
+        Args:
+            products: Product codes.
+        """
+        today = futures_session(datetime.fromtimestamp(self._clock(), UTC))
+        query = {
+            "product_code.any_of": tuple(sorted(products)),
+            "session_end_date.gte": today - _DAYS_BACK,
+            "session_end_date.lte": today + _DAYS_AHEAD,
+            "limit": _PAGE,
+        }
+        try:
+            with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
+                rows = self._fetch(self._schedules_path, query, bucket=_BUCKET, cancel=lane)
+        except MassiveError as error:
+            self._failure(products, f"loading its schedule failed: {error}")
+            return
+        events: dict[str, dict[date, list[int]]] = {product: {} for product in products}
+        for row in rows:
+            product, day, stamp = (
+                row.get(k) for k in ("product_code", "session_end_date", "timestamp")
+            )
+            if product in events and isinstance(day, str) and isinstance(stamp, str):
+                events[product].setdefault(date.fromisoformat(day), []).append(_ns(stamp))
+        loaded = {
+            product: tuple(
+                ScheduledSession(day, min(stamps), max(stamps))
+                for day, stamps in sorted(found.items())
+            )
+            for product, found in events.items()
+        }
+        now = self._clock()
+        with self._lock:
+            self._sessions = MappingProxyType({**self._sessions, **loaded})
+            for product in loaded:
+                # A schedule just loaded counts as asked for: a miss reloads it only after
+                # `RELOAD_SPACING`, however its load was asked for.
+                self._loaded[product] = self._asked[product] = now
+                self._failed.pop(product, None)
+                self._waiting.pop(product, None)
+
+    def _failure(self, keys: set[str], why: str) -> None:
+        """Record that loading some contracts or products failed, and log it once.
+
+        Their rows keep the rule's date and are reported as misses; they are asked for again
+        after `RELOAD_SPACING`. Nothing is logged once the calendar is closed: a lookup cut
+        short by the session closing is no failure.
+
+        Args:
+            keys: The contracts or products.
+            why: The failure, for the log and the misses.
+        """
+        with self._lock:
+            closed = self._closed
+            for key in keys:
+                self._failed[key] = why
+                self._waiting.pop(key, None)
+        if not closed:
+            logger.error(
+                "%s: futures schedules: %s (%s)", self._label, why, ", ".join(sorted(keys))
+            )
+
+
+_NOT_LOADED: Final = f"its schedule was not loaded after {LOAD_PATIENCE.seconds} s"
+"""The reason of a miss whose contract or product is still loading after `LOAD_PATIENCE`."""
+
+
+def _outside(product: str, sessions: tuple[ScheduledSession, ...], *, before: bool) -> str:
+    """Return why a row outside a product's loaded sessions is a miss.
+
+    The text names the loaded schedule's first or last session, not the row's instant, so the
+    rows of one product and rule date share one miss, however many instants they hold.
+
+    Args:
+        product: The product.
+        sessions: Its loaded sessions, oldest first; possibly none.
+        before: True for a row before the first session, False for one after the last.
+
+    Returns:
+        The reason, such as `its loaded schedule (ES) ends with the session of 2024-04-01`.
+    """
+    if not sessions:
+        return f"its loaded schedule ({product}) holds no session"
+    if before:
+        return f"its loaded schedule ({product}) begins with the session of {sessions[0].day}"
+    return f"its loaded schedule ({product}) ends with the session of {sessions[-1].day}"

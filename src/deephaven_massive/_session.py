@@ -15,7 +15,8 @@ so the dataset layer never has to find the namespace modules itself.
 
 The module also numbers sessions (`MassiveSession #1`, a per-process counter, used in the
 `repr`, in error messages, and in the same-key WARNING) and keeps the weak registry of open
-sessions that warns when a second open session uses the same API key.
+sessions that warns when a second open session uses the same API key with different connection
+settings, so the two cannot share their WebSocket connections.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from deephaven.table import Table
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
 from deephaven_massive._namespaces import (
     crypto,
     economy,
@@ -115,11 +116,17 @@ def _next_label() -> str:
 
 
 def _register(core: SessionCore) -> None:
-    """Record a new open session and warn if another open session uses the same key.
+    """Record a new open session; warn if one with the same key cannot share its connections.
 
-    Individual Massive plans allow one WebSocket connection per cluster per account, so a
-    second session with the same key would make the two compete for connection slots. Sessions
-    are held weakly; closed and collected ones do not count.
+    Individual Massive plans allow one WebSocket connection per cluster per account, so
+    sessions of one process with the same key share their connections. They can only when
+    every connection setting (`CONNECTION_SETTINGS`) is equal: a connection carries one value
+    of each. A new session whose settings differ from those of an open session with the same
+    key gets connections of its own, which compete with the other session's for the slot, so
+    a WARNING names the first such session and the settings that differ. Sessions on
+    different Deephaven update graphs never share either; that is not warned about, since a
+    worker normally has one graph. Sessions are held weakly; closed and collected ones do not
+    count.
 
     Args:
         core: The new session's core.
@@ -129,17 +136,22 @@ def _register(core: SessionCore) -> None:
         _open_sessions[:] = [weakref.ref(other) for other in alive]
         _open_sessions.append(weakref.ref(core))
         others = sorted(
-            other.label
+            (other.label, other.config)
             for other in alive
             if other.config.api_key == core.config.api_key and not other.closed
         )
-    if others:
-        logger.warning(
-            "%s uses the same API key as %s; individual plans allow one WebSocket connection "
-            "per cluster per account, so the sessions will compete for connection slots",
-            core.label,
-            others[0],
-        )
+    for label, config in others:
+        differ = [n for n in CONNECTION_SETTINGS if getattr(config, n) != getattr(core.config, n)]
+        if differ:
+            logger.warning(
+                "%s uses the same API key as %s with different connection settings (%s), so "
+                "the two cannot share WebSocket connections; on an individual plan, which "
+                "allows one connection per cluster, they compete for it",
+                core.label,
+                label,
+                ", ".join(differ),
+            )
+            return
 
 
 class MassiveSession:
@@ -152,14 +164,18 @@ class MassiveSession:
     further from console globals that every user of a worker can read.
 
     Dataset methods hang off the namespaces (`m.stocks.trades(...)`) and return queries; verbs
-    on a query return Deephaven tables. Live results are released automatically when garbage
-    collected, deterministically with `m.release(table)`, and all at once from the network
-    side with `m.close()`. As a context manager the session closes on exit, which suits
-    scripts whose results are static.
+    on a query return Deephaven tables. A live table keeps running, and keeps its session
+    running, for as long as it, or a table derived from it, is in use, even after the session
+    object itself was dropped. Live results are released automatically when garbage collected,
+    or at once with `m.release(table)`; `m.close()` stops everything and fails every live
+    table. As a context manager the session closes on exit, which suits scripts whose results
+    are static.
 
+    Sessions of one process with the same API key share their WebSocket connections
+    (individual plans allow one connection per cluster per account), as long as their
+    connection settings are equal; otherwise a WARNING says that they compete for the slot.
     The session's label (`MassiveSession #1`, a per-process counter) appears in its `repr`, in
-    the WARNING logged when a second open session uses the same key (individual plans allow
-    one WebSocket connection per cluster per account), and in error messages. Thread-safe.
+    that WARNING, and in error messages. Thread-safe.
 
     Example:
         ::
@@ -172,7 +188,7 @@ class MassiveSession:
             conns = m.connections()  # live diagnostics: connections and host decisions
             streams = m.streams()  # live diagnostics: one row per stream
             limits = m.rate_limits()  # live diagnostics: REST pace and pauses per subscription
-            m.close()  # live tables go static; verbs now raise MassiveError
+            m.close()  # live tables fail (keeping their rows); verbs now raise MassiveError
 
             with dm.MassiveSession() as m2:  # closes on exit
                 m2.partners.benzinga  # <MassiveSession #2 partners.benzinga>
@@ -379,15 +395,18 @@ class MassiveSession:
         `BufferedRows` (rows a connection received that no flush has taken yet; a WARNING is
         logged when they pass 1,000,000), the last error, and `SchemaDrift`: the fields a
         connection's frames had beyond the documented schema (`channel:field+`) or lacked
-        (`channel:field-`). The table is the session's; do not edit it. After `close()` this
-        raises `MassiveError` (see `SessionCore.require_open`).
+        (`channel:field-`). A connection shared with another session of the same API key shows
+        in both. Each call returns a new view, a live result like any other: while it is held it
+        keeps the session running and current, and after `close()` it keeps showing the final
+        rows. After `close()` this raises `MassiveError` (see `SessionCore.diagnostics_view`).
 
         Returns:
-            The `connections` table, keyed by `Transport`, `AssetClass`, and `Family`;
-            its columns are `CONNECTIONS` in `_tables/diagnostics.py`.
+            A view of the `connections` table, keyed by `Transport`, `AssetClass`, and
+            `Family`; its columns are `CONNECTIONS` in `_tables/diagnostics.py`.
+
+        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
         """
-        self._core.require_open()
-        return self._core.diagnostics.connections
+        return self._core.diagnostics_view(self._core.diagnostics.connections)
 
     def streams(self) -> Table:
         """Return the live diagnostics table of streams and `poll()` tables.
@@ -396,14 +415,19 @@ class MassiveSession:
         host, rows published, requests per poll cycle, state, error, and `SchemaDrift`: the
         fields the stream's payloads had beyond the documented schema (`transport:field+`) or
         lacked (`transport:field-`), shown apart from the error because drift is not a
-        failure. After `close()` this raises `MassiveError`.
+        failure. `Error` also shows warnings that do not stop a stream: the options cap's
+        deferral, and the wait for a WebSocket slot that another connection with the key (for
+        example from another process) holds. Each call returns a new view, a live result like
+        any other: while it is held it keeps the session running and current, and after
+        `close()` it keeps showing the final rows, `CLOSED` included.
 
         Returns:
-            The `streams` table, keyed by `StreamId`; its columns are
-            `STREAMS` in `_tables/diagnostics.py`.
+            A view of the `streams` table, keyed by `StreamId`; its columns are `STREAMS` in
+            `_tables/diagnostics.py`.
+
+        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
         """
-        self._core.require_open()
-        return self._core.diagnostics.streams
+        return self._core.diagnostics_view(self._core.diagnostics.streams)
 
     def rate_limits(self) -> Table:
         """Return the live diagnostics table of REST rate limits, one row per subscription.
@@ -417,24 +441,29 @@ class MassiveSession:
         `MassiveConfig.rest_basic_subscriptions`, or `LEARNED` from Massive's refusal), the
         requests in flight, waiting, and in the last window, totals of requests and refusals,
         `PausedUntil`, and the latest refusal. Sessions of this process that use the same API
-        key share one governor, so their tables show the same rows. The table is the
-        session's; do not edit it. After `close()` this raises `MassiveError`.
+        key share one governor, so their tables show the same rows. Each call returns a new
+        view, a live result like any other: while it is held it keeps the session running and
+        current, and after `close()` it keeps showing the final rows.
 
         Returns:
-            The `rate_limits` table, keyed by `Subscription`; its columns are `RATE_LIMITS`
+            A view of the `rate_limits` table, keyed by `Bucket`; its columns are `RATE_LIMITS`
             in `_tables/diagnostics.py`.
+
+        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
         """
-        self._core.require_open()
-        return self._core.diagnostics.rate_limits
+        return self._core.diagnostics_view(self._core.diagnostics.rate_limits)
 
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
         The library's hold on the table is released on the session's reaper thread, right
         away. The table keeps ticking only while something else holds it (a derived table, an
-        open UI panel); once nothing does, its stream unsubscribes. Releasing a result twice
-        does nothing, and `release()` keeps working after `close()`. Static results
-        (`fetch()`, `history()`) are not tracked.
+        open UI panel); once nothing does, its stream unsubscribes, or its poller stops. A table
+        derived in the console is held only weakly by the console, so after `del` it keeps its
+        stream running until the JVM next collects it: usually seconds, but unbounded on an idle
+        heap; `close()` stops everything at once. Releasing a result twice does nothing, and
+        `release()` keeps working after `close()`. Static results (`fetch()`, `history()`) are
+        not tracked.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -449,22 +478,37 @@ class MassiveSession:
             raise ValueError("table is not a live result of this session")
 
     def close(self) -> None:
-        """Close every connection and poller; live tables go static. Idempotent.
+        """Stop every stream and poller of the session now, and fail every live table. Idempotent.
 
-        Publishers are not failed, so live tables keep their rows and stop updating;
-        `m.streams()` shows every stream `CLOSED` before the diagnostics tables are released.
-        "session closed; N live tables are now static" is logged, at WARNING when N > 0. After
-        `close()`, verbs, `connections()`, `streams()`, and `rate_limits()` raise
+        Every live table of the session, and every table derived from one, fails with
+        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`, whatever
+        still holds it, so no table is left looking live while it never changes. A failed table
+        keeps its rows: `t.snapshot()`, `deephaven.pandas.to_pandas(t)`, and
+        `deephaven.arrow.to_arrow(t)` still return them, so take `t.snapshot()` to keep working
+        with the data; a new operation on `t` itself (`t.where(...)`) raises "Can not listen to
+        failed table". `m.streams()` shows every stream `CLOSED` (one that had already failed
+        keeps `FAILED`), and a `connections()` or `streams()` table taken before the close
+        keeps its final rows. The session's streams leave their WebSocket connections, and
+        every connection no other session of the same key uses is closed. "MassiveSession #1
+        closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
+        `connections()`, `streams()`, and `rate_limits()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
-        and `release()` keep working. On an update-graph thread it raises `ValueError`, even
-        when the session is already closed.
+        and `release()` keep working. On an
+        update-graph thread it raises `ValueError`, even when the session is already closed.
+
+        Example:
+            ::
+
+                trades = m.stocks.trades("AAPL").append_only()
+                m.close()
+                rows = trades.snapshot()  # a static copy of the rows received before the close
         """
         self._core.close()
 
     def __enter__(self) -> Self:
         """Enter a `with` block; the session closes when the block exits.
 
-        Use it for scripts whose results are static: live tables stop updating on exit.
+        Use it for scripts whose results are static: live tables fail on exit (`close()`).
 
         Returns:
             The session.

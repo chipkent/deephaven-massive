@@ -13,10 +13,9 @@ failure can fail the table (`publish_failure`) in every mode:
   poller keeps every identity it appended for its whole life: each is a row the append-only
   table holds, so the set never outgrows the table, and no row is ever appended twice.
 - `UPSERT`: the blink table's `last_by` on the dataset's poll keys (`DatasetSpec.poll_keys`):
-  keyed, and a key never leaves. When the poll keys are every column
-  (`reference.related_companies`), `last_by` has nothing to aggregate, so the result is the
-  blink table's `select_distinct` on them instead: each distinct row once, accumulated over
-  every cycle, which is what that `last_by` would keep.
+  keyed, and a key never leaves. Poll keys that are every vendor column
+  (`reference.related_companies`) still leave `TimestampInsert` to aggregate, so each distinct
+  row is kept once, with the time of the latest poll that returned it.
 - `REPLACE`: the same `last_by`, plus one *tombstone* row for each key the previous cycle had
   and this one lacks, marked in a hidden boolean column that the result filters on and drops;
   so a key absent from the latest cycle leaves the table, also when the cycle is empty. A cycle
@@ -24,6 +23,9 @@ failure can fail the table (`publish_failure`) in every mode:
   `last_by` state keeps a hidden row for every key ever seen, as the `last_by()` of a stream
   does, so a `REPLACE` table over a churning key set (an options chain, the day's movers) grows
   with the keys it has ever held.
+
+Every row's `TimestampInsert` is when its page of the cycle arrived, so in a keyed table it is
+the time of the latest poll that returned the row; it is never part of a row's identity.
 
 A cycle reads a reactive symbol table once, with `Table.snapshot()` on the poller thread (never
 in a listener), and requests the dataset's fetch path for the symbols it holds; a fan-out path
@@ -42,16 +44,18 @@ reference data does not give). Any other error, also one while publishing,
 is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds.
 
-**Lifetime.** The poller ends when its table is released (`m.release`, or garbage collection
-through the reaper), when the table's blink table shuts down, when it fails, or when the
-session closes: every live poller is registered with the session's `Pollers`, which the
-session's REST closer stops, and a poller can no longer be registered once that has run, so a
-`poll()` that races `close()` never starts a poller the session would not stop. A stopped poller
-finishes a request already on the wire, stops at once a request still waiting for the rate
-governor (its stop token is the cycle's `Cancel`), and publishes nothing more; the table keeps its
-rows. The
-poller holds the session core only through a weak reference, so a `poll()` table never keeps an
-unclosed session from being collected (whose collection then stops the poller).
+**Lifetime.** A poll keeps polling while its table is in use, by the result or by anything
+derived from it. Releasing the result (`m.release`, or garbage collection through the reaper)
+only marks its row `RELEASED`; the poller ends when the poll's blink table shuts down, which
+happens once nothing uses the table any more, when the table fails, or when the session closes,
+which fails the table (`Poller.fail`) after stopping the poller. Every live poller is also
+registered with the session's `Pollers`, which the session's REST closer stops, and a poller can
+no longer be registered once that has run, so a `poll()` that races `close()` never starts a
+poller the session would not stop. A stopped poller finishes a request already on the wire,
+stops at once a request still waiting for the rate governor (its stop token is the cycle's
+`Cancel`), and publishes nothing more; a failed table keeps its rows. The poller holds the
+session core only through a weak reference; the poll's record in the session keeps the session
+alive while the poll runs (`SessionCore.register_poll`).
 """
 
 from __future__ import annotations
@@ -62,15 +66,15 @@ import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from deephaven import arrow as dh_arrow
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 from deephaven.stream.table_publisher import table_publisher
 
+from deephaven_massive._datasets.row_times import INSERT
 from deephaven_massive._datasets.schema import RAW_SYMBOL
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode
@@ -81,7 +85,7 @@ from deephaven_massive._errors import (
     PermanentError,
 )
 from deephaven_massive._massive import Cancel, Transport
-from deephaven_massive._tables.columns import col_defs, describe
+from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
 from deephaven_massive._tables.watchlist import read_symbols
@@ -297,9 +301,12 @@ class Poller:
 
     Created by `open_poll` on the caller thread, which builds the table (`build`), registers
     the poller, and then starts its thread (`start`). The thread enters the session's execution
-    context for its whole life. Every other method is safe from any thread: `stop` and
-    `release` only set an event and update registries. The key state of `REPLACE` and `APPEND`
-    belongs to the thread alone, so it takes no lock.
+    context for its whole life, and leaves the session's `Pollers` when it ends. Every other
+    method is safe from any thread: `stop` and `release` only set an event and update
+    registries, and `fail` fails the table. The key state of `REPLACE` and `APPEND` belongs to
+    the thread alone, so it takes no lock; the publish lock, below which only `registry_lock`
+    is taken (a cycle's rows are converted to a table before it), keeps a failure and an `add`
+    from interleaving and makes the failure once-only.
     """
 
     __slots__ = (
@@ -307,6 +314,7 @@ class Poller:
         "_clock",
         "_core",
         "_exec_ctx",
+        "_failed",
         "_interval",
         "_key_names",
         "_keys",
@@ -314,6 +322,7 @@ class Poller:
         "_max_concurrency",
         "_mode",
         "_pollers",
+        "_publish_lock",
         "_published",
         "_publisher",
         "_read",
@@ -374,6 +383,8 @@ class Poller:
         self._clock = clock
         self._stop = stop
         self._publisher = publisher
+        self._publish_lock = threading.Lock()
+        self._failed = False
         self._keys: set[tuple[Hashable, ...]] = set()
         # The identities an APPEND table holds; only the poller thread touches it.
         self._seen: set[tuple[Hashable, ...]] = set()
@@ -401,31 +412,52 @@ class Poller:
         self._stop.set()
 
     def release(self) -> None:
-        """The table was released: stop, leave the session's pollers, mark the row `RELEASED`.
+        """The result was released: mark the row `RELEASED`; the poller keeps running.
 
         Runs on the reaper thread as the result record's `on_released` callback, so it takes
-        no lock beyond the leaf locks of the registries it updates.
+        no lock beyond the leaf locks of the registries it updates. A table derived from the
+        result may still use the poll; the poller stops when the poll's blink table shuts down.
+        The session is alive: the poll's record keeps it in the live set until this has run.
+        """
+        cast("SessionCore", self._core()).release_poll(self._stream_id)
+
+    def fail(self, error: MassiveError) -> bool:
+        """Stop the poller and fail its table, once: the session closed, or a thread died.
+
+        The session's hook for the poll (`SessionCore.register_poll`), called outside every lock
+        while the poll is registered, so the session is alive. The row is updated first
+        (`SessionCore.fail_stream`, which keeps a `CLOSED` row as it is), then the table fails;
+        a table that already failed is left alone.
+
+        Args:
+            error: The error the table fails with.
+
+        Returns:
+            False when the table had already failed.
         """
         self._stop.set()
-        self._pollers.discard(self)
-        core = self._core()
-        if core is not None:
-            core.release_poll(self._stream_id)
+        return self._fail_once(cast("SessionCore", self._core()), error)
 
     def _run(self) -> None:
-        """Run cycles until stopped or failed, waiting `interval` from one start to the next."""
-        with (
-            entered(self._exec_ctx),
-            ThreadPoolExecutor(
-                self._max_concurrency, f"{self._label} poll #{self._stream_id}"
-            ) as pool,
-        ):
-            while not self._stop.is_set():
-                began = self._clock.monotonic()
-                if not self._cycle(pool):
-                    return
-                remaining = self._interval - (self._clock.monotonic() - began)
-                self._clock.wait(self._stop, max(remaining, 0.0))
+        """Run cycles until stopped or failed, waiting `interval` from one start to the next.
+
+        The poller leaves the session's `Pollers` when the thread ends, however it ends.
+        """
+        try:
+            with (
+                entered(self._exec_ctx),
+                ThreadPoolExecutor(
+                    self._max_concurrency, f"{self._label} poll #{self._stream_id}"
+                ) as pool,
+            ):
+                while not self._stop.is_set():
+                    began = self._clock.monotonic()
+                    if not self._cycle(pool):
+                        return
+                    remaining = self._interval - (self._clock.monotonic() - began)
+                    self._clock.wait(self._stop, max(remaining, 0.0))
+        finally:
+            self._pollers.discard(self)
 
     def _symbols(self) -> NormalizedSymbols | None:
         """Return the cycle's symbols, reading a reactive table once.
@@ -466,7 +498,7 @@ class Poller:
             return self._publish_cycle(core, pool)
         except _FATAL as error:
             if not self._stop.is_set():
-                self._fail(core, error)
+                self._fail_once(core, error)
             return False
         except MassiveError as error:  # any other library error: the next cycle runs
             return self._carry_on(core, error)
@@ -532,7 +564,8 @@ class Poller:
             table: The cycle's rows in the dataset's schema.
 
         Returns:
-            How many of the cycle's rows were published (tombstones not counted).
+            How many of the cycle's rows were published (tombstones not counted); 0 once the
+            table has failed, when nothing is published.
         """
         self._check_keys(table)
         keys = None
@@ -543,8 +576,14 @@ class Poller:
         elif self._mode is PollMode.APPEND:
             table, identities = self._fresh(table)
             published = table.num_rows
-        if table.num_rows:
-            self._publisher.add(dh_arrow.to_table(table))
+        # Converted before the publish lock, which is a leaf: the conversion may take the
+        # update-graph lock.
+        rows = dataset_table(table, self._schema.date_columns) if table.num_rows else None
+        with self._publish_lock:
+            if self._failed:  # the session closed after the stop check: publish nothing
+                return 0
+            if rows is not None:
+                self._publisher.add(rows)
         # The key state changes only once the cycle is published: if it failed, the next
         # cycle still tombstones the keys this one dropped, or appends the rows it skipped.
         if keys is not None:
@@ -571,8 +610,9 @@ class Poller:
 
         Raises:
             RowDataError: Naming the dataset, the key column, the first such row's position in
-                the cycle, and that row's non-null values, truncated to `_ROW_TEXT`
-                characters, so the row can be found although it was never published.
+                the cycle, and that row's non-null values but its `TimestampInsert`, truncated
+                to `_ROW_TEXT` characters, so the row can be found although it was never
+                published.
         """
         nullable = self._spec.nullable_poll_keys
         # In a WARN session the key holds RawSymbol (`key_columns`): a row's Symbol is null
@@ -586,7 +626,8 @@ class Poller:
             row = pc.index(missing, True).as_py()
             if row >= 0:
                 (values,) = table.slice(row, 1).to_pylist()
-                text = repr({k: v for k, v in values.items() if v is not None})
+                # The row as Massive sent it: the arrival time is the library's own.
+                text = repr({k: v for k, v in values.items() if v is not None and k != INSERT})
                 text = text if len(text) <= _ROW_TEXT else text[: _ROW_TEXT - 3] + "..."
                 raise RowDataError(
                     f"{self._spec.name} poll(): row {row} of the cycle has a null poll key "
@@ -646,19 +687,33 @@ class Poller:
         tombstones = pa.Table.from_arrays(columns, schema=rows.schema)
         return pa.concat_tables([rows, tombstones]), keys
 
-    def _fail(self, core: SessionCore, error: MassiveError) -> None:
-        """Mark the table's row `FAILED`, then fail the table with `error`; log it at ERROR.
+    def _fail_once(self, core: SessionCore, error: MassiveError) -> bool:
+        """Mark the row `FAILED`, then fail the table, once; log it at ERROR.
 
-        The failure is recorded first, as `StreamSink.fail` does for a stream, so the `FAILED`
-        row is on its way to `m.streams()` before anyone can see the table failed.
+        The failure is recorded first, as `StreamSink.fail` does for a stream, so the row is on
+        its way to `m.streams()` before anyone can see the table failed. When the session's
+        close came first, the table fails with the close's error instead and nothing is logged,
+        so the table and its `CLOSED` row name the same cause. The table counts as failed only
+        once `publish_failure` has returned, so a failure that raises can be retried.
 
         Args:
             core: The session's core.
             error: The failure.
+
+        Returns:
+            False when the table had already failed.
         """
-        logger.error("%s poll() failed: %s", self._spec.name, error)
-        core.fail_stream(self._stream_id, str(error))
-        self._publisher.publish_failure(error)
+        with self._publish_lock:
+            if self._failed:
+                return False
+            closed = core.fail_stream(self._stream_id, str(error))
+            if closed is None:
+                logger.error("%s poll() failed: %s", self._spec.name, error)
+            self._publisher.publish_failure(
+                error if closed in (None, str(error)) else MassiveError(closed)
+            )
+            self._failed = True
+            return True
 
 
 _SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})
@@ -688,32 +743,39 @@ def key_columns(spec: DatasetSpec, schema: Schema) -> tuple[str, ...]:
 
 
 def build_table(
-    spec: DatasetSpec, schema: Schema, mode: PollMode, *, stream_id: int, stop: Cancel
+    spec: DatasetSpec,
+    schema: Schema,
+    mode: PollMode,
+    *,
+    stream_id: int,
+    on_shutdown: Callable[[], None],
 ) -> tuple[Table, TablePublisher]:
     """Create a `poll()` table's publisher and the result shaped from its blink table.
 
     Runs on the caller thread, inside the result's liveness scope and the session's execution
     context. The publisher is named `massive.<dataset>#<stream id>`, and its blink table's
-    shutdown (the result's release, or a failure) sets `stop`.
+    shutdown (nothing uses the table any more, or it failed) runs `on_shutdown`.
 
     Args:
         spec: The dataset, for its name and poll keys.
         schema: The dataset's schema.
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
-        stop: The poller's stop token.
+        on_shutdown: The blink table's `on_shutdown_callback`: it stops the poller and tells
+            the session (`_shut_down`).
 
     Returns:
         The result (append-only for `APPEND`, the `last_by` of the poll keys for `UPSERT`,
-        or their `select_distinct` when they are every column, and for `REPLACE` that
-        `last_by` without its tombstones and their hidden column) and the publisher.
+        and for `REPLACE` that `last_by` without its tombstones and their hidden column) and
+        the publisher. Every schema ends with `TimestampInsert`, which no dataset keys on, so
+        `last_by` always has a column to aggregate.
     """
     definitions = col_defs(schema)
     replace = mode is PollMode.REPLACE
     if replace:
         definitions[LIVE_COLUMN] = dtypes.bool_
     blink, publisher = table_publisher(
-        f"massive.{spec.name}#{stream_id}", definitions, on_shutdown_callback=stop.set
+        f"massive.{spec.name}#{stream_id}", definitions, on_shutdown_callback=on_shutdown
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
@@ -725,6 +787,24 @@ def build_table(
     if not replace:
         return keyed, publisher
     return keyed.where(LIVE_COLUMN).drop_columns(LIVE_COLUMN), publisher
+
+
+def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel) -> None:
+    """A `poll()` blink table's shutdown callback: stop the poller and tell the session.
+
+    Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
+    thread after a failure, a gRPC thread, or Deephaven's liveness-cleanup thread), so it only
+    sets a token and updates the registry (`SessionCore.poll_shut_down`). The session is alive:
+    the poll's record keeps it in the live set until this has run, and before the record
+    exists the opening caller holds it.
+
+    Args:
+        core_ref: The session's core, weakly.
+        stream_id: The table's `StreamId`.
+        stop: The poller's stop token.
+    """
+    stop.set()
+    cast("SessionCore", core_ref()).poll_shut_down(stream_id)
 
 
 def _build(
@@ -742,7 +822,7 @@ def _build(
         spec: The dataset.
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
-        stop: The poller's stop token.
+        stop: The poller's stop token, set when the blink table shuts down.
 
     Returns:
         The result and its publisher (`build_table`), and the result scope. The result is the
@@ -755,7 +835,10 @@ def _build(
     schema = core.dataset_schema(spec)
 
     def shape() -> Table:
-        table, publisher = build_table(spec, schema, mode, stream_id=stream_id, stop=stop)
+        on_shutdown = functools.partial(_shut_down, weakref.ref(core), stream_id, stop)
+        table, publisher = build_table(
+            spec, schema, mode, stream_id=stream_id, on_shutdown=on_shutdown
+        )
         built.append(publisher)
         return describe(table, spec, schema)
 
@@ -780,10 +863,12 @@ def open_poll(
 
     On the caller thread: the publisher and the result are created inside the result's own
     liveness scope (in the session's execution context); the table's row is registered in
-    `m.streams()` with a new `StreamId`; the poller joins the session's pollers; and the result
-    is tracked, so that releasing it stops the poller. Only then does the poller's thread
-    start. If any step raises, even `KeyboardInterrupt`, every step already taken is undone
-    and nothing keeps running.
+    `m.streams()` with a new `StreamId`, which keeps the session alive while the poll runs; the
+    poller joins the session's pollers; and the result is tracked, so that releasing it marks
+    the row released. Only then does the poller's thread start, unless the session closed
+    meanwhile: the result is then released and the closed session's `MassiveError` raised. If
+    any step raises, even `KeyboardInterrupt`, every step already taken is undone and nothing
+    keeps running.
 
     Args:
         core: The session's core.
@@ -800,8 +885,11 @@ def open_poll(
     Returns:
         The live table.
 
-    A session closed before the poller could be registered raises the `MassiveError` of
-    `SessionCore.register_poll` or `Pollers.add`.
+    Raises:
+        MassiveError: If the session closed after the poll was registered but before its
+            poller started (`"MassiveSession #1 is closed"`). One closed before the poll could
+            be registered raises the `MassiveError` of `SessionCore.register_poll` or
+            `Pollers.add`.
     """
     stream_id = core.next_stream_id()
     stop = Cancel()
@@ -835,7 +923,8 @@ def open_poll(
                 host=host,
                 path=path,
                 created_at=time.time_ns(),
-            )
+            ),
+            fail=poller.fail,
         )
         registered = True
         pollers.add(poller)
@@ -850,5 +939,8 @@ def open_poll(
             with entered(core.exec_ctx):
                 scope.release()
         raise
+    if core.closed:  # close() failed the table meanwhile; never start its poller
+        core.results.release(result)
+        raise MassiveError(f"{core.label} is closed")
     poller.start()
     return result

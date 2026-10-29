@@ -5,22 +5,32 @@ channel, a flat-file prefix) is a generated `Source` of the wire package, whose 
 carry their long-form PascalCase columns and wire types. This module turns those sources into
 the dataset's table shape:
 
-- `ColumnType`, the closed set of Deephaven column types (`Instant`, `LocalDate`, `double`,
-  `long`, `int`, `String`, `boolean`, `int[]`), each with its Arrow type, and `COLUMN_TYPES`,
-  the fixed map from a field's `WireType` to its column type.
+- `ColumnType`, the closed set of Deephaven column types (`Instant`, `double`, `long`, `int`,
+  `String`, `boolean`, `int[]`), each with its Arrow type, and `COLUMN_TYPES`, the fixed map
+  from a field's `WireType` to its column type. Every calendar date is ISO `yyyy-MM-dd` text,
+  a `String`, so a date joins and compares as text; `Column.calendar_date` marks those
+  columns, and the Deephaven side stores one shared `String` per distinct date
+  (`_tables/columns.py` `dataset_table`), so a date costs a reference per row. A date is a
+  stored column, never a `LocalDate` and never a view computed on read; instants stay
+  `Instant`. The library's time columns (`row_times.py`) own their names: no vendor field
+  keeps `Timestamp` or any `Timestamp<Qualifier>` outside a declared key, and on a tick, bar,
+  or daily-summary dataset none keeps `Date` either (a vendor `date` stays `Date` only on a
+  dataset without the library's `Date`, such as the economy data); no refresh `NAMES` entry
+  may coin one.
 - `Schema`, an ordered set of typed columns that turns row dictionaries into an Arrow table
   (used by the diagnostics tables, whose rows are built in Python).
-- `rename`, the run-time key rename of one source for one dataset: the source's fields,
-  through the projection of the dataset's membership of its kind, with the dataset's declared
-  key columns renamed to `Symbol`, `Timestamp`, and `Underlying` (a fan-out key that is no
-  instrument, such as a filer CIK, keeps its column), and a key the source does
-  not carry (one filled from the request) added as a constant `String` column. Nothing else
-  changes. `required_fields` resolves the keys a source must carry back to the generated
-  fields behind them, for the wire clients' required-key checks.
+- `rename`, the run-time key rename of one source for one dataset: the source's fields, through the
+  projection of the dataset's membership of its kind, with the dataset's declared key columns
+  renamed to `Symbol`, `Timestamp` (for a bar, `TimestampStart`), `TimestampEnd`, `Underlying`, and
+  `Date` (a fan-out key that is no instrument, such as a filer CIK, keeps its column), and a key the
+  source does not carry (one filled from the request) added as a constant `String` column. Nothing
+  else changes. `required_fields` resolves the keys a source must carry back to the generated fields
+  behind them, for the wire clients' required-key checks.
 - `dataset_schema`, the merge: the ordered union by column name of the renamed columns of
-  every source of every member of the dataset's kind (`Catalog.members`), `Symbol` and
-  `Timestamp` first where the dataset declares them, each column's wire type
-  the lattice join (`join`) of every contribution. Every member of a kind therefore has the
+  every source of every member of the dataset's kind (`Catalog.members`), with the library's
+  own time columns (`row_times`): `Symbol`, `Date`, and `Timestamp` or `TimestampStart` and
+  `TimestampEnd` first, `TimestampInsert` last, each column's wire type the lattice join
+  (`join`) of every contribution. Every member of a kind therefore has the
   same columns: crypto trades carry the stocks-only `Tape`, always null. Each column also gets
   one description chosen for the dataset, the transports that fill it, and the wire keys behind
   it (`Column`); every result's column descriptions and the queries' `columns()` tables read
@@ -37,9 +47,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -47,6 +57,16 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from deephaven_massive._datasets.dates import DAY_ZONE_NAMES, DAY_ZONES, NEW_YORK
+from deephaven_massive._datasets.row_times import (
+    DATE,
+    END,
+    INSERT,
+    START,
+    TIMESTAMP,
+    RowTimes,
+    time_column,
+)
 from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._errors import MassiveError
@@ -54,6 +74,7 @@ from deephaven_massive._massive import Transport, WireType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from datetime import tzinfo
 
     from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
     from deephaven_massive._massive import Field, Source
@@ -88,12 +109,11 @@ class ColumnType(StrEnum):
 
     Each member knows its Arrow type (`arrow_type`); its Deephaven type is `dh_type` in
     `_tables/columns.py`. A dataset column's type follows from its wire type (`COLUMN_TYPES`):
-    timestamps are `Instant`, calendar dates `LocalDate`, and condition codes `int[]`. `INT` is
-    used only by the library's own diagnostics tables.
+    timestamps are `Instant`, calendar dates ISO `yyyy-MM-dd` text (`String`), and condition
+    codes `int[]`. `INT` is used only by the library's own diagnostics tables.
     """
 
     INSTANT = "Instant"
-    LOCAL_DATE = "LocalDate"
     DOUBLE = "double"
     LONG = "long"
     INT = "int"
@@ -109,7 +129,6 @@ class ColumnType(StrEnum):
 
 _ARROW_TYPES: Final[Mapping[ColumnType, pa.DataType]] = {
     ColumnType.INSTANT: pa.timestamp("ns", tz="UTC"),
-    ColumnType.LOCAL_DATE: pa.date32(),
     ColumnType.DOUBLE: pa.float64(),
     ColumnType.LONG: pa.int64(),
     ColumnType.INT: pa.int32(),
@@ -124,35 +143,41 @@ COLUMN_TYPES: Final[Mapping[WireType, ColumnType]] = {
     WireType.BOOL: ColumnType.BOOLEAN,
     WireType.STRING: ColumnType.STRING,
     WireType.JSON_TEXT: ColumnType.STRING,
-    WireType.DATE: ColumnType.LOCAL_DATE,
+    WireType.DATE: ColumnType.STRING,
     WireType.EPOCH: ColumnType.INSTANT,
     WireType.ISO_INSTANT: ColumnType.INSTANT,
     WireType.INT_ARRAY: ColumnType.INT_ARRAY,
 }
-"""The column type of each wire type: `string` and `json-text` are both text, and an `epoch`
-and an `iso-instant` are both an `Instant`."""
+"""The column type of each wire type: `string` and `json-text` are both text, a `date` is ISO
+`yyyy-MM-dd` text too (every calendar date the library produces is), and an `epoch` and an
+`iso-instant` are both an `Instant`."""
 
 KEY_COLUMNS: Final[Mapping[str, str]] = {
     "symbol": "Symbol",
-    "time": "Timestamp",
+    "time": TIMESTAMP,
+    "end": END,
     "fanout": "Underlying",
+    "date": DATE,
 }
-"""The column each renamed key role takes. The `session` role keeps its generated column (the
-futures `SessionEndDate`), and so does a `fanout` key that is no instrument (`FilerCik`)."""
+"""The column each renamed key role takes. A bar's `time` key takes `TimestampStart` instead
+(`key_column`), and a `fanout` key that is no instrument keeps its own column (`FilerCik`)."""
 
 
-def key_column(role: str, key: KeySpec) -> str:
+def key_column(spec: DatasetSpec, role: str, key: KeySpec) -> str:
     """Return the dataset column one declared key takes.
 
     Args:
-        role: The key's role: `symbol`, `time`, `fanout`, or `session`.
+        spec: The dataset, whose row times decide where its `time` key goes.
+        role: The key's role: `symbol`, `time`, `end`, `fanout`, or `date`.
         key: The key's declaration.
 
     Returns:
-        `Symbol`, `Timestamp`, or `Underlying` for a key the rename moves (`KEY_COLUMNS`; a
-        `fanout` key only when it is an instrument); otherwise the key's own column, such as
-        `SessionEndDate` or `FilerCik`.
+        `Symbol`, `Timestamp` (for a bar or daily summary, `TimestampStart`), `TimestampEnd`,
+        `Underlying`, or `Date` (`KEY_COLUMNS`); a `fanout` key that is no instrument keeps
+        its own column, such as `FilerCik`.
     """
+    if role == "time":
+        return time_column(spec.times)
     if role in KEY_COLUMNS and key.instrument:
         return KEY_COLUMNS[role]
     return key.column
@@ -182,6 +207,9 @@ class Column:
         wire_keys: For each transport of `supplied_by`, the distinct wire keys behind the
             column, in the order of the dataset's sources, before any projection renames
             them; None stands for a key filled from the request. Excluded from hashing.
+        calendar_date: True for a calendar date, ISO `yyyy-MM-dd` text (`Date`, a vendor
+            `date` field): the Deephaven side stores one shared string per distinct date in
+            such a column (`_tables/columns.py`, `dataset_table`).
     """
 
     name: str
@@ -191,6 +219,7 @@ class Column:
     wire_keys: Mapping[Transport, tuple[str | None, ...]] = dataclass_field(
         default_factory=lambda: MappingProxyType({}), hash=False
     )
+    calendar_date: bool = False
 
 
 _INTEGER_TYPES: Final = frozenset({ColumnType.LONG, ColumnType.INT})
@@ -199,16 +228,14 @@ _INTEGER_TYPES: Final = frozenset({ColumnType.LONG, ColumnType.INT})
 def _coerce(value: object, column_type: ColumnType) -> object:
     """Prepare one Python value for `pa.array` of the column's Arrow type.
 
-    Five conversions Arrow does not do by itself: an ISO `YYYY-MM-DD` string becomes a `date`
-    for a `LocalDate` column; an ISO-8601 date-time string (`2024-06-24T18:33:53Z`) becomes
-    epoch nanoseconds for an `Instant` column, read as UTC when it carries no offset, keeping
-    every fraction digit down to the nanosecond; a dict or list becomes its JSON text for a
-    `String` column; a single integer becomes a one-element list for an `int[]` column; and an
-    integral `float` becomes an `int` for a `long` or `int` column, and for each element of an
-    `int[]` list, while any other `float` there is rejected, because Arrow would silently
-    truncate `7140.08` to `7140`. Everything else passes through for Arrow to check; in
-    particular a naive `datetime` object in an `Instant` column is read as UTC, as Arrow reads
-    it.
+    Four conversions Arrow does not do by itself: an ISO-8601 date-time string
+    (`2024-06-24T18:33:53Z`) becomes epoch nanoseconds for an `Instant` column, read as UTC when it
+    carries no offset, keeping every fraction digit down to the nanosecond; a dict or list becomes
+    its JSON text for a `String` column; a single integer becomes a one-element list for an `int[]`
+    column; and an integral `float` becomes an `int` for a `long` or `int` column, and for each
+    element of an `int[]` list, while any other `float` there is rejected, because Arrow would
+    silently truncate `7140.08` to `7140`. Everything else passes through for Arrow to check; in
+    particular a naive `datetime` object in an `Instant` column is read as UTC, as Arrow reads it.
 
     Args:
         value: A non-null value from a row.
@@ -222,8 +249,6 @@ def _coerce(value: object, column_type: ColumnType) -> object:
             or `int` column or an element of an `int[]` list (`Schema.to_arrow` reports it as
             a schema mismatch).
     """
-    if column_type is ColumnType.LOCAL_DATE and isinstance(value, str):
-        return date.fromisoformat(value)
     if column_type is ColumnType.INSTANT and isinstance(value, str):
         return _iso_to_epoch_ns(value)
     if column_type is ColumnType.STRING and isinstance(value, dict | list):
@@ -302,6 +327,11 @@ class Schema:
     def column_names(self) -> tuple[str, ...]:
         """The column names, in table order."""
         return tuple(column.name for column in self.columns)
+
+    @property
+    def date_columns(self) -> tuple[str, ...]:
+        """The calendar-date columns (`Column.calendar_date`), in table order."""
+        return tuple(column.name for column in self.columns if column.calendar_date)
 
     def arrow_schema(self) -> pa.Schema:
         """Return the Arrow schema whose tables `deephaven.arrow.to_table` converts to this one.
@@ -431,10 +461,11 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
 
     The source's fields, kept and named by the projection of the dataset's membership of its
     kind (`Source.memberships`), in the source's field order; then the dataset's key columns
-    for this source (`DatasetSpec.keys`): the `symbol`, `time`, and instrument `fanout` keys
-    are renamed to `Symbol`, `Timestamp`, and `Underlying` (`key_column`), the `session` key
-    and a `fanout` key that is no instrument keep their columns, and a key filled from the
-    request comes first, as a constant `String` column. Nothing else changes.
+    for this source (`DatasetSpec.keys`): the `symbol`, `time`, `end`, instrument `fanout`, and
+    `date` keys are renamed to `Symbol`, `Timestamp` (for a bar, `TimestampStart`),
+    `TimestampEnd`, `Underlying`, and `Date` (`key_column`), a `fanout` key that is no
+    instrument keeps its column, and a key filled from the request comes first, as a constant
+    `String` column. Nothing else changes.
 
     Args:
         spec: The dataset.
@@ -445,8 +476,9 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
 
     Raises:
         ValueError: If a declared key is not a column of the source after the projection,
-            a time key is not an `epoch` or `iso-instant` field, a symbol key from the rows
-            is not a `string` field, or two keys name one column (`"declared keys: ..."`); or
+            a time or end key is not an `epoch` or `iso-instant` field, a date key is not a
+            `date` field, a symbol key from the rows is not a `string` field, or two keys name
+            one column (`"declared keys: ..."`); or
             if two columns share a name after the rename (`"unique columns: ..."`). The
             message names the dataset and the source.
     """
@@ -459,7 +491,7 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
     roles: dict[str, str] = {}  # each source column a key claims, and the key's role
     columns: list[SourceColumn] = []
     for role, key in spec.keys_for(source.transport, source.key).declared():
-        target = key_column(role, key)
+        target = key_column(spec, role, key)
         if key.from_request:
             # DatasetSpec allows only an instrument symbol or fan-out key from the request.
             columns.append(SourceColumn(target, WireType.STRING, parameter=key.column))
@@ -468,10 +500,15 @@ def rename(spec: DatasetSpec, source: Source) -> tuple[SourceColumn, ...]:
                 f"declared keys: {where}: the {role} key {key.column!r} is not a column of the "
                 "source"
             )
-        elif role == "time" and by_column[key.column].wire_type not in _INSTANTS:
+        elif role in ("time", "end") and by_column[key.column].wire_type not in _INSTANTS:
             raise ValueError(
-                f"declared keys: {where}: the time key {key.column!r} is "
+                f"declared keys: {where}: the {role} key {key.column!r} is "
                 f"{by_column[key.column].wire_type}, not an instant (epoch or iso-instant)"
+            )
+        elif role == "date" and by_column[key.column].wire_type is not WireType.DATE:
+            raise ValueError(
+                f"declared keys: {where}: the date key {key.column!r} is "
+                f"{by_column[key.column].wire_type}, not a date"
             )
         elif role == "symbol" and by_column[key.column].wire_type is not WireType.STRING:
             # A list of tickers describes no single instrument (a filing's `tickers`).
@@ -515,24 +552,34 @@ def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
         source: One of the dataset's generated sources.
 
     Returns:
-        The fields, in the order `symbol`, `time`, `fanout`, `session`.
+        The fields, in the order `symbol`, `time`, `end`, `fanout`, `date`.
 
     A declared key the source lacks raises the `ValueError` of `rename`.
     """
     columns = {c.column: c.field for c in rename(spec, source) if c.field is not None}
     return tuple(
-        columns[key_column(role, key)]
+        columns[key_column(spec, role, key)]
         for role, key in spec.keys_for(source.transport, source.key).declared()
         if not key.from_request and key.required
     )
 
 
-_LEADING: Final = ("Symbol", "Timestamp")
-"""The key columns a merged schema starts with, in this order, where the dataset declares them;
-every other column, `Underlying` included, takes its place by first appearance."""
+_LEADING: Final = ("Symbol", DATE, TIMESTAMP, START, END)
+"""The columns a merged schema starts with, in this order, where the dataset declares them as
+keys or the library fills them; every other column, `Underlying` included, takes its place by
+first appearance, and `TimestampInsert` comes last."""
 
 _INSTANTS: Final = frozenset({WireType.EPOCH, WireType.ISO_INSTANT})
-"""The wire types a `time` key may have, so that `Timestamp` is always an `Instant`."""
+"""The wire types a `time` or `end` key may have, so that their columns are always `Instant`s."""
+
+_LIBRARY_TYPES: Final[Mapping[str, WireType]] = {
+    DATE: WireType.DATE,
+    START: WireType.EPOCH,
+    END: WireType.EPOCH,
+    INSERT: WireType.EPOCH,
+}
+"""The wire type each library time column joins the merge with: `Date` is a date (ISO text), the
+others instants."""
 
 
 def _by_position(
@@ -601,14 +648,14 @@ tables show. Read-only."""
 
 _KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
-    "Timestamp": "The row's primary time, as an Instant.",
+    TIMESTAMP: "The row's primary time, as an Instant.",
     "Underlying": (
         "The instrument Massive links the row to, exactly as Massive sends it; for an option, "
         "the linked instrument, not what the contract delivers."
     ),
 }
-"""The library's own sentence for each renamed key column; its description goes on to name
-the wire key or request parameter behind it on each transport."""
+"""The library's own sentence for each renamed key column of every dataset; its description
+goes on to name the wire key or request parameter behind it on each transport."""
 
 OPTION_ROOT: Final = "OptionRoot"
 """The derived column of every options dataset with a `Symbol`: the OCC root of the symbol."""
@@ -635,6 +682,223 @@ _DERIVED_SENTENCES: Final[Mapping[str, str]] = {
 _QUOTED_ENDS: Final = ('."', '?"', '!"')
 """The endings of a quoted description that already closes a sentence, so the key column's
 "From …" sentence takes no period after the closing quote."""
+
+_ZONE_WORDS: Final[Mapping[tzinfo, str]] = {NEW_YORK: "New York", UTC: "UTC"}
+"""How a day zone of `dates.DAY_ZONES` names a date in a description: "the New York date"."""
+
+_ZONE_CLOCKS: Final[Mapping[str, str]] = {
+    _ZONE_WORDS[zone]: name for zone, name in DAY_ZONE_NAMES.items()
+}
+"""How a day zone names a time of day in a description, by its date word: "00:00 New York
+time" (`dates.DAY_ZONE_NAMES`)."""
+
+_WINDOW_END: Final = (
+    "The exclusive end of the bar's window, as an Instant: the first instant at which the bar "
+    'is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, '
+    "never attaches a bar that is still open. It is when the window closes, not when Massive "
+    "published the bar, and Massive may correct a bar later."
+)
+"""The first sentences of every bars dataset's `TimestampEnd`."""
+
+_INDEX_HOUR: Final = (
+    "For indices that end is an hour later, 01:00 New York time, since whether an index day bar "
+    "covers the New York or the Chicago day is not verified."
+)
+"""Why an index bar of a day or longer ends at 01:00 New York time."""
+
+_NULL_DATE: Final = (
+    "Joining an intraday row to the same day's daily bar on `Date` attaches values not known "
+    "until that day ended, and a null `Date` matches another null, so join longer bars on "
+    "`TimestampEnd`."
+)
+"""The join caveat every bars dataset's `Date` ends with."""
+
+_INSERT_SENTENCE: Final = (
+    "When the library received the row, as an Instant: the local clock when the REST page, "
+    "flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. "
+    "It is not monotonic and is not Massive's own receive time; on history() rows it is the "
+    "download time, and in a poll() table the latest poll's."
+)
+"""The description of every dataset's `TimestampInsert`."""
+
+_FROM_PARTS: Final = frozenset({"Symbol", "Underlying", TIMESTAMP, START, DATE})
+"""The library's columns whose description goes on to quote the wire key behind each source;
+`TimestampEnd` does not, since the library recomputes it rather than keep Massive's."""
+
+
+def _zone_word(spec: DatasetSpec) -> str | None:
+    """Return how a dataset's day zone is named in its descriptions.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        "New York" or "UTC" for a class with a day zone; None for futures, whose days are
+        sessions, and for a dataset without a class, whose zone follows its symbols.
+    """
+    if not isinstance(spec.asset_class, AssetClass) or spec.asset_class not in DAY_ZONES:
+        return None
+    return _ZONE_WORDS[DAY_ZONES[spec.asset_class]]
+
+
+def _date_sentence(spec: DatasetSpec) -> str:
+    """Return the library's description of a tick or bar dataset's `Date`.
+
+    Args:
+        spec: A dataset whose rows carry `Date` (`RowTimes` other than `NONE`).
+
+    Returns:
+        The description.
+    """
+    zone = _zone_word(spec)
+    times = spec.times
+    if times is RowTimes.DAY:
+        return f"The day the summary covers, as ISO yyyy-MM-dd text: a {zone} calendar day."
+    if spec.asset_class is AssetClass.FUTURES:
+        if times is RowTimes.TICK:
+            return (
+                "The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd "
+                "text: Massive's `session_end_date` from REST and the flat files. The WebSocket "
+                "sends none, so a streamed row gets the session that ends at the next 17:00 "
+                "Chicago time (a Saturday's or Sunday's moves to Monday), corrected to the "
+                "session Massive's futures schedules place the row in; a row the schedules do "
+                "not cover keeps that date, and the stream's m.streams() row shows the error."
+            )
+        return (
+            "The futures session of the bar (its trading date), as ISO yyyy-MM-dd text: "
+            "Massive's `session_end_date` from REST and the flat files, and on the WebSocket the "
+            "session as for futures trades; null for a bar of several sessions, a week or "
+            f"longer, or an intraday bar that crosses 17:00 Chicago time. {_NULL_DATE}"
+        )
+    if times is RowTimes.TICK:
+        return (
+            f"The trading day of the row, as ISO yyyy-MM-dd text: the {zone} date of `Timestamp`."
+        )
+    where = (
+        f"the {zone} date of `TimestampStart`"
+        if zone is not None
+        else "the date of `TimestampStart` in the day zone of the symbol's class (UTC for forex "
+        "and crypto, New York otherwise)"
+    )
+    return (
+        f"The trading day of the bar, as ISO yyyy-MM-dd text: {where} for an intraday or 1-day "
+        "bar, and null for a bar that spans more than one date (several days, a week or longer, "
+        f"or an intraday bar that crosses midnight). {_NULL_DATE}"
+    )
+
+
+def _start_sentence(spec: DatasetSpec) -> str:
+    """Return the library's description of a bars dataset's `TimestampStart`.
+
+    Args:
+        spec: A dataset of bars (`RowTimes.BAR`) or daily summaries (`RowTimes.DAY`).
+
+    Returns:
+        The description, before the wire keys it quotes.
+    """
+    zone = _zone_word(spec)
+    if spec.times is RowTimes.DAY:
+        return (
+            "The start of the day the summary covers, as an Instant: 00:00 "
+            f"{_ZONE_CLOCKS[str(zone)]} of `Date`."
+        )
+    if spec.asset_class is AssetClass.FUTURES:
+        return "The start of the bar's window, as an Instant: Massive's own window start."
+    if zone is None:
+        return (
+            "The start of the bar the value is computed at, as an Instant. A bar of a day or "
+            "longer starts at 00:00 of its window's first day in the day zone of the symbol's "
+            "class (UTC for forex and crypto, New York otherwise)."
+        )
+    first = (
+        "a week's Monday"
+        if spec.asset_class in (AssetClass.FOREX, AssetClass.CRYPTO)
+        else "a week's Monday, a month's, quarter's, or year's first weekday"
+    )
+    return (
+        "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
+        f"00:00 {_ZONE_CLOCKS[zone]} of its window's first day ({first}), whichever source "
+        "serves it; each "
+        "source's own stamp, quoted next, is moved there."
+    )
+
+
+def _end_sentence(spec: DatasetSpec) -> str:
+    """Return the library's description of a bars dataset's `TimestampEnd`.
+
+    Args:
+        spec: A dataset of bars (`RowTimes.BAR`) or daily summaries (`RowTimes.DAY`).
+
+    Returns:
+        The description.
+    """
+    zone = _zone_word(spec)
+    indices = spec.asset_class is AssetClass.INDICES
+    if spec.times is RowTimes.DAY:
+        later = f" {_INDEX_HOUR}" if indices else ""
+        return (
+            "The exclusive end of the day the summary covers, as an Instant: 00:00 "
+            f"{_ZONE_CLOCKS[str(zone)]} of the next day.{later}"
+        )
+    if spec.asset_class is AssetClass.FUTURES:
+        return (
+            f"{_WINDOW_END} An intraday bar ends its length after its start (a one-second "
+            "WebSocket bar at the later of that and Massive's `e`); a session bar at 17:00 "
+            "Chicago time on its session date; a bar of several sessions, or of a week or "
+            "longer, at the latest end its label allows, since whether Massive labels it with "
+            "its first or its last session is not verified."
+        )
+    where = (
+        f"00:00 {_ZONE_CLOCKS[zone]}"
+        if zone is not None
+        else "00:00, in the day zone of the symbol's class,"
+    )
+    later = f" {_INDEX_HOUR}" if indices else ""
+    return (
+        f"{_WINDOW_END} An intraday bar ends its length after its start; a bar of a day or longer "
+        f"at {where} after its window's last day.{later}"
+    )
+
+
+def _library_sentence(spec: DatasetSpec, name: str) -> str:
+    """Return the library's own sentence for one of a dataset's library columns.
+
+    Args:
+        spec: The dataset.
+        name: A key column (`Symbol`, `Timestamp`, `Underlying`) or a time column the
+            library fills (`Date`, `TimestampStart`, `TimestampEnd`, `TimestampInsert`).
+
+    Returns:
+        The sentence, before any wire keys it quotes.
+    """
+    if name == DATE:
+        return _date_sentence(spec)
+    if name == START:
+        return _start_sentence(spec)
+    if name == END:
+        return _end_sentence(spec)
+    if name == INSERT:
+        return _INSERT_SENTENCE
+    return _KEY_SENTENCES[name]
+
+
+def _library_names(spec: DatasetSpec) -> tuple[str, ...]:
+    """Return the time columns the library fills for every row of a dataset.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        `Date` for ticks; `Date`, `TimestampStart`, and `TimestampEnd` for bars and daily
+        summaries; and `TimestampInsert` for every dataset, last.
+    """
+    times = spec.times
+    if times is RowTimes.TICK:
+        return (DATE, INSERT)
+    if times is RowTimes.NONE:
+        return (INSERT,)
+    return (DATE, START, END, INSERT)
+
 
 _Contribution = tuple[Transport, SourceColumn]
 """One column one source of a dataset contributes, with the source's transport."""
@@ -694,7 +958,7 @@ def _description(
     *,
     own: Sequence[_Contribution],
     suppliers: Sequence[str],
-    is_key: bool,
+    library: bool,
 ) -> str:
     """Pick one column's description for one dataset (the rules of `dataset_schema`).
 
@@ -704,9 +968,40 @@ def _description(
         own: The dataset's own contributions to the column, in description order; empty when
             only other members of the kind supply it.
         suppliers: The members of the kind that supply the column, by name, in member order.
-        is_key: True when the column is one of the dataset's declared key columns. Only then
-            does a `Symbol`, `Timestamp`, or `Underlying` column get the library's sentence;
-            a vendor field that merely carries one of those names is described as any other.
+        library: True when the library describes the column: one of the dataset's declared key
+            columns, or a time column the library fills (`Date`, `TimestampStart`,
+            `TimestampEnd`, `TimestampInsert`). A vendor field that merely carries one of those
+            names in a dataset that has no such column of its own is described as any other.
+
+    Returns:
+        The description, with the dataset's note on the column (`DatasetSpec.column_notes`)
+        after it; empty when nothing describes the column.
+    """
+    note = spec.column_notes.get(name, "")
+    text = _chosen(spec, name, own=own, suppliers=suppliers, library=library)
+    if not text or not note:
+        return text or note
+    # The vendor's text may lack its closing period; the note is a sentence of its own.
+    stop = "" if text.endswith((".", "!", "?", *_QUOTED_ENDS)) else "."
+    return f"{text}{stop} {note}"
+
+
+def _chosen(
+    spec: DatasetSpec,
+    name: str,
+    *,
+    own: Sequence[_Contribution],
+    suppliers: Sequence[str],
+    library: bool,
+) -> str:
+    """Pick one column's description, before the dataset's note (`_description`).
+
+    Args:
+        spec: The dataset.
+        name: The column.
+        own: The dataset's own contributions to the column, in description order.
+        suppliers: The members of the kind that supply the column, by name, in member order.
+        library: True when the library describes the column.
 
     Returns:
         The description; empty when no source describes the column.
@@ -714,20 +1009,24 @@ def _description(
     # The wire spec keys its per-class descriptions by class value, and has none for a
     # dataset of every class.
     asset_class = None if spec.asset_class is ClassFromPrefix.ANY else spec.asset_class.value
-    if not own:
-        named = ", ".join(f"`{member}`" for member in suppliers)
-        return f"Always null for `{spec.name}`; supplied by {named}."
-    if is_key and name in _KEY_SENTENCES:
+    if library:
         parts: list[str] = []
-        for transport, column in own:
-            part = _key_part(transport, column, asset_class)
-            if part not in parts:
-                parts.append(part)
+        if name in _FROM_PARTS:
+            for transport, column in own:
+                part = _key_part(transport, column, asset_class)
+                if part not in parts:
+                    parts.append(part)
+        sentence = _library_sentence(spec, name)
+        if not parts:
+            return sentence
         # One sentence after the library's own, so a lowercase label never starts a sentence.
         # A quote that already ends the sentence inside it gets no second period after it.
         listed = "; ".join(parts)
         end = "" if listed.endswith(_QUOTED_ENDS) else "."
-        return f"{_KEY_SENTENCES[name]} From {listed}{end}"
+        return f"{sentence} From {listed}{end}"
+    if not own:
+        named = ", ".join(f"`{member}`" for member in suppliers)
+        return f"Always null for `{spec.name}`; supplied by {named}."
     for _, column in own:
         described = column.field.description_for(asset_class) if column.field else ""
         if described:
@@ -742,7 +1041,8 @@ def _column(
     column_type: ColumnType,
     own: Sequence[_Contribution],
     suppliers: Sequence[str],
-    is_key: bool,
+    library: bool,
+    filled: tuple[Transport, ...],
 ) -> Column:
     """Build one column of a dataset schema with its description, transports, and wire keys.
 
@@ -752,7 +1052,10 @@ def _column(
         column_type: Its merged type.
         own: The dataset's own contributions to the column, in description order.
         suppliers: The members of the kind that supply the column, by name, in member order.
-        is_key: True when the column is one of the dataset's declared key columns.
+        library: True when the library describes the column (`_description`).
+        filled: The transports on which the library fills the column itself (every transport
+            of the dataset for a library time column, none otherwise); they are listed in
+            `Column.supplied_by` with the transports that contribute it.
 
     Returns:
         The column.
@@ -763,11 +1066,12 @@ def _column(
         key = None if column.field is None else column.field.wire_key
         if key not in keys:
             keys.append(key)
+    supplied = tuple(t for t in _TRANSPORT_ORDER if t in wire_keys or t in filled)
     return Column(
         name,
         column_type,
-        _description(spec, name, own=own, suppliers=suppliers, is_key=is_key),
-        tuple(wire_keys),
+        _description(spec, name, own=own, suppliers=suppliers, library=library),
+        supplied,
         MappingProxyType({transport: tuple(keys) for transport, keys in wire_keys.items()}),
     )
 
@@ -853,18 +1157,24 @@ def dataset_schema(
 
     The ordered union by column name of `rename(member, s)` for every source `s` of every
     member, in member order, then the order of the sources' positions in the kind's group
-    (declared order for a source without one), then field order; `Symbol` and then
-    `Timestamp` come first where the dataset declares them, and every other column,
-    `Underlying` included, takes its place by first appearance. Each column's type is the
-    `join` of every contribution, mapped through `COLUMN_TYPES`. `Catalog.dataset_schema`
-    calls it once per dataset and caches the result.
+    (declared order for a source without one), then field order, with the library's time
+    columns for the dataset's row times (`DatasetSpec.times`): `Date` for ticks, `Date`,
+    `TimestampStart`, and `TimestampEnd` for bars and daily summaries, and `TimestampInsert` for
+    every dataset. `Symbol`, `Date`, `Timestamp`, `TimestampStart`, and `TimestampEnd` come
+    first, in that order, where the dataset declares them as keys or the library fills them;
+    `TimestampInsert` comes last; every other column, `Underlying` included, takes its place
+    by first appearance. Each column's type is the `join` of every contribution, mapped
+    through `COLUMN_TYPES` (a library `Date` is a date, so ISO text, and the other library
+    columns instants). `Catalog.dataset_schema` calls it once per dataset and caches the
+    result.
 
     Each column also gets its transports and wire keys from the dataset's own sources
-    (`Column.supplied_by`, `Column.wire_keys`), and one description chosen for this dataset,
-    never one per kind: a kind spans asset classes, and the stock text for a price ("dollar
-    value per whole share") is wrong for crypto. A field's description is the one for the
-    dataset's asset class (`Field.description_for`): the per-class description a source that
-    serves several classes gives, else its own, which is the vendor's or the refresh's
+    (`Column.supplied_by`, `Column.wire_keys`; a library time column lists every transport of
+    the dataset, since the library fills it on each), and one description chosen for this
+    dataset, never one per kind: a kind spans asset classes, and the stock text for a price
+    ("dollar value per whole share") is wrong for crypto. A field's description is the one for
+    the dataset's asset class (`Field.description_for`): the per-class description a source
+    that serves several classes gives, else its own, which is the vendor's or the refresh's
     correction of it. Three rules choose it:
 
     1. A column the dataset's own sources supply takes the first non-empty field description
@@ -874,15 +1184,19 @@ def dataset_schema(
     2. A column that exists only through the kind's union, which no source of the dataset
        supplies, says so and names the members that do, in member order:
        ``Always null for `crypto.trades`; supplied by `stocks.trades`.``
-    3. `Symbol`, `Timestamp`, and `Underlying`, when they are declared key columns of the
-       dataset, get the library's own sentence ("The row's primary time, as an Instant."),
-       followed, per source in the order of rule 1, by the wire key the source renames and
-       its quoted field description
+    3. The library describes its own columns: `Symbol`, `Timestamp`, and `Underlying` when
+       they are declared key columns, and the time columns it fills (`Date`,
+       `TimestampStart`, `TimestampEnd`, `TimestampInsert`), each with a sentence of its own
+       that says what the column means for this dataset ("The row's primary time, as an
+       Instant."; for a bar's `TimestampStart`, where a bar of a day or longer starts). The
+       key columns and `Date` and `TimestampStart` go on, per source in the order of rule 1,
+       to the wire key the source renames and its quoted field description
        (``REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp..."``), or, for a
        key filled from the request, the request parameter it came from (``REST: the
        request's `stocksTicker` parameter.``); a part two sources share appears once.
 
-    A column whose sources carry no description gets `""`, and nothing fails.
+    A dataset's note on a column (`DatasetSpec.column_notes`) follows its description. A column
+    whose sources carry no description gets `""`, and nothing fails.
 
     Derived columns, which no source carries and every transport computes from `Symbol`, follow
     the leading key columns, with the library's own description: `OptionRoot` on every options
@@ -891,7 +1205,8 @@ def dataset_schema(
 
     Args:
         spec: The dataset whose schema is built; it names the schema, decides the leading
-            key columns, and is the dataset the descriptions are chosen for.
+            key columns and the library's time columns, and is the dataset the descriptions
+            are chosen for.
         members: The datasets whose sources merge, in member order: the datasets of the
             dataset's kind (`Catalog.members`), or the dataset alone when it is in no kind.
         source: Returns the generated source of a transport and key.
@@ -903,8 +1218,9 @@ def dataset_schema(
 
     Raises:
         ValueError: If two contributions to one column conflict (`"member types: ..."`, naming
-            the column, both types, and the member and source of the second). A failed rename
-            raises the `ValueError` of `rename`, and an unknown source whatever `source` raises.
+            the column, both types, and the member and source of the second, or the library
+            for one of its time columns). A failed rename raises the `ValueError` of `rename`,
+            and an unknown source whatever `source` raises.
     """
     types: dict[str, WireType] = {}
     suppliers: dict[str, list[str]] = {}
@@ -925,21 +1241,41 @@ def dataset_schema(
                 named = suppliers.setdefault(contribution.column, [])
                 if member.name not in named:
                     named.append(member.name)
-    declared = {key_column(r, k) for keys in spec.keys.values() for r, k in keys.declared()}
-    leading = [name for name in _LEADING if name in declared]
-    order = [*leading, *(name for name in types if name not in leading)]
+    library = _library_names(spec)
+    for name in library:
+        prior = types.get(name)
+        joined = _LIBRARY_TYPES[name] if prior is None else join(prior, _LIBRARY_TYPES[name])
+        if joined is None:
+            raise ValueError(
+                f"member types: {spec.name}: column {name!r} is {prior} in a source but "
+                f"{_LIBRARY_TYPES[name]} as the library fills it"
+            )
+        types[name] = joined
+    declared = {key_column(spec, r, k) for keys in spec.keys.values() for r, k in keys.declared()}
+    described = declared | set(library)
+    leading = [name for name in _LEADING if name in described]
+    rest = [name for name in types if name not in leading and name != INSERT]
+    order = [*leading, *rest, *((INSERT,) if INSERT in types else ())]
     own = _own_contributions(spec, source)
+    transports = tuple(t for t in _TRANSPORT_ORDER if any(d is t for d, _ in spec.sources))
     columns = [
-        _column(
-            spec,
-            name,
-            column_type=COLUMN_TYPES[types[name]],
-            own=own.get(name, ()),
-            suppliers=suppliers[name],
-            is_key=name in declared,
+        replace(
+            _column(
+                spec,
+                name,
+                column_type=COLUMN_TYPES[types[name]],
+                own=own.get(name, ()),
+                suppliers=suppliers.get(name, ()),
+                library=name in described and (name in _KEY_SENTENCES or name in library),
+                filled=transports if name in library else (),
+            ),
+            calendar_date=types[name] is WireType.DATE,
         )
         for name in order
     ]
-    symbol = next((c for c in columns if c.name == "Symbol" and "Symbol" in declared), None)
-    derived = _derived(spec, symbol, raw_symbol=raw_symbol)
+    derived = _derived(
+        spec,
+        next((c for c in columns if c.name == "Symbol" and "Symbol" in declared), None),
+        raw_symbol=raw_symbol,
+    )
     return Schema(spec.name, (*columns[: len(leading)], *derived, *columns[len(leading) :]))
