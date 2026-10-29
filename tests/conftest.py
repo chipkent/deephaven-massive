@@ -22,6 +22,7 @@ import faulthandler
 import gc
 import gzip
 import importlib
+import itertools
 import os
 import sys
 import threading
@@ -37,6 +38,7 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
+from _pytest.mark.expression import Expression
 from deephaven_server import Server
 
 from deephaven_massive._errors import EntitlementError
@@ -83,6 +85,63 @@ _JVM_ARGS = [
 ]
 
 
+def _is_xdist_controller(config: pytest.Config) -> bool:
+    """Tell whether this process hands tests to pytest-xdist workers instead of running them.
+
+    The condition is xdist's own for starting its distributed session: a distribution mode
+    other than `no` and at least one worker (`-n 0` leaves none), in a run that is more than
+    collection. Under `--collect-only`, `--fixtures`, and `--fixtures-per-test`, xdist starts
+    no session and the main process collects the tests itself. Workers carry `workerinput`.
+
+    Args:
+        config: The pytest configuration.
+
+    Returns:
+        True only in the xdist controller of a distributed run.
+    """
+    option = config.option
+    return (
+        getattr(option, "dist", "no") != "no"
+        and bool(getattr(option, "tx", None))
+        and not option.collectonly
+        and not option.showfixtures
+        and not option.show_fixtures_per_test
+        and not hasattr(config, "workerinput")
+    )
+
+
+def _selects_live_tests(config: pytest.Config) -> bool:
+    """Tell whether the run's `-m` expression selects any live test.
+
+    A live test carries `integration` and any combination of the markers only live tests use:
+    `integration_limits`, `integration_smoke`, `needs`, `settles`, and `requests`. An `-m`
+    expression matches a marker by name whatever its arguments, so `-m needs` selects every
+    live test with a `needs` marker. Each combination of those markers is tried; a keyword
+    form such as `needs(x=1)` is treated as matching nothing, since their arguments are
+    positional.
+
+    Args:
+        config: The pytest configuration, for the `-m` expression.
+
+    Returns:
+        True if a test with any of those marker sets would be selected.
+    """
+    expression = Expression.compile(config.option.markexpr or "")
+    optional = (_LIMITS, _SMOKE, "needs", "settles", "requests")
+
+    def carrying(markers: frozenset[str]) -> Callable[..., bool]:
+        def matcher(name: str, /, **kwargs: str | int | bool | None) -> bool:
+            return not kwargs and name in markers
+
+        return matcher
+
+    return any(
+        expression.evaluate(carrying(frozenset({_INTEGRATION, *extra})))
+        for size in range(len(optional) + 1)
+        for extra in itertools.combinations(optional, size)
+    )
+
+
 # `trylast` matters: pytest's faulthandler plugin installs its SIGSEGV handler in its own
 # `pytest_configure`. The JVM must install its signal handlers after that, chaining to the
 # faulthandler, because the JVM raises SIGSEGV on purpose (implicit null checks, safepoints).
@@ -92,14 +151,26 @@ _JVM_ARGS = [
 def pytest_configure(config: pytest.Config) -> None:
     """Start the embedded Deephaven server once per process, before collection.
 
-    Then check that the update graph runs the 25 ms cycle the tests are written for.
+    Then check that the update graph runs the 25 ms cycle the tests are written for. Under
+    pytest-xdist (`-n`), only the worker processes start a server.
 
     Args:
-        config: The pytest configuration (unused; required by the hook signature).
+        config: The pytest configuration, read to tell an xdist controller from a worker.
 
     Raises:
-        pytest.UsageError: If the JVM did not apply the cycle property.
+        pytest.UsageError: If the JVM did not apply the cycle property, or if the live tests
+            are asked to run on parallel workers.
     """
+    # The xdist controller only hands tests to its workers and reports their results; it never
+    # imports a test module or runs a test. Each worker is its own process that runs this hook
+    # and starts its own JVM, so a JVM in the controller would cost only startup time and
+    # memory.
+    if _is_xdist_controller(config):
+        # The live tests share Massive's per-key rate limits and write one evidence log and
+        # one summary, which only a single process keeps whole.
+        if _selects_live_tests(config):
+            raise pytest.UsageError("the live tests run in one process: drop -n, or pass -n 0")
+        return
     # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
     Server(port=0, jvm_args=_JVM_ARGS).start()
     atexit.register(_final_jvm_exit)
