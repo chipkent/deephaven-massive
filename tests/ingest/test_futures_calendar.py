@@ -521,16 +521,18 @@ def test_each_lookup_is_charged_to_futures_in_a_lane_of_its_own(
     assert not second.is_set()
 
 
+@pytest.mark.parametrize("held", [CONTRACTS_PATH, SCHEDULES_PATH])
 def test_closing_ends_a_lookup_still_waiting_for_the_rate_governor(
-    fetch: FakeFetch, clock: Clock
+    fetch: FakeFetch, clock: Clock, held: str
 ) -> None:
     # The lookup's token follows the calendar's: a lookup paced behind a Basic futures
     # subscription's limit stops waiting the moment the calendar closes.
     calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
-    fetch.hold(CONTRACTS_PATH)
+    fetch.hold(held)
     calendar.watch(["ESM4"])
-    fetch.wait(1)
-    _, lookup = fetch.charged[0]
+    calls = 1 if held == CONTRACTS_PATH else 2  # the schedule follows the contract's product
+    fetch.wait(calls)
+    _, lookup = fetch.charged[calls - 1]
     assert not lookup.is_set()
     closing = threading.Thread(target=calendar.close, daemon=True)
     closing.start()
