@@ -37,15 +37,23 @@ dependencies = [
     # Config(proxies=...), proxies_config, and retries={"total_max_attempts": ..., "mode": ...}
     # are older.
     "botocore>=1.34.63",
-    # 2.6.0 is the first release that bounds how much a compressed response may expand while
-    # it is decoded; earlier releases decompress without limit, and the REST client asks for
-    # gzip, so a hostile or broken server could exhaust memory. Inline type information and
-    # ProxyManager are older.
-    "urllib3>=2.6.0",
-    # 2026.10.18 is the first release that drops the root certificates withdrawn from the
-    # Mozilla trust store; earlier releases still trust them. Finding the bundle with
-    # importlib.resources.files and inline type information (py.typed) are older.
-    "certifi>=2026.10.18",
+    # 2.8.0 is the first release that fixes all of these advisories. It strips headers and
+    # bodies from cross-origin and 303 redirects (GHSA-g4mx-q9vg-27p4, GHSA-34jh-p97f-mpxf,
+    # GHSA-qccp-gfcp-xxvc; the REST client never follows a redirect, but botocore's S3
+    # requests do), honors redirects disabled when a PoolManager is created
+    # (GHSA-pq67-6m6q-mj2v), limits chained Content-Encoding (GHSA-gm62-xv2j-4w53), bounds
+    # decompression and chunk sizes in the streaming API that botocore reads S3 objects
+    # through (GHSA-2xpw-w6gg-jr37, GHSA-38jv-5279-wg99, GHSA-mf9v-mfxr-j63j,
+    # GHSA-vxq7-64xx-v4gw), and keeps an HTTPS proxy's TLS settings apart from the target's
+    # (GHSA-8988-9cw3-xx77). Inline type information and ProxyManager are older.
+    "urllib3>=2.8.0",
+    # 2026.10.19 is the release that advisory GHSA-6q48-6c7w-9gw2 recommends. It no longer
+    # trusts emSign ECC Root CA - G3, under which the private keys of eight intermediate CAs
+    # were compromised: with one of them, an on-path attacker could forge a certificate for
+    # any host. Earlier releases also trust the withdrawn TrustCor, e-Tugra and GLOBALTRUST
+    # roots. Finding the bundle with importlib.resources.files and inline type information
+    # (py.typed) are older.
+    "certifi>=2026.10.19",
     # 17.1 is the first release that defines process_exception, the public rule for which
     # connection failures to retry, in websockets.client (17.0 and earlier define it only in
     # websockets.asyncio.client, which does not export it). Proxy support from the environment
