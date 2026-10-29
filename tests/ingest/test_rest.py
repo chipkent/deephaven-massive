@@ -2459,17 +2459,19 @@ def test_a_paced_fetch_announces_how_long_it_takes(
         rest_basic_subscriptions={dm.Subscription.CURRENCIES},
     )
     m = dm.MassiveSession(config)
-    pairs = ["BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "XRP-USD", "DOT-USD"]
+    pairs = ["C:EURUSD", "C:GBPUSD", "C:AUDUSD", "C:USDJPY", "C:USDCHF", "C:NZDUSD"]
     for pair in pairs:
-        fake_rest.reply(f"/v1/last/crypto/{pair.replace('-', '/')}", Reply(envelope([])))
+        base, quote = pair[2:5], pair[5:]
+        body = {"status": "success", "from": base, "to": quote, "symbol": f"{base}/{quote}"}
+        fake_rest.reply(f"/v1/conversion/{base}/{quote}", Reply(body))
     try:
         with caplog.at_level(logging.INFO):
-            fetch(m, CRYPTO_LAST, symbols=pairs)
+            fetch(m, CONVERSION, symbols=pairs)
     finally:
         m.close()
     assert (
-        "crypto.last fetch: 6 requests; paced at 5 requests a minute (currencies); at that pace "
-        "they take at least 1 min"
+        "forex.conversion fetch: 6 requests; paced at 5 requests a minute (currencies); at that "
+        "pace they take at least 1 min"
     ) in caplog.messages
 
 
@@ -2494,11 +2496,11 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
             governor.acquire("currencies", _massive.Cancel(), lane=object()), answered=True
         )
     refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
-    for pair in ("BTC/USD", "ETH/USD", "SOL/USD"):
-        fake_rest.reply(f"/v1/last/crypto/{pair}", refused)
+    for pair in ("EUR/USD", "GBP/USD", "AUD/USD"):
+        fake_rest.reply(f"/v1/conversion/{pair}", refused)
     try:
         with pytest.raises(dm.EntitlementError, match="upgrade"):
-            fetch(m, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD", "SOL-USD"])
+            fetch(m, CONVERSION, symbols=["C:EURUSD", "C:GBPUSD", "C:AUDUSD"])
         assert len(fake_rest.requests) == 1  # the others gave up their places unsent
         assert next(s for s in governor.snapshot() if s.bucket == "currencies").waiting == 0
     finally:
