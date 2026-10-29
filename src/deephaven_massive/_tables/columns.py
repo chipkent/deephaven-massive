@@ -229,7 +229,7 @@ class _DateRuns:
 
     @classmethod
     def of(cls, column: pa.ChunkedArray) -> _DateRuns:
-        """Split a column into runs, with Arrow compute and one numpy pass.
+        """Split a column into runs of one date each, using Arrow compute alone.
 
         Args:
             column: An Arrow string column of ISO dates and nulls.
