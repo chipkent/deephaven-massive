@@ -299,7 +299,7 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
 
 
 @pytest.mark.needs("options:starter")
-@pytest.mark.settles("half-day stamps")
+@pytest.mark.settles("51", "half-day stamps")
 @pytest.mark.timeout(100)
 def test_half_day_option_bars_and_their_stamps(
     live_rest: RestClient, *, half_day_report: HalfDayReport, evidence: Evidence

@@ -165,7 +165,7 @@ def test_index_ticker_spelling_on_every_index_endpoint(
 
 
 @pytest.mark.needs("indices:basic")
-@pytest.mark.settles("half-day stamps")
+@pytest.mark.settles("52", "60", "half-day stamps")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_half_day_index_bars_and_their_stamps(
