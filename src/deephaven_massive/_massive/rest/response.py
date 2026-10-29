@@ -174,7 +174,8 @@ def _excerpt(data: bytes | bytearray) -> str:
     Returns:
         The first 200 characters, with undecodable bytes replaced, or `"an empty body"`.
     """
-    return data.decode("utf-8", "replace")[:_EXCERPT] or "an empty body"
+    # A character is at most four UTF-8 bytes, so only the excerpt's bytes are decoded.
+    return data[: _EXCERPT * 4].decode("utf-8", "replace")[:_EXCERPT] or "an empty body"
 
 
 def http_error(status: int, data: bytes | bytearray, request: Request) -> WireError:

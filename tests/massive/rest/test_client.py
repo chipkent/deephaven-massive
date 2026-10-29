@@ -297,15 +297,23 @@ def test_a_body_of_exactly_the_cap_is_read(
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
 
 
-def test_a_body_that_does_not_decompress_is_never_retried(
-    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
+def test_a_body_that_does_not_decompress_is_never_retried_and_is_logged(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG)
     corrupt = Reply(b"not gzip at all", headers={"Content-Encoding": "gzip"})
     fake_rest.reply("/v3/trades/AAPL", corrupt, _ok())
     with pytest.raises(WireError, match="does not decompress") as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.status == 200
     assert "not gzip" not in caught.value.message  # the body itself is never quoted
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [f"{caught.value.message} (HTTP 200); not retried"]
+    assert not any("not gzip" in r.getMessage() for r in caplog.records)
     assert clock.waits == []
     assert len(fake_rest.requests) == 1
 

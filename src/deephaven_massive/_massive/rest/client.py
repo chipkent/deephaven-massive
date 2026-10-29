@@ -361,11 +361,13 @@ class RestClient:
         Errors: `WireError` when the request fails after its retries, Massive keeps refusing
         it for longer than the governor waits (status 429), TLS verification fails, the proxy
         refuses its credentials (status 407, never retried), the body is not a valid page or
-        decompresses to more than `MAX_BODY_BYTES` or not at all (never retried), the client is
-        closed, or `cancel` is set; `WireAuthError` for 401; `WireEntitlementError` for 403 or
-        a `NOT_AUTHORIZED` envelope. Parameters that do not fit the path raise `ValueError`,
-        and a value of a type its kind does not accept raises `TypeError` (see `rest.query`).
-        An unknown `bucket` raises `ValueError` when the request would start.
+        decompresses to more than `MAX_BODY_BYTES` or not at all (never retried, even for a
+        429, which still pauses the bucket; a 429 whose body breaks off waits out its pause
+        and is tried again), the client is closed, or `cancel` is set; `WireAuthError` for
+        401; `WireEntitlementError` for 403 or a `NOT_AUTHORIZED` envelope. Parameters that
+        do not fit the path raise `ValueError`, and a value of a type its kind does not accept
+        raises `TypeError` (see `rest.query`). An unknown `bucket` raises `ValueError` when
+        the request would start.
 
         Args:
             rest_path: The path, from the spec.
@@ -595,6 +597,9 @@ class RestClient:
                     response,
                     f"decompresses to more than {MAX_BODY_BYTES} bytes, the most the client reads",
                 )
+            # The call that fails logs the one error; this records which reply it was. Never the
+            # body: it was not read, or not in full.
+            _log.warning("%s (HTTP %d); not retried", unreadable, response.status)
             # The status arrived whole, so the governor hears of it: a refusal pauses the bucket,
             # and any other status is an answer.
             if response.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -669,7 +674,9 @@ class RestClient:
         A body unreadable for its content, one that does not decompress or decompresses past
         `MAX_BODY_BYTES`, is never retried: it is no page of Massive's, and the same request
         would bring the same reply. (A body that breaks off or times out is a transient
-        failure instead, retried like a reset.)
+        failure instead, retried like a reset.) A 429 is no exception: one with an unreadable
+        body pauses its bucket and then fails the read, while one whose body breaks off pauses
+        the bucket and is tried again once the pause ends, as any refusal is.
 
         Args:
             request: The request.
