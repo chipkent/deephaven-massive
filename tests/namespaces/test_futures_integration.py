@@ -439,33 +439,34 @@ def test_streamed_futures_dates_and_one_second_ends(
     front_contract: Callable[[str, date], str],
     wait_rows: WaitRows,
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
-    market_status: Callable[[str], str],
+    rows_due: Callable[[str], tuple[str, bool]],
     skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
     """Which session the library gives streamed futures bars, and how long a one-second bar is.
 
-    Streams the front ES contract's minute and one-second bars, the streams every Futures plan
-    from Starter includes (trades and quotes need Developer), and asserts that Massive
-    acknowledged both topics, whatever the hour. Rows are required only while
-    `/futures/v1/market-status` says ES is `open`; otherwise the test skips after the
+    Streams the front ES contract's minute and one-second bars, the streams every Futures plan from
+    Starter includes (trades and quotes need Developer), and asserts that Massive acknowledged both
+    topics, whatever the hour. Rows are required only once ES has been `open`, by
+    `/futures/v1/market-status` and its `timestamp`, longer than the plan's feed delay (10 minutes
+    on Futures Starter and Developer, none on real-time plans); before that the test skips after the
     acknowledgement. Records each row's `Date`, the `m.streams()` errors (a schedule miss shows
     there), and the one-second bars' `TimestampStart` and `TimestampEnd`, with the WARNING the
     library logs when Massive's `e` is not the start plus one second. Reading it: no miss and
-    one-second windows confirm the calendar and the documented length; the WARNING means
-    Massive's bars span more, as its documented sample suggests, and the library keeps the
-    later end. A refused stream skips, naming the plan.
+    one-second windows confirm the calendar and the documented length; the WARNING means Massive's
+    bars span more, as its documented sample suggests, and the library keeps the later end. A
+    refused stream skips, naming the plan.
     """
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
     contract = front_contract("ES", datetime.now(_CHICAGO).date())
     minutes = live_session.futures.bars(contract, dm.Timespan.MINUTE).append_only()
     seconds = live_session.futures.bars(contract, dm.Timespan.SECOND).append_only()
     acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
-    status = market_status("futures")
+    status, due = rows_due("futures")
     deadline = time.monotonic() + _STREAM_WAIT
-    rows = wait_rows(live_session, minutes, deadline) if status == "open" else []
-    bars = wait_rows(live_session, seconds, deadline) if status == "open" else []
+    rows = wait_rows(live_session, minutes, deadline) if due else []
+    bars = wait_rows(live_session, seconds, deadline) if due else []
     for line in stream_report(live_session):
         evidence(line)
     live_session.release(minutes)
@@ -478,9 +479,9 @@ def test_streamed_futures_dates_and_one_second_ends(
     )
     skip_if_not_entitled(live_session, "Futures Starter")
     assert acked >= 2, f"Massive acknowledged {acked} of the 2 topics"
-    if status != "open":
-        pytest.skip(f"ES is {status}, not open (per /futures/v1/market-status)")
-    assert rows or bars, f"no futures bar arrived in {_STREAM_WAIT:.0f} s of an open market"
+    if not due:
+        pytest.skip(f"no ES bar is due yet: ES is {status}, or still within the feed delay")
+    assert rows or bars, f"no futures bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
 
 
 def _midnight(day: date) -> datetime:

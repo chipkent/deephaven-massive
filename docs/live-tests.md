@@ -32,7 +32,7 @@ a few cheap requests per class:
 | a snapshot of one liquid ticker (AAPL, one SPY option, `I:NDX`, `C:EURUSD`, one ES contract) | Starter or above; refused means Basic |
 | that ticker's trades, then its quotes (stocks and options) | Developer (trades), Advanced (quotes) |
 | that contract's trades (futures) | Developer or above; Developer and Advanced both include quotes, so futures never read as Advanced |
-| a non-null `fmv` in the snapshot (stocks, options, currencies) | Business; for stocks and options, Business with the trades and quotes expansion when trades or quotes answer too |
+| a non-null `fmv` in the snapshot (stocks, options, currencies) | Business; for stocks and options always the base Business plan, since its REST trades and quotes answer too (at end-of-day recency), so only a declaration names the trades and quotes expansion |
 | a real-time indices snapshot | Advanced |
 | one file of every flat-file prefix | which flat files the S3 credentials reach: only a file that opens counts |
 
@@ -41,8 +41,8 @@ empty answer proves nothing either way, so the probe stops and the run asks you 
 the plans instead. For the same reason the probe does not run from 03:30 to 04:30 New York
 time, while Massive clears and refills its snapshots and a Business plan's `fmv` can be
 missing. A stocks or options Business plan is not an Advanced plan: without the
-expansion it has no trades, quotes, LULD, or per-second streams, so a test that needs Advanced
-skips on it. Indices Business leaves no mark a request can see and reads as Advanced. Futures
+expansion it streams no trades, quotes, LULD, or per-second bars, so a test that needs Advanced
+skips on it; declare `business_expansion` to run those tests on a key with the expansion. Indices Business leaves no mark a request can see and reads as Advanced. Futures
 Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Developer; a test of a venue
 the plan lacks is refused. The answer is kept in `.live-plans.json` in the repository root (git-ignored; it names the key and
 the S3 access key id only by a digest) until the New York day ends, so later runs that day do
@@ -107,9 +107,12 @@ recorded as outside the plan's history.
 
 A stream test asserts that Massive acknowledged its topics, which Massive does whether or not
 the market is open. It waits for rows only while `/v1/marketstatus/now` says the market is
-open, and skips, after the acknowledgement, only when that status says closed. The futures
-stream reads the E-mini S&P 500's status from `/futures/v1/market-status` instead, and the
-LULD check needs the regular session, the only time bands change. In the smoke tier a stream
+open, and skips, after the acknowledgement, only when that status says closed. On a delayed
+plan the first rows of a session arrive only after the plan's delay, so the index stream
+requires rows once the S&P indices have been open 15 minutes past 09:30 New York time on
+Indices Starter, and the futures stream once ES has been open 10 minutes, by the `timestamp`
+of `/futures/v1/market-status`, on Futures Starter and Developer; before that they skip after
+the acknowledgement. The LULD check needs the regular session, the only time bands change. In the smoke tier a stream
 that passed without a row is counted "acknowledged only".
 
 ## S3 credentials

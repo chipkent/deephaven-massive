@@ -15,6 +15,7 @@ or last millisecond fails the request with `MassiveError` rather than being rela
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -297,15 +298,14 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
 ) -> None:
     """Whether the REST crypto day bar covers the UTC day, as the library assumes.
 
-    Rebuilds `/prev`'s day of `X:BTCUSD` from REST minute bars twice, over the UTC day and
-    over the New York day (midnight to the next midnight in New York, so a 23- or 25-hour day
-    is right), and records both beside `/prev` and the range bar. Decides by comparison, not
-    by an absolute tolerance: passes when the UTC rebuild's largest relative error against
-    `/prev` is at most a tenth of the New York rebuild's, so `/prev` covers the UTC day, the
-    library's day cut. A failure means another cut: `/prev` closer to the New York rebuild
-    means REST crypto days are New York days, a different bar from the flat file's, and the
-    source of crypto day bars needs an owner decision; close to neither means another cut
-    (compare the stamps and the minute coverage).
+    Rebuilds `/prev`'s day of `X:BTCUSD` from REST minute bars twice, over the UTC day and over the
+    New York day (midnight to the next midnight in New York, so a 23- or 25-hour day is right), and
+    records both beside `/prev` and the range bar. Decides by comparison, not by an absolute
+    tolerance: passes when the UTC rebuild's largest relative error against `/prev` is finite and at
+    most a tenth of the New York rebuild's, so `/prev` covers the UTC day, the library's day cut. A
+    failure means another cut: `/prev` closer to the New York rebuild means REST crypto days are New
+    York days, a different bar from the flat file's, and the source of crypto day bars needs an
+    owner decision; close to neither means another cut (compare the stamps and the minute coverage).
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -352,6 +352,7 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
         f"largest relative error against /prev: UTC rebuild {utc:.2e}, "
         f"New York rebuild {new_york:.2e}"
     )
+    assert math.isfinite(utc), "the UTC rebuild lacks a field of /prev"
     assert utc <= new_york / _CLOSER, "/prev is not much closer to the UTC day's rebuild"
 
 

@@ -61,33 +61,36 @@ def test_index_values_stream_on_the_resolved_host(
     *,
     wait_rows: WaitRows,
     wait_acked: WaitAcked,
-    market_status: Callable[[str], str],
+    rows_due: Callable[[str], tuple[str, bool]],
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
     """Whether index values (`V.I:SPX`) stream on the host the session resolves for indices.
 
-    The documentation names `business.` for `V` while the plan table names `socket.` or
-    `delayed.`; the library uses the indices class's own host. Records the session's
-    connection and stream (host, state, acknowledgement, error) and asserts that Massive
-    acknowledged the topic, whatever the hour. Unless `/v1/marketstatus/now` says the S&P
-    indices are closed, it also requires values to arrive; when they are closed it skips after
-    the acknowledgement. Reading it: the host the evidence names, with rows, is the host that
-    serves index values; a refusal names the host to use instead.
+    The documentation names `business.` for `V` while the plan table names `socket.` or `delayed.`;
+    the library uses the indices class's own host. Records the session's connection and stream
+    (host, state, acknowledgement, error) and asserts that Massive acknowledged the topic, whatever
+    the hour. Values are required only once the S&P indices have been open longer than the plan's
+    feed delay, counted from 09:30 New York time (15 minutes on Indices Starter, none on real-time
+    plans); before that, and while they are closed, the test skips after the acknowledgement.
+    Reading it: the host the evidence names, with rows, is the host that serves index values; a
+    refusal names the host to use instead.
     """
     table = live_session.indices.values("I:SPX").append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
-    status = market_status("indices")
+    status, due = rows_due("indices")
     deadline = time.monotonic() + _STREAM_WAIT
-    rows = wait_rows(live_session, table, deadline) if status != "closed" else []
+    rows = wait_rows(live_session, table, deadline) if due else []
     for line in stream_report(live_session):
         evidence(line)
     live_session.release(table)
     evidence(f"V.I:SPX rows received: {len(rows)}; first: {rows[:1]}")
     assert acked, "Massive acknowledged no index value topic (see the connection above)"
-    if status == "closed":
-        pytest.skip("the S&P indices are closed (per /v1/marketstatus/now)")
-    assert rows, f"no index value arrived in {_STREAM_WAIT:.0f} s while the indices are open"
+    if not due:
+        pytest.skip(
+            f"no index value is due: the S&P indices are {status}, or within the feed delay"
+        )
+    assert rows, f"no index value arrived in {_STREAM_WAIT:.0f} s, though one was due"
 
 
 @pytest.mark.needs("stocks:business")

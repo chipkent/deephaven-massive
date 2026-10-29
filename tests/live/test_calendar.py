@@ -139,3 +139,14 @@ def test_the_recent_holiday_is_a_week_old_or_older() -> None:
 
 def test_today_is_a_new_york_day() -> None:
     assert isinstance(calendar.today(), date)
+
+
+def test_memorial_day_is_the_last_monday_of_may() -> None:
+    assert date(2027, 5, 31) in calendar.market_holidays(2027)
+    assert date(2027, 5, 24) not in calendar.market_holidays(2027)
+    assert date(2021, 5, 31) in calendar.market_holidays(2021)
+
+
+def test_a_week_whose_monday_is_a_holiday_is_skipped() -> None:
+    # Martin Luther King Jr. Day 2026 is Monday, January 19.
+    assert calendar.recent_week(date(2026, 1, 26)) == (date(2026, 1, 12), date(2026, 1, 18))

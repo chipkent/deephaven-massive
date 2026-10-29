@@ -366,7 +366,7 @@ Supporting files outside the package:
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST server, WebSocket server, S3, clock, and stream helpers, and the shared streaming session harness ([section 4.2](#42-test-layout)). |
-| `tests/_live/` | The logic behind the live tests' fixtures: the plan probe and the plans' coverage and history windows, the exchange calendar, the futures front contract, and the choice of recent corporate actions ([section 4.2](#42-test-layout)). |
+| `tests/_live/` | The logic behind the live tests' fixtures: the plans' coverage and history windows, the plan probe, the exchange calendar, the futures front contract, the choice of recent corporate actions, the delayed-feed timing, the week-window rule, and the open-questions summary ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
 `TYPE_CHECKING`. The library imports nothing from `deephaven_server`;
@@ -446,13 +446,16 @@ others:
   7), and every example of section 21 once the README carries them. It mirrors `README.md`, not
   a source module.
 - `_` helper directories, of which there are two, `HELPER_PACKAGES` in `tests/test_layout.py`
-  (a new one needs owner approval). The second, `tests/_live/` (`plans.py`, `classes.py`,
-  `calendar.py`, `contracts.py`, `events.py`), holds the logic behind the live tests'
-  fixtures: which Massive plans a key holds and what each covers and keeps, which class a
-  request reads, the exchange calendar, the front futures contract, and the recent splits and
-  dividends to check. `tests/conftest.py` turns it into fixtures. It runs against Massive only
-  in a live run, so each module has a unit test against the fakes at the mirrored path
-  (`tests/live/test_plans.py`), and coverage measures it with the library. The first is
+  (a new one needs owner approval). The second, `tests/_live/` (`plans.py`, `probe.py`,
+  `classes.py`, `calendar.py`, `contracts.py`, `events.py`, `streams.py`, `week_windows.py`,
+  `summary.py`), holds the logic behind the live tests' fixtures: the Massive plans, what each
+  covers and keeps, the probe that finds a key's plans and its cache, which class a request
+  reads, the exchange calendar, the front futures contract, the recent splits and dividends to
+  check, when a delayed stream must deliver rows, the week-window rule, and the open-questions
+  summary. `tests/conftest.py` turns it into fixtures. It runs against Massive only in a live
+  run, so each module has a unit test against the fakes at the mirrored path
+  (`tests/live/test_plans.py`), and coverage measures it with the library. Only this helper
+  package has mirrored tests (`TESTED_HELPER_PACKAGES`). The first is
   `tests/_fakes/` (`__init__.py`, `rest.py`,
   `ws.py`, `s3.py`, `stream.py`, `clock.py`, `gh.py`), protocol-faithful fakes, and
   `ws_session.py`, the one streaming harness every WebSocket end-to-end test shares (a real

@@ -5,12 +5,15 @@ and on whatever day they are run. This package holds the logic that makes that p
 from the fixtures that call it, so it can be unit-tested against the fakes:
 
 - `plans`: the plans per asset class, which plan covers which, their documented history
-  windows, the probe that asks Massive which plans a key holds, its day-long cache, and the
-  verdict on a request refused for its timeframe;
+  windows, and the verdict on a request refused for its timeframe;
+- `probe`: the probe that asks Massive which plans a key holds, and its day-long cache;
 - `classes`: which asset class, and so which rate-limit bucket, a REST request reads;
 - `calendar`: the US exchanges' holidays and half days, and the recent days the tests read;
 - `contracts`: the front futures contract of a day, by each product's roll rule;
-- `events`: the choice of recent splits and special dividends to check.
+- `events`: the choice of recent splits and special dividends to check;
+- `streams`: when a stream on a delayed plan must have delivered rows;
+- `week_windows`: which seven days a week bar covers, and whether that is the library's week;
+- `summary`: the open-questions summary that ends a live run.
 
 `tests/conftest.py` turns them into fixtures, which the live test modules use; only the unit
 tests of this package, under `tests/live/` (one per module, against the fakes), import it.

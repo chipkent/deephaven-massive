@@ -56,9 +56,9 @@ uv build                                 # sdist and wheel
 10. **Tests mirror the package**, one leading underscore dropped per path component:
     `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`. Two helper
     packages sit outside the rule: `tests/_fakes/`, the fake servers, and `tests/_live/`, the
-    logic behind the live tests' fixtures. A helper module's unit test takes the same mirrored
-    path (`tests/_live/plans.py` is tested by `tests/live/test_plans.py`). A new helper package
-    needs owner approval.
+    logic behind the live tests' fixtures. Each `tests/_live/` module has a unit test at the
+    same mirrored path (`tests/_live/plans.py` is tested by `tests/live/test_plans.py`); the
+    fakes have none. A new helper package, or tests for another one, needs owner approval.
 11. **Coverage is 100%** of statements and branches. Delete a dead defensive branch instead of
     covering it. `# pragma: no cover` needs a reason on its line and owner approval in the PR.
 12. **Every suppression has a reason**: each ruff ignore entry, `# noqa`, and
