@@ -37,10 +37,11 @@ construct them.
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 
 from deephaven import arrow as dh_arrow
 from deephaven.stream import blink_to_append_only
@@ -90,6 +91,33 @@ logger = logging.getLogger(__name__)
 
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
+
+_Q = TypeVar("_Q", bound="QueryBase")
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _verb(method: Callable[Concatenate[_Q, _P], _R]) -> Callable[Concatenate[_Q, _P], _R]:
+    """Make a query method a verb, run through `SessionCore.run_verb`.
+
+    So every verb raises `ValueError` on an update-graph thread and `MassiveError` on a closed
+    session before it checks a single argument, and one that runs long on a thread that holds
+    the update graph's lock (a Deephaven console command) is reported once, as
+    `"<dataset> <verb>()"`.
+
+    Args:
+        method: The verb's body.
+
+    Returns:
+        The verb, with the body's name, docstring, and signature.
+    """
+
+    @functools.wraps(method)
+    def verb(self: _Q, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        call = f"{self._spec.name} {method.__name__}()"
+        return self._core.run_verb(call, functools.partial(method, self, *args, **kwargs))
+
+    return verb
 
 
 def _interval(value: object) -> timedelta:
@@ -274,6 +302,7 @@ class Query(QueryBase):
 
     __slots__ = ()
 
+    @_verb
     def fetch(self) -> Table:
         """Return every row the dataset's endpoint returns, fully paginated, as a static table.
 
@@ -300,11 +329,11 @@ class Query(QueryBase):
         Returns:
             A static table.
         """
-        self._core.require_verb_thread()
         return self._described(
             self._core.rest_transport().fetch(self._spec, self._static_request())
         )
 
+    @_verb
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
         """Return a live table that re-runs `fetch()` every `interval`.
 
@@ -361,7 +390,6 @@ class Query(QueryBase):
             with neither unique poll keys nor an update time (one keyed by the default
             `Symbol`), `APPEND` adds one row per symbol.
         """
-        self._core.require_verb_thread()
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
         if isinstance(self._request.symbols, SymbolTable):
@@ -469,6 +497,7 @@ class StreamQuery(QueryBase):
             build=lambda blink: describe(shape(blink), spec, schema),
         )
 
+    @_verb
     def blink(self) -> Table:
         """Return the stream as a blink table: each update cycle holds only that cycle's rows.
 
@@ -484,9 +513,9 @@ class StreamQuery(QueryBase):
         Returns:
             A live blink table in the dataset's schema.
         """
-        self._core.require_verb_thread()
         return self._stream(lambda blink: blink, self._stream_request())
 
+    @_verb
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
 
@@ -501,9 +530,9 @@ class StreamQuery(QueryBase):
         Returns:
             A live append-only table in the dataset's schema.
         """
-        self._core.require_verb_thread()
         return self._stream(blink_to_append_only, self._stream_request())
 
+    @_verb
     def ring(self, capacity: int) -> Table:
         """Return the most recent `capacity` rows received.
 
@@ -522,10 +551,10 @@ class StreamQuery(QueryBase):
         Returns:
             A live ring table in the dataset's schema.
         """
-        self._core.require_verb_thread()
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(lambda blink: ring_table(blink, rows), self._stream_request())
 
+    @_verb
     def last_by(self, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
 
@@ -556,7 +585,6 @@ class StreamQuery(QueryBase):
         Returns:
             A live table with one row per key, in the dataset's schema.
         """
-        self._core.require_verb_thread()
         keys = self._last_by_keys(by)
         request = self._stream_request()
         symbols = request.symbols
@@ -625,6 +653,7 @@ class HistoryQuery(QueryBase):
 
     __slots__ = ()
 
+    @_verb
     def history(
         self,
         start: DateLike,
@@ -755,7 +784,6 @@ class HistoryQuery(QueryBase):
                 )
                 since = q.history("2026-01-02")  # through now
         """
-        self._core.require_verb_thread()
         chosen = _require_enum(source, HistorySource, "source")
         first = parse_date_like(start, "start")
         last = None if end is None else parse_date_like(end, "end")
@@ -849,6 +877,7 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 
     __slots__ = ()
 
+    @_verb
     def fetch(self) -> Table:
         """Return exactly one row per symbol, the latest, from the dataset's "last" endpoint.
 
@@ -866,7 +895,6 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         Returns:
             A static table in the stream's schema.
         """
-        self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
         return self._described(
             self._core.rest_transport().fetch(self._spec, self._static_request())
@@ -891,6 +919,7 @@ class HistoryLatestQuery(HistoryQuery):
 
     __slots__ = ()
 
+    @_verb
     def fetch(self) -> Table:
         """Return one row per symbol: the bar of the previous completed session.
 
@@ -912,7 +941,6 @@ class HistoryLatestQuery(HistoryQuery):
         Returns:
             A static table in the bars schema.
         """
-        self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
         return self._described(
             self._core.rest_transport().fetch(self._spec, self._static_request())

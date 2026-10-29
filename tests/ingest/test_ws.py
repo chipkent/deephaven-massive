@@ -32,7 +32,7 @@ from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._ingest import futures_calendar, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
-from deephaven_massive._tables.diagnostics import Diagnostics, StreamUpdate
+from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -1347,6 +1347,96 @@ def test_a_connection_that_does_not_end_is_reported(
     ws_session.connections.close()
     assert "has not ended 0 s after close()" in caplog.text
     del result
+
+
+def test_a_close_holding_the_update_graph_lock_joins_nothing(
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    # In a console command no live table updates while close() waits, so it joins neither the
+    # connections nor the futures schedule worker there; those daemons end on their own. A
+    # close without the lock still joins both, each for a bounded time.
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    connection = ws_session.connection()
+    joined: list[float] = []
+    detached: list[bool] = []
+    join, detach = connection.join, ws_session.connections.group.detach
+
+    def joining(timeout: float) -> bool:
+        joined.append(timeout)
+        return join(timeout)
+
+    def detaching(owner: ws.WsConnections, *, wait: bool = True) -> None:
+        detached.append(wait)
+        detach(owner, wait=wait)
+
+    monkeypatch.setattr(connection, "join", joining)
+    monkeypatch.setattr(ws_session.connections.group, "detach", detaching)
+    console_command(ws_session.connections.close)
+    assert (joined, detached) == ([], [False])
+    assert join(TIMEOUT)  # the connection's threads end on their own
+    ws_session.session.release(result)
+
+
+@pytest.mark.parametrize("last", ["CONNECTED", "FAILED"])
+def test_a_console_close_shows_its_connections_closed(
+    *,
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
+    rows_when: RowsWhen,
+    last: str,
+) -> None:
+    # Joining no connection, close() under the lock cannot count on the client's own last row,
+    # CLOSED, reaching the session before its diagnostics are released: it writes that row
+    # itself, from the last row the client wrote (a FAILED one keeps its state), for each
+    # family whose row the session shows, and the session leaves the connection's users. Here
+    # the client never even closes (a server that never answers), yet a held m.connections()
+    # view shows the final state once the command is over.
+    m = ws_session.session
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    view = m.connections()
+
+    def states(rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
+        return [(r["Family"], r["State"]) for r in rows if r["Transport"] == "WS"]
+
+    rows_when(view, lambda rows: states(rows) == [("TICK", "CONNECTED")])
+    with connection._lock:
+        (row,) = connection._rows.values()
+        connection._rows[ChannelFamily.TICK] = dataclasses.replace(row, state=ConnectionState(last))
+        # A family the session does not show a row of: show_closed writes nothing for it.
+        connection._rows[ChannelFamily.FMV] = dataclasses.replace(row, family=ChannelFamily.FMV)
+    client = connection._client
+    stop = client.close
+    monkeypatch.setattr(client, "close", lambda: None)
+    console_command(m.close)
+    final = "FAILED" if last == "FAILED" else "CLOSED"
+    rows_when(view, lambda rows: states(rows) == [("TICK", final)])
+    assert ws_session.connections not in connection.users
+    stop()
+    assert client.join(TIMEOUT)
+    del result, view
+
+
+def test_a_close_without_the_lock_joins_its_connections(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    connection = ws_session.connection()
+    joined: list[float] = []
+    join = connection.join
+
+    def joining(timeout: float) -> bool:
+        joined.append(timeout)
+        return join(timeout)
+
+    monkeypatch.setattr(connection, "join", joining)
+    ws_session.connections.close()
+    assert joined == [ws.JOIN_TIMEOUT]
+    ws_session.session.release(result)
 
 
 def test_the_default_factory_builds_real_clients(ws_session: WsSession) -> None:

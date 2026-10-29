@@ -185,6 +185,7 @@ def test_a_console_command_never_waits_for_another_threads_open(
     monkeypatch: pytest.MonkeyPatch,
     stream_rows: Callable[[], list[dict[str, Any]]],
     console_command: Callable[[Callable[[], None]], None],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Another thread's open that needs the update graph's lock, as starting a watchlist's
     # listener does, cannot finish while a console command holds that lock. A verb in the
@@ -209,17 +210,39 @@ def test_a_console_command_never_waits_for_another_threads_open(
         gated.gate.set()  # the open goes on, and then waits for the lock this command holds
         made.append(q.append_only())
 
+    got: dict[str, Table] = {}
+
+    def opening() -> None:
+        got["first"] = q.blink()
+
+    def waiting_verb() -> None:  # a thread without the lock waits for the first open
+        got["woken"] = q.ring(3)
+
+    # Daemons, never a pool's threads: a regression deadlocks these threads behind the lock the
+    # command keeps, and the interpreter would join a pool's threads at exit forever.
+    opener = threading.Thread(target=opening, daemon=True)
+    waiter = threading.Thread(target=waiting_verb, daemon=True)
     waiting = threading.Event()
-    with ThreadPoolExecutor(2) as pool:
-        opener = pool.submit(q.blink)
-        assert gated.entered.wait(TIMEOUT)
-        helper = _when_waiting(core, monkeypatch, waiting.set)
-        waiter = pool.submit(q.ring, 3)  # a thread without the lock waits for the first open
-        assert waiting.wait(TIMEOUT)
+    opener.start()
+    assert gated.entered.wait(TIMEOUT)
+    helper = _when_waiting(core, monkeypatch, waiting.set)
+    waiter.start()
+    assert waiting.wait(TIMEOUT)
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.core"):
         console_command(command)
-        first = opener.result(TIMEOUT)
-        woken = waiter.result(TIMEOUT)  # woke when the first open ended, then found the new one
-    helper.join(TIMEOUT)
+    # The second row of the key in m.streams() is explained.
+    assert caplog.messages == [
+        (
+            f"{label(massive_session)}: test.trades stream 2 opens alongside stream 1 for AAPL, "
+            "which another thread is still opening: this call holds the update graph's lock (a "
+            "console command) and cannot wait for that open, so m.streams() shows both; later "
+            "calls reuse stream 2"
+        )
+    ]
+    for thread in (opener, waiter, helper):
+        thread.join(TIMEOUT)
+        assert not thread.is_alive()
+    first, woken = got["first"], got["woken"]  # woken: found the new stream once the first opened
     assert gated.calls == 2
     assert [(r["StreamId"], r["HeldResults"]) for r in stream_rows()] == [(1, 1), (2, 2)]
     reused = q.ring(5)  # the key's stream is the command's
@@ -230,6 +253,7 @@ def test_a_console_command_never_waits_for_another_threads_open(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     assert fake_streams.shutdown[2].wait(TIMEOUT)
     made.clear()
+    got.clear()
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("refused"), KeyboardInterrupt()])
@@ -847,14 +871,17 @@ def test_a_verb_racing_close_does_not_reuse_the_closed_stream(
     core = massive_session._core
     q = stream_query(massive_session)
     first = q.blink()
-    guard = core.require_verb_thread
+    run_verb = core.run_verb
 
-    def guard_then_close() -> None:
+    def guard_then_close(call: str, body: Callable[[], Table]) -> Table:
         # The verb passes the guard, then another thread closes the session.
-        guard()
-        core.close()
+        def closing() -> Table:
+            core.close()
+            return body()
 
-    monkeypatch.setattr(core, "require_verb_thread", guard_then_close)
+        return run_verb(call, closing)
+
+    monkeypatch.setattr(core, "run_verb", guard_then_close)
     with pytest.raises(dm.MassiveError, match=f"^{label(massive_session)} is closed$"):
         q.append_only()
     assert len(fake_streams.opened) == 1
@@ -1105,6 +1132,51 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
     with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
         _core.refuse_update_graph_thread(dh_exec_ctx)
     _core.refuse_update_graph_thread(dh_exec_ctx)
+
+
+def test_a_long_verb_in_a_console_command_is_reported_once(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    # While a console command holds the update graph's lock, no live table updates: a verb that
+    # runs long there says so, once per session. Every verb counts as long here.
+    q = stream_query(massive_session)
+    made: list[Table] = []
+    monkeypatch.setattr(_core, "LOCKED_CALL_WARNING", 0.0)
+    made.append(q.blink())  # without the lock: nothing is paused, nothing is reported
+    assert caplog.messages == []
+
+    def command() -> None:
+        made.append(q.append_only())
+        made.append(q.ring(5))
+
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+        console_command(command)
+    (message,) = caplog.messages
+    assert message.startswith(f"{label(massive_session)}: test.trades append_only() ran for ")
+    assert "live tables do not update until the command ends; run long downloads" in message
+    for result in made:
+        massive_session.release(result)
+    made.clear()
+
+
+def test_a_short_verb_in_a_console_command_is_not_reported(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    caplog: pytest.LogCaptureFixture,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    q = stream_query(massive_session)
+    made: list[Table] = []
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+        console_command(lambda: made.append(q.blink()))
+    assert caplog.messages == []
+    massive_session.release(made.pop())
 
 
 def test_the_lock_check_sees_either_lock(dh_exec_ctx: ExecutionContext) -> None:

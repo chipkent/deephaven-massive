@@ -48,7 +48,7 @@ thread next runs Python code (or a cyclic collection runs), so the core is freed
 
 The module also holds the process-wide stream-id allocator and four context checks.
 `refuse_update_graph_thread` runs at every entry point: `MassiveSession()`, every verb (through
-`SessionCore.require_verb_thread`), and `close()`. `has_execution_context` and
+`SessionCore.run_verb`), and `close()`. `has_execution_context` and
 `has_script_query_scope` run only when a `MassiveSession` is constructed, which is the one place
 an execution context is captured. `holds_update_graph_lock` tells the calls that would wait on
 another thread whether they may.
@@ -56,10 +56,12 @@ another thread whether they may.
 **The console holds the UG lock.** Deephaven's console runs every command holding the update
 graph's exclusive lock, so no update cycle runs until the command returns; a user thread may
 hold the shared lock to the same effect. Every call works there, and a call on a thread that
-holds the lock never waits on another thread, which may need the lock or an update cycle to
-finish: `close()` waits neither for the diagnostics writer nor for the cycle that applies its
-final rows, and a verb never waits for another thread's open of the same stream (see below).
-Only update-graph threads themselves (table listeners) are refused.
+holds the lock never waits for an update cycle or on a thread that may need the lock (the
+diagnostics writer, a poller, another caller's stream open): `close()` waits neither for the
+diagnostics writer nor for the cycle that applies its final rows, and a verb never waits for
+another thread's open of the same stream (see below). Only update-graph threads themselves
+(table listeners) are refused. A verb that runs long there pauses every live table of the
+worker, which the session reports once (`SessionCore.run_verb`).
 
 Lock order: the update-graph (UG) lock, then `registry_lock`, then the live set's leaf lock. A
 stream is registered under `registry_lock` before it opens (with a session-minted id), then
@@ -79,7 +81,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 
 from deephaven.dherror import DHError
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock, shared_lock
@@ -115,6 +117,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.liveness import StreamHandle
 
 __all__ = [
+    "LOCKED_CALL_WARNING",
     "FlatFileTransport",
     "IngestPorts",
     "RestTransport",
@@ -127,6 +130,8 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 # A thread with no execution context gets Deephaven's empty default context, whose update graph
@@ -189,7 +194,8 @@ def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
     An update-graph thread runs the graph's cycle: a library call there would create tables and
     wait on library threads while the cycle, which those threads may need, cannot go on. A
     thread that merely holds the update graph's lock, as the Deephaven console does for every
-    command, is not refused: the library never waits on another thread there.
+    command, is not refused: the library never waits there for an update cycle or on a thread
+    that may need the lock.
 
     Args:
         exec_ctx: The session's execution context, or the one a new session captures.
@@ -208,8 +214,8 @@ def holds_update_graph_lock(exec_ctx: ExecutionContext) -> bool:
     """Tell whether the calling thread holds the update graph's exclusive or shared lock.
 
     The Deephaven console runs every command holding the exclusive lock. While a thread holds
-    either lock no update cycle runs, so it must not wait on another thread that may need the
-    lock or a cycle to finish. A Java call: never make it under `registry_lock`.
+    either lock no update cycle runs, so it must not wait for one, nor on a thread that may
+    need the lock. A Java call: never make it under `registry_lock`.
 
     Args:
         exec_ctx: The session's execution context.
@@ -219,6 +225,11 @@ def holds_update_graph_lock(exec_ctx: ExecutionContext) -> bool:
     """
     update_graph = exec_ctx.update_graph
     return has_exclusive_lock(update_graph) or has_shared_lock(update_graph)
+
+
+LOCKED_CALL_WARNING: Final = 5.0
+"""Seconds a verb may run on a thread that holds the update graph's lock before the session
+logs, once, that the worker's live tables are paused (`SessionCore.run_verb`)."""
 
 
 def _next_stream_id() -> int:
@@ -623,6 +634,8 @@ class SessionCore:
         # Shared with the finalizer, which runs the closers of a session collected unclosed.
         self._closers: list[Callable[[], None]] = []
         self._closed = False
+        # Whether a long verb under the update graph's lock has been reported.
+        self._reported_locked_call = False
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
         finalizer = weakref.finalize(
@@ -679,12 +692,24 @@ class SessionCore:
             del _live[id(self)]
         self._reaper.submit(functools.partial(_let_go, self))
 
-    def require_verb_thread(self) -> None:
-        """The guard every verb runs first: this is not a UG thread, and the session is open.
+    def run_verb(self, call: str, body: Callable[[], _T]) -> _T:
+        """Run a verb: its guard first, then its body, timed when it holds the UG lock.
 
-        The thread is checked first, so a verb on an update-graph thread raises the
-        `ValueError` of `refuse_update_graph_thread` whether or not the session is closed. A
-        thread that holds the update graph's lock, such as the console's, passes.
+        The guard checks the thread first, so a verb on an update-graph thread raises the
+        `ValueError` of `refuse_update_graph_thread` whether or not the session is closed, and
+        then the session, before the body checks a single argument. A thread that holds the
+        update graph's lock, such as a console command's, passes, and the body is timed there:
+        while it runs no live table of the worker updates, so a verb that ran
+        `LOCKED_CALL_WARNING` seconds or longer, such as a `history()` of many requests on a
+        rate-limited key, logs one WARNING saying so, the first time only, whether it returned
+        or raised.
+
+        Args:
+            call: The verb, as the warning names it, such as `"stocks.bars history()"`.
+            body: The verb's work.
+
+        Returns:
+            What `body` returned.
 
         Raises:
             MassiveError: If the session is closed.
@@ -692,6 +717,36 @@ class SessionCore:
         refuse_update_graph_thread(self.exec_ctx)
         if self.closed:
             raise MassiveError(f"{self.label} is closed")
+        if not holds_update_graph_lock(self.exec_ctx):
+            return body()
+        began = time.monotonic()
+        try:
+            return body()
+        finally:
+            self._report_locked_call(call, time.monotonic() - began)
+
+    def _report_locked_call(self, call: str, seconds: float) -> None:
+        """Warn, once per session, that a verb held the update graph's lock for a long time.
+
+        Args:
+            call: The verb, as the warning names it.
+            seconds: How long it ran; under `LOCKED_CALL_WARNING` logs nothing.
+        """
+        if seconds < LOCKED_CALL_WARNING:
+            return
+        with self.registry_lock:
+            first = not self._reported_locked_call
+            self._reported_locked_call = True
+        if first:
+            logger.warning(
+                "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "
+                "update graph's lock: live tables do not update until the command ends; run "
+                "long downloads from a thread of your own, outside a console command (logged "
+                "once per session)",
+                self.label,
+                call,
+                seconds,
+            )
 
     # --- Transport factory hooks: one per transport, served by the attached ingest ports. ---
 
@@ -985,7 +1040,8 @@ class SessionCore:
         to it. The first stream finishes opening for its own caller and is never reused, and
         the verbs waiting for it wake, claim again, and find the new record. Every unmapping
         checks that the key still maps to the stream being unmapped, so the first stream's end
-        leaves the key alone.
+        leaves the key alone. A take-over is logged at INFO, after the lock is released, so
+        the two rows of the key in `m.streams()` are explained.
 
         Args:
             spec: The dataset.
@@ -1045,7 +1101,20 @@ class SessionCore:
             self._streams[stream_id] = state
             holds.append((stream_id, ready))  # right after the stores: the caller cleans up
             self._sync_live()
-            return stream_id
+        if existing is not None:  # the key was taken over from a stream still opening
+            logger.info(
+                "%s: %s stream %d opens alongside stream %d for %s, which another thread is "
+                "still opening: this call holds the update graph's lock (a console command) "
+                "and cannot wait for that open, so m.streams() shows both; later calls reuse "
+                "stream %d",
+                self.label,
+                spec.name,
+                stream_id,
+                existing,
+                text,
+                stream_id,
+            )
+        return stream_id
 
     def _open(
         self, spec: DatasetSpec, request: Request, *, channel: str, stream_id: int
@@ -1553,11 +1622,13 @@ class SessionCore:
         that holds the update graph's lock, such as a console command's, no cycle can run until
         the lock is released, so `close()` waits for neither the rows nor the cycle: the
         diagnostics writer applies the rows, and a held view shows them, once the caller
-        releases the lock. Results stay tracked, so garbage collection and `release()` still
-        free them. Logs "MassiveSession #1 closed; N live tables failed": a WARNING when N > 0,
-        INFO otherwise; the tables themselves are not logged one by one. On an update-graph
-        thread it raises the `ValueError` of `refuse_update_graph_thread`, even when the session
-        is already closed.
+        releases the lock. There the closers join no thread either (`WsConnections.close`):
+        while they would wait no live table updates, and the threads, daemons that never need
+        the lock, end on their own. Results stay tracked, so garbage collection and `release()`
+        still free them. Logs "MassiveSession #1 closed; N live tables failed": a WARNING when
+        N > 0, INFO otherwise; the tables themselves are not logged one by one. On an
+        update-graph thread it raises the `ValueError` of `refuse_update_graph_thread`, even
+        when the session is already closed.
         """
         refuse_update_graph_thread(self.exec_ctx)
         locked = holds_update_graph_lock(self.exec_ctx)

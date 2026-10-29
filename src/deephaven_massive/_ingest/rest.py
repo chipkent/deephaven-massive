@@ -143,6 +143,7 @@ from deephaven_massive._massive import (
     to_batch,
 )
 from deephaven_massive._tables.columns import dataset_table
+from deephaven_massive._tables.core import holds_update_graph_lock
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.liveness import entered
 from deephaven_massive._types import _All
@@ -1707,11 +1708,13 @@ class RestReader:
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
+        pausing: bool = False,
     ) -> tuple[pa.Table, int]:
         """Read a dataset's fetch paths for the symbols: `fetch()`.
 
         Once planned, the read logs at INFO the least time its paced requests take, when they
-        cannot all start within a minute (`rate_limits.announce`).
+        cannot all start within a minute (`rate_limits.announce`); at WARNING when the read
+        holds the update graph's lock.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1719,6 +1722,8 @@ class RestReader:
             symbols: The static symbols.
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
+            pausing: True when the calling thread holds the update graph's lock (a console
+                command), so the read pauses every live table of the worker while it runs.
 
         Returns:
             The rows of every path, in path order, capped at `Request.limit`, and the request
@@ -1728,7 +1733,12 @@ class RestReader:
         `ValueError` of `_base`.
         """
         planned = self.plan_fetch(spec, request, symbols)
-        announce(self.state.client.governor, f"{spec.name} fetch", _buckets(spec, planned))
+        announce(
+            self.state.client.governor,
+            f"{spec.name} fetch",
+            _buckets(spec, planned),
+            pausing=pausing,
+        )
         return self._read_planned(
             spec, request, planned, record=record, executor=executor, cancel=None
         )
@@ -2008,7 +2018,12 @@ class RestEndpoints:
         """
         reader = self._reader()
         try:
-            table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
+            table, _ = reader.read_fetch(
+                spec,
+                request,
+                symbols=request.symbols,
+                pausing=holds_update_graph_lock(self._core.exec_ctx),
+            )
         except MassiveError as error:
             _report(error)
             raise
@@ -2070,6 +2085,7 @@ class RestEndpoints:
             f"{spec.name} history",
             [call_bucket(spec, call) for call in calls],
             shape=shape,
+            pausing=holds_update_graph_lock(self._core.exec_ctx),
         )
         try:
             table, requests = reader.read(

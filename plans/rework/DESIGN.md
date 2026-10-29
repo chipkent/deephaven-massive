@@ -641,11 +641,20 @@ A thread that only holds the UG lock is not a UG thread, and every call works th
 `close()`. This is the main deployment path, not an edge case: Deephaven's console runs every
 command holding the UG's exclusive lock (`PythonDeephavenSession.evaluate` runs the script
 inside `exclusiveLock().doLockedInterruptibly`), so no update cycle runs until the command
-returns. A call on such a thread never waits on another thread, which may need the lock or a
-cycle to finish ([section 18.3](#183-lock-order)). What a call writes to a live table (stream
-rows, diagnostics rows, a poll's first cycle) therefore shows once the command is over. A
-long blocking call in a command, such as a `history()` of many requests on a rate-limited key,
-holds every live table of the worker still for its duration, as any long console command does.
+returns. A call on such a thread never waits on a thread that may need the UG lock or an
+update cycle to finish: the diagnostics writer, a poller, or another caller's stream open
+([section 18.3](#183-lock-order)). What a call writes to a live table (stream rows,
+diagnostics rows, a poll's first cycle) therefore shows once the command is over, which is
+Deephaven's normal behavior for anything done in a console command. A long blocking call in a
+command, such as a `history()` of many requests on a rate-limited key, holds every live table
+of the worker still for its duration, as any long console command does. The first verb of a
+session that runs 5 seconds or longer there logs one WARNING after it returns, "MassiveSession
+#1: stocks.bars history() ran for 12 s inside a Deephaven console command, which holds the
+update graph's lock: live tables do not update until the command ends; run long downloads from
+a thread of your own, outside a console command (logged once per session)", and a paced REST
+read warns before its first request how long it will pause them
+([section 13.4](#134-rest)). An application script runs under the lock too, so the remedy is a
+thread, not a script.
 
 **How long a session lives.** The rule: a live table keeps alive everything it needs, and
 nothing else keeps anything alive. A session lives while the user holds it (`m`, a query, a
@@ -774,7 +783,11 @@ return result
   reused; the verbs that were waiting for it wake when it is ready, claim again, and reuse the
   new one. Every unmapping checks that the key still maps to the stream being unmapped, so the
   first stream's end leaves the key alone. The lock is checked once per verb, before the claim,
-  since the check is a Java call and `registry_lock` admits none. The opener's claim
+  since the check is a Java call and `registry_lock` admits none. A take-over logs one INFO
+  line after the lock is released, so the key's second row in `m.streams()` is explained:
+  "MassiveSession #1: stocks.quotes stream 2 opens alongside stream 1 for AAPL, which another
+  thread is still opening: this call holds the update graph's lock (a console command) and
+  cannot wait for that open, so m.streams() shows both; later calls reuse stream 2". The opener's claim
   and open run inside one `try`/`except`, so whatever interrupts them (even a
   `KeyboardInterrupt` landing between the two, or after the open returned) the record is
   readied and, unless the verb got the stream, the opener's hold is released. Asynchronous
@@ -841,7 +854,15 @@ return result
      failing its publisher. `SessionCore.fail_stream` never changes a `CLOSED` row's state.
   4. It runs the closers: the session's own streams leave their connections, and every
      connection no other session leases is closed and joined for a bounded time; the pollers
-     stop.
+     stop. On a thread that holds the UG lock it joins nothing (neither the connections nor
+     the futures-schedule worker): no live table updates while it would wait, and against an
+     unresponsive server each join could last its full bound. Those threads are daemons that
+     never need the lock, so they end on their own. A closing connection's own last row,
+     `CLOSED`, would then reach the session only after its diagnostics are released, and be
+     dropped, so the closing thread writes it instead: under the group's lock, which every row
+     write holds, the session gets the last row written for each family it shows, marked
+     `CLOSED` (a `FAILED` row keeps its state), and leaves the connection's users, so no later
+     row replaces it.
   5. It writes the final rows, then releases the diagnostics scope, and returns once the
      update cycle that applied the rows has ended (it takes the shared update-graph lock once),
      so a held `m.streams()` view, which updates later in that cycle, shows them. On a thread
@@ -2988,7 +3009,11 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   static read logs one INFO line per bucket before its first request when its paced requests
   cannot all start within a minute ("stocks.trades fetch: 250 requests; paced at 5 requests a
   minute (stocks); at that pace they take at least 49 min", a lower bound from the governor's
-  state), and
+  state). Made on a thread that holds the UG lock (a console command), which pauses every live
+  table of the worker while the read runs, that line is a WARNING instead: "stocks.bars
+  history: 250 requests; paced at 5 requests a minute (stocks); this command will pause every
+  live table in the worker for at least 49 min: run long downloads from a thread of your own,
+  outside a console command". And
   a grouped-daily or per-session download of more than five requests of an unpaced
   subscription names what the Basic tier would cost ([section 12](#12-timestamp-units-and-day-boundaries)).
   A `poll()` whose cycle makes more paced requests than its interval allows (each request
@@ -3448,7 +3473,7 @@ without the GIL.
 
 | Thread | Created by | Does | Must not |
 |---|---|---|---|
-| caller (console, script, user thread); a console command holds the UG's exclusive lock throughout | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every library lock and only when it does not hold the UG lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every library lock) | hold the registry lock while calling Deephaven or waiting; wait on another thread, or for an update cycle, while holding the UG lock |
+| caller (console, script, user thread); a console command holds the UG's exclusive lock throughout | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every library lock and only when it does not hold the UG lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every library lock) | hold the registry lock while calling Deephaven or waiting; while holding the UG lock, wait for an update cycle or on a thread that may need the lock (the diagnostics writer, a poller, another caller's stream open), or join a closing connection |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (the first TLS context of a certificate setting loads from disk); moving the streams' leases under the connection group's lock; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
@@ -3568,7 +3593,9 @@ directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, o
 `deephaven.arrow.to_table`, while holding `registry_lock`. That single rule prevents the UG and
 registry deadlock. Verbs called on the UG thread raise `ValueError`.
 
-**A caller holding the UG lock never waits on another thread.** The caller may hold the UG lock
+**A caller holding the UG lock never waits on a thread that may need the UG lock or an update
+cycle** (the diagnostics writer, a poller, another caller's stream open). The caller may hold
+the UG lock
 without being a UG thread: the console holds the exclusive lock for every command, and a user
 thread may hold the shared lock. No update cycle runs meanwhile, and any other thread that needs
 the lock blocks, so a wait on such a thread could never end. Which library threads can need the
@@ -3581,11 +3608,18 @@ a static table, `publish_failure`, listener removal). So on a thread that holds 
 (`holds_update_graph_lock`, checked outside `registry_lock`, since it is a Java call), a verb
 takes over the key of a stream still opening on another thread instead of waiting for it
 ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), and `close()` waits for
-neither the diagnostics writer nor the cycle that applies the final rows. It still joins the
-connections it closes and the futures-schedule worker for at most `JOIN_TIMEOUT` each, since
-none of those threads needs the lock; against an unresponsive server that bound can be reached,
-and the console command lasts that much longer. No library lock is ever held by a thread that
-waits for the UG lock, so a caller holding the UG lock may take any of them in the usual order.
+neither the diagnostics writer nor the cycle that applies the final rows. It does not join the
+connections it closes or the futures-schedule worker either, though none of those threads
+needs the lock: while it waits no live table updates, and against an unresponsive server each
+join could last its full `JOIN_TIMEOUT`. They are daemons and end on their own; a caller
+without the lock still joins them, each for a bounded time. No library lock is ever held by a
+thread that waits for the UG lock, so a caller holding the UG lock may take any of them in the
+usual order.
+
+The reverse direction is latency, not a deadlock: a thread without the lock whose verb needs
+it (a stream open that starts a watchlist's listener, a `fetch()` that reads a watchlist)
+waits for the whole console command that holds it, as any Deephaven operation that locks
+does.
 
 The WebSocket flush adds two locks above `registry_lock`: a connection's **flush lock**, then a
 stream's **publish lock**, then `registry_lock`. Nothing takes the flush or the publish lock

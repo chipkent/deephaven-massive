@@ -542,6 +542,23 @@ def test_closing_ends_a_lookup_still_waiting_for_the_rate_governor(
     assert not closing.is_alive()
 
 
+def test_a_close_that_does_not_wait_leaves_the_worker_to_end_on_its_own(
+    fetch: FakeFetch, clock: Clock
+) -> None:
+    # A thread holding the update graph's lock closes without waiting: the worker, busy with a
+    # request, ends once the request returns.
+    calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
+    fetch.hold(CONTRACTS_PATH)
+    calendar.watch(["ESM4"])
+    fetch.wait(1)
+    calendar.close(wait=False)
+    worker = next(t for t in threading.enumerate() if t.name == "test futures schedules")
+    assert worker.is_alive()  # still in its request: the close did not wait for it
+    fetch.release.set()
+    worker.join(TIMEOUT)
+    assert not worker.is_alive()
+
+
 @pytest.mark.parametrize(
     "failure",
     [MassiveError("MassiveSession #1 is closed"), RuntimeError("cannot schedule new futures")],

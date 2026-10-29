@@ -488,7 +488,8 @@ class MassiveSession:
         failed table". `m.streams()` shows every stream `CLOSED` (one that had already failed
         keeps `FAILED`), and a `connections()` or `streams()` table taken before the close
         keeps its final rows (in a console command, which holds the update graph's lock, once
-        the command is over). The session's streams leave their WebSocket connections, and
+        the command is over; there `close()` returns at once, waiting for nothing). The
+        session's streams leave their WebSocket connections, and
         every connection no other session of the same key uses is closed. "MassiveSession #1
         closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
         `connections()`, `streams()`, and `rate_limits()` raise

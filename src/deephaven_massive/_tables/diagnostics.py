@@ -799,9 +799,8 @@ class Diagnostics:
         Only for a live session's diagnostics, whose writer is running (tests use it to wait
         for rows). After `release()` the event comes back already set, even when a release
         that did not wait still has rows to apply: join `thread` to wait for those. After
-        `stop()` (the
-        finalizer of a collected session) the writer may already have exited, so the event
-        might never be set: do not call it then.
+        `stop()` (the finalizer of a collected session) the writer may already have exited, so
+        the event might never be set: do not call it then.
 
         Returns:
             The event; already set when the writer has been released.

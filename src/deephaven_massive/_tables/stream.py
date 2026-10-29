@@ -499,8 +499,11 @@ class StreamSink:
       its connection failed while it was opening, from the closing thread at `m.close()`, and
       from the reaper when its watchlist failed. The order is the flush lock (on a flush
       thread), then the publish lock, then `registry_lock` (`SessionCore.fail_stream`, which
-      `fail` calls); the publish lock is never taken under `registry_lock` or the update-graph
-      lock.
+      `fail` calls); the publish lock is never taken under `registry_lock`. A caller that holds
+      the update-graph lock (a console command) takes it to fail the stream, which is safe
+      because nothing done under it takes the update-graph lock or waits for an update cycle:
+      `where_in` of static tables, `publisher.add` of a static table, `publish_failure`, and
+      `SessionCore.fail_stream`.
 
     A failed stream publishes nothing more, and is failed once, so a failure queued behind the
     session's close never replaces the close.
