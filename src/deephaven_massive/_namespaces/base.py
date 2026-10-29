@@ -31,7 +31,7 @@ here runs synchronously on the calling thread, makes no network call, and create
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -73,6 +73,7 @@ __all__ = [
     "bar_query_class",
     "build_query",
     "list_params",
+    "one_or_any_of",
     "optional_text",
     "query_class",
     "require_bool",
@@ -249,6 +250,43 @@ def optional_text(name: str, value: object) -> str | None:
     if value is not None and not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
     return value
+
+
+def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
+    """Return the wire parameter that carries an argument taking one value or several.
+
+    Many list endpoints take a parameter both as `name` (one value) and as `name.any_of` (a
+    comma-separated list), such as a futures `product_code` or a filing's `issuer_cik`. The
+    factory argument accepts either: one `str` is sent as `name`, a sequence as
+    `name.any_of`. Both keys are always returned, the unset one as None, so `build_query`
+    reserves every form of the parameter from `filters` even when the argument is not given.
+
+    Args:
+        name: The wire name of the single-value form, which is also the argument's name.
+        value: The argument as passed: one `str`, a sequence of `str`, or None.
+        every: What None selects, for the message that refuses an empty sequence, such as
+            `"every product"`.
+
+    Returns:
+        `{name: value, f"{name}.any_of": None}` for one value or None, and
+        `{name: None, f"{name}.any_of": values}` for a sequence, with the values as a tuple.
+
+    Raises:
+        TypeError: If the argument is neither None, a `str`, nor a sequence.
+        ValueError: If the sequence is empty, which would select nothing.
+
+    An element that is not a `str` raises the `TypeError` of `build_query`.
+    """
+    plural = f"{name}.any_of"
+    if value is None or isinstance(value, str):
+        return {name: value, plural: None}
+    if not isinstance(value, Sequence):
+        raise TypeError(
+            f"{name} must be a str, a sequence of str, or None, not {type(value).__name__}"
+        )
+    if not value:
+        raise ValueError(f"{name} is empty; pass None for {every}")
+    return {name: None, plural: tuple(value)}
 
 
 def _list_item(item: object) -> bool:

@@ -265,8 +265,14 @@ class QueryBase:
 class Query(QueryBase):
     """A REST list or snapshot dataset: a static `fetch()` or a live `poll()`.
 
-    No namespace declares a dataset of this kind yet, so no query can be built and there is no
-    example here yet.
+    Built by a dataset method, such as `m.stocks.dividends(...)` or `m.stocks.snapshots(...)`;
+    immutable and reusable.
+
+    Example:
+        ::
+
+            divs = m.stocks.dividends(["AAPL", "MSFT"], start="2024-01-01").fetch()
+            live = m.stocks.snapshots(["AAPL", "MSFT"]).poll(5.0)  # every 5 seconds
     """
 
     __slots__ = ()
@@ -325,8 +331,8 @@ class Query(QueryBase):
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
             mode: How cycles combine (`PollMode`); None uses the dataset's default:
-                `APPEND` for news and filings (not the filing taxonomies), `UPSERT` for IPOs,
-                and `REPLACE` otherwise.
+                `APPEND` for news and filings (not the filing taxonomies, insider activity, or
+                insider holdings), `UPSERT` for IPOs, and `REPLACE` otherwise.
 
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A
@@ -371,8 +377,13 @@ class StreamQuery(QueryBase):
     connection raise `ValueError` at once; those of a reactive symbol table are deferred
     instead (`Deferred` in `m.streams()`).
 
-    No namespace declares a dataset of this kind yet, so no query can be built and there is no
-    example here yet.
+    Built by a dataset method, such as `m.stocks.luld(...)`; immutable and reusable.
+
+    Example:
+        ::
+
+            bands = m.stocks.luld(dm.ALL).last_by()  # the latest band of every ticker
+            recent = m.stocks.imbalances(["AAPL", "MSFT"]).ring(1000)
     """
 
     __slots__ = ()
@@ -723,8 +734,15 @@ class HistoryQuery(QueryBase):
 class StreamHistoryQuery(StreamQuery, HistoryQuery):
     """A WebSocket dataset that also has history: the stream verbs plus `history()`.
 
-    No namespace declares a dataset of this kind yet, so no query can be built and there is no
-    example here yet.
+    Built by a dataset method, such as `m.stocks.bars(...)` with a one-second or one-minute
+    timespan; immutable and reusable.
+
+    Example:
+        ::
+
+            q = m.stocks.bars(["AAPL", "MSFT"])  # one-minute bars
+            live = q.append_only()
+            day = q.history("2025-03-03", "2025-03-03")
     """
 
     __slots__ = ()
@@ -733,8 +751,14 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
 class StreamHistoryLatestQuery(StreamHistoryQuery):
     """A stream-and-history dataset with a REST "last" endpoint, served by `fetch()`.
 
-    No namespace declares a dataset of this kind yet, so no query can be built and there is no
-    example here yet.
+    Built by a dataset method, such as `m.stocks.trades(...)`; immutable and reusable.
+
+    Example:
+        ::
+
+            q = m.stocks.trades(["AAPL", "MSFT"])
+            last = q.fetch()  # one row per symbol: its latest trade
+            tape = q.ring(10_000)
     """
 
     __slots__ = ()
@@ -766,8 +790,15 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 class HistoryLatestQuery(HistoryQuery):
     """Daily bars: `history()` plus `fetch()` of the previous completed session's bar.
 
-    No namespace declares a dataset of this kind yet, so no query can be built and there is no
-    example here yet.
+    Built by a dataset method, such as `m.stocks.bars(...)` with a one-day timespan; immutable
+    and reusable.
+
+    Example:
+        ::
+
+            q = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY)
+            prev = q.fetch()  # each symbol's bar of the previous completed session
+            march = q.history("2025-03-03", "2025-03-31")
     """
 
     __slots__ = ()
