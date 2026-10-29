@@ -396,9 +396,7 @@ class FuturesSessions:
         if 0 <= index < len(sessions) - 1:
             return day  # between a close and the next session's first event: no session
         batch.products.add(product)
-        where = "before" if index < 0 else "after"
-        why = f"its schedule ({product}) holds no session {where} {_iso(moment)}"
-        batch.misses[symbol, product, day, why] = None
+        batch.misses[symbol, product, day, _outside(product, sessions, before=index < 0)] = None
         return day
 
     def _report(self, batch: _Batch) -> list[tuple[str, str]]:
@@ -655,13 +653,22 @@ _NOT_LOADED: Final = f"its schedule was not loaded after {LOAD_PATIENCE.seconds}
 """The reason of a miss whose contract or product is still loading after `LOAD_PATIENCE`."""
 
 
-def _iso(ns: int) -> str:
-    """Return epoch nanoseconds as an ISO-8601 UTC instant, for a message.
+def _outside(product: str, sessions: tuple[Session, ...], *, before: bool) -> str:
+    """Return why a row outside a product's loaded sessions is a miss.
+
+    The text names the loaded schedule's first or last session, not the row's instant, so the
+    rows of one product and rule date share one miss, however many instants they hold.
 
     Args:
-        ns: The instant.
+        product: The product.
+        sessions: Its loaded sessions, oldest first; possibly none.
+        before: True for a row before the first session, False for one after the last.
 
     Returns:
-        Such as `2025-03-03T22:00:00+00:00`.
+        The reason, such as `its loaded schedule (ES) ends with the session of 2024-04-01`.
     """
-    return (datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=ns // 1000)).isoformat()
+    if not sessions:
+        return f"its loaded schedule ({product}) holds no session"
+    if before:
+        return f"its loaded schedule ({product}) begins with the session of {sessions[0].day}"
+    return f"its loaded schedule ({product}) ends with the session of {sessions[-1].day}"

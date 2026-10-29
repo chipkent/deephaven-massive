@@ -183,6 +183,13 @@ def test_local_dates_follow_the_clock_change_inside_a_day() -> None:
     assert local_dates(late, UTC).to_pylist() == ["2025-11-03", "2025-11-03"]
 
 
+def test_the_wall_clock_takes_the_new_offset_at_the_change_itself() -> None:
+    # At 06:00 UTC exactly New York reads 01:00 EST, not 02:00 EDT; a second before, 01:59:59.
+    values = pa.array([ns("2025-11-02T05:59:59"), ns("2025-11-02T06:00:00")], pa.int64())
+    wall = row_times._local_ns(values, NEW_YORK).to_pylist()
+    assert wall == [ns("2025-11-02T01:59:59"), ns("2025-11-02T01:00:00")]
+
+
 def test_a_futures_tick_keeps_massive_s_session() -> None:
     rule = TimeRule("futures.trades", RowTimes.TICK, A.FUTURES)
     sent = ticks(["2024-03-28T23:00:00"], dates=["2024-04-01"])  # Good Friday's fold

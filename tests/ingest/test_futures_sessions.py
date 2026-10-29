@@ -335,9 +335,9 @@ def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
         (
             "ESM4",
             (
-                "futures session of ESM4 not confirmed: its schedule (ES) holds no session "
-                "after 2024-04-01T22:00:00+00:00; its rows keep the session the 17:00 Chicago "
-                "rule gives them, 2024-04-02"
+                "futures session of ESM4 not confirmed: its loaded schedule (ES) ends with the "
+                "session of 2024-04-01; its rows keep the session the 17:00 Chicago rule gives "
+                "them, 2024-04-02"
             ),
         )
     ]
@@ -363,10 +363,24 @@ def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
     assert fetch.paths().count(SCHEDULES_PATH) == 2
 
 
+def test_a_row_at_the_last_close_is_past_the_loaded_sessions(calendar: FuturesSessions) -> None:
+    # A session's close is its first instant without trading: a row stamped exactly at the
+    # close of the last loaded session lies past every loaded session.
+    watched(calendar, "ESM4")
+    dates, misses = correct(calendar, [("ESM4", "2024-04-01T21:00:00", "2024-04-01")])
+    assert dates == ["2024-04-01"]
+    assert "its loaded schedule (ES) ends with the session of 2024-04-01" in misses[0][1]
+    # A second earlier, the row is inside it.
+    assert correct(calendar, [("ESM4", "2024-04-01T20:59:59", "2024-04-01")]) == (
+        ["2024-04-01"],
+        [],
+    )
+
+
 def test_a_row_before_the_loaded_sessions_is_a_miss(calendar: FuturesSessions) -> None:
     watched(calendar, "ESM4")
     _, misses = correct(calendar, [("ESM4", "2024-03-20T15:00:00", "2024-03-20")])
-    assert "holds no session before 2024-03-20T15:00:00+00:00" in misses[0][1]
+    assert "its loaded schedule (ES) begins with the session of 2024-03-28" in misses[0][1]
 
 
 def test_a_contract_massive_does_not_list_is_a_miss_and_asked_again(
@@ -491,7 +505,7 @@ def test_a_schedule_without_events_for_a_product_places_nothing(
     ]
     watched(calendar, "ESM4")
     _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
-    assert "holds no session before" in misses[0][1]
+    assert "its loaded schedule (ES) holds no session;" in misses[0][1]
 
 
 def test_the_module_names_its_paths() -> None:
