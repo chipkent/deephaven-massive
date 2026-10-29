@@ -1227,6 +1227,28 @@ def test_a_verdict_that_arrives_while_a_host_is_decided_wins(
     groups.clear()
 
 
+def test_a_connection_built_for_the_host_a_verdict_replaced_is_dropped(
+    make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The verdict lands while the real-time connection is being built: the lease drops it
+    # unused and builds the delayed host's instead.
+    custom_session = make_ws_session(decide=unknown_futures)
+    group = custom_session.connections.group
+    build = group.factory
+
+    def verdict_while_building(url: str, **options: object) -> object:
+        if url == "wss://socket.test/futures":
+            group.verdicts[AssetClass.FUTURES, ChannelFamily.TICK] = DELAYED
+        return cast("Callable[..., object]", build)(url, **options)
+
+    monkeypatch.setattr(group, "factory", verdict_while_building)
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    assert list(group.connections) == ["wss://delayed.test/futures"]
+    monkeypatch.undo()
+    custom_session.session.release(result)
+
+
 def test_a_session_that_joins_during_a_move_records_the_verdict(
     make_ws_session: Callable[..., WsSession],
 ) -> None:
