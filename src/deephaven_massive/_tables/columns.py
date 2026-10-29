@@ -241,13 +241,14 @@ class _DateRuns:
         if count == 0:
             return cls(0, (), ())
         distinct = pc.unique(column)
-        # A null row's code is the null entry's, so a run of nulls is a run like any other.
-        codes = pc.fill_null(pc.index_in(column, value_set=distinct), -1).combine_chunks()
+        # `distinct` holds null too where the column does, so every row has a code and a run of
+        # nulls is a run like any other, whose text is None.
+        codes = pc.index_in(column, value_set=distinct).combine_chunks()
         changes = pc.indices_nonzero(pc.not_equal(codes[1:], codes[:-1]))
         starts = [0, *pc.add(changes, 1).to_pylist()]
         texts = distinct.to_pylist()
         firsts = codes.take(pa.array(starts, pa.int64())).to_pylist()
-        return cls(count, tuple(starts), tuple(None if c < 0 else texts[c] for c in firsts))
+        return cls(count, tuple(starts), tuple(texts[code] for code in firsts))
 
     def strings(self) -> object:
         """Build the Java `String[]` of the column, every row of a date sharing one `String`.
