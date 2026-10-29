@@ -323,8 +323,8 @@ class Query(QueryBase):
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
             mode: How cycles combine (`PollMode`); None uses the dataset's default:
-                `APPEND` for news and filings (not the filing taxonomies), `UPSERT` for IPOs,
-                and `REPLACE` otherwise.
+                `APPEND` for news and filings (not the filing taxonomies, insider activity, or
+                insider holdings), `UPSERT` for IPOs, and `REPLACE` otherwise.
 
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A

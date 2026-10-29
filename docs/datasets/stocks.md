@@ -184,46 +184,46 @@ Current market snapshots of US-listed stocks, one row per ticker.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
-| `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. | REST | `day.dv` |
-| `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
-| `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. | REST | `day.o` |
-| `DayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `day.otc` |
-| `DayVolume` | double | The trading volume of the symbol in the given time period. | REST | `day.v` |
-| `DayVwap` | double | The volume weighted average price. | REST | `day.vw` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
+| `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `day` object: The most recent daily bar for this ticker. | REST | `day.dv` |
+| `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
+| `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.l` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.o` |
+| `DayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `day` object: The most recent daily bar for this ticker. | REST | `day.otc` |
+| `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.v` |
+| `DayVwap` | double | The volume weighted average price. From the `day` object: The most recent daily bar for this ticker. | REST | `day.vw` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastQuoteAskPrice` | double | The ask price. | REST | `lastQuote.P` |
-| `LastQuoteAskSize` | long | The ask size in lots. | REST | `lastQuote.S` |
-| `LastQuoteBidPrice` | double | The bid price. | REST | `lastQuote.p` |
-| `LastQuoteBidSize` | long | The bid size in lots. | REST | `lastQuote.s` |
-| `LastQuoteSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. | REST | `lastQuote.t` |
-| `LastTradeConditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST | `lastTrade.c` |
-| `LastTradeDecimalSize` | String | The size of the trade including fractional shares, respresented as a string. | REST | `lastTrade.ds` |
-| `LastTradeId` | String | The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID. | REST | `lastTrade.i` |
-| `LastTradePrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST | `lastTrade.p` |
-| `LastTradeSize` | long | The size (volume) of the trade. | REST | `lastTrade.s` |
-| `LastTradeSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. | REST | `lastTrade.t` |
-| `LastTradeExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `lastTrade.x` |
-| `LastMinuteAccumulatedVolume` | long | The accumulated volume. | REST | `min.av` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. | REST | `min.c` |
-| `LastMinuteAccumulatedDecimalVolume` | String | The accumulated volume including fractional shares, respresented as a string. | REST | `min.dav` |
-| `LastMinuteDecimalVolume` | String | The volume including fractional shares, respresented as a string. | REST | `min.dv` |
-| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. | REST | `min.h` |
-| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. | REST | `min.o` |
-| `LastMinuteOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `min.otc` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. | REST | `min.t` |
-| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. | REST | `min.v` |
-| `LastMinuteVwap` | double | The volume weighted average price. | REST | `min.vw` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. | REST | `prevDay.c` |
-| `PrevDayHigh` | double | The highest price for the symbol in the given time period. | REST | `prevDay.h` |
-| `PrevDayLow` | double | The lowest price for the symbol in the given time period. | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. | REST | `prevDay.o` |
-| `PrevDayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `prevDay.otc` |
-| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. | REST | `prevDay.v` |
-| `PrevDayVwap` | double | The volume weighted average price. | REST | `prevDay.vw` |
+| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.P` |
+| `LastQuoteAskSize` | long | The ask size in lots. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.S` |
+| `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.p` |
+| `LastQuoteBidSize` | long | The bid size in lots. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.s` |
+| `LastQuoteSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.t` |
+| `LastTradeConditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.c` |
+| `LastTradeDecimalSize` | String | The size of the trade including fractional shares, respresented as a string. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.ds` |
+| `LastTradeId` | String | The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.i` |
+| `LastTradePrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.p` |
+| `LastTradeSize` | long | The size (volume) of the trade. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.s` |
+| `LastTradeSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.t` |
+| `LastTradeExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.x` |
+| `LastMinuteAccumulatedVolume` | long | The accumulated volume. From the `min` object: The most recent minute bar for this ticker. | REST | `min.av` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteAccumulatedDecimalVolume` | String | The accumulated volume including fractional shares, respresented as a string. From the `min` object: The most recent minute bar for this ticker. | REST | `min.dav` |
+| `LastMinuteDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `min` object: The most recent minute bar for this ticker. | REST | `min.dv` |
+| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
+| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
+| `LastMinuteOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `min` object: The most recent minute bar for this ticker. | REST | `min.otc` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
+| `LastMinuteVwap` | double | The volume weighted average price. From the `min` object: The most recent minute bar for this ticker. | REST | `min.vw` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.c` |
+| `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.h` |
+| `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.l` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.o` |
+| `PrevDayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.otc` |
+| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.v` |
+| `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
@@ -241,46 +241,46 @@ The twenty US stocks with the largest percentage move today, up or down.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
-| `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. | REST | `day.dv` |
-| `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
-| `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. | REST | `day.o` |
-| `DayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `day.otc` |
-| `DayVolume` | double | The trading volume of the symbol in the given time period. | REST | `day.v` |
-| `DayVwap` | double | The volume weighted average price. | REST | `day.vw` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
+| `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `day` object: The most recent daily bar for this ticker. | REST | `day.dv` |
+| `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
+| `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.l` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.o` |
+| `DayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `day` object: The most recent daily bar for this ticker. | REST | `day.otc` |
+| `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.v` |
+| `DayVwap` | double | The volume weighted average price. From the `day` object: The most recent daily bar for this ticker. | REST | `day.vw` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastQuoteAskPrice` | double | The ask price. | REST | `lastQuote.P` |
-| `LastQuoteAskSize` | long | The ask size in lots. | REST | `lastQuote.S` |
-| `LastQuoteBidPrice` | double | The bid price. | REST | `lastQuote.p` |
-| `LastQuoteBidSize` | long | The bid size in lots. | REST | `lastQuote.s` |
-| `LastQuoteSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. | REST | `lastQuote.t` |
-| `LastTradeConditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST | `lastTrade.c` |
-| `LastTradeDecimalSize` | String | The size of the trade including fractional shares, respresented as a string. | REST | `lastTrade.ds` |
-| `LastTradeId` | String | The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID. | REST | `lastTrade.i` |
-| `LastTradePrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST | `lastTrade.p` |
-| `LastTradeSize` | long | The size (volume) of the trade. | REST | `lastTrade.s` |
-| `LastTradeSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. | REST | `lastTrade.t` |
-| `LastTradeExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `lastTrade.x` |
-| `LastMinuteAccumulatedVolume` | long | The accumulated volume. | REST | `min.av` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. | REST | `min.c` |
-| `LastMinuteAccumulatedDecimalVolume` | String | The accumulated volume including fractional shares, respresented as a string. | REST | `min.dav` |
-| `LastMinuteDecimalVolume` | String | The volume including fractional shares, respresented as a string. | REST | `min.dv` |
-| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. | REST | `min.h` |
-| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. | REST | `min.o` |
-| `LastMinuteOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `min.otc` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. | REST | `min.t` |
-| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. | REST | `min.v` |
-| `LastMinuteVwap` | double | The volume weighted average price. | REST | `min.vw` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. | REST | `prevDay.c` |
-| `PrevDayHigh` | double | The highest price for the symbol in the given time period. | REST | `prevDay.h` |
-| `PrevDayLow` | double | The lowest price for the symbol in the given time period. | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. | REST | `prevDay.o` |
-| `PrevDayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `prevDay.otc` |
-| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. | REST | `prevDay.v` |
-| `PrevDayVwap` | double | The volume weighted average price. | REST | `prevDay.vw` |
+| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.P` |
+| `LastQuoteAskSize` | long | The ask size in lots. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.S` |
+| `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.p` |
+| `LastQuoteBidSize` | long | The bid size in lots. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.s` |
+| `LastQuoteSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. | REST | `lastQuote.t` |
+| `LastTradeConditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.c` |
+| `LastTradeDecimalSize` | String | The size of the trade including fractional shares, respresented as a string. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.ds` |
+| `LastTradeId` | String | The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.i` |
+| `LastTradePrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.p` |
+| `LastTradeSize` | long | The size (volume) of the trade. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.s` |
+| `LastTradeSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.t` |
+| `LastTradeExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `lastTrade` object: The most recent trade for this ticker. This is only returned if your current plan includes trades. | REST | `lastTrade.x` |
+| `LastMinuteAccumulatedVolume` | long | The accumulated volume. From the `min` object: The most recent minute bar for this ticker. | REST | `min.av` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteAccumulatedDecimalVolume` | String | The accumulated volume including fractional shares, respresented as a string. From the `min` object: The most recent minute bar for this ticker. | REST | `min.dav` |
+| `LastMinuteDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `min` object: The most recent minute bar for this ticker. | REST | `min.dv` |
+| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
+| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
+| `LastMinuteOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `min` object: The most recent minute bar for this ticker. | REST | `min.otc` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
+| `LastMinuteVwap` | double | The volume weighted average price. From the `min` object: The most recent minute bar for this ticker. | REST | `min.vw` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.c` |
+| `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.h` |
+| `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.l` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.o` |
+| `PrevDayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.otc` |
+| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.v` |
+| `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
@@ -767,9 +767,9 @@ Massive's documentation of this dataset:
 
 - <https://massive.com/docs/rest/stocks/filings/13-f-filings.md>
 
-<a id="filings-insider_holdings"></a>
+<a id="filings-initial_insider_ownership"></a>
 
-## `m.stocks.filings.insider_holdings`
+## `m.stocks.filings.initial_insider_ownership`
 
 Initial insider ownership statements (SEC Form 3), one row per reported holding.
 
@@ -861,6 +861,65 @@ Insider transactions (SEC Form 4), one row per reported transaction or holding.
 Massive's documentation of this dataset:
 
 - <https://massive.com/docs/rest/stocks/filings/form-4.md>
+
+<a id="filings-insider_activity"></a>
+
+## `m.stocks.filings.insider_activity`
+
+Open-market insider purchases and sales, summed per company and transaction day.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST | `issuer_cik` |
+| `IssuerName` | String | Name of the issuer company as reported in the filings. | REST | `issuer_name` |
+| `LastFilingDate` | LocalDate | Filing date of the latest filing that reported one of these transactions (formatted as YYYY-MM-DD). Transactions are usually filed within two business days. | REST | `last_filing_date` |
+| `NetShares` | double | Shares purchased minus shares sold. | REST | `net_shares` |
+| `NetValue` | double | Value purchased minus value sold in USD. | REST | `net_value` |
+| `PlannedPurchaseValue` | double | Value of shares purchased under a Rule 10b5-1 trading plan in USD. Zero on filings before the plan checkbox was introduced in 2023. | REST | `planned_purchase_value` |
+| `PlannedSaleValue` | double | Value of shares sold under a Rule 10b5-1 trading plan in USD. Zero on filings before the plan checkbox was introduced in 2023. | REST | `planned_sale_value` |
+| `PurchaseCount` | long | Number of open-market purchase transactions. | REST | `purchase_count` |
+| `PurchaseShares` | double | Shares purchased. | REST | `purchase_shares` |
+| `PurchaseValue` | double | Value of shares purchased in USD. | REST | `purchase_value` |
+| `PurchaserCount` | long | Number of distinct insiders who purchased. | REST | `purchaser_count` |
+| `SaleCount` | long | Number of open-market sale transactions. | REST | `sale_count` |
+| `SaleShares` | double | Shares sold. | REST | `sale_shares` |
+| `SaleValue` | double | Value of shares sold in USD. | REST | `sale_value` |
+| `SellerCount` | long | Number of distinct insiders who sold. | REST | `seller_count` |
+| `Tickers` | String | Ticker symbols of the issuer as of the transaction date. Multiple symbols may indicate different share classes; the totals cover the issuer, not each ticker. | REST | `tickers` |
+| `TransactionDate` | LocalDate | Date of the transactions (formatted as YYYY-MM-DD). | REST | `transaction_date` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/insider-activity.md>
+
+<a id="filings-insider_holdings"></a>
+
+## `m.stocks.filings.insider_holdings`
+
+Each company's insiders and the shares each one holds now, one row per insider.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `FilingCount` | long | Number of Form 3, 4, and 5 filings by the owner for this issuer. | REST | `filing_count` |
+| `FirstFilingDate` | LocalDate | Date of the owner's first Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). Filings begin in 2003. | REST | `first_filing_date` |
+| `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST | `issuer_cik` |
+| `IssuerName` | String | Name of the issuer company as reported in the most recent filing. | REST | `issuer_name` |
+| `LastFilingDate` | LocalDate | Date of the owner's most recent Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). | REST | `last_filing_date` |
+| `OfficerTitle` | String | Title of the officer in the most recent filing, if the reporting owner is an officer. | REST | `officer_title` |
+| `OldestPositionDate` | LocalDate | Earliest as_of_date among the summed positions (formatted as YYYY-MM-DD). A date far behind last_filing_date means at least one position has not been restated recently and may be stale. | REST | `oldest_position_date` |
+| `OwnerCik` | String | SEC Central Index Key of the reporting owner (10 digits, zero-padded). Stable across issuers and years; use it to follow a person through the Form 3, 4, and 5 endpoints. | REST | `owner_cik` |
+| `OwnerName` | String | Name of the reporting owner (individual or entity) as reported in the most recent filing. | REST | `owner_name` |
+| `OwnershipPct` | double | shares_owned as a percentage of the issuer's shares outstanding (largest share class) as of last_filing_date. Absent when shares outstanding is not available for the issuer. | REST | `ownership_pct` |
+| `PositionCount` | long | Number of positions summed into shares_owned: one for direct holdings plus one per indirect vehicle. | REST | `position_count` |
+| `Roles` | String | Relationships of the reporting owner to the issuer in the most recent filing. Possible values: director, officer, ten_percent_owner, other. | REST | `roles` |
+| `SharesOwned` | double | Shares of the issuer's non-derivative securities the owner holds: the sum of the latest reported balance of each position (direct, and each indirect vehicle) across their Form 3, 4, and 5 filings. As filed, not adjusted for splits. Unexercised options and other derivative securities are not included. Absent when the owner has never reported a share balance. | REST | `shares_owned` |
+| `SharesOwnedDirect` | double | Shares held directly, in the owner's own name. | REST | `shares_owned_direct` |
+| `SharesOwnedIndirect` | double | Shares held indirectly through trusts, LLCs, family members, and other vehicles. | REST | `shares_owned_indirect` |
+| `Tickers` | String | Ticker symbols of the issuer as of the owner's most recent filing. Multiple symbols may indicate different share classes. | REST | `tickers` |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/filings/insider-holdings.md>
 
 <a id="filings-risk_factor_taxonomy"></a>
 

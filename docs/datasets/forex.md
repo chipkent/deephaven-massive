@@ -108,29 +108,29 @@ The current state of currency pairs: today's bar, the last minute, and the last 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
-| `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
-| `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. | REST | `day.o` |
-| `DayVolume` | double | The trading volume of the symbol in the given time period. | REST | `day.v` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.c` |
+| `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.h` |
+| `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.l` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.o` |
+| `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.v` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastQuoteAskPrice` | double | The ask price. | REST | `lastQuote.a` |
-| `LastQuoteBidPrice` | double | The bid price. | REST | `lastQuote.b` |
-| `LastQuoteParticipantTimestamp` | Instant | The millisecond accuracy timestamp of the quote. | REST | `lastQuote.t` |
-| `LastQuoteExchange` | long | The exchange ID on which this quote happened. | REST | `lastQuote.x` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. | REST | `min.c` |
-| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. | REST | `min.h` |
-| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. | REST | `min.o` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. | REST | `min.t` |
-| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. | REST | `min.v` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. | REST | `prevDay.c` |
-| `PrevDayHigh` | double | The highest price for the symbol in the given time period. | REST | `prevDay.h` |
-| `PrevDayLow` | double | The lowest price for the symbol in the given time period. | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. | REST | `prevDay.o` |
-| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. | REST | `prevDay.v` |
-| `PrevDayVwap` | double | The volume weighted average price. | REST | `prevDay.vw` |
+| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.a` |
+| `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.b` |
+| `LastQuoteParticipantTimestamp` | Instant | The millisecond accuracy timestamp of the quote. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.t` |
+| `LastQuoteExchange` | long | The exchange ID on which this quote happened. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.x` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
+| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.c` |
+| `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.h` |
+| `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.l` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.o` |
+| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.v` |
+| `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
@@ -148,29 +148,29 @@ The twenty currency pairs that gained or lost the most since the previous UTC cl
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
-| `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
-| `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. | REST | `day.o` |
-| `DayVolume` | double | The trading volume of the symbol in the given time period. | REST | `day.v` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.c` |
+| `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.h` |
+| `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.l` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.o` |
+| `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.v` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastQuoteAskPrice` | double | The ask price. | REST | `lastQuote.a` |
-| `LastQuoteBidPrice` | double | The bid price. | REST | `lastQuote.b` |
-| `LastQuoteParticipantTimestamp` | Instant | The millisecond accuracy timestamp of the quote. | REST | `lastQuote.t` |
-| `LastQuoteExchange` | long | The exchange ID on which this quote happened. | REST | `lastQuote.x` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. | REST | `min.c` |
-| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. | REST | `min.h` |
-| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. | REST | `min.o` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. | REST | `min.t` |
-| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. | REST | `min.v` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. | REST | `prevDay.c` |
-| `PrevDayHigh` | double | The highest price for the symbol in the given time period. | REST | `prevDay.h` |
-| `PrevDayLow` | double | The lowest price for the symbol in the given time period. | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. | REST | `prevDay.o` |
-| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. | REST | `prevDay.v` |
-| `PrevDayVwap` | double | The volume weighted average price. | REST | `prevDay.vw` |
+| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.a` |
+| `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.b` |
+| `LastQuoteParticipantTimestamp` | Instant | The millisecond accuracy timestamp of the quote. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.t` |
+| `LastQuoteExchange` | long | The exchange ID on which this quote happened. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.x` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
+| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.c` |
+| `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.h` |
+| `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.l` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.o` |
+| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.v` |
+| `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
@@ -191,10 +191,10 @@ An amount converted between two currencies at the latest quote.
 | `Converted` | double | The result of the conversion. | REST | `converted` |
 | `From` | String | The "from" currency symbol. | REST | `from` |
 | `InitialAmount` | double | The amount to convert. | REST | `initialAmount` |
-| `LastAsk` | double | The ask price. | REST | `last.ask` |
-| `LastBid` | double | The bid price. | REST | `last.bid` |
-| `LastExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `last.exchange` |
-| `LastTimestamp` | Instant | The Unix millisecond timestamp. | REST | `last.timestamp` |
+| `LastAsk` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.ask` |
+| `LastBid` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.bid` |
+| `LastExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.exchange` |
+| `LastTimestamp` | Instant | The Unix millisecond timestamp. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.timestamp` |
 | `To` | String | The "to" currency symbol. | REST | `to` |
 
 Massive's documentation of this dataset:
