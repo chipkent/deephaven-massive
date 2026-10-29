@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import traceback
 from typing import TYPE_CHECKING
 
@@ -150,11 +151,33 @@ def test_a_secret_with_a_quote_is_found_in_its_json_escaped_form() -> None:
     assert json.loads(Redactor(odd_key).received(encoded)) == {"echo": REDACTED}
 
 
-def test_a_emoji_key_beyond_the_bmp_is_found_as_itself_in_text_and_bytes() -> None:
+def test_a_key_beyond_the_bmp_is_found_as_itself_in_text_and_bytes() -> None:
     emoji_key = "key-\U0001f600"
     redactor = Redactor(emoji_key)
     assert redactor.received(f"a {emoji_key} b") == f"a {REDACTED} b"
     assert redactor.received(f"a {emoji_key} b".encode()) == f"a {REDACTED} b".encode()
+
+
+@pytest.mark.parametrize("kind", [bytes, str])
+def test_a_key_of_backslashes_is_searched_in_linear_time(kind: type) -> None:
+    # Every spelling of a backslash starts with one, so a pattern that could backtrack into a
+    # character's spelling took close to a minute for this key against 2 KB of backslashes.
+    slashes_key = "\\" * 20 + "X"
+    raw = ("\\" * 44 + "Y") * 50
+    data = raw.encode() if kind is bytes else raw
+    started = time.perf_counter()
+    assert Redactor(slashes_key).received(data) is data
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_key_of_backslashes_is_found_as_itself_and_as_json() -> None:
+    slashes_key = "a\\\\b"
+    redactor = Redactor(slashes_key)
+    assert redactor.received(f"<p>{slashes_key}</p>".encode()) == b"<p>***</p>"  # not JSON
+    echoed = json.dumps({"echo": slashes_key}).encode()  # each backslash written as two
+    assert json.loads(redactor.received(echoed)) == {"echo": REDACTED}
+    spelled = b'{"echo":"a\\u005c\\\\b"}'  # one backslash as a u escape, one as a short one
+    assert json.loads(redactor.received(spelled)) == {"echo": REDACTED}
 
 
 # --- the planted-secret test --------------------------------------------------------------------
