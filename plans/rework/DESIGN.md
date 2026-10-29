@@ -258,7 +258,9 @@ text would be brittle and costly to keep for little protection.
 
 The tree below is the target layout: the modules as they will be once the open feature PRs and
 the package layout cleanup, a series of refactoring PRs, have all merged. Until then, some
-modules named here do not exist yet, and some of today's modules do not appear here.
+modules named here do not exist yet, and some of today's modules do not appear here. The
+cleanup plan, `LAYOUT.md`, gives each target module's source today: its ← marks name the
+module each new or renamed one comes from.
 
 ```
 src/deephaven_massive/
@@ -3761,6 +3763,8 @@ refresh/             build time only; excluded from the wheel; may import any of
   exclusions.py      EXCLUSIONS (kind, item, reason), the executable rows of section 8.12;
                      SAMPLE_ERRORS (path, wire key, sample, reason), the wrong vendor samples
   drift.py           live-against-snapshot comparison, unaccounted items, deprecations
+  spec_diff.py       flatten the paths of an OpenAPI specification and describe how two
+                     copies differ
 
 vendor/massive/      outside the package; Massive's published content, vendored as generation
                      input, not covered by the repository's license, in no distribution
