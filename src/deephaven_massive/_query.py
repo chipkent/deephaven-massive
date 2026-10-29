@@ -194,7 +194,8 @@ class QueryBase:
         Returns:
             A static table with one row per column, in result column order:
             `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
-            `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
+            `int`, `double`, `boolean`, `String`, `Instant`, or `int[]`; every calendar date,
+            such as `Date`, is ISO `yyyy-MM-dd` text, a `String`);
             `Description` (String), what the column holds, empty when Massive gives no
             description; and `SuppliedBy` (String), the transports whose sources fill the
             column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
@@ -279,9 +280,12 @@ class Query(QueryBase):
         The requests run on the calling thread, or for an endpoint that takes one symbol per
         request on up to `max_concurrency` threads. `limit`, when the dataset was built with
         one, caps the total number of rows; the page size is internal. Columns are the
-        dataset's schema. A reactive symbol table is read once, when the verb is called. HTTP
-        401 raises `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
-        `MassiveError`; a symbol the endpoint answers with HTTP 404 is left out with a WARNING.
+        dataset's schema, ending with `TimestampInsert`, when the row's page arrived. A
+        reactive symbol table is read once, when the verb is called. HTTP 401 raises
+        `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
+        `MassiveError`; a symbol with no data (HTTP 404 on its first request) returns no rows,
+        with a WARNING, while HTTP 404 on a later page of its pages raises `MassiveError`,
+        since its data was cut short.
 
         Before any request it raises `ValueError` if a path the call reads does not take a
         parameter or filter the query set (an explicit `adjusted` on a path without it), or a
@@ -331,6 +335,9 @@ class Query(QueryBase):
             mode: How cycles combine (`PollMode`); None uses the dataset's default:
                 `APPEND` for news and filings (not the filing taxonomies, insider activity, or
                 insider holdings), `UPSERT` for IPOs, and `REPLACE` otherwise.
+
+        Every row's `TimestampInsert` is when its page arrived, so in a keyed table it is the
+        time of the latest cycle that returned the row; it is never part of a row's identity.
 
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A
@@ -627,26 +634,51 @@ class HistoryQuery(QueryBase):
         - **Dates** (`"2025-03-03"` or a `date`) are whole days, inclusive at both ends:
           `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in
           the asset class's day zone: New York for stocks, options, and indices, UTC for forex
-          and crypto. For futures a date names the trading session whose `SessionEndDate` it
-          is, which opens at 17:00 Chicago time the evening before (earlier after a holiday).
+          and crypto. For futures a date names the trading session whose `Date`
+          (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
+          (earlier after a holiday).
         - **Aware datetimes** are exact instants, half-open: rows with `start <= Timestamp <
-          end`. Equal instants give an empty table.
+          end` (for bars, `TimestampStart`). Equal instants give an empty table.
 
-        `end=None`, the default, reads through now. A bar is returned only when its whole
-        window lies inside the range and has ended: an intraday or 1-day bar its own interval;
-        for stocks, options, indices, and futures, a week Monday to Friday and a month,
-        quarter, or year its calendar period less its leading and trailing weekend days; for
-        forex and crypto, which trade at weekends, whole calendar weeks (Monday to Sunday),
-        months, quarters, and years; a bar of several units all of them; and a futures bar
-        named by session dates its sessions. So the current day's, week's, or month's bar is
-        never returned, and `history("2025-03-05", "2025-03-20")` of monthly bars is empty.
-        Datetime bounds keep only whole calendar days of 1-day bars: Monday 09:30 to Friday
-        16:00 New York time returns Tuesday to Thursday, so pass dates for daily bars. Futures
-        bars of a session or longer with `multiplier` above 1 cannot be named by dates (their
-        session label is not verified) and raise `ValueError`; pass datetimes. There is no
-        holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
-        week. Forex and crypto 1-day bars are stamped at 00:00 UTC of their day whatever the
-        source. There is no `limit`: the library pages internally.
+        `end=None`, the default, reads through now. A bar is returned only when its whole window
+        lies inside the range and has ended: its `TimestampStart` lies in the range, and its
+        `TimestampEnd` is no later than now or than the range's end (for dates, the end of the
+        last day: the next midnight, 01:00 New York time for indices, 17:00 Chicago time on the
+        last session's date for futures). Its window is an intraday or 1-day bar's own interval;
+        for stocks, options, and futures, a week Monday to Friday and a month, quarter, or year
+        its calendar period less its leading and trailing weekend days; for indices, which can
+        update around the clock, the same periods as whole calendar periods, weekends included
+        at both ends; for forex and crypto, which trade at weekends, whole calendar weeks
+        (Monday to Sunday), months, quarters, and years; a bar of several units all of them,
+        where several days or sessions end as late as holidays could push them (one weekday
+        more, and one more for every five further days); and a futures bar named by session
+        dates its sessions. So the current day's, week's, or month's bar is never returned, and
+        `history("2025-03-05", "2025-03-20")` of monthly bars is empty. Datetime bounds keep
+        only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
+        returns Tuesday to Thursday, so pass dates for daily bars. A futures bar of several
+        sessions, weeks, or months named by dates is kept only when it fits the range whether
+        Massive labels it with its first or its last session, which is not documented. There is
+        no holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
+        week. There is no `limit`: the library pages internally.
+
+        Every row says when it happened, its trading day, and when it arrived: a tick its
+        `Timestamp`; a bar its window, `TimestampStart` and the exclusive `TimestampEnd`
+        (join on the end, `aj(..., on=["Symbol", "Timestamp>=TimestampEnd"])`, so no bar is
+        attached before it closed); its `Date`, ISO `yyyy-MM-dd` text, null for a bar that
+        spans more than one date; and `TimestampInsert`, when its page or file block arrived
+        (the download time). A bar of a day or longer starts at 00:00 of its window's first
+        day in the class day zone (New York for stocks, options, and indices; UTC for forex
+        and crypto), whatever the source, and ends at 00:00 after its last day (an hour later
+        for indices, whose day is not verified); a futures bar keeps Massive's window start and
+        ends at 17:00 Chicago time on its session date, or for a bar of several sessions, a week,
+        or longer at the latest end its label allows, since Massive does not document whether
+        it labels such a bar with its first or its last session.
+
+        One call never mixes split bases: with `adjusted=True`, the default of the stock and
+        option bars, it reads REST only and checks every page's `adjusted` echo; flat files
+        are as traded, so they serve only `adjusted=False`. Massive adjusts for splits only,
+        never for cash dividends. A table that joins adjusted history to live bars, which are
+        as traded, jumps at the next split's execution date: build it again after a split.
 
         Flat files (S3) can serve a request when S3 credentials are configured, the dataset
         has files for it (bars: only 1-minute and 1-day bars, and 1-session bars for futures,
@@ -655,15 +687,16 @@ class HistoryQuery(QueryBase):
         the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. A crypto bar of a day or longer whose stamp is off
-        the UTC day cut fails loudly, whichever source serves it, so the source never changes
-        which days a bar covers; `source=` picks a source explicitly. A reactive symbol table
-        is read once, when the verb is called, and every source receives the same sorted
-        canonical symbols; a row that is not Massive's exact ticker raises `ValueError`.
-        Flat-file reads skip a missing weekend file silently and a missing weekday
-        file (a holiday) with a WARNING. Futures trades and quotes named by session dates are
-        read over REST one request series per weekday session and symbol; a long
-        one-request-per-day download logs its request count first, at INFO.
+        `dm.ALL`); otherwise it uses REST. A bar of a day or longer stamped at a time of day,
+        or on a day, Massive is not known to use for its class fails loudly, whichever source
+        serves it, so the source never changes which day a bar is labelled with; `source=`
+        picks a source explicitly. A reactive symbol table is read once, when the verb is
+        called, and every source receives the same sorted canonical symbols; a row that is not
+        Massive's exact ticker raises `ValueError`. Flat-file reads skip a missing
+        weekend file silently and a missing weekday file (a holiday) with a WARNING. Futures
+        trades and quotes named by session dates are read over REST one request series per
+        weekday session and symbol; a long one-request-per-day download logs its request count
+        first, at INFO.
 
         Side effects: network requests on the calling thread, and for flat files a pool of up
         to `max_concurrency` reader threads that end before the call returns. It blocks until
@@ -684,25 +717,28 @@ class HistoryQuery(QueryBase):
             symbol over REST, in file order over flat files; empty, with every column, when
             no row lies in the range.
 
-        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`, `date`,
-        or `datetime`. `ValueError`, synchronously, before any request: a naive or unparseable
-        bound; a date mixed with a datetime; `start` after `end` (or after now when `end` is None);
-        a symbol table without a symbol, or with a row that is not canonical; futures trades or
-        quotes named by session dates on a query that also filters `session_end_date` in any form;
-        futures bars of a session or longer with `multiplier` above 1 named by dates; a source that
-        cannot serve the request (`REST` without REST history or with `dm.ALL` and no grouped-daily
-        endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither can, with
-        every violated condition listed); or a call on a Deephaven update-graph thread.
-        `MassiveError` when a request fails (`EntitlementError` on HTTP 403, which for futures flat
-        files names the venue and the `venue=` parameter; `AuthenticationError` when S3 rejects the
-        flat-file credentials); when the flat file of the last requested day is missing within a day
-        after its publication time ("... is not yet published (flat files land ~11:00 ET next day),
-        or was a market holiday"; after that the day is skipped with a WARNING, as a holiday); when
-        a futures range named by instants ends on a holiday and the next session's file, which holds
-        the holiday's hours, is not published yet or does not exist within 7 days; when a crypto bar
-        of a day or longer is stamped off the UTC day cut (a 1-day bar elsewhere than its day's
-        first or last millisecond, a longer one elsewhere than 00:00 UTC); or once the session is
-        closed.
+        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
+        `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
+        unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
+        `end` is None); a symbol table without a symbol, or with a row that is not canonical;
+        futures trades or quotes named by session dates on a query that also filters
+        `session_end_date` in any form; a source that cannot serve the request (`REST` without
+        REST history or with `dm.ALL` and no grouped-daily endpoint; `FLAT_FILES` when a
+        flat-file condition above fails; `AUTO` when neither can, with every violated condition
+        listed); or a call on a Deephaven update-graph thread. `MassiveError` when a request
+        fails (`EntitlementError` on HTTP 403, which for futures flat files names the venue and
+        the `venue=` parameter; `AuthenticationError` when S3 rejects the flat-file
+        credentials); when a page of adjusted bars echoes another basis than the request; when a
+        symbol's later page answers HTTP 404, its data cut short (a symbol with no data at all
+        simply returns no rows); when the flat file of the last requested day is missing within
+        a day after its publication time ("... is not yet published (flat files land ~11:00 ET
+        next day), or was a market holiday"; after that the day is skipped with a WARNING, as a
+        holiday); when a futures range named by instants ends on a holiday and the next
+        session's file, which holds the holiday's hours, is not published yet or does not exist
+        within 7 days; when a bar of a day or longer is stamped at a time of day, or on a day,
+        Massive is not known to use for its class (a crypto 1-day bar at midnight New York time,
+        or a crypto week bar on a Sunday), naming the dataset, the source, and what to do
+        instead; or once the session is closed.
 
         Example:
             ::
@@ -835,8 +871,10 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 class HistoryLatestQuery(HistoryQuery):
     """Daily bars: `history()` plus `fetch()` of the previous completed session's bar.
 
-    Built by a dataset method, such as `m.stocks.bars(...)` with a one-day timespan; immutable
-    and reusable.
+    The `bars()` of stocks, options, indices, forex, and crypto return this class for 1-day
+    bars with `multiplier=1`. A query is built by the namespace method, holds no state of its
+    own beyond its arguments, and may be used from any thread but a Deephaven update-graph
+    thread.
 
     Example:
         ::
@@ -852,7 +890,14 @@ class HistoryLatestQuery(HistoryQuery):
         """Return one row per symbol: the bar of the previous completed session.
 
         Massive documents the endpoint as "the prior session's open, high, low, close, and
-        volume". A failed request raises `MassiveError` (`EntitlementError` on HTTP 403).
+        volume". The bar's `TimestampStart` is 00:00 of its day in the class day zone (New
+        York for stocks, options, and indices; UTC for forex and crypto), whatever time Massive
+        stamps it at, its `TimestampEnd` 00:00 of the next day (01:00 New York time for
+        indices), and its `Date` that day. A stamp at a time of day Massive is not known to use
+        for the class raises `MassiveError`, naming the dataset and `/prev`. Stock and option
+        bars are split-adjusted unless the query says `adjusted=False`, and a page whose
+        `adjusted` echo differs from the request raises `MassiveError`. A failed request raises
+        `MassiveError` (`EntitlementError` on HTTP 403).
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 

@@ -458,6 +458,14 @@ def test_render_gives_one_page_per_namespace_in_catalog_order() -> None:
     assert render(Catalog(()), _PROVENANCE) == {}
 
 
+CATALOG_INSERT = next(
+    c.description
+    for c in _CATALOG.dataset_schema(_STOCK_TRADES).columns
+    if c.name == "TimestampInsert"
+)
+"""Every dataset's arrival-time description, the same on every page."""
+
+
 def test_the_rendered_stocks_page() -> None:
     page = render(_CATALOG, _PROVENANCE)["stocks.md"]
     schema = {c.name: c for c in _CATALOG.dataset_schema(_STOCK_TRADES).columns}
@@ -465,6 +473,8 @@ def test_the_rendered_stocks_page() -> None:
     stamp = schema["Timestamp"].description.replace("|", "\\|")
     received = schema["Received"].description
     assert received == "Always null for `stocks.trades`; supplied by `crypto.trades`."
+    day = schema["Date"].description
+    insert = schema["TimestampInsert"].description
     every = "REST, flat files, WebSocket"
     head = (
         "| Column | Deephaven type | Description | Supplied by | REST field | Flat-file field "
@@ -494,9 +504,11 @@ Trades of stocks, tick by tick.
 {head}
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | {symbol} | {every} | `ticker`, request | `ticker` | `sym` |
+| `Date` | String | {day} | {every} |  |  |  |
 | `Timestamp` | Instant | {stamp} | {every} | `t` | `sip_timestamp` | `t` |
 {price}
 | `Received` | Instant | {received} |  |  |  |  |
+| `TimestampInsert` | Instant | {insert} | {every} |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -512,6 +524,7 @@ Financial ratios.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `PriceEarnings` | double | Price \\| earnings. | REST | `pe` |
+| `TimestampInsert` | Instant | {insert} | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -548,7 +561,11 @@ def test_the_rendered_crypto_page() -> None:
     page = render(_CATALOG, _PROVENANCE)["crypto.md"]
     # One wire-field column for the one transport the dataset reads, and its own URLs only.
     assert "| Column | Deephaven type | Description | Supplied by | WebSocket field |\n" in page
-    received = "| `Received` | Instant | When Massive received it. | WebSocket | `r` |\n"
+    insert = CATALOG_INSERT
+    received = (
+        "| `Received` | Instant | When Massive received it. | WebSocket | `r` |\n"
+        f"| `TimestampInsert` | Instant | {insert} | WebSocket |  |\n"
+    )
     links = "\nMassive's documentation of this dataset:\n\n- <https://docs.example/ws/crypto.md>\n"
     assert page.endswith(f"{received}{links}\n---\n\n{_FOOTER}\n")
 
@@ -556,7 +573,9 @@ def test_the_rendered_crypto_page() -> None:
 def test_a_dataset_whose_sources_have_no_urls_has_no_url_list() -> None:
     bare = Provenance(fetched=dt.date(2026, 10, 27), urls={})
     page = render(_CATALOG, bare)["crypto.md"]
-    assert page.endswith(f"| WebSocket | `r` |\n\n---\n\n{_FOOTER}\n")
+    assert page.endswith(
+        f"| `TimestampInsert` | Instant | {CATALOG_INSERT} | WebSocket |  |\n\n---\n\n{_FOOTER}\n"
+    )
     assert "documentation of this dataset" not in page
 
 

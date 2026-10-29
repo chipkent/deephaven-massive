@@ -5,14 +5,17 @@ import functools
 import gc
 import gzip
 import io
+import itertools
 import logging
 import re
 import threading
+import time
 import tracemalloc
 import weakref
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, cast
@@ -29,9 +32,10 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, DaySpan
+from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
 from deephaven_massive._ingest import flatfiles
@@ -39,6 +43,7 @@ from deephaven_massive._massive import Field, Source, Transport, WireType, WireU
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
@@ -82,7 +87,7 @@ def keys(symbol: str | KeySpec, time: str, *, session: bool = False) -> SourceKe
     return SourceKeys(
         KeySpec(symbol) if isinstance(symbol, str) else symbol,
         KeySpec(time),
-        session=KeySpec("SessionEndDate") if session else None,
+        date=KeySpec("SessionEndDate") if session else None,
     )
 
 
@@ -139,6 +144,7 @@ FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
+    row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
     keys={
@@ -217,11 +223,18 @@ def request(symbols: object = ("AAPL",), **fields: object) -> Request:
     return Request(symbols=cast("Any", symbols), **cast("dict[str, Any]", fields))
 
 
-def rows(table: Table) -> list[dict[str, Any]]:
-    # Instants become epoch nanoseconds, so assertions keep every digit.
+def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit. Every row carries the
+    # instant its block was decoded, last; it is checked here and, unless asked for, left out,
+    # so an assertion compares only what the files hold.
     data = dh_arrow.to_arrow(table)
+    assert data.column_names[-1] == "TimestampInsert"
+    assert data.column("TimestampInsert").null_count == 0
     columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
     out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    if not arrival:
+        for row in out:
+            del row["TimestampInsert"]
     return out
 
 
@@ -481,13 +494,43 @@ def synthetic_catalog() -> Catalog:
     return Catalog((SYNTHETIC,), source_tables=lambda t: tables.get(t, {}))
 
 
+@pytest.mark.parametrize(("hours", "kept"), [(23, 0), (24, 1)], ids=["open", "ended"])
+def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, kept: int) -> None:
+    midnight = datetime(2025, 3, 3, 5, tzinfo=UTC)  # 00:00 in New York
+    times = TimeRange(midnight, midnight + timedelta(days=1))
+    day = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
+    bars = BarBounds(midnight, midnight + timedelta(hours=hours), StartRule.RANGE)
+    window = HistoryWindow(day, times, None, times, bars)
+    transform = flatfiles._Transform.build(
+        CATALOG,
+        STOCK_BARS,
+        prefix="us_stocks_sip/day_aggs_v1",
+        request=request(timespan=Timespan.DAY, adjusted=False),
+        window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["AAPL"],
+            "Volume": [1.0],
+            "Open": [1.0],
+            "Close": [1.0],
+            "High": [1.0],
+            "Low": [1.0],
+            "TimestampStart": [epoch_ns(midnight)],
+            "Transactions": [1],
+        }
+    )
+    assert transform.apply(batch, received=7).num_rows == kept
+
+
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
         synthetic_catalog(),
         SYNTHETIC,
         prefix=SYNTHETIC_FILES,
-        symbols=dm.ALL,
+        request=request(dm.ALL),
         window=window,
         unknown_symbols=dm.UnknownSymbols.FAIL,
     )
@@ -500,7 +543,9 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
             "Conditions": [12, None],
         }
     )
-    out = transform.apply(batch).to_pydict()
+    out = transform.apply(batch, received=7).to_pydict()
+    # Every row of the block arrived together.
+    assert [int(v.value) for v in out["TimestampInsert"]] == [7, 7]
     assert [
         None if v is None else int(v.timestamp() * 10**3) for v in out["ParticipantTimestamp"]
     ] == [
@@ -634,13 +679,13 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 0
@@ -722,10 +767,15 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
     )
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-03", "2025-03-03")
-    assert pick(t, "Symbol", "Timestamp", "Open", "Volume", "Transactions", "Vwap") == [
-        ("AAPL", 1740978000000000000, 241.79, 47184000.0, 612403, None),
-        ("MSFT", 1740978000000000000, 398.82, 26093000.0, 402122, None),
+    # The day file stamps a bar at the 16:00 close; it runs from midnight to midnight.
+    day = 1740978000000000000
+    assert pick(
+        t, "Symbol", "Date", "TimestampStart", "TimestampEnd", "Open", "Volume", "Transactions"
+    ) == [
+        ("AAPL", "2025-03-03", day, day + 86_400 * 10**9, 241.79, 47184000.0, 612403),
+        ("MSFT", "2025-03-03", day, day + 86_400 * 10**9, 398.82, 26093000.0, 402122),
     ]
+    assert pick(t, "Vwap") == [(None,), (None,)]
     assert caplog.messages == [
         "stocks.bars history: AUTO chose FLAT_FILES (every symbol)",
         "stocks.bars history: source=S3 files=1 skipped=none",
@@ -741,18 +791,35 @@ def test_each_file_becomes_one_table(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     put(TRADES_0305, "us_stocks_sip_trades_v1_2025-03-05.csv")
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)  # several blocks per file
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-05")
     assert t.size == 6
     # The empty schema table, then one table per file, although each file has many blocks.
     assert sorted(converted) == [0, 2, 4]
+
+
+def test_every_block_carries_the_instant_it_was_decoded(
+    *,
+    session: dm.MassiveSession,
+    many_blocks: Callable[[str], int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each block's rows share the instant the block was decoded; later blocks, later instants.
+    blocks = many_blocks(TRADES_0303)
+    ticks = itertools.count(1_000)
+    monkeypatch.setattr(time, "time_ns", lambda: next(ticks))
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    arrived = [row["TimestampInsert"] for row in rows(t, arrival=True)]
+    assert len(arrived) == 4000
+    assert arrived == sorted(arrived)  # one reader reads the file's blocks in order
+    assert 1 < len(set(arrived)) <= blocks + 1
 
 
 def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
@@ -763,13 +830,13 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
 ) -> None:
     blocks = many_blocks(TRADES_0303)
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 2)
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     assert pick(t, "Id")[:3] == [("0",), ("1",), ("2",)]  # still in file order
@@ -930,6 +997,46 @@ def test_a_missing_last_date_after_a_day_is_skipped_as_a_holiday(
     ]
 
 
+def test_a_missing_weekend_file_of_a_class_that_trades_at_weekends_warns(
+    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Forex trades from Sunday evening UTC, so its weekend day is a trading day like crypto's:
+    # a missing Sunday file is reported as a possible holiday, never skipped silently.
+    transport = session._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
+    key = "global_forex/trades_v1/2025/03/2025-03-02.csv.gz"
+    sunday = flatfiles._Key(key, date(2025, 3, 2), None)
+    stocks = replace(forex, name="stocks.trades", asset_class=AssetClass.STOCKS)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        transport._skip_missing(forex, [sunday], last=date(2025, 3, 3))
+        transport._skip_missing(stocks, [sunday], last=date(2025, 3, 3))
+    assert caplog.messages == [
+        f"forex.trades: {key} does not exist; skipping 2025-03-02 (a market holiday?)"
+    ]
+
+
+def test_a_missing_forex_saturday_file_is_skipped_silently_even_as_the_last_day(
+    *,
+    session: dm.MassiveSession,
+    clock: Callable[[datetime], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Forex does not trade on a UTC Saturday, so its file need not exist: no WARNING, and no
+    # "not yet published" error while the Saturday is still within its publication grace.
+    transport = session._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
+    saturday = date(2025, 3, 1)
+    key = flatfiles._Key("global_forex/trades_v1/2025/03/2025-03-01.csv.gz", saturday, None)
+    clock(datetime(2025, 3, 2, 12, tzinfo=NEW_YORK))
+    cutoff = session._core.config.flat_file_publish_cutoff
+    assert history_source.within_publication_grace(forex, saturday, cutoff=cutoff)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        transport._skip_missing(forex, [key], last=saturday)
+    assert caplog.messages == []
+
+
 def test_crypto_trades_every_day(
     *,
     session: dm.MassiveSession,
@@ -972,7 +1079,9 @@ class RestRecorder:
     def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         self.calls.append((spec, request, window))
         # A table in the dataset's schema, as the REST transport returns.
-        return dh_arrow.to_table(schema_of(spec).to_arrow([{"Symbol": "from REST"}]))
+        return dh_arrow.to_table(
+            schema_of(spec).to_arrow([{"Symbol": "from REST", "TimestampInsert": 1}])
+        )
 
 
 def test_auto_delegates_few_symbols_to_rest(
@@ -1012,11 +1121,11 @@ def test_futures_read_every_venue_by_default_in_venue_order(
     t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
     assert sorted(fake_s3.keys()) == sorted(FUTURES_0304.format(v) for v in VENUES)
     # Venue order within a date: CME, CBOT, NYMEX, COMEX.
-    assert pick(t, "ReportSequence", "SessionEndDate") == [
-        (0, date(2025, 3, 4)),
-        (1, date(2025, 3, 4)),
-        (2, date(2025, 3, 4)),
-        (3, date(2025, 3, 4)),
+    assert pick(t, "ReportSequence", "Date") == [
+        (0, "2025-03-04"),
+        (1, "2025-03-04"),
+        (2, "2025-03-04"),
+        (3, "2025-03-04"),
     ]
 
 
@@ -1027,10 +1136,10 @@ def test_futures_read_one_venue_when_asked(
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
     t = q.history("2025-03-04", "2025-03-04")
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
-    assert pick(t, "Symbol", "Timestamp", "SessionEndDate", "ReportSequence") == [
-        ("ESH5", 1741042800000000000, date(2025, 3, 4), 31),
-        ("ESH5", 1741100400000000000, date(2025, 3, 4), 32),
-        ("NQH5", 1741100400000000000, date(2025, 3, 4), 33),
+    assert pick(t, "Symbol", "Timestamp", "Date", "ReportSequence") == [
+        ("ESH5", 1741042800000000000, "2025-03-04", 31),
+        ("ESH5", 1741100400000000000, "2025-03-04", 32),
+        ("NQH5", 1741100400000000000, "2025-03-04", 33),
     ]
 
 
@@ -1046,9 +1155,7 @@ def test_futures_evening_instants_read_only_the_next_session(
         source=HistorySource.FLAT_FILES,
     )
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
-    assert pick(t, "Symbol", "Timestamp", "SessionEndDate") == [
-        ("ESH5", 1741042800000000000, date(2025, 3, 4))
-    ]
+    assert pick(t, "Symbol", "Timestamp", "Date") == [("ESH5", 1741042800000000000, "2025-03-04")]
 
 
 def test_futures_instants_inside_one_session_need_only_its_file(
@@ -1480,15 +1587,15 @@ def test_a_dropped_connection_is_read_again_from_the_start(
 ) -> None:
     many_blocks(TRADES_0303)
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
     built = hold_each_drop(fake_s3)
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
         built.set()  # the read under way has built a table, so it may now fail
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 1)  # a table per block, so drops leave some
     size = len(fake_s3.data(TRADES_0303))
     fake_s3.drop(TRADES_0303, times=2, at=size // 2)
@@ -1787,15 +1894,15 @@ def test_reader_threads_enter_the_session_context(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     seen: list[tuple[str, bool]] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
     expected = session._core.exec_ctx.j_exec_ctx
 
-    def recorded(data: pa.Table) -> Table:
+    def recorded(data: pa.Table, dates: Sequence[str]) -> Table:
         context = get_exec_ctx().j_exec_ctx.equals(expected)
         seen.append((threading.current_thread().name, context))
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", recorded)
+    monkeypatch.setattr(flatfiles, "dataset_table", recorded)
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     reader = f"{session._core.label} flat files"
     assert all(context for _, context in seen)
@@ -1873,7 +1980,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         CATALOG,
         STOCK_TRADES,
         prefix="us_stocks_sip/trades_v1",
-        symbols=dm.ALL,
+        request=request(dm.ALL),
         window=window,
         unknown_symbols=dm.UnknownSymbols.FAIL,
     )
@@ -2159,7 +2266,7 @@ class MemorySampler:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         batches = _massive.FlatFile.batches
-        convert = dh_arrow.to_table
+        convert = columns.dataset_table
 
         def sampled_batches(
             file: _massive.FlatFile, plan: _massive.ReadPlan
@@ -2170,12 +2277,12 @@ class MemorySampler:
                 self.taken[1] += 1
                 yield batch
 
-        def sampled_convert(data: pa.Table) -> Table:
+        def sampled_convert(data: pa.Table, dates: Sequence[str]) -> Table:
             self.sample_arrow()
-            return convert(data)
+            return convert(data, dates)
 
         monkeypatch.setattr(_massive.FlatFile, "batches", sampled_batches)
-        monkeypatch.setattr(flatfiles, "to_table", sampled_convert)
+        monkeypatch.setattr(flatfiles, "dataset_table", sampled_convert)
 
     def sample_arrow(self) -> None:
         self.arrow[self.taken[0]] = pa.total_allocated_bytes()
@@ -2295,7 +2402,9 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
 ) -> None:
     # Converting a file's rows can fail in Arrow (out of memory, say): it is a failed read of
     # that file, named like any other.
-    def exhausted(transform: flatfiles._Transform, batch: pa.RecordBatch) -> pa.RecordBatch:
+    def exhausted(
+        transform: flatfiles._Transform, batch: pa.RecordBatch, *, received: int
+    ) -> pa.RecordBatch:
         raise pa.ArrowMemoryError("malloc of size 1048576 failed")
 
     monkeypatch.setattr(flatfiles._Transform, "apply", exhausted)
@@ -2523,7 +2632,9 @@ def test_minute_bar_files_keep_only_whole_bars_of_an_instant_range(
         datetime(2025, 3, 3, 14, 32, 30, tzinfo=UTC),
         source=HistorySource.FLAT_FILES,
     )
-    assert pick(t, "Timestamp") == [(minutes[1],)]
+    assert pick(t, "Date", "TimestampStart", "TimestampEnd") == [
+        ("2025-03-03", minutes[1], minutes[2])
+    ]
 
 
 def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
@@ -2539,3 +2650,19 @@ def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
         q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES)
     assert fake_s3.requests == []
+
+
+def test_every_row_of_a_day_shares_one_stored_date(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    header = "ticker,volume,open,close,high,low,window_start,transactions\n"
+    minutes = [epoch_ns(datetime(2025, 3, 3, 15, m, tzinfo=UTC)) for m in range(20)]
+    body = "".join(f"AAPL,1,1.0,1.0,1.0,1.0,{m},1\n" for m in minutes)
+    key = "us_stocks_sip/minute_aggs_v1/2025/03/2025-03-03.csv.gz"
+    fake_s3.put(key, make_csv_gz(header + body))
+    q = query(session, STOCK_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=False)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert t.size == 20
+    # Counted inside Deephaven: a string crossing to Python is copied.
+    refs = t.update("DateRef = java.lang.System.identityHashCode(Date)").select_distinct("DateRef")
+    assert refs.size == 1

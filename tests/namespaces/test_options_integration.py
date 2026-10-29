@@ -327,3 +327,33 @@ def test_half_day_option_bars_and_their_stamps(
     for line in lines:
         evidence(line)
     assert lines
+
+
+_NVDA_CONTRACT = "O:NVDA240621C00120000"
+"""An NVDA call expiring after its 10-for-1 split of 2024-06-10, under its post-split strike."""
+
+
+@pytest.mark.needs("options:basic")
+@pytest.mark.settles("57")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_option_bars_across_the_underlyings_split(
+    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """Whether option bars are split-adjusted for their underlying's split.
+
+    Records an NVDA call's day bars from 2024-06-05 to 2024-06-12 with `adjusted=true` and
+    `adjusted=false`. Reading it: prices before 2024-06-10 that differ by the split's ratio mean
+    options are adjusted in full like stocks; equal prices, or no bars before the split under
+    the post-split ticker, mean the contract was renamed instead, and the docstrings must say
+    so.
+    """
+    # A request that fails raises; an empty result is evidence in itself (a renamed contract).
+    for adjusted in (True, False):
+        rows = table_rows(
+            live_session.options.bars(_NVDA_CONTRACT, dm.Timespan.DAY, adjusted=adjusted).history(
+                date(2024, 6, 5), date(2024, 6, 12), source=dm.HistorySource.REST
+            )
+        )
+        closes = [(r["Date"], r["Close"], r["Volume"]) for r in rows]
+        evidence(f"{_NVDA_CONTRACT} adjusted={adjusted}: (Date, Close, Volume) {closes}")
