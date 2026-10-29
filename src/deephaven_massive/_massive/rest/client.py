@@ -384,8 +384,9 @@ class RestClient:
 
         Returns:
             An iterator of pages. Iterating raises what `get` raises, and `WireError` when a
-            `next_url` points to a scheme, host, or port other than the base URL's (it is
-            never requested).
+            `next_url` points to a scheme, host, or port other than the base URL's, or names
+            a page this pagination has already fetched (a cycle); such a `next_url` is never
+            requested. A new call to `pages` starts with no fetched pages.
 
         Raises:
             ValueError: When `limit` is less than 1, or the parameters do not fit the path
@@ -424,10 +425,12 @@ class RestClient:
             Each page, the last cut to `limit`.
 
         Raises:
-            WireError: If a `next_url` leaves the base URL's origin, or repeats the target
-                just fetched (which would page forever).
+            WireError: If a `next_url` leaves the base URL's origin, or names a target this
+                pagination has already fetched (a cycle such as A to B to A, which would
+                page forever). The check keeps one target string per page until paging ends.
         """
         remaining = limit
+        fetched = {target}
         while True:
             page = self._fetch(job, target)
             if remaining is not None and len(page.rows) >= remaining:
@@ -445,13 +448,14 @@ class RestClient:
                 raise WireError(
                     f"{job.rest_path.template}: refusing to follow {error}", host=self._host
                 ) from error
-            if following == target:
+            if following in fetched:
                 raise WireError(
-                    f"{job.rest_path.template}: next_url repeats the page just fetched "
-                    f"({target}); refusing to loop",
+                    f"{job.rest_path.template}: next_url {following} repeats a page this "
+                    "pagination already fetched; refusing to loop",
                     host=self._host,
-                    path=target,
+                    path=following,
                 )
+            fetched.add(following)
             target = following
 
     def _fetch(self, job: _Job, target: str) -> Page:
