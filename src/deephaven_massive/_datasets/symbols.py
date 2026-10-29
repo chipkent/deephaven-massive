@@ -57,7 +57,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
@@ -79,7 +78,6 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
 __all__ = [
-    "NO_PAIRS",
     "NormalizedSymbols",
     "ReadSymbols",
     "SymbolTable",
@@ -97,6 +95,7 @@ __all__ = [
     "canonical_symbol_stock_nasdaq",
     "canonical_symbol_stock_yahoo",
     "check_symbol",
+    "forex_codes",
     "is_canonical",
     "is_forex_currency",
     "normalize",
@@ -180,8 +179,6 @@ _CLASS_NAMES: Final[dict[AssetClass, str]] = {
 """The singular noun of each class, as the per-class converters are named."""
 _CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES: "futures"}
 """The noun of each class as messages write it before "ticker" (`a futures ticker`)."""
-NO_PAIRS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType({})
-"""The crypto splits of a topic or path that has no crypto symbol (`ws_symbol`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1214,7 +1211,7 @@ def canonical_from_wire(
     return raw if _CANONICAL[resolved](raw) else None
 
 
-def wire_spellings(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> tuple[str, ...]:
+def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
     """Return every spelling `canonical_from_wire` reads as a canonical symbol, for a file filter.
 
     A flat file is filtered on its raw `ticker` column before any row is read, so the filter
@@ -1226,20 +1223,20 @@ def wire_spellings(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> tu
     first.
 
     Args:
-        asset_class: The dataset's class, or `ClassFromPrefix.ANY` for one that spans classes.
-        symbol: A canonical symbol.
+        asset_class: The dataset's class; every flat-file dataset has one (`DatasetSpec`
+            refuses `ClassFromPrefix.ANY` with flat files).
+        symbol: A canonical symbol of the class.
 
     Returns:
         The spellings, each of which `canonical_from_wire(asset_class, spelling)` reads as
         `symbol`.
     """
-    resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
     prefixes: tuple[str, ...]
-    if resolved is AssetClass.FOREX:
-        base, quote = symbol[2:5], symbol[5:]
-        prefixes = ("C:", "X:", "") if asset_class is AssetClass.FOREX else ("C:",)
-    elif resolved is AssetClass.CRYPTO:
-        prefixes = ("X:", "") if asset_class is AssetClass.CRYPTO else ("X:",)
+    if asset_class is AssetClass.FOREX:
+        base, quote = forex_codes(symbol)
+        prefixes = ("C:", "X:", "")
+    elif asset_class is AssetClass.CRYPTO:
+        prefixes = ("X:", "")
         # The joined ticker does not say where the pair splits, so the file may separate it at
         # any point: every cut is looked for, and each reads back as this one symbol.
         body = symbol[2:]
@@ -1252,6 +1249,22 @@ def wire_spellings(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> tu
     else:
         return (symbol,)
     return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
+
+
+def forex_codes(symbol: str) -> tuple[str, str]:
+    """Split a canonical forex ticker into its two ISO 4217 codes.
+
+    A forex ticker is `C:` and two three-letter codes joined, so, unlike a crypto pair, it
+    splits by position, with no lookup and no guess: `C:EURUSD` is `("EUR", "USD")`.
+
+    Args:
+        symbol: A canonical forex ticker, such as `C:EURUSD`.
+
+    Returns:
+        `(base, quote)`, such as `("EUR", "USD")`.
+    """
+    body = symbol.removeprefix("C:")
+    return body[:_CURRENCY_CODE_LENGTH], body[_CURRENCY_CODE_LENGTH:]
 
 
 def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[str, str]]) -> str:
@@ -1271,7 +1284,7 @@ def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[st
         asset_class: The symbol's class.
         symbol: A canonical symbol.
         pairs: The base and quote of crypto symbols by canonical symbol, from Massive's crypto
-            ticker list; every crypto symbol must be in it. `NO_PAIRS` for a class other than
+            ticker list; every crypto symbol must be in it. Empty for a class other than
             crypto, which needs none.
 
     Returns:
@@ -1284,8 +1297,8 @@ def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[st
         # The `ticker` parameter of every forex channel is "{from}-{to}": see
         # vendor/massive/websocket/forex/quotes.md, aggregates-per-minute.md,
         # aggregates-per-second.md, and fair-market-value.md.
-        body = symbol.removeprefix("C:")
-        return f"{body[:_CURRENCY_CODE_LENGTH]}-{body[_CURRENCY_CODE_LENGTH:]}"
+        base, quote = forex_codes(symbol)
+        return f"{base}-{quote}"
     if asset_class is AssetClass.CRYPTO:
         base, quote = pairs[symbol]
         return f"{base}-{quote}"

@@ -249,6 +249,13 @@ def test_spec_validation() -> None:
             change(EXCHANGES, name=name)
     with pytest.raises(ValueError, match=r"test\.x: a WebSocket dataset .* needs a class"):
         DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={None: "T"})
+    with pytest.raises(ValueError, match=r"^test\.x: a flat-file dataset needs a class$"):
+        # A file filter looks for the spellings of one class.
+        DatasetSpec(
+            name="test.x",
+            summary="A dataset for the tests.",
+            flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+        )
     for transports in ({"channels": {None: "T"}}, {"flat_file_prefixes": {None: "us/x"}}):
         with pytest.raises(
             ValueError, match=r"^test\.x: symbols kept as written are for REST datasets only$"

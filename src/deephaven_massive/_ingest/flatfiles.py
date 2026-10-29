@@ -355,6 +355,9 @@ class _Transform:
             The transform.
         """
         schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
+        # with flat files.
+        file_class = cast("AssetClass", spec.asset_class)
         source = catalog.source(Transport.FLAT_FILES, prefix)
         renamed = rename(spec, source)
         by_column = {c.column: c for c in renamed}
@@ -380,7 +383,7 @@ class _Transform:
             symbol_header=header["Symbol"],
             symbols=(
                 pa.array(
-                    [w for s in symbols for w in wire_spellings(spec.asset_class, s)],
+                    [w for s in symbols for w in wire_spellings(file_class, s)],
                     pa.string(),
                 )
                 if isinstance(symbols, tuple)

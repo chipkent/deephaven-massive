@@ -9,10 +9,12 @@ names the member to use; `Timespan("minute")` is the documented way to convert t
 An enum of a library setting that never reaches the wire (`HistorySource`, `SymbolConvention`,
 `OnError`, `UnknownSymbols`) takes its member names in lower case as values.
 
-Two further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
-data is) and `ChannelFamily` (which host a channel is served from). Both appear as values in
+Three further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
+data is) and `ChannelFamily` (which host a channel is served from), which appear as values in
 the diagnostics tables, beside the wire package's `Transport`, which names WebSocket, REST, or
-flat files once for both sides of the wire boundary.
+flat files once for both sides of the wire boundary; and `ClassFromPrefix`, a plain `Enum`
+(not a `StrEnum`, so it never equals an `AssetClass` value), whose one member `ANY` is the
+class of a dataset whose symbols span classes, each read from its prefix.
 
 The eighteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private.

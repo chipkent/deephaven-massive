@@ -31,13 +31,14 @@ makes its requests on the poller's pool of `max_concurrency` threads. Each cycle
 table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, `SymbolCount` for a reactive
 table, and `SchemaDrift` from each page's drift.
 
-**Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, `RowDataError` (a
+**Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
+`PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
+(`SessionCore.fail_stream`), and ends the poller. The permanent errors are `RowDataError` (a
 row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
-rows), `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks
-a parameter the caller set), or a `PermanentError` (such as `_ingest/rest.py`'s
-`UnlistedPairError`, a crypto pair whose currencies Massive's reference data does not give)
-fails the table through `publish_failure`, marks the row `FAILED` (`SessionCore.fail_stream`),
-and ends the poller. Any other error, also one while publishing,
+rows), `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks a
+parameter the caller set), `SymbolRowError` (a symbol table's row that is not Massive's
+ticker), and `_ingest/rest.py`'s `UnlistedPairError` (a crypto pair whose currencies Massive's
+reference data does not give). Any other error, also one while publishing,
 is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds.
 
@@ -122,7 +123,7 @@ LIVE_COLUMN: Final = "__MassiveLive"
 are PascalCase wire names, so none can take this name."""
 
 
-class RowDataError(MassiveError):
+class RowDataError(PermanentError):
     """A REST row that breaks its dataset's schema.
 
     A row that lacks a key the dataset requires, a value that does not convert to its field's
@@ -132,7 +133,7 @@ class RowDataError(MassiveError):
     """
 
 
-class UnsupportedParameterError(MassiveError):
+class UnsupportedParameterError(PermanentError):
     """A parameter the caller set that the path a `poll()` cycle chose does not take.
 
     A reactive symbol table can route a new symbol to a path that lacks a parameter (an
@@ -141,7 +142,7 @@ class UnsupportedParameterError(MassiveError):
     """
 
 
-class SymbolRowError(MassiveError):
+class SymbolRowError(PermanentError):
     """A row of a `poll()` table's reactive symbol table that is not Massive's exact ticker.
 
     The table fails with it, since every later cycle would read the same row; its message
@@ -149,14 +150,7 @@ class SymbolRowError(MassiveError):
     """
 
 
-_FATAL: Final = (
-    AuthenticationError,
-    EntitlementError,
-    RowDataError,
-    PermanentError,
-    SymbolRowError,
-    UnsupportedParameterError,
-)
+_FATAL: Final = (AuthenticationError, EntitlementError, PermanentError)
 """The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""
 
 

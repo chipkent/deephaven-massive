@@ -10,7 +10,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from deephaven_massive._datasets.symbols import NO_PAIRS
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest.subscriptions import (
     Subscriptions,
@@ -527,4 +526,4 @@ def test_topic_helpers() -> None:
     assert is_wildcard("T.*")
     assert not is_wildcard("T.AAPL")
     assert channel_of("C.EUR-USD") == "C"
-    assert stream_topics(AssetClass.FOREX, "C", ["C:EURUSD"], pairs=NO_PAIRS) == {"C.EUR-USD"}
+    assert stream_topics(AssetClass.FOREX, "C", ["C:EURUSD"], pairs={}) == {"C.EUR-USD"}

@@ -82,13 +82,12 @@ from deephaven_massive._datasets.schema import (
     widen,
 )
 from deephaven_massive._datasets.symbols import (
-    NO_PAIRS,
     SymbolTable,
     WireSymbols,
+    forex_codes,
     option_roots,
     symbol_class,
     unknown_symbol_message,
-    ws_symbol,
 )
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
@@ -373,8 +372,7 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
         raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
     if asset_class is AssetClass.CRYPTO:
         return split(symbol)
-    base, _, quote = ws_symbol(asset_class, symbol, NO_PAIRS).partition("-")
-    return base, quote
+    return forex_codes(symbol)
 
 
 def _own_symbols(

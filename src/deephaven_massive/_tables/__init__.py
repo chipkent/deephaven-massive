@@ -6,8 +6,8 @@
 - `liveness`: liveness scopes, `entered()`, result records, `QueueWorker`, and the reaper;
 - `diagnostics`: the `connections()` and `streams()` tables and their writer thread;
 - `columns`: the Deephaven type of each column type and the column definitions of a schema;
-- `watchlist`: the check of a symbol table's rows, the watch that follows a reactive one, and
-  the public `canonicalize_symbols`;
+- `watchlist`: the check of a symbol table's rows and the watch that follows a reactive one;
+- `symbols`: `canonicalize_symbols`, the table form of the symbol converters;
 - `stream`: live streams' publishers, the flush thread, and the shared-batch fan-out.
 
 Layer: tables, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,

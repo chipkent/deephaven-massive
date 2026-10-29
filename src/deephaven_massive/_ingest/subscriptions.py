@@ -94,7 +94,7 @@ def stream_topics(
         channel: The channel, such as `"T"`.
         symbols: Canonical symbols.
         pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list;
-            `NO_PAIRS` for a class other than crypto.
+            empty for a class other than crypto.
 
     Returns:
         The topics, such as `{"T.AAPL", "T.MSFT"}`.

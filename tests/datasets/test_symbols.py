@@ -16,11 +16,11 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.symbols import (
-    NO_PAIRS,
     SymbolTable,
     WireSymbols,
     canonical_from_wire,
     check_symbol,
+    forex_codes,
     is_canonical,
     is_forex_currency,
     normalize,
@@ -299,6 +299,9 @@ def test_converter_enums_reject_text() -> None:
         dm.canonical_symbol("AAPL", cast("AssetClass", "stocks"))
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
         dm.canonical_symbol("BRK-B", STK, convention=cast("SymbolConvention", "yahoo"))
+    # No convention is not a default: SymbolConvention.MASSIVE names Massive's own spelling.
+    with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
+        dm.canonical_symbol("AAPL", STK, convention=cast("SymbolConvention", None))
 
 
 @pytest.mark.parametrize(
@@ -495,7 +498,7 @@ def test_forex_currencies_are_three_letters() -> None:
 def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
     # A crypto split comes from Massive's crypto ticker list, given here as `pairs`.
     split = cast("tuple[str, str]", tuple(expected.split("-")))
-    pairs = {symbol: split} if asset_class is CRY else NO_PAIRS
+    pairs = {symbol: split} if asset_class is CRY else {}
     assert ws_symbol(asset_class, symbol, pairs) == expected
 
 
@@ -553,18 +556,20 @@ def test_canonical_from_wire(
         (IDX, "I:SPX"),
         (STK, "BRK.B"),
         (OPT, "O:AAPL250117C00150000"),
-        (ClassFromPrefix.ANY, "C:EURUSD"),
-        (ClassFromPrefix.ANY, "X:ETHBTC"),
-        (ClassFromPrefix.ANY, "AAPL"),
     ],
 )
 def test_wire_spellings_are_the_inverse_of_canonical_from_wire(
-    asset_class: AssetClass | ClassFromPrefix, symbol: str
+    asset_class: AssetClass, symbol: str
 ) -> None:
     spellings = wire_spellings(asset_class, symbol)
     assert spellings[0] == symbol
     assert len(set(spellings)) == len(spellings)
     assert all(canonical_from_wire(asset_class, s) == symbol for s in spellings)
+
+
+def test_forex_codes_split_a_forex_ticker_by_position() -> None:
+    assert forex_codes("C:EURUSD") == ("EUR", "USD")
+    assert forex_codes("C:USDJPY") == ("USD", "JPY")
 
 
 def test_wire_spellings_cover_the_flat_file_and_websocket_forms() -> None:
@@ -743,9 +748,9 @@ def test_a_crypto_topic_takes_its_split_only_from_the_pairs_given() -> None:
     assert ws_symbol(CRY, "X:DOTUSD", pairs) == "DOT-USD"
     assert ws_symbol(CRY, "X:BTCUSD", pairs) == "BTC-USD"
     with pytest.raises(KeyError, match="X:BTCUSD"):
-        ws_symbol(CRY, "X:BTCUSD", NO_PAIRS)  # no split given: none is guessed
-    assert ws_symbol(FX, "C:EURUSD", NO_PAIRS) == "EUR-USD"
-    assert ws_symbol(STK, "AAPL", NO_PAIRS) == "AAPL"
+        ws_symbol(CRY, "X:BTCUSD", {})  # no split given: none is guessed
+    assert ws_symbol(FX, "C:EURUSD", {}) == "EUR-USD"
+    assert ws_symbol(STK, "AAPL", {}) == "AAPL"
     # A file may split a pair anywhere: every cut is looked for, and each reads back.
     for symbol in ("X:BTCXYZ", "X:BTCPYUSD", "X:BTCUSD"):
         spellings = wire_spellings(CRY, symbol)

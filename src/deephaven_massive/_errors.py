@@ -26,8 +26,9 @@ through `TablePublisher.publish_failure`, so the table fails where Deephaven use
 failure is also logged at ERROR and shown in `m.streams()`.
 
 The module also holds `log_once`, the one helper for facts that are logged a single time per
-process (a codec choice, a detected unit, rate-limit advice), and `BoundedWarnings`, which
-reports each of a bounded number of bad values once.
+process (a codec choice, a detected unit, rate-limit advice), `BoundedWarnings`, which reports
+each of a bounded number of bad values once, and `PermanentError`, the internal base of the
+ingest errors a retry cannot fix, which is not exported.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
@@ -146,10 +147,15 @@ class EntitlementError(MassiveError):
 class PermanentError(MassiveError):
     """A failure that the same request would meet again, so a retry cannot fix it.
 
-    The base of the errors a module raises when the answer it needs is settled for the session
-    (a crypto pair missing from the ticker list the session read). A `poll()` table fails with
-    one rather than retrying it every cycle; the module that raises a subclass defines it, and
-    `_ingest/poll.py` names only this base, so neither imports the other.
+    Internal: not exported from `dm`, and only its subclasses are raised. They are the ingest
+    errors whose cause is settled for the session or the request: a row that breaks its
+    dataset's schema (`RowDataError`), a parameter the chosen path does not take
+    (`UnsupportedParameterError`), a symbol table's row that is not Massive's ticker
+    (`SymbolRowError`), and a crypto pair missing from the session's ticker list
+    (`UnlistedPairError`). A `poll()` table fails with one rather than retrying it every cycle.
+    The subclasses are defined in the ingest modules (`_ingest/poll.py`, `_ingest/rest.py`),
+    and the fatal set of `poll()` names only this base, so a subclass defined in a module the
+    poll module cannot import (`rest.py` imports `poll.py`) still fails the table.
 
     Example:
         ::

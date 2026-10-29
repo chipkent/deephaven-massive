@@ -135,6 +135,8 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None
         dm.canonicalize_symbols(
             table, AssetClass.STOCKS, convention=cast("SymbolConvention", "yahoo")
         )
+    with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
+        dm.canonicalize_symbols(table, AssetClass.FOREX, convention=cast("SymbolConvention", None))
     with pytest.raises(
         TypeError, match=r"^on_error must be dm\.OnError, e\.g\. dm\.OnError\.NULL$"
     ):

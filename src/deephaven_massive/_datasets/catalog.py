@@ -341,20 +341,21 @@ class DatasetSpec:
 
         Raises:
             ValueError: If the name is not `"<namespace>.<dataset>"`; the summary is not one
-                line of text ending in a period (`_check_summary`); the keys of `channels`
-                or `flat_file_prefixes` do not match `is_bars`; a dataset with channels or a
-                kind has no `asset_class`; `keys` names a source the dataset does not use,
-                fills a `time` or `session` key from the request, marks a key other than
-                `fanout` as no instrument, or fills a non-instrument fan-out key from the
-                request, or makes a key optional other than a `symbol` key read from a REST
-                path's rows; `poll_keys` holds the `Symbol` of an optional symbol key, is empty
-                on an `APPEND` dataset, is empty together with `revision_keys`, or shares a
-                column with `revision_keys`; `nullable_poll_keys` names a column that is no
-                poll key, or gives an empty reason; a flat-file prefix does not
-                declare its `symbol` and `time` keys from its own columns (and, for futures,
-                its `session` key, against which every futures file is checked); a dataset
-                that keeps its symbols as written has channels or flat-file prefixes; or the
-                transports match no query class (see the class docstring and `_check_verbs`).
+                line of text ending in a period (`_check_summary`); the keys of `channels` or
+                `flat_file_prefixes` do not match `is_bars`; a dataset with channels, flat
+                files, or a kind has no `asset_class` (`ClassFromPrefix.ANY`); `keys` names a
+                source the dataset does not use, fills a `time` or `session` key from the
+                request, marks a key other than `fanout` as no instrument, or fills a
+                non-instrument fan-out key from the request, or makes a key optional other than
+                a `symbol` key read from a REST path's rows; `poll_keys` holds the `Symbol` of
+                an optional symbol key, is empty on an `APPEND` dataset, is empty together with
+                `revision_keys`, or shares a column with `revision_keys`; `nullable_poll_keys`
+                names a column that is no poll key, or gives an empty reason; a flat-file prefix
+                does not declare its `symbol` and `time` keys from its own columns (and, for
+                futures, its `session` key, against which every futures file is checked); a
+                dataset that keeps its symbols as written has channels or flat-file prefixes; or
+                the transports match no query class (see the class docstring and
+                `_check_verbs`).
         """
         namespace, _, dataset = self.name.partition(".")
         if not namespace or not dataset:
@@ -370,6 +371,9 @@ class DatasetSpec:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
         if self.kind is not None and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a dataset in a kind needs a class (its group)")
+        if self.flat_file_prefixes and self.asset_class is ClassFromPrefix.ANY:
+            # A file filter looks for the spellings of one class (`symbols.wire_spellings`).
+            raise ValueError(f"{self.name}: a flat-file dataset needs a class")
         if self.symbols_as_written and (self.channels or self.flat_file_prefixes):
             # A stream subscribes and a flat file filters by the class's spellings.
             raise ValueError(f"{self.name}: symbols kept as written are for REST datasets only")

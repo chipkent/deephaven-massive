@@ -25,6 +25,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode
+from deephaven_massive._errors import PermanentError
 from deephaven_massive._ingest import poll
 from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, open_poll
 from deephaven_massive._massive import DriftReport, Transport
@@ -1257,3 +1258,10 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         assert m._core.diagnostics.barrier().wait(30.0)
         assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
         assert not table.j_table.isFailed()
+
+
+def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:
+    # A poll() table fails on a PermanentError, its fatal set names only the base.
+    for error in (poll.RowDataError, poll.UnsupportedParameterError, poll.SymbolRowError):
+        assert issubclass(error, PermanentError)
+    assert (dm.AuthenticationError, dm.EntitlementError, PermanentError) == poll._FATAL
