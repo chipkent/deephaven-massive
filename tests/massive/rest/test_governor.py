@@ -1114,3 +1114,19 @@ def test_refusals_without_the_basic_words_never_pace_a_bucket_however_many() -> 
         _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
     state = _state(governor)
     assert (state.limit, state.learned, state.refusals) == (None, False, 3)
+
+
+def test_an_interrupt_before_the_grant_leaves_its_place_and_holds_nothing() -> None:
+    governor = _governor()
+    # A pause makes the request queue; the notice of its queuing is interrupted.
+    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=1.0)
+
+    def interrupting() -> None:
+        raise KeyboardInterrupt
+
+    governor.subscribe(interrupting)
+    with pytest.raises(KeyboardInterrupt):
+        governor.acquire("stocks", Cancel(), lane=object())
+    governor.unsubscribe(interrupting)
+    state = _state(governor)
+    assert (state.in_flight, state.waiting, state.attempts) == (0, 0, 1)
