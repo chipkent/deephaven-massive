@@ -650,28 +650,50 @@ def test_insider_datasets_take_issuer_and_owner(
     make = factory(massive_session, name)
     query = make("AAPL", issuer_cik="0000320193", owner_cik="0001214156")
     assert dict(query._request.params) == {"issuer_cik": "0000320193", "owner_cik": "0001214156"}
-    with pytest.raises(TypeError, match="issuer_cik must be a str"):
+    # A sequence of CIKs is sent as the `.any_of` form, which the paths also document.
+    query = make(issuer_cik=["0000320193", "0001045810"], owner_cik=("0001214156",))
+    assert dict(query._request.params) == {
+        "issuer_cik.any_of": ("0000320193", "0001045810"),
+        "owner_cik.any_of": ("0001214156",),
+    }
+    with pytest.raises(TypeError, match="issuer_cik must be a str, a sequence of str, or None"):
         make(issuer_cik=320193)
-    with pytest.raises(TypeError, match="owner_cik must be a str"):
+    with pytest.raises(TypeError, match="owner_cik must be a str, a sequence of str, or None"):
         make(owner_cik=1214156)
+    with pytest.raises(ValueError, match="issuer_cik is empty; pass None for every issuer"):
+        make(issuer_cik=[])
+    with pytest.raises(ValueError, match="owner_cik is empty; pass None for every owner"):
+        make(owner_cik=())
+    with pytest.raises(TypeError):
+        make(issuer_cik=[320193])
+    # The list forms belong to the arguments, and the refusal names the argument to use.
+    with pytest.raises(ValueError, match="its own argument, owner_cik="):
+        make(filters={"owner_cik_any_of": ["0001214156"]})
 
 
-def test_insider_activity_takes_an_issuer_and_no_owner(massive_session: dm.MassiveSession) -> None:
+def test_insider_activity_takes_issuers_and_no_owner(massive_session: dm.MassiveSession) -> None:
     # The totals sum every insider of the issuer, so the path documents no owner filter.
     activity = massive_session.stocks.filings.insider_activity
     query = activity("NVDA", issuer_cik="0001045810")
     assert dict(query._request.params) == {"issuer_cik": "0001045810"}
+    query = activity(issuer_cik=["0001045810", "0000320193"])
+    assert dict(query._request.params) == {"issuer_cik.any_of": ("0001045810", "0000320193")}
     assert "owner_cik" not in inspect.signature(activity).parameters
     with pytest.raises(TypeError, match="issuer_cik must be a str"):
         activity(issuer_cik=cast("Any", 1045810))
+    with pytest.raises(ValueError, match="issuer_cik is empty"):
+        activity(issuer_cik=[])
+    with pytest.raises(ValueError, match="its own argument, issuer_cik="):
+        activity(filters={"issuer_cik_any_of": ["0001045810"]})
 
 
 @pytest.mark.parametrize("name", ["filings.insider_activity", "filings.insider_holdings"])
 def test_insider_aggregates_leave_no_parameter_to_filters(
     massive_session: dm.MassiveSession, name: str
 ) -> None:
-    # Every documented parameter is a typed argument (symbols, CIKs, the date axis), as the
-    # docstrings say; a parameter Massive adds later shows up here.
+    # The arguments reserve every form of the tickers (`tickers.all_of` included), the CIKs,
+    # and the date (the exclusive bounds included), as the docstrings say, which leaves no
+    # filter; a parameter Massive adds later shows up here.
     with pytest.raises(ValueError, match=r"valid filters: \[\]"):
         factory(massive_session, name)(filters={"anything": "x"})
 
@@ -1046,9 +1068,9 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
     ),
     (
         "filings.initial_insider_ownership",
-        {"issuer_cik": "0000320193"},
+        {"symbols": ["NVDA", "GOOGL"], "issuer_cik": "0000320193"},
         "/stocks/filings/vX/form-3",
-        {"issuer_cik": "0000320193", "limit": "10000"},
+        {"tickers.any_of": "GOOGL,NVDA", "issuer_cik": "0000320193", "limit": "10000"},
         ("FilingDate", date(2026, 3, 30)),
     ),
     (
@@ -1060,10 +1082,16 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
     ),
     (
         "filings.insider_activity",
-        {"symbols": "NVDA", "start": date(2026, 9, 1), "end": date(2026, 9, 30)},
+        {
+            "symbols": "NVDA",
+            "issuer_cik": ["0001045810", "0000320193"],
+            "start": date(2026, 9, 1),
+            "end": date(2026, 9, 30),
+        },
         "/stocks/insiders/vX/activity",
         {
             "tickers.any_of": "NVDA",
+            "issuer_cik.any_of": "0001045810,0000320193",
             "transaction_date.gte": "2026-09-01",
             "transaction_date.lte": "2026-09-30",
             "limit": "10000",
@@ -1072,9 +1100,15 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
     ),
     (
         "filings.insider_holdings",
-        {"owner_cik": "0001588670", "start": date(2026, 1, 1), "sort": "shares_owned"},
+        {
+            "symbols": ["NVDA", "GOOGL"],
+            "owner_cik": "0001588670",
+            "start": date(2026, 1, 1),
+            "sort": "shares_owned",
+        },
         "/stocks/insiders/vX/holdings",
         {
+            "tickers.any_of": "GOOGL,NVDA",
             "owner_cik": "0001588670",
             "last_filing_date.gte": "2026-01-01",
             "sort": "shares_owned",

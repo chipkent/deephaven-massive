@@ -43,12 +43,13 @@ from deephaven_massive._namespaces.base import (
     Namespace,
     build_query,
     list_params,
+    one_or_any_of,
     optional_text,
     require_bool,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from deephaven_massive._query import (
         HistoryLatestQuery,
@@ -659,6 +660,7 @@ def _list_query(
     start: DateLike | None = None,
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
+    arguments: Mapping[str, str] | None = None,
     sort: str | None,
     order: Order | None,
     limit: int | None,
@@ -673,6 +675,9 @@ def _list_query(
         start: The first day of the dataset's axis, or None.
         end: The last day of the dataset's axis, or None.
         params: The dataset's other typed parameters by wire name; None values are dropped.
+        arguments: The factory's argument name of each key of `params` it names differently,
+            such as `{"issuer_cik.any_of": "issuer_cik"}`, for the message that refuses that
+            key in `filters`; None when every argument has its wire name.
         sort: The field to sort by, or None.
         order: The sort direction, or None.
         limit: The cap on the total number of rows, or None.
@@ -691,6 +696,7 @@ def _list_query(
         start=start,
         end=end,
         params={**list_params(sort=sort, order=order), **(params or {})},
+        arguments=arguments,
         filters=filters,
         limit=limit,
     )
@@ -1447,8 +1453,8 @@ class _StockFilings(Namespace):
         self,
         symbols: Symbols | None = None,
         *,
-        issuer_cik: str | None = None,
-        owner_cik: str | None = None,
+        issuer_cik: str | Sequence[str] | None = None,
+        owner_cik: str | Sequence[str] | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -1472,15 +1478,18 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-        the wrong kind.
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
+        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
+        filter is unknown, reserved, or of the wrong kind.
 
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            issuer_cik: The SEC CIK of the issuing company, as text; None for every issuer.
-            owner_cik: The SEC CIK of the reporting owner, as text; None for every owner.
+            issuer_cik: The SEC CIK of the issuing company, as text with its leading zeros
+                (sent as `issuer_cik`), or a sequence of them for any of several issuers
+                (sent as `issuer_cik.any_of`); None for every issuer.
+            owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
+                way (`owner_cik` or `owner_cik.any_of`); None for every owner.
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
@@ -1517,8 +1526,8 @@ class _StockFilings(Namespace):
         self,
         symbols: Symbols | None = None,
         *,
-        issuer_cik: str | None = None,
-        owner_cik: str | None = None,
+        issuer_cik: str | Sequence[str] | None = None,
+        owner_cik: str | Sequence[str] | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -1542,15 +1551,18 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-        the wrong kind.
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
+        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
+        filter is unknown, reserved, or of the wrong kind.
 
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            issuer_cik: The SEC CIK of the issuing company, as text; None for every issuer.
-            owner_cik: The SEC CIK of the reporting owner, as text; None for every owner.
+            issuer_cik: The SEC CIK of the issuing company, as text with its leading zeros
+                (sent as `issuer_cik`), or a sequence of them for any of several issuers
+                (sent as `issuer_cik.any_of`); None for every issuer.
+            owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
+                way (`owner_cik` or `owner_cik.any_of`); None for every owner.
             start: The first filing date to include, inclusive; None for no lower bound.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
@@ -1589,7 +1601,7 @@ class _StockFilings(Namespace):
         self,
         symbols: Symbols | None = None,
         *,
-        issuer_cik: str | None = None,
+        issuer_cik: str | Sequence[str] | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -1624,15 +1636,17 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-        the wrong kind.
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
+        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
+        filter is unknown, reserved, or of the wrong kind.
 
         Args:
             symbols: Tickers whose issuers to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every issuer.
             issuer_cik: The SEC Central Index Key (CIK) of the issuing company, as text with
-                its leading zeros, such as `"0001045810"`; None for every issuer.
+                its leading zeros, such as `"0001045810"` (sent as `issuer_cik`), or a
+                sequence of them for any of several issuers (sent as `issuer_cik.any_of`);
+                None for every issuer.
             start: The first transaction date to include, inclusive; None for no lower bound.
             end: The last transaction date to include, inclusive; None for no upper bound.
             sort: The field to sort by, such as `"net_value"`; None for the server default,
@@ -1641,8 +1655,10 @@ class _StockFilings(Namespace):
                 the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores; checked now. Every parameter the endpoint documents is
-                already an argument here, so today any key raises `ValueError`.
+                as underscores; checked now. The endpoint has no parameter left for it: the
+                arguments above reserve every form of the tickers, the CIKs, and the date
+                (`tickers.all_of` and the exclusive `.gt` and `.lt` bounds included), so
+                today any key raises `ValueError`.
 
         Returns:
             The query; nothing is requested until a verb runs.
@@ -1658,7 +1674,8 @@ class _StockFilings(Namespace):
             symbols=symbols,
             start=start,
             end=end,
-            params={"issuer_cik": optional_text("issuer_cik", issuer_cik)},
+            params=_ciks(issuer_cik=issuer_cik),
+            arguments=_CIK_ARGUMENTS,
             sort=sort,
             order=order,
             limit=limit,
@@ -1669,8 +1686,8 @@ class _StockFilings(Namespace):
         self,
         symbols: Symbols | None = None,
         *,
-        issuer_cik: str | None = None,
-        owner_cik: str | None = None,
+        issuer_cik: str | Sequence[str] | None = None,
+        owner_cik: str | Sequence[str] | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -1687,7 +1704,8 @@ class _StockFilings(Namespace):
         `other`), and officer title; the dates of the first and latest filing and their count;
         the shares owned directly, indirectly (through trusts, LLCs, family members, and other
         vehicles), and in total, as filed and not adjusted for splits, with no options or other
-        derivative securities; and that total as a percentage of the shares outstanding.
+        derivative securities; and that total as a percentage of the shares outstanding
+        (`OwnershipPct`, in percent, not a fraction: 0.0198 means 0.0198%).
         `OldestPositionDate` far behind `LastFilingDate` warns that a summed position has not
         been restated lately and may be stale. Use it to see who a company's insiders are and
         how much they own, or, with `owner_cik`, every company one person is an insider of;
@@ -1707,19 +1725,21 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-        the wrong kind.
+        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
+        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
+        filter is unknown, reserved, or of the wrong kind.
 
         Args:
             symbols: Tickers whose issuers' insiders to return (one `str`, a sequence, or a
                 `Table` with a `Symbol` column, re-read each `poll()` cycle); None for every
                 issuer.
             issuer_cik: The SEC Central Index Key (CIK) of the issuing company, as text with
-                its leading zeros, such as `"0001045810"`; None for every issuer.
+                its leading zeros, such as `"0001045810"` (sent as `issuer_cik`), or a
+                sequence of them for any of several issuers (sent as `issuer_cik.any_of`);
+                None for every issuer.
             owner_cik: The SEC CIK of the insider, as text with its leading zeros, such as
-                `"0001588670"`; the same for one person across every issuer. None for every
-                insider.
+                `"0001588670"`, the same for one person across every issuer; or a sequence
+                of them, sent as `owner_cik.any_of`. None for every insider.
             start: The earliest latest-filing date (`LastFilingDate`) to include, inclusive;
                 an insider who has not filed since is left out. None for no lower bound.
             end: The last latest-filing date to include, inclusive; None for no upper bound.
@@ -1729,8 +1749,10 @@ class _StockFilings(Namespace):
                 the server default.
             limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores; checked now. Every parameter the endpoint documents is
-                already an argument here, so today any key raises `ValueError`.
+                as underscores; checked now. The endpoint has no parameter left for it: the
+                arguments above reserve every form of the tickers, the CIKs, and the date
+                (`tickers.all_of` and the exclusive `.gt` and `.lt` bounds included), so
+                today any key raises `ValueError`.
 
         Returns:
             The query; nothing is requested until a verb runs.
@@ -1856,6 +1878,32 @@ class _StockFilings(Namespace):
         )
 
 
+_CIK_ARGUMENTS: Final = {"issuer_cik.any_of": "issuer_cik", "owner_cik.any_of": "owner_cik"}
+"""The argument that sets each CIK list parameter, for the message that rejects it in `filters`."""
+
+
+def _ciks(**ciks: object) -> dict[str, object]:
+    """Return the wire parameters of the insider datasets' CIK arguments.
+
+    Every insider path takes each CIK both alone and as `.any_of`, so one CIK is sent as
+    `issuer_cik` (or `owner_cik`) and a sequence as `issuer_cik.any_of`.
+
+    Args:
+        ciks: Each CIK argument by name (`issuer_cik`, `owner_cik`) as passed: one CIK, a
+            sequence of CIKs, or None.
+
+    Returns:
+        Both wire forms of each argument, the unset one None.
+
+    The `TypeError` and `ValueError` of `one_or_any_of` propagate: a CIK that is neither
+    text, a sequence, nor None, or an empty sequence.
+    """
+    params: dict[str, object] = {}
+    for name, value in ciks.items():
+        params |= one_or_any_of(name, value, every=f"every {name.removesuffix('_cik')}")
+    return params
+
+
 def _insider_query(
     core: SessionCore,
     spec: DatasetSpec,
@@ -1878,8 +1926,8 @@ def _insider_query(
         core: The session core.
         spec: The dataset.
         symbols: The tickers that filter the request, or None.
-        issuer_cik: The `issuer_cik` argument as passed.
-        owner_cik: The `owner_cik` argument as passed.
+        issuer_cik: The `issuer_cik` argument as passed: one CIK, a sequence, or None.
+        owner_cik: The `owner_cik` argument as passed: one CIK, a sequence, or None.
         start: The first day of the dataset's date axis, or None.
         end: The last day of the dataset's date axis, or None.
         sort: The field to sort by, or None.
@@ -1890,8 +1938,7 @@ def _insider_query(
     Returns:
         The `Query`.
 
-    A CIK that is not a `str` raises the `TypeError` of `optional_text`; the errors of
-    `_list_query` propagate.
+    The errors of `_ciks` and `_list_query` propagate.
     """
     return _list_query(
         core,
@@ -1899,10 +1946,8 @@ def _insider_query(
         symbols=symbols,
         start=start,
         end=end,
-        params={
-            "issuer_cik": optional_text("issuer_cik", issuer_cik),
-            "owner_cik": optional_text("owner_cik", owner_cik),
-        },
+        params=_ciks(issuer_cik=issuer_cik, owner_cik=owner_cik),
+        arguments=_CIK_ARGUMENTS,
         sort=sort,
         order=order,
         limit=limit,
