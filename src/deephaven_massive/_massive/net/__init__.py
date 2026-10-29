@@ -11,6 +11,8 @@ WebSocket, and flat-file clients all build on it:
   injectable `Clock` every wait goes through.
 - `net.cancel`: `Cancel`, the token that ends a request's waits, which follows other tokens.
 - `net.origins`: `origin_of`, the scheme, host, and port a URL reaches.
+- `net.redaction`: `Redactor` and `redact`, which replace a client's secrets with `***` in
+  whatever it receives, however JSON spells them, before it is decoded, quoted, or logged.
 
 Attributes:
     USER_AGENT: The `User-Agent` every client sends, `deephaven-massive/<version>`, where the

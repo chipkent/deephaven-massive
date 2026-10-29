@@ -304,10 +304,11 @@ class Connection:
         self._started = False
         self._closing = False
         self._timer: threading.Timer | None = None
+        self._start_name = f"{group.label} start {decision.host}{self.path}"
         self.sessions: Final = sessions
         self.flusher: Final = Flusher(
             exec_ctx,
-            f"massive-flush {decision.host}{self.path}",
+            f"{group.label} flush {decision.host}{self.path}",
             interval=group.flush_interval,
             sessions=sessions,
         )
@@ -408,6 +409,7 @@ class Connection:
                 self._start_locked()
                 return
             self._timer = threading.Timer(delay, self._start_later)
+            self._timer.name = self._start_name
             self._timer.daemon = True
             self._timer.start()
 
@@ -1058,25 +1060,30 @@ class Connection:
 
 
 class _WsClientFactory:
-    """The factory of real `WsClient`s, with the session's key and backoffs.
+    """The factory of real `WsClient`s, with the session's key, backoffs, and thread prefix.
 
     Holds the API key, which goes only into each client's authentication frame and is never
     logged; its `repr` does not show it.
     """
 
-    __slots__ = ("_api_key", "_backoff", "_max_backoff")
+    __slots__ = ("_api_key", "_backoff", "_max_backoff", "_thread_prefix")
 
-    def __init__(self, api_key: str, *, backoff: float, max_backoff: float) -> None:
+    def __init__(
+        self, api_key: str, *, backoff: float, max_backoff: float, thread_prefix: str
+    ) -> None:
         """Keep the settings every client gets.
 
         Args:
             api_key: The session's key.
             backoff: `MassiveConfig.reconnect_backoff`.
             max_backoff: `MassiveConfig.max_reconnect_backoff`.
+            thread_prefix: The connection group's label (`"massive group #1"`), which starts
+                each client thread's name.
         """
         self._api_key = api_key
         self._backoff = backoff
         self._max_backoff = max_backoff
+        self._thread_prefix = thread_prefix
 
     def __call__(
         self,
@@ -1111,6 +1118,7 @@ class _WsClientFactory:
             on_state=on_state,
             reconnect_backoff=self._backoff,
             max_reconnect_backoff=self._max_backoff,
+            thread_prefix=self._thread_prefix,
         )
 
 
@@ -1271,6 +1279,7 @@ class ConnectionGroup:
         self,
         key: Hashable,
         *,
+        label: str,
         factory: ClientFactory,
         ack_timeout: float,
         flush_interval: float,
@@ -1281,6 +1290,9 @@ class ConnectionGroup:
 
         Args:
             key: Its key in the process's registry: the sharing key of `attach`.
+            label: Its label, `"massive group #<n>"`, which starts the name of every thread its
+                connections run (their clients, flush threads, delayed starts, and moves), since
+                they serve several sessions.
             factory: Creates each connection's client.
             ack_timeout: `MassiveConfig.ack_timeout` of its sessions.
             flush_interval: `MassiveConfig.flush_interval` of its sessions.
@@ -1288,7 +1300,7 @@ class ConnectionGroup:
             pinned: The classes whose host its sessions pin with `MassiveConfig.ws_hosts`.
         """
         self.key: Final = key
-        self.label: Final = f"massive group #{next(_group_numbers)}"
+        self.label: Final = label
         self.lock: Final = threading.RLock()
         self.factory: Final = factory
         self.ack_timeout: Final = ack_timeout
@@ -1339,13 +1351,16 @@ class ConnectionGroup:
         with _groups_lock:
             group = _groups.get(key)
             if group is None:
+                label = f"massive group #{next(_group_numbers)}"
                 factory = client_factory or _WsClientFactory(
                     config.api_key,
                     backoff=config.reconnect_backoff,
                     max_backoff=config.max_reconnect_backoff,
+                    thread_prefix=label,
                 )
                 group = _groups[key] = cls(
                     key,
+                    label=label,
                     factory=factory,
                     ack_timeout=config.ack_timeout,
                     flush_interval=config.flush_interval,
@@ -1519,7 +1534,7 @@ class ConnectionGroup:
         mover = threading.Thread(
             target=self._move,
             args=(connection, decision),
-            name=f"massive-move {connection.url}",
+            name=f"{self.label} move {connection.decision.host}{connection.path}",
             daemon=True,
         )
         mover.start()
@@ -1722,7 +1737,7 @@ class WsConnections:
         self.verdicts_recorded: set[tuple[AssetClass, ChannelFamily]] = set()
         # One worker, started on the first crypto watchlist change: a pair is looked up off
         # the update-graph thread, and no change of a stream overtakes another.
-        self._lookups: Final = ThreadPoolExecutor(1, f"{core.label} crypto pairs")
+        self._lookups: Final = ThreadPoolExecutor(1, f"{core.thread_prefix} crypto pairs")
         self._closed = False
 
     @property

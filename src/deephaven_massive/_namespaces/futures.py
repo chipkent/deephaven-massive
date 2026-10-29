@@ -35,7 +35,7 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params, one_or_any_of
 
@@ -123,8 +123,8 @@ TRADES: Final = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     kind="trades",
     history_path=_TRADES_PATH,
-    channels={None: "T"},
-    flat_file_prefixes={None: _TRADES_FILES},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: _TRADES_FILES},
     keys={
         (_REST, _TRADES_PATH): _tick_keys("Timestamp"),
         (_WS, "futures/T"): _stream_keys("Timestamp"),
@@ -140,8 +140,8 @@ QUOTES: Final = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     kind="quotes",
     history_path=_QUOTES_PATH,
-    channels={None: "Q"},
-    flat_file_prefixes={None: _QUOTES_FILES},
+    channels={NotBars.ANY: "Q"},
+    flat_file_prefixes={NotBars.ANY: _QUOTES_FILES},
     keys={
         (_REST, _QUOTES_PATH): _tick_keys("Timestamp"),
         (_WS, "futures/Q"): _stream_keys("Timestamp"),

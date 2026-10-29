@@ -24,7 +24,7 @@ from deephaven.table_factory import ring_table
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
@@ -43,7 +43,7 @@ SPEC = DatasetSpec(
     name="stocks.trades",
     summary="Trades of US-listed stocks, tick by tick.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
 )
 SCHEMA = Schema(
     "stocks.trades",

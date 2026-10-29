@@ -33,9 +33,9 @@ uv build                                 # sdist and wheel
    or otherwise): only the owner merges.
 2. **Never bypass a hook**: no `--no-verify`, no `core.hooksPath` tricks, no skipped failing
    check. When a hook fails, fix the cause.
-3. **Naming.** Branches are `<type>/<topic>`, cut from `origin/main` after `git fetch`. Commits
-   and PR titles follow Conventional Commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`,
-   `ci:`, `chore:`.
+3. **Branches and commits.** Branches are `<type>/<topic>`, cut from `origin/main` after
+   `git fetch`. Commits and PR titles follow Conventional Commits: `feat:`, `fix:`, `docs:`,
+   `test:`, `refactor:`, `ci:`, `chore:`.
 4. **Check, review, push.** Before opening a PR and before every push to one, get
    `./scripts/check.sh` (full) green, run the `pre-push-review` skill, and fix its findings. Every
    CI job must pass, the required free-threaded 3.14t job too: locking must work without the GIL.
@@ -69,8 +69,9 @@ uv build                                 # sdist and wheel
     tests, under `tests/massive/`, may import any `_massive` module; all other code, tests
     included, uses only `deephaven_massive._massive` and its `__all__`.
 15. **Layers**, lowest first: wire; vocabulary (`_config`, `_enums`, `_errors`, `_types`);
-    `_datasets`; `_tables`; `_ingest`; API (`__init__`, `_session`, `_query`, `_namespaces`). A
-    module imports only its own layer or lower, under `TYPE_CHECKING` too; pass objects down.
+    `_datasets`; `_tables`; `_ingest`; API (`__init__`, `_debug_log`, `_session`, `_query`,
+    `_namespaces`). A module imports only its own layer or lower, under `TYPE_CHECKING` too;
+    pass objects down.
 16. **`tests/test_layout.py` is the owner's.** It enforces the mirror, wire, and layer rules.
     Never widen its layer map, allow lists, or exceptions to pass a change; ask the owner.
 17. **Never edit generated or vendored files by hand.** `_massive/spec/*.json` changes only
@@ -78,8 +79,10 @@ uv build                                 # sdist and wheel
     `exclusions.py`, each entry with a reason; `vendor/massive/` only through `refresh --fetch`;
     `docs/datasets/` only through `render_reference.py`, committed in the same PR as its cause.
     The procedure, including wrong vendor descriptions, is in `docs/dev/spec-refresh.md`.
-18. **Placement.** A module holds one subject, named in the first line of its docstring.
-    `DESIGN.md` § 4.1 says where new code goes; read it before adding a module or a helper.
+18. **Placement and names.** A module holds one subject, named in the first line of its
+    docstring; `DESIGN.md` § 4.1 says where new code goes and lists the pattern words no module
+    name uses. Every name (function, argument, column, environment variable, pytest marker) says
+    what the thing is or does, in words a newcomer knows: no abbreviation you coined.
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.
 20. **Dates are ISO strings.** Every calendar-date column, vendor dates included, stores
     `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read: one type joins with every
@@ -89,6 +92,8 @@ uv build                                 # sdist and wheel
 21. **No planning references outside `plans/`.** Code, comments, docstrings, test names, error
     messages, CI step names, and config never cite the planning documents, their sections,
     planned-PR names, or decision numbers. State the behavior or the reason directly.
+22. **Every change logs its decisions and failures, with their values, and never a secret**:
+    the rules and their checks are in the `src/deephaven_massive/_debug_log.py` docstring.
 
 ## Documentation standard
 

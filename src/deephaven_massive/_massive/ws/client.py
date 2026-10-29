@@ -42,6 +42,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.net.http import TlsConsumer, ssl_context
+from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
 from deephaven_massive._massive.ws.backoff import Backoff
 from deephaven_massive._massive.ws.protocol import (
@@ -214,6 +215,7 @@ class WsClient:
         max_reconnect_backoff: float,
         clock: Clock = SYSTEM_CLOCK,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        thread_prefix: str = "massive",
     ) -> None:
         """Create the client and its loop; nothing connects until `start()`.
 
@@ -221,7 +223,8 @@ class WsClient:
             url: The endpoint, `wss://<host>/<path>` (or `ws://` against a local test server),
                 such as `"wss://socket.massive.com/stocks"`.
             api_key: The Massive API key. It is sent only in the authentication frame and
-                never logged.
+                never logged; a frame that echoes it has it replaced with `***`
+                (`net.redaction`) before it is decoded, so nothing built from it can quote it.
             sources: The WebSocket sources of the endpoint's cluster (keys `"<cluster>/<ev>"`),
                 against which every frame is decoded.
             on_open: Called with each new generation's number; see the class documentation.
@@ -245,6 +248,11 @@ class WsClient:
             sleep: The coroutine that waits out a backoff on the loop; `close()` interrupts it
                 by cancelling the task. Tests inject one that records the wait and returns at
                 once.
+            thread_prefix: The start of the client thread's name, which is
+                `"<thread_prefix> ws <host><path>"`, such as `"massive group #1 ws
+                delayed.massive.com/stocks"`. The library passes the label of the connection
+                group that owns the client, so a log line's thread names the group; the default
+                suits a client used alone.
 
         Raises:
             ValueError: If `url` is not a `ws://` or `wss://` URL with a host, a source is not a
@@ -257,6 +265,7 @@ class WsClient:
         self._host = parts.hostname
         self._path = parts.path or "/"
         self._api_key = api_key
+        self._redactor = Redactor(api_key)
         self._ssl = ssl_context(TlsConsumer.WEBSOCKETS) if parts.scheme == "wss" else None
         self._decoder = FrameDecoder(sources, host=self._host, path=self._path)
         self._backoff = Backoff(reconnect_backoff, max_reconnect_backoff)
@@ -275,7 +284,7 @@ class WsClient:
         self._generations = 0
         self._current: _Generation | None = None
         self._thread = threading.Thread(
-            target=self._run, name=f"massive-ws {self._host}{self._path}", daemon=True
+            target=self._run, name=f"{thread_prefix} ws {self._host}{self._path}", daemon=True
         )
         self._loop = asyncio.new_event_loop()
 
@@ -570,11 +579,11 @@ class WsClient:
         Raises:
             ValueError: If the greeting is not `connected` or the reply is none of those.
         """
-        greeting, _ = handshake_status(await websocket.recv())
+        greeting, _ = handshake_status(self._clean(await websocket.recv()))
         if greeting != "connected":
             raise ValueError(f"expected the 'connected' status, got {greeting!r}")
         await websocket.send(auth_frame(self._api_key))
-        reply, message = handshake_status(await websocket.recv())
+        reply, message = handshake_status(self._clean(await websocket.recv()))
         if reply == "auth_success":
             return None
         if reply == "auth_failed":
@@ -607,7 +616,7 @@ class WsClient:
         try:
             self._on_open(generation.number)
             async for frame in websocket:
-                for event in self._decoder.decode(frame):
+                for event in self._decoder.decode(self._clean(frame)):
                     if isinstance(event, Status):
                         no_slot = no_slot or event.kind is StatusKind.MAX_CONNECTIONS
                         self._on_status(generation.number, event)
@@ -622,6 +631,21 @@ class WsClient:
             sender.cancel()
         logger.info("the connection to %s closed (code %s)", self._url, websocket.close_code)
         return _Ended(uptime=self._clock.monotonic() - opened_at, waiting_slot=no_slot)
+
+    def _clean(self, frame: str | bytes) -> str | bytes:
+        """Return a received frame with the API key replaced, should the server echo it.
+
+        Every frame passes through here before it is decoded, so no status, row, reject, error,
+        or log line built from it can quote the key.
+
+        Args:
+            frame: The frame as received: text, or bytes for a binary frame.
+
+        Returns:
+            The frame itself when it does not hold the key, otherwise a copy with `***` in
+            its place.
+        """
+        return self._redactor.received(frame)
 
     @staticmethod
     async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str | None]) -> None:
