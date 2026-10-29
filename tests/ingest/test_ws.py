@@ -295,6 +295,15 @@ class Harness:
         assert done.wait(TIMEOUT)
         return result[0]
 
+    def settle(self) -> None:
+        # Run what each live connection's loop has queued, such as the row write a status
+        # schedules for the end of its loop turn, so a diagnostics read sees it.
+        with self.session._core.registry_lock:
+            connections = list(self.connections._connections.values())
+        for connection in connections:
+            if connection._client.loop.is_running():
+                self.on_loop(connection, lambda: None)
+
     def subscribed(self, *topics: str) -> None:
         # Wait until the latest connection has received a subscribe frame naming each topic.
         def named() -> bool:
@@ -377,6 +386,7 @@ def wait_for(condition: Callable[[], bool]) -> None:
 def streams_of(
     harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
+    harness.settle()
     assert harness.session._core.diagnostics.barrier().wait(TIMEOUT)
     return sorted(dh_to_pylist(harness.session.streams()), key=lambda r: r["StreamId"])
 
@@ -384,6 +394,7 @@ def streams_of(
 def connections_of(
     harness: Harness, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> list[dict[str, Any]]:
+    harness.settle()
     assert harness.session._core.diagnostics.barrier().wait(TIMEOUT)
     return [r for r in dh_to_pylist(harness.session.connections()) if r["Transport"] == "WS"]
 
@@ -1130,6 +1141,29 @@ def test_last_message_rows_are_throttled(harness: Harness, monkeypatch: pytest.M
     harness.send(trade("AAPL"))
     harness.send(trade("AAPL"))
     assert written == [1]
+    harness.session.release(result)
+
+
+def test_rows_buffered_while_row_writes_are_throttled_still_show(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The message right after a row write does not rewrite the row, so the rows it buffers
+    # must still schedule the backlog rewrite: with no further message, nothing else would.
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.wait(lambda h: any(s.message == "subscribed to: T.AAPL" for s in h.statuses))
+    connection = harness.connection()
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", 10**18)  # every message row write is throttled
+
+    def quiet() -> bool:
+        if connection._backlog_timer is not None:
+            connection._backlog_timer.cancel()
+            connection._backlog_timer = None
+        return connection.flusher.backlog == 0
+
+    assert harness.on_loop(connection, quiet)  # nothing buffered, no rewrite scheduled
+    harness.send(trade("AAPL"))
+    assert harness.on_loop(connection, lambda: connection._backlog_timer is not None)
+    harness.flush()
     harness.session.release(result)
 
 

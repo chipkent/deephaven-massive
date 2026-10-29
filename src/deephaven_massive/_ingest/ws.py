@@ -612,6 +612,7 @@ class Connection:
         """
         if rows:
             self.flusher.rows(channel, rows)
+            self._arm_backlog_row()  # the row write below may be throttled
         for reject in rejects:
             self._reject(channel, reject)
         if drift.extra or drift.missing:
@@ -834,6 +835,19 @@ class Connection:
         if core is not None:
             core.update_streams(updates)
 
+    def _arm_backlog_row(self) -> None:
+        """Schedule a rewrite of the row `_BACKLOG_ROW_DELAY` seconds from now, unless one is.
+
+        Called when rows are buffered and when a written row shows buffered rows. The
+        rewrite shows the backlog as it is then, and schedules the next one while it is not
+        zero, so `BufferedRows` shows rows that arrived while row writes were throttled and
+        falls back to zero once the flush thread catches up.
+        """
+        if self._backlog_timer is None:
+            self._backlog_timer = self._client.loop.call_later(
+                _BACKLOG_ROW_DELAY, self._backlog_row
+            )
+
     def _backlog_row(self) -> None:
         """Rewrite the row that showed buffered rows, to show the backlog as it is now."""
         self._backlog_timer = None
@@ -851,10 +865,8 @@ class Connection:
             return
         topics, acked, pending, no_ack = self.subscriptions.counts()
         backlog = self.flusher.backlog
-        if backlog and self._backlog_timer is None:
-            self._backlog_timer = self._client.loop.call_later(
-                _BACKLOG_ROW_DELAY, self._backlog_row
-            )
+        if backlog:
+            self._arm_backlog_row()
         now = time.time_ns()
         self._message_row_at = now
         with self._lock:
