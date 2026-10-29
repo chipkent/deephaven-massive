@@ -2707,11 +2707,24 @@ def test_a_reference_request_is_charged_to_other_whatever_market_it_filters(
     ids=["options contracts", "IPOs", "news"],
 )
 def test_every_reference_endpoint_is_charged_to_other_whatever_its_dataset_class(
-    spec: DatasetSpec, template: str
+    spec: DatasetSpec, template: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     # A dataset of one class (options contracts, IPOs) still reads a reference endpoint,
-    # which Massive counts in the reference bucket.
-    assert rest.call_bucket(spec, template, rest.Call({}, {}, "AAPL")) == "other"
+    # which Massive counts in the reference bucket; the log says why.
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
+        assert rest.call_bucket(spec, template, rest.Call({}, {}, "AAPL")) == "other"
+    assert caplog.messages == [
+        f"{spec.name} {template} (symbol AAPL) is charged to the other bucket: a reference endpoint"
+    ]
+
+
+def test_a_request_of_a_class_logs_the_bucket_it_is_charged_to(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
+        assert rest.call_bucket(DIVIDENDS, DIVIDENDS_PATH, rest.Call({}, {}, "AAPL")) == "stocks"
+    charged = "is charged to the stocks bucket: its data's class"
+    assert caplog.messages == [f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbol AAPL) {charged}"]
 
 
 def test_a_session_charges_reads_and_host_decisions_to_their_buckets(

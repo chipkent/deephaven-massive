@@ -2217,11 +2217,23 @@ def call_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
 
     Returns:
         The bucket's name, such as `"stocks"`, `"currencies"`, or `"other"`.
+
+    Logs the choice at DEBUG, with the dataset, the path template, and the symbol.
     """
     if _REFERENCE_PATH.match(template):
-        return OTHER
-    classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
-    return bucket_of(subscription_of(day_class(spec, classes)))
+        bucket, reason = OTHER, "a reference endpoint"
+    else:
+        classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
+        bucket, reason = bucket_of(subscription_of(day_class(spec, classes))), "its data's class"
+    logger.debug(
+        "%s %s (symbol %s) is charged to the %s bucket: %s",
+        spec.name,
+        template,
+        call.symbol,
+        bucket,
+        reason,
+    )
+    return bucket
 
 
 def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) -> list[str]:
