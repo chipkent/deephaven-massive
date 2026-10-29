@@ -47,7 +47,7 @@ def _check(
 
 
 @pytest.mark.needs("currencies:starter")
-@pytest.mark.settles("2")
+@pytest.mark.verifies("2")
 def test_forex_last_quote_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
     *,
@@ -70,7 +70,7 @@ def test_forex_last_quote_timestamp_is_milliseconds(
 
 
 @pytest.mark.needs("currencies:starter")
-@pytest.mark.settles("2")
+@pytest.mark.verifies("2")
 def test_crypto_last_trade_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
     *,
@@ -93,7 +93,7 @@ def test_crypto_last_trade_timestamp_is_milliseconds(
 
 
 @pytest.mark.needs("currencies:starter")
-@pytest.mark.settles("2")
+@pytest.mark.verifies("2")
 def test_forex_conversion_last_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
     *,

@@ -7,6 +7,7 @@ tables, so they observe exactly when Deephaven runs a stream's `on_shutdown_call
 import gc
 import logging
 import threading
+import types
 import weakref
 from collections.abc import Callable
 from typing import Any, Protocol, cast
@@ -17,7 +18,7 @@ from deephaven.dherror import DHError
 from deephaven.execution_context import ExecutionContext, get_exec_ctx
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
-from deephaven.update_graph import shared_lock
+from deephaven.update_graph import exclusive_lock, shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -31,8 +32,10 @@ from deephaven_massive._tables.liveness import (
     ResultRecord,
     ResultRegistry,
     entered,
+    holds_update_graph_lock,
     make_result,
     new_scope,
+    refuse_update_graph_thread,
 )
 from deephaven_massive._types import override
 
@@ -419,6 +422,30 @@ def test_concurrent_verbs_share_one_stream(
     assert fake_streams.shutdown[winner].wait(TIMEOUT)
     drain()
     assert fake_streams.shutdown_calls == dict.fromkeys(fake_streams.shutdown, 1)
+
+
+def test_the_update_graph_check_refuses_only_update_graph_threads(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    # The check itself, run on this thread with an update graph that says this is one of its
+    # threads (coverage tools on Python 3.11 do not see lines run on Deephaven's own threads).
+    graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
+    update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
+    with pytest.raises(ValueError, match="must not run on a Deephaven update-graph thread"):
+        refuse_update_graph_thread(cast("ExecutionContext", update_thread))
+    with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
+        refuse_update_graph_thread(dh_exec_ctx)
+    refuse_update_graph_thread(dh_exec_ctx)
+
+
+def test_the_lock_check_sees_either_lock(dh_exec_ctx: ExecutionContext) -> None:
+    update_graph = dh_exec_ctx.update_graph
+    assert not holds_update_graph_lock(dh_exec_ctx)
+    with shared_lock(update_graph):
+        assert holds_update_graph_lock(dh_exec_ctx)
+    with exclusive_lock(update_graph):
+        assert holds_update_graph_lock(dh_exec_ctx)
+    assert not holds_update_graph_lock(dh_exec_ctx)
 
 
 def test_entered_contexts_survive_overlapping_threads(dh_exec_ctx: ExecutionContext) -> None:

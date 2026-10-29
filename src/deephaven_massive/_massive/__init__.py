@@ -35,6 +35,7 @@ Interface:
     - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
       start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
       API key, and a snapshot of one subscription's state for diagnostics.
+    - `Patience`: how long one read waits out its buckets' pauses, shared by its requests.
     - `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`: a Basic subscription's limit (5 requests
       per minute) and the seconds a finished request holds its slot (61).
     - `Cancel`: the cancellation token that ends a request's waits.
@@ -78,6 +79,7 @@ __all__ = [
     "FlatFileClient",
     "Page",
     "ParamKind",
+    "Patience",
     "Provenance",
     "ReadColumn",
     "ReadPlan",
@@ -115,6 +117,7 @@ _EXPORTS: dict[str, str] = {
     "FlatFile": "deephaven_massive._massive.flatfiles.reader",
     "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
     "Page": "deephaven_massive._massive.rest.response",
+    "Patience": "deephaven_massive._massive.rest.governor",
     "ReadColumn": "deephaven_massive._massive.flatfiles.reader",
     "ReadPlan": "deephaven_massive._massive.flatfiles.reader",
     "RestClient": "deephaven_massive._massive.rest.client",
@@ -163,6 +166,7 @@ if TYPE_CHECKING:
         BASIC_REQUESTS_PER_MINUTE,
         RATE_WINDOW,
         BucketState,
+        Patience,
         RequestGovernor,
     )
     from deephaven_massive._massive.rest.response import Page
