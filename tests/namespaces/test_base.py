@@ -32,6 +32,7 @@ from deephaven_massive._namespaces.base import (
     bar_query_class,
     build_query,
     list_params,
+    one_or_any_of,
     optional_text,
     query_class,
     require_bool,
@@ -846,6 +847,21 @@ def test_require_bool() -> None:
     for bad in (0, 1, "true", None):
         with pytest.raises(TypeError, match=rf"^flag must be a bool, not {type(bad).__name__}$"):
             require_bool("flag", bad)
+
+
+def test_one_or_any_of_sends_one_value_alone_and_a_sequence_as_any_of() -> None:
+    assert one_or_any_of("code", None, every="every code") == {"code": None, "code.any_of": None}
+    assert one_or_any_of("code", "ES", every="every code") == {"code": "ES", "code.any_of": None}
+    assert one_or_any_of("code", ["ES", "NQ"], every="every code") == {
+        "code": None,
+        "code.any_of": ("ES", "NQ"),
+    }
+    with pytest.raises(ValueError, match=r"^code is empty; pass None for every code$"):
+        one_or_any_of("code", (), every="every code")
+    with pytest.raises(
+        TypeError, match=r"^code must be a str, a sequence of str, or None, not int$"
+    ):
+        one_or_any_of("code", 5, every="every code")
 
 
 def test_optional_text() -> None:
