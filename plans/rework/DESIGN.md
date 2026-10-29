@@ -1448,17 +1448,21 @@ The generator knows every vendor extension it accepts, each with the reason in `
 an unknown one stops the refresh (`shape`).
 
 **Coverage.** Everything documented is generated or excluded, and everything generated is
-used or listed as still to be declared:
+used or deferred:
 
 - **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft)**, tested against the
-  pinned snapshot in `tests/massive/refresh/test_generate.py`;
-- **generated ⊆ used ∪ undeclared**, tested in `tests/datasets/test_catalog.py`. Every generated item
-  is used by a declared dataset or listed in some undeclared file. The file
-  `tests/data/datasets/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
-  declare, so a shared source (the aggregate range path, `/prev`) appears in the file of every
-  namespace that will use it, and the files may overlap. A namespace's file must not list a
-  source that namespace already uses. Each namespace's dataset planned PR deletes only its own
-  file, so those planned PRs land in any order; when all are gone, generated = used.
+  pinned snapshot in `tests/massive/refresh/test_generate.py` (WebSocket channels and flat-file
+  prefixes) and `tests/massive/refresh/test_rest.py` (REST paths, and every path a
+  documentation page names is in the OpenAPI spec);
+- **generated = used ⊎ deferred**, tested in `tests/datasets/test_catalog.py`: every generated
+  item is read by a declared dataset or deferred (the coverage test, with a negative test that
+  drops a dataset), and every item a dataset reads is generated (the generated-sources gate).
+  A deferred item is a `DEFERRED` entry of the coverage test: the generated source key, a
+  reason, and the number of the issue that will add its dataset, both required. An entry that
+  names an item not generated, or one a dataset reads, fails the test, so the list cannot go
+  stale. A new generated item, from a refresh that takes a vendor addition, therefore fails the
+  coverage test until a dataset reads it, a `DEFERRED` entry defers it, or an `EXCLUSIONS`
+  entry, with its reason, keeps the refresh from generating it.
 
 `/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}` are ordinary
 generated paths: every path reaches the same REST client in the same way.
@@ -4062,8 +4066,9 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   schema;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names
   the dataset and says "deprecated or removed in the snapshot";
-- **Coverage:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
-  that namespace already uses ([section 8.12](#812-excluded-endpoints)).
+- **Coverage:** generated = used ⊎ deferred: every generated source is read by some dataset,
+  or deferred with a reason and an issue
+  ([section 8.12](#812-excluded-endpoints)).
 
 `KINDS` overlaps the catalog by design: the refresh checks names before any dataset is
 declared, and the kind-membership gate keeps the two in step. A test loads `spec/` with `refresh/`
@@ -4172,7 +4177,7 @@ refresh gate and the catalog gates. What each change does:
 | Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; `transport-agreement` catches a one-sided rename. |
 | Type changed | A value that no longer converts fails loudly. | `type-agreement` or the member-types gate fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
 | Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
-| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec` or an `EXCLUSIONS` entry is added. |
+| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec`, a `DEFERRED` entry, or an `EXCLUSIONS` entry is added. |
 | Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and the generated-sources gate names every dataset that uses it. |
 
 ## 20. Quality gates
@@ -4193,7 +4198,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   `_massive` boundary and layers of [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
-  and `tests/datasets/test_catalog.py` passes (the catalog gates, generated ⊆ used ∪ undeclared) ([section
+  and `tests/datasets/test_catalog.py` passes (the catalog gates, generated = used ⊎ deferred) ([section
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
 - **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
   exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
@@ -4292,7 +4297,11 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Packaging.** `uv.lock` is not committed, and CI resolves afresh on every run. The wheel
   excludes all of `refresh/` (`[tool.hatch.build.targets.wheel] exclude =
   ["src/deephaven_massive/_massive/refresh"]`), the snapshot included; `spec/*.json` ship as
-  package data, and the CI build job asserts both. Development dependencies use a PEP 735
+  package data, and the CI build job asserts both. The build job also installs the wheel, with
+  `deephaven-server`, into a fresh environment and runs `scripts/check_wheel.py` there: inside
+  a started server it imports every shipped module, resolves every public name, renders the
+  column reference from the installed catalog and compares it with `docs/datasets/`, and opens
+  and closes a session. Development dependencies use a PEP 735
   `[dependency-groups]` table; license metadata follows PEP 639. `__version__` comes from
   `importlib.metadata`. `deephaven-server` is a development dependency only. The runtime
   dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`, `boto3`,

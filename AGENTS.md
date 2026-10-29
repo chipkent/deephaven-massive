@@ -20,6 +20,7 @@ uv run pytest -m integration               # live tests only (owner, with MASSIV
 uv run pytest -m integration_smoke         # every dataset and verb once, unattended (owner)
 uv run pytest -m integration_limits        # the live tests that exceed Massive's limits (owner)
 uv build                                   # sdist and wheel
+PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded
 ```
 
 Live integration tests (`tests/**/test_*_integration.py`) carry the `integration` marker, which
@@ -51,6 +52,9 @@ lexicon, `SHAPES`, or `IDENTITY` entry (`lexicon.py`); a `NAMES`, `UNITS`, `TAG_
 `SAMPLE_ERRORS` entry (`exclusions.py`). A vendor description that is clearly wrong for its
 source (another asset class's or event's text, or a statement Massive's own documentation of the
 field contradicts) is corrected the same way, by a `DESCRIPTION_FIXES` entry that quotes it.
+
+A new Massive endpoint, channel, or flat-file prefix needs a dataset, a permanent `EXCLUSIONS`
+entry with its reason, or a `DEFERRED` entry with its issue; see the `exclusions.py` docstring.
 
 `--check` downloads the live sources into a scratch directory and prints a Markdown report of
 what differs from the snapshot and the committed schemas, each item under the action that
