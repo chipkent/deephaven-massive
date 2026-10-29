@@ -36,6 +36,16 @@ section it implements, and `AGENTS.md`. For each changed file ask:
 - **Layers and boundaries.** `tests/test_layout.py` passes, but also: does the change put logic
   in the layer that owns it, or work around a shared bug locally? Report shared bugs instead of
   patching around them.
+- **Placement and organization.** For every function, class and module the diff adds or moves,
+  assume it is in the wrong place until you can argue otherwise. Would a newcomer look for it in
+  this file and package? Do the module's name and docstring describe everything in it, or is it a
+  grab-bag of unrelated concerns? Does it duplicate a helper that already exists elsewhere? Is it
+  in the layer and package that own the concept? Should the module be split, merged or renamed?
+  Do the tests mirror the new location? Fix a misplaced item by moving it in the same PR, not by
+  noting it.
+- **Explicit choices.** A parameter whose `None` selects a mode or a behavior (`convention=None`
+  meaning "the default convention") should take an explicit enum member as its default instead.
+  `None` means only a value that is genuinely absent.
 - **Generated data.** No hand-written schema, no edit to `spec/*.json`; hand input only in the
   refresh hand-input files, each entry with a reason.
 - **Secrets.** No key, secret or proxy password can reach a message, `repr` or log record.
