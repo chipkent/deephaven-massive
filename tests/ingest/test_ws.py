@@ -1648,6 +1648,24 @@ def test_closing_the_last_session_on_a_connection_closes_it(ws_session: WsSessio
     del forex
 
 
+def test_closing_a_session_keeps_the_connection_it_shares(ws_session: WsSession) -> None:
+    other = join(ws_session)
+    stocks = ws_session.query(TRADES, ["AAPL"]).blink()
+    shared = ws_session.query(TRADES, ["MSFT"], other).blink()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    forex = ws_session.query(FOREX, ["C:EURUSD"], other).blink()
+    ws_session.subscribed("C.EUR-USD")
+    stocks_connection = ws_session.connection()
+    forex_connection = ws_session.connection("wss://socket.test/forex")
+    other.close()  # it shared the stocks connection, and alone used the forex one
+    assert forex_connection.join(TIMEOUT)
+    assert not stocks_connection.closing
+    # Only its own stream left the shared connection.
+    assert ws_session.on_loop(stocks_connection, lambda: sorted(stocks_connection._streams)) == [1]
+    ws_session.session.release(stocks)
+    del forex, shared
+
+
 def _group_of(session: dm.MassiveSession) -> ws.ConnectionGroup:
     transport = cast("ws.WsTransport", session._core.stream_transport())
     return transport._connections.group
