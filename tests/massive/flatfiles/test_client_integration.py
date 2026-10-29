@@ -53,7 +53,11 @@ def _weekdays_before(day: date, count: int) -> list[date]:
 @pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.settles("14")
 def test_when_each_days_file_was_published(
-    live_flat_files: FlatFileClient, *, live_s3_config: MassiveConfig, evidence: Evidence
+    live_flat_files: FlatFileClient,
+    *,
+    live_s3_config: MassiveConfig,
+    flat_files_reached: Callable[[str], bool],
+    evidence: Evidence,
 ) -> None:
     """When Massive publishes each day's stock file, against the documented ~11:00 New York.
 
@@ -61,8 +65,11 @@ def test_when_each_days_file_was_published(
     New York time the next day). Records the `LastModified` of `us_stocks_sip/day_aggs_v1`
     for each of the last ten weekdays, in New York time, or why it has none (a holiday has no
     file). Reading it: every file modified before 11:30 the next weekday confirms the cutoff;
-    later ones show how far to move it.
+    later ones show how far to move it. Skips when the S3 credentials do not reach the stock
+    day files.
     """
+    if not flat_files_reached(_DAY_FILE):
+        pytest.skip(f"needs the {_DAY_FILE} flat files: the S3 credentials do not reach them")
     s3, _proxy = live_flat_files._client_for(_DAY_FILE)
     today = datetime.now(_NEW_YORK).date()
     seen = 0
@@ -86,6 +93,7 @@ def test_a_weekend_key_is_missing_not_refused(
     *,
     recent_monday: date,
     live_s3_config: MassiveConfig,
+    flat_files_reached: Callable[[str], bool],
     evidence: Evidence,
 ) -> None:
     """Whether a key with no file answers 404 `NoSuchKey` (missing), not 403 or another 404.
@@ -104,6 +112,8 @@ def test_a_weekend_key_is_missing_not_refused(
             answers a 404 that is not `NoSuchKey`; the answer is recorded first, and fails
             the test.
     """
+    if not flat_files_reached(_DAY_FILE):
+        pytest.skip(f"needs the {_DAY_FILE} flat files: the S3 credentials do not reach them")
     control = live_flat_files.open(object_key(_DAY_FILE, recent_monday))
     evidence(f"control {recent_monday}: {'exists' if control is not None else 'missing'}")
     assert control is not None, (

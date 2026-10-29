@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -87,20 +87,7 @@ _ADJUSTED: tuple[tuple[str, str, date], ...] = (
 )
 """(contract root, underlying, a day the contracts were listed): three adjusted roots, after a
 spin-off, a special dividend, and a split. Adjusted roots are rare and named by hand, so the
-older ones lie beyond a short history; the test reads them only when the plan reaches back."""
-
-_HISTORY_DAYS = 3 * 365
-"""How far back a listing day may lie before the test needs the plans probe to say the
-options history reaches three years."""
-
-
-class _Plans(Protocol):
-    """The part of the run's plans (the `live_plans` fixture) this module reads."""
-
-    @property
-    def three_years(self) -> Mapping[str, bool | None]:
-        """Whether each class's history reaches three years back; None when not known."""
-        ...
+older ones lie beyond a short history; the test reads only those the plan keeps."""
 
 
 _OCC_TAIL = 15
@@ -280,7 +267,7 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    live_plans: _Plans,
+    plan_history_start: Callable[[str], date | None],
     recent_monday: date,
     table_rows: TableRows,
     evidence: Evidence,
@@ -292,45 +279,34 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
     standard `AAPL` and `SPX` contracts (the most recent published Monday), looked up by
     underlying (following pages until the root is passed) and by root, and records
     `additional_underlyings` (or `<missing>`), `cfi`, `correction`, and `shares_per_contract`
-    of up to three of each, and the library's columns for the first. A root listed more than
-    three years ago is read only when the plans probe found that the options history reaches
-    that far, and a lookup the plan refuses for its timeframe is recorded and skipped; either
-    way the line says "outside the plan's history". Reading it: standard contracts without
+    of up to three of each, and the library's columns for the first. A root listed before the
+    first day the key's Options plan keeps, by the documented history windows, is not read; its
+    line says "outside the plan's history". Reading it: standard contracts without
     `additional_underlyings` (or with `[]`) and adjusted ones with a non-empty list mean null
     and `[]` both mark a standard deliverable; an adjusted contract with neither means only
     `Cfi` or the root's trailing digit can tell. A root found by neither lookup, with the page
     counts showing the listing was read past it, is not kept by Massive for that day.
 
-    Raises:
-        WireEntitlementError: When a lookup is refused for any reason but its timeframe; the
-            plans hold Options Starter, so the test fails.
     """
-    reach = recent_monday - timedelta(days=_HISTORY_DAYS)
-    deep = live_plans.three_years["options"] is True
+    first = plan_history_start("options")
     found = 0
     roots = (*_ADJUSTED, ("AAPL", "AAPL", recent_monday), ("SPX", "SPX", recent_monday))
     for root, underlying, listed in roots:
         evidence(f"{root} (underlying {underlying}, as of {listed}):")
-        if listed < reach and not deep:
-            evidence(f"    outside the plan's history: {listed} is before {reach}")
+        if first is not None and listed < first:
+            evidence(f"    outside the plan's history: {listed} is before {first}")
             continue
-        try:
-            matching = [
-                row
-                for expired in (False, True)
-                for lookup in dict.fromkeys((underlying, root))
-                for row in _root_contracts(
-                    live_rest,
-                    root,
-                    query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
-                    evidence=evidence,
-                )
-            ]
-        except WireEntitlementError as error:
-            if "timeframe" not in str(error).lower():
-                raise
-            evidence(f"    outside the plan's history: {error}")
-            continue
+        matching = [
+            row
+            for expired in (False, True)
+            for lookup in dict.fromkeys((underlying, root))
+            for row in _root_contracts(
+                live_rest,
+                root,
+                query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
+                evidence=evidence,
+            )
+        ]
         rows = list({str(row["ticker"]): row for row in matching}.values())
         found += bool(rows)
         evidence(f"    {len(rows)} contracts of root {root}")

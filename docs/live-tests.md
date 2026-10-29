@@ -30,20 +30,29 @@ a few cheap requests per class:
 | What it asks | What an answer means |
 |---|---|
 | a snapshot of one liquid ticker (AAPL, one SPY option, `I:NDX`, `C:EURUSD`, one ES contract) | Starter or above; refused means Basic |
-| that ticker's trades, then its quotes (stocks, options, futures) | Developer (trades), Advanced (quotes) |
-| the snapshot's `fmv` field (stocks, options, currencies) | Business; for indices a real-time snapshot means Advanced |
-| one week of day bars three years back | whether the class's history reaches that far |
-| one file of every flat-file prefix | which flat files the S3 credentials reach |
+| that ticker's trades, then its quotes (stocks and options) | Developer (trades), Advanced (quotes) |
+| that contract's trades (futures) | Developer or above; Developer and Advanced both include quotes, so futures never read as Advanced |
+| a non-null `fmv` in the snapshot (stocks, options, currencies) | Business; for stocks and options, Business with the trades and quotes expansion when trades or quotes answer too |
+| a real-time indices snapshot | Advanced |
+| one file of every flat-file prefix | which flat files the S3 credentials reach: only a file that opens counts |
 
-Indices and Futures Business leave no mark a request can see, so they read as Advanced. The
-answer is kept in `.live-plans.json` in the repository root (git-ignored; it names the key and
+An answer counts only with at least one row, since every probe asks for a liquid ticker. An
+empty answer proves nothing either way, so the probe stops and the run asks you to declare
+the plans instead. For the same reason the probe does not run from 03:30 to 04:30 New York
+time, while Massive clears and refills its snapshots and a Business plan's `fmv` can be
+missing. A stocks or options Business plan is not an Advanced plan: without the
+expansion it has no trades, quotes, LULD, or per-second streams, so a test that needs Advanced
+skips on it. Indices Business leaves no mark a request can see and reads as Advanced. Futures
+Business is sold per venue (CME, CBOT, NYMEX, COMEX) and reads as Developer; a test of a venue
+the plan lacks is refused. The answer is kept in `.live-plans.json` in the repository root (git-ignored; it names the key and
 the S3 access key id only by a digest) until the New York day ends, so later runs that day do
 not probe again. Delete the file to probe again at once, after an upgrade. The plans head the
 evidence (under "live plans") and the summary at the end of the run.
 
 To skip the probe, declare the plans in `MASSIVE_LIVE_PLANS`, comma-separated:
-`<class>=<plan>` for each paid class (`starter`, `developer`, `advanced`, or `business`), and
-`s3` when the S3 credentials reach the flat files. Every class you leave out is Basic, the
+`<class>=<plan>` for each paid class (`starter`, `developer`, `advanced`, `business`, or, for
+stocks and options, `business_expansion`), and `s3` when the S3 credentials reach the flat
+files. Every class you leave out is Basic, the
 free plan. A declaration overrides the probe and the cache.
 
 ```bash
@@ -54,7 +63,10 @@ Each test declares the plans it needs (`@pytest.mark.needs("currencies:starter",
 test whose plans the key lacks skips before any request, naming the plan and its monthly
 price, such as "needs Currencies Starter ($49/month)". A request refused because it reaches
 further back than the plan's history ("Your plan doesn't include this data timeframe") skips
-the test as "outside the plan's history". Any other refusal of a test whose plans the key
+the test as "outside the plan's history" when the day it asked for is before the first day
+the plan keeps, by the history windows Massive documents per plan (two years on every Basic
+plan). Refused for a day the plan keeps, it fails, since that may be a library bug. Any other
+refusal of a test whose plans the key
 holds fails, and the refusal is recorded: either the probe or the documented plan table is
 wrong. The smoke tier reports a refused dataset as "not entitled: needs <plan>" and counts it
 apart from failures.
@@ -87,16 +99,18 @@ recent half day (the Friday after Thanksgiving, July 3, or December 24) whose we
 The futures tests read the contract that was front on their day, and the holiday-session
 checks the most recent Martin Luther King Day and Good Friday. The split and dividend checks
 find the year's most recent forward split and special cash dividend through the library's own
-`stocks.splits` and `stocks.dividends`. So every read stays inside a Basic plan's two years of
-history. The three adjusted option roots of the deliverable check (from 2014, 2021, and 2024)
-are the exception: each is read only when the probe found the options history reaches three
-years back, or when it is younger, and is otherwise recorded as outside the plan's history.
+`stocks.splits` and `stocks.dividends`, choosing common stocks with no later split. So every
+read stays inside a Basic plan's two years of history. The three adjusted option roots of the
+deliverable check (from 2014, 2021, and 2024) are the exception: each is read only when the
+key's Options plan keeps its day, by the documented history windows, and is otherwise
+recorded as outside the plan's history.
 
 A stream test asserts that Massive acknowledged its topics, which Massive does whether or not
 the market is open. It waits for rows only while `/v1/marketstatus/now` says the market is
-open, and skips, after the acknowledgement, only when that status says closed. Massive's status
-has no futures field, so the futures stream requires rows only during the stock market's
-regular session, when CME's equity futures always trade.
+open, and skips, after the acknowledgement, only when that status says closed. The futures
+stream reads the E-mini S&P 500's status from `/futures/v1/market-status` instead, and the
+LULD check needs the regular session, the only time bands change. In the smoke tier a stream
+that passed without a row is counted "acknowledged only".
 
 ## S3 credentials
 
@@ -123,19 +137,19 @@ plan keeps its access to the month's end ([S4], [S5]).
 
 | Plans | Per month | What it settles |
 |---|---|---|
-| Every class on Basic | $0 | about 12 questions: the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; plus the 429 text, the rate buckets, and how a spent minute frees its requests |
+| Every class on Basic | $0 | the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; plus the 429 text, the rate buckets, and how a spent minute frees its requests |
 | Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
-| Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots with a plan that reaches three years back), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
-| Stocks Starter | $29 | adds the delayed-key refusal text, the flat-file publication time, and that a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com and the split stock's as-traded day file (with `s3`; if it answers anything else, the library raises on every flat-file range that holds a weekend), and the stamps of AAPL's 1-day, week, and month bars on every source (with `s3` for the day and minute files) |
+| Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
+| Stocks Starter | $29 | adds the delayed-key refusal text and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
 | **Currencies, Options, and Stocks Starter** | **$107** | every priority question |
 | the same and Futures Starter | $136 | adds the futures files' sessions, the snapshot's `timeframe` fields, its ticker location, and the streamed futures dates and one-second bar ends: most of the open questions |
 | Indices Starter | $49 | the index values file unit, `I:SPX` everywhere, the index 1-day, week, month, quarter, and year bar stamps and which day and week they cover (`I:SPX` and `I:AAVE100` rebuilt from minute bars; with `s3` for the day file), and possibly the index value stream (the documentation says Starter, the pricing page Advanced) |
 | Stocks Advanced; Options Advanced | $199 each | the LULD unit; the options topic cap |
-| Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only |
+| Business plans | $999 and up | the FMV unit (Currencies Business, $999) and the base Business host (Stocks Business, $2,499) ([S2], [S8]); otherwise covered by fixture tests only. Futures Business is sold per venue, and covers only the tests of its venue |
 
 The bar-stamp checks read the most recent half day whose week has ended and the full trading
-day before it, so their day and week reads are at most about seven months old, inside every
-plan's history. Their month and quarter reads are the two whole ones before the run's, and the
+day before it. A December 24 half day stays the latest until the next Thanksgiving week ends,
+so these reads can be about eleven months old, still inside every plan's two years of history. Their month and quarter reads are the two whole ones before the run's, and the
 index year read runs from January 1 to the run's day; before the year's first trading day
 there is no year bar yet, and the year read is recorded as skipped.
 
@@ -156,9 +170,11 @@ documentation page names its plan in its "Plan Access" table ([S15]).
 
 ## Safety
 
-- **Streams.** Every stream test subscribes to one symbol per asset class, releases its stream
-  as soon as the first rows arrive, and closes its session at the end, so no cluster holds more
-  than one of the run's connections. The exceptions are the limit tests.
+- **Streams.** Every stream test subscribes to one symbol per asset class, except the LULD
+  check, which streams the bands of every ticker (`LULD.*`) so that some arrive within seconds
+  of an open session. Each releases its stream as soon as the first rows arrive and closes its
+  session at the end, so no cluster holds more than one of the run's connections. The
+  exceptions are the limit tests.
 - **REST.** Some checks query several symbols over REST, because the question is about the
   differences between them: nine options underlyings, five contract roots, four stock ticker
   types and three partner pages, nine futures products' schedules, the inactive tickers from

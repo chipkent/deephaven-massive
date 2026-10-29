@@ -440,44 +440,47 @@ def test_streamed_futures_dates_and_one_second_ends(
     wait_rows: WaitRows,
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     market_status: Callable[[str], str],
+    skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
-    """Which session the library gives streamed futures rows, and how long a one-second bar is.
+    """Which session the library gives streamed futures bars, and how long a one-second bar is.
 
-    Streams the front ES contract's trades and one-second bars and asserts that Massive
-    acknowledged both topics, whatever the hour. Massive's market status has no futures
-    field, so rows are required only while the stock market's regular session is open, when
-    CME's equity futures always trade; otherwise the test skips after the acknowledgement.
-    Records each row's `Date`, the `m.streams()` errors (a schedule miss shows there), and the
-    one-second bars' `TimestampStart` and `TimestampEnd`, with the WARNING the library logs
-    when Massive's `e` is not the start plus one second. Reading it: no miss and one-second
-    windows confirm the calendar and the documented length; the WARNING means Massive's bars
-    span more, as its documented sample suggests, and the library keeps the later end.
+    Streams the front ES contract's minute and one-second bars, the streams every Futures plan
+    from Starter includes (trades and quotes need Developer), and asserts that Massive
+    acknowledged both topics, whatever the hour. Rows are required only while
+    `/futures/v1/market-status` says ES is `open`; otherwise the test skips after the
+    acknowledgement. Records each row's `Date`, the `m.streams()` errors (a schedule miss shows
+    there), and the one-second bars' `TimestampStart` and `TimestampEnd`, with the WARNING the
+    library logs when Massive's `e` is not the start plus one second. Reading it: no miss and
+    one-second windows confirm the calendar and the documented length; the WARNING means
+    Massive's bars span more, as its documented sample suggests, and the library keeps the
+    later end. A refused stream skips, naming the plan.
     """
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
     contract = front_contract("ES", datetime.now(_CHICAGO).date())
-    trades = live_session.futures.trades(contract).append_only()
+    minutes = live_session.futures.bars(contract, dm.Timespan.MINUTE).append_only()
     seconds = live_session.futures.bars(contract, dm.Timespan.SECOND).append_only()
     acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
     status = market_status("futures")
     deadline = time.monotonic() + _STREAM_WAIT
-    rows = wait_rows(live_session, trades, deadline) if status == "open" else []
+    rows = wait_rows(live_session, minutes, deadline) if status == "open" else []
     bars = wait_rows(live_session, seconds, deadline) if status == "open" else []
     for line in stream_report(live_session):
         evidence(line)
-    live_session.release(trades)
+    live_session.release(minutes)
     live_session.release(seconds)
-    evidence(f"{contract} trade Dates: {sorted({str(r['Date']) for r in rows})}")
+    evidence(f"{contract} minute-bar Dates: {sorted({str(r['Date']) for r in rows})}")
     spans = [(r["TimestampStart"], (r["TimestampEnd"] - r["TimestampStart"]) / 1e9) for r in bars]
     evidence(f"one-second bars (start, end - start in s): {spans[:5]}")
     evidence(
         f"end warnings: {[r.getMessage() for r in caplog.records if 'one-second' in r.message]}"
     )
+    skip_if_not_entitled(live_session, "Futures Starter")
     assert acked >= 2, f"Massive acknowledged {acked} of the 2 topics"
     if status != "open":
-        pytest.skip("the futures market's status is unknown outside the stock session")
-    assert rows or bars, f"no futures row arrived in {_STREAM_WAIT:.0f} s"
+        pytest.skip(f"ES is {status}, not open (per /futures/v1/market-status)")
+    assert rows or bars, f"no futures bar arrived in {_STREAM_WAIT:.0f} s of an open market"
 
 
 def _midnight(day: date) -> datetime:

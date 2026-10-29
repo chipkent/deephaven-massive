@@ -303,18 +303,20 @@ def test_every_dataset_and_verb_returns_its_columns(
     *,
     live_rest: RestClient,
     index_symbol: str,
-    last_trading_day: date,
+    previous_trading_day: date,
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     skip_if_not_entitled: SkipIfNotEntitled,
+    record_property: Callable[[str, object], None],
     evidence: Evidence,
 ) -> None:
     """One dataset's verb, called once, works and returns exactly the dataset's columns.
 
     Reading it needs nobody: a pass means the call succeeded (an empty result included) with
     exactly the dataset's columns, in the order `columns()` lists them, and, for a stream,
-    that Massive acknowledged its topic, which it does whether or not the market is open;
+    that Massive acknowledged its topic, which it does whether or not the market is open (a
+    stream that passed without a row is counted "acknowledged only" in the coverage);
     "not entitled: needs <plan>" is a skip; anything else fails. A history the request cannot
     be served without S3 credentials skips, naming them.
 
@@ -334,13 +336,13 @@ def test_every_dataset_and_verb_returns_its_columns(
         dm.AssetClass.FUTURES: front_contract("ES", datetime.now(UTC).date()),
     }
     query = _query(
-        live_session, name, verb, client=live_rest, symbols=symbols, day=last_trading_day
+        live_session, name, verb, client=live_rest, symbols=symbols, day=previous_trading_day
     )
     expected = [row["Name"] for row in table_rows(query.columns())]
     acked = None
     if verb in {"fetch", "history"}:
         try:
-            table = _run(query, verb, bars=spec.is_bars, day=last_trading_day)
+            table = _run(query, verb, bars=spec.is_bars, day=previous_trading_day)
         except dm.EntitlementError as error:
             pytest.skip(f"not entitled: needs {plan} ({error})")
         except ValueError as error:
@@ -365,6 +367,9 @@ def test_every_dataset_and_verb_returns_its_columns(
         skip_if_not_entitled(live_session, plan)
         assert not failed, f"{name} {verb} failed: {failed[0]['Error']}"
     columns = list(table.column_names)
+    if verb == "stream" and not table.size:
+        # A closed market sends nothing: the pass then rests on the acknowledgement alone.
+        record_property("stream", "acknowledged only")
     evidence(f"{name} {verb}: {table.size} rows; columns {columns}; acknowledged {acked}")
     assert columns == expected
     assert acked is None or acked >= 1, f"{name}: Massive acknowledged no topic"

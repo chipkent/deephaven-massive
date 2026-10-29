@@ -134,6 +134,7 @@ def test_luld_frames_convert_to_a_current_instant(
     wait_acked: WaitAcked,
     market_status: MarketStatus,
     stream_report: Report,
+    skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
     instant_text: Text,
     evidence: Evidence,
     table_rows: TableRows,
@@ -146,7 +147,9 @@ def test_luld_frames_convert_to_a_current_instant(
     and asserts that Massive acknowledged the topic. Bands exist only in the regular session,
     so when `/v1/marketstatus/now` does not say `open` the test skips after the
     acknowledgement. Passes when the first row's instant is within a day of now; a failed
-    stream naming the bound means milliseconds, and the test fails quoting the error.
+    stream naming the bound means milliseconds, and the test fails quoting the error; a
+    refused stream (a Business plan without the trades and quotes expansion has no LULD)
+    skips, naming the plan.
     """
     table = live_session.stocks.luld(dm.ALL).append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
@@ -161,6 +164,7 @@ def test_luld_frames_convert_to_a_current_instant(
         evidence=evidence,
         table_rows=table_rows,
     )
+    skip_if_not_entitled(live_session, "Stocks Advanced, or Business with the expansion")
     if failure is not None:
         pytest.fail(f"the LULD stream failed (a unit mismatch fails its bound check): {failure}")
     assert acked, "Massive acknowledged no LULD topic"
@@ -308,15 +312,16 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Whether a stock week bar covers the week from Monday 00:00 New York, wherever stamped.
+    """Whether a stock week bar starts in the weekend before its Monday, wherever stamped.
 
-    For each raw week bar of `AAPL` over the four weeks ending with the most recent week
-    without a holiday, records its stamp and the candidate windows whose hour-bar volume is
-    closest to its own; `MATCH` marks the bucket. Passes when every bar of those weeks
-    matches the week from Monday 00:00 New York time, as the library assumes (stamped on the
-    Monday or on the weekend before, which the library keeps for its week); a failure names
-    the bars whose bucket starts elsewhere. The last line shows which bars the library's `history()`
-    keeps.
+    For each raw week bar of `AAPL` over the four weeks ending with the most recent week without a
+    holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
+    own; `MATCH` marks the bucket. Passes when, for every bar of those weeks, the week from Monday
+    00:00 New York time, the library's week (stamped on the Monday or on the weekend before, which
+    the library keeps for its week), is the closest window, ties allowed. Stocks do not trade at
+    weekends, so every start from Friday evening to Monday morning ties: the check can only catch a
+    week that starts in the middle of the week. A failure names the bars whose closest window starts
+    elsewhere. The last line shows which bars the library's `history()` keeps.
     """
     lines, checked, misses = week_bar_report("stocksTicker", _SYMBOL, "New York")
     for line in lines:
@@ -328,7 +333,7 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
     assert checked >= 3, f"only {checked} week bars of the four weeks"
-    assert not misses, f"week bars whose bucket is not Monday 00:00 New York: {misses}"
+    assert not misses, f"week bars closer to another window than the library's: {misses}"
 
 
 @pytest.mark.needs("stocks:basic")
@@ -587,7 +592,7 @@ def test_every_page_echoes_its_adjustment(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("55")
-@pytest.mark.requests(8)
+@pytest.mark.requests(12)
 @pytest.mark.timeout(100)
 def test_cash_dividends_are_never_adjusted(
     live_session: dm.MassiveSession,
@@ -598,11 +603,13 @@ def test_cash_dividends_are_never_adjusted(
 ) -> None:
     """Whether Massive's adjustment leaves prices alone around a special cash dividend.
 
-    Finds the year's most recent special cash dividend of a plain ticker
+    Finds the year's most recent special cash dividend of a common stock with no later split
     (`m.stocks.dividends`) and records the stock's day bars from a week before its ex-dividend
-    date to two days after, with `adjusted=true` and `adjusted=false`. Passes when the closes
-    are equal on every day, so `adjusted` concerns splits only, as the library documents.
-    Skips when the year had no special dividend with bars.
+    date to two days after, with `adjusted=true` and `adjusted=false`. Passes when the ratio
+    of the adjusted to the as-traded close takes no step across the ex-dividend date: the same
+    ratio on every day, so `adjusted` concerns splits only, as the library documents, and an
+    adjustment for the dividend would show as a step on the ex-date. Skips when the year had
+    no such dividend with bars.
     """
     dividends = special_dividends(live_session)
     spans = {
@@ -624,16 +631,19 @@ def test_cash_dividends_are_never_adjusted(
     if found is None:
         pytest.skip(f"no recent special cash dividend with bars: {dividends}")
     dividend, adjusted, traded = found
-    differ = sorted(
-        day
-        for day in adjusted
-        if abs(float(adjusted[day]["Close"]) / float(traded[day]["Close"]) - 1) > _SAME_PRICE
-    )
+    ratios = {
+        day: float(adjusted[day]["Close"]) / float(traded[day]["Close"]) for day in sorted(adjusted)
+    }
     evidence(
         f"{dividend.symbol} special dividend of {dividend.amount} ex {dividend.ex_date}: "
-        f"{len(adjusted)} days, adjusted close differs on {differ}"
+        f"adjusted / as-traded close by day {ratios}"
     )
-    assert not differ, f"{dividend.symbol}'s adjusted closes differ on {differ}"
+    before = [r for day, r in ratios.items() if day < dividend.ex_date.isoformat()]
+    after = [r for day, r in ratios.items() if day >= dividend.ex_date.isoformat()]
+    assert before, f"no bar before the ex-date {dividend.ex_date}"
+    assert after, f"no bar on or after the ex-date {dividend.ex_date}"
+    steps = [r / before[-1] - 1 for r in (*before, *after)]
+    assert all(abs(step) <= _SAME_PRICE for step in steps), f"the ratio steps: {ratios}"
 
 
 @pytest.mark.needs("stocks:basic")
@@ -840,7 +850,7 @@ def _with_bars(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("53")
-@pytest.mark.requests(8)
+@pytest.mark.requests(12)
 @pytest.mark.timeout(100)
 def test_split_basis_before_and_on_the_split(
     live_session: dm.MassiveSession,
@@ -851,11 +861,11 @@ def test_split_basis_before_and_on_the_split(
 ) -> None:
     """How a recent forward split shows in adjusted and as-traded REST bars.
 
-    Finds the year's most recent forward split of a plain ticker with a ratio of at least 2
-    (`m.stocks.splits`) and records its day bars, with `adjusted=true` and `adjusted=false`,
-    on the last trading day before the split and on the execution date. Passes when, before
-    the split, the as-traded close is the adjusted close times the ratio and the adjusted
-    volume the as-traded volume times the ratio (within 1%), and both bases agree on the
+    Finds the year's most recent forward split of a common stock with a ratio of at least 2 and no
+    later split (`m.stocks.splits`) and records its day bars, with `adjusted=true` and
+    `adjusted=false`, on the last trading day before the split and on the execution date. Passes
+    when, before the split, the as-traded close is the adjusted close times the ratio and the
+    adjusted volume the as-traded volume times the ratio (within 1%), and both bases agree on the
     execution date: `adjusted` restates prices before a split by its ratio, as the library
     documents. Skips when the year had no such split with bars.
     """
@@ -887,7 +897,7 @@ def test_split_basis_before_and_on_the_split(
 
 @pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.verifies("53")
-@pytest.mark.requests(8)
+@pytest.mark.requests(12)
 @pytest.mark.timeout(100)
 def test_day_file_before_a_split_is_as_traded(
     live_session: dm.MassiveSession,

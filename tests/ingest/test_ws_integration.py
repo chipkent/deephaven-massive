@@ -68,26 +68,27 @@ def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
 ) -> None:
     """Whether the refusal a delayed key gets on the real-time host says "real-time".
 
-    The library reads a refusal mentioning "real-time" as the server's verdict that the key
-    lacks real-time data. Pins stocks to `socket.massive.com` with a delayed key
-    (`MASSIVE_DELAYED_API_KEY`, or the main key when Stocks is on Starter or Developer),
-    subscribes `T.AAPL`, and records the stream's error and the connection's last error. The
-    refusal does not depend on the market being open. Passes when either error contains
-    "real-time" (in any case); a failure quotes the text the match must look for instead.
+    The library reads a refusal mentioning "real-time" as the server's verdict that the key lacks
+    real-time data. Pins stocks to `socket.massive.com` with a delayed key
+    (`MASSIVE_DELAYED_API_KEY`, or the main key when Stocks is on Starter or Developer), subscribes
+    `AM.AAPL`, minute bars, which every plan from Starter includes, so the host is the only reason
+    left for a refusal, and records the stream's error and the connection's last error. The refusal
+    does not depend on the market being open. Passes when either error contains "real-time" (in any
+    case); a failure quotes the text the match must look for instead.
     """
     config = dm.MassiveConfig(
         api_key=delayed_key, ws_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}
     )
     session = dm.MassiveSession(config)
     try:
-        table = session.stocks.trades("AAPL").append_only()
+        table = session.stocks.bars("AAPL").append_only()
         rows = wait_rows(session, table, time.monotonic() + _WAIT)
         for line in stream_report(session):
             evidence(line)
         errors = [str(r["Error"]) for r in table_rows(session.streams()) if r["Error"]]
         errors += [str(r["LastError"]) for r in table_rows(session.connections()) if r["LastError"]]
         session.release(table)
-        evidence(f"T.AAPL rows received on socket.massive.com with a delayed key: {len(rows)}")
+        evidence(f"AM.AAPL rows received on socket.massive.com with a delayed key: {len(rows)}")
     finally:
         session.close()
     assert any("real-time" in error.lower() for error in errors), f"the errors: {errors}"

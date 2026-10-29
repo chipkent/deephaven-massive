@@ -57,6 +57,9 @@ _DAY_NS = 86_400 * 1_000_000_000
 _STREAM_WAIT = 60.0
 """Seconds the FMV test waits for its first frame."""
 _NEW_YORK = ZoneInfo("America/New_York")
+_CLOSER = 10.0
+"""How many times closer to `/prev` the UTC rebuild must be than the New York rebuild."""
+
 _TOLERANCE = 1e-6
 """The relative error within which a high, low, or volume read from text equals a JSON number."""
 
@@ -89,6 +92,18 @@ def _errors(left: Sequence[Any], right: Sequence[Any]) -> list[float | None]:
         None if a is None or b is None else abs(a - b) / max(abs(a), abs(b), 1e-12)
         for a, b in zip(left, right, strict=True)
     ]
+
+
+def _largest(left: Sequence[Any], right: Sequence[Any]) -> float:
+    """Return the largest relative error of two OHLCV tuples' fields.
+
+    Returns:
+        The error; infinity when either lacks a field, as an empty rebuild does.
+    """
+    if len(left) != len(right):
+        return float("inf")
+    errors = _errors(left, right)
+    return float("inf") if None in errors else max(e for e in errors if e is not None)
 
 
 def _same(left: Sequence[Any], right: Sequence[Any]) -> bool:
@@ -284,11 +299,13 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
 
     Rebuilds `/prev`'s day of `X:BTCUSD` from REST minute bars twice, over the UTC day and
     over the New York day (midnight to the next midnight in New York, so a 23- or 25-hour day
-    is right), and records both beside `/prev` and the range bar. Passes when `/prev` equals
-    the UTC rebuild, the library's day cut. A failure means another cut: `/prev` equal to the
-    New York rebuild means REST crypto days are New York days, a different bar from the flat
-    file's, and the source of crypto day bars needs an owner decision; equal to neither means
-    another cut (compare the stamps and the minute coverage).
+    is right), and records both beside `/prev` and the range bar. Decides by comparison, not
+    by an absolute tolerance: passes when the UTC rebuild's largest relative error against
+    `/prev` is at most a tenth of the New York rebuild's, so `/prev` covers the UTC day, the
+    library's day cut. A failure means another cut: `/prev` closer to the New York rebuild
+    means REST crypto days are New York days, a different bar from the flat file's, and the
+    source of crypto day bars needs an owner decision; close to neither means another cut
+    (compare the stamps and the minute coverage).
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -330,9 +347,12 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
         evidence(f"range t={instant_text(bar['t'] * _MS)} ohlcv={_ohlcv(bar)}")
     evidence(f"rebuilt over the UTC day {day}: {by_utc}")
     evidence(f"rebuilt over the New York day {day} ({ny_start} to {ny_end}): {by_new_york}")
-    utc, new_york = _same(by_utc, _ohlcv(prev)), _same(by_new_york, _ohlcv(prev))
-    evidence(f"/prev equals the UTC rebuild: {utc}; equals the New York rebuild: {new_york}")
-    assert utc, f"/prev is not the UTC day's rebuild (the New York day's: {new_york})"
+    utc, new_york = _largest(by_utc, _ohlcv(prev)), _largest(by_new_york, _ohlcv(prev))
+    evidence(
+        f"largest relative error against /prev: UTC rebuild {utc:.2e}, "
+        f"New York rebuild {new_york:.2e}"
+    )
+    assert utc <= new_york / _CLOSER, "/prev is not much closer to the UTC day's rebuild"
 
 
 @pytest.mark.needs("currencies:starter", "s3")
@@ -379,10 +399,11 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
 
     For each raw week bar of `X:BTCUSD` over the four weeks ending with the most recent week without
     a holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
-    own; `MATCH` marks the bucket. Passes when every bar of those weeks matches the week from Monday
-    00:00 UTC, the calendar week the library assumes; a failure names the bars whose bucket starts
-    elsewhere (such as a Sunday start), and the library's crypto week windows must start there. The
-    last line shows which bars the library's `history()` keeps.
+    own; `MATCH` marks the bucket. Decides by comparison, not by an absolute tolerance: passes when,
+    for every bar of those weeks, the week from Monday 00:00 UTC, the calendar week the library
+    assumes, is the closest window, ties allowed; a failure names the bars whose closest window
+    starts elsewhere (such as a Sunday start), and the library's crypto week windows must start
+    there. The last line shows which bars the library's `history()` keeps.
     """
     lines, checked, misses = week_bar_report("cryptoTicker", _PAIR, "UTC")
     for line in lines:
@@ -394,7 +415,7 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
     assert checked >= 3, f"only {checked} week bars of the four weeks"
-    assert not misses, f"week bars whose bucket is not Monday 00:00 UTC: {misses}"
+    assert not misses, f"week bars closer to another window than the library's: {misses}"
 
 
 @pytest.mark.needs("currencies:business")

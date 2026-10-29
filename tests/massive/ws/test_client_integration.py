@@ -65,6 +65,19 @@ _CLOSED_AT: dict[str, float] = {}
 _STATUSES, _ROWS, _FRAMES = "statuses", "rows", "frames"
 """What a probe keeps: statuses only, statuses and decoded rows, or also every raw frame."""
 
+_PLAN_REFUSALS = ("not authorized", "not entitled", "plan")
+"""Words of a status that refuses a subscription for want of a plan, in lower case."""
+
+
+def _refuses_plan(message: str) -> bool:
+    """Tell whether a status message refuses a subscription for want of a plan.
+
+    Returns:
+        True when the message names authorization, entitlement, or the plan.
+    """
+    lowered = message.lower()
+    return any(word in lowered for word in _PLAN_REFUSALS)
+
 
 @dataclass(frozen=True)
 class _Records:
@@ -417,7 +430,8 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
     topics, and records the acknowledgements and refusals, stopping as soon as every topic is
     answered; rows are not kept. Reading it: a refusal past 1,000 topics confirms that topics
     count; all 1,002 acknowledged means contracts count and the library's cap could be relaxed.
-    Needs an options plan with real-time WebSocket access.
+    Needs an options plan with real-time trades and quotes on the WebSocket: refused ones (a
+    Business plan without the expansion) skip, naming the plan.
     """
     far = datetime.now(UTC).date() + timedelta(days=365)
     contracts = live_rest.get(
@@ -439,6 +453,8 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
     evidence(f"acknowledged {len(records.acked())} topics; status kinds {dict(kinds)}")
     evidence(f"other statuses: {others[:10]}")
     evidence(f"client states: {records.states}")
+    if not records.acked() and any(_refuses_plan(message) for message in others):
+        pytest.skip(f"not entitled: needs an options plan with trades and quotes ({others[:1]})")
     assert tickers
 
 

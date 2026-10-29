@@ -137,6 +137,7 @@ def test_ticker_spellings_of_every_flat_file(
     flat_file_head: FlatFileHead,
     *,
     recent_monday: date,
+    flat_files_reached: Callable[[str], bool],
     evidence: Evidence,
 ) -> None:
     """How each flat file spells its tickers, beside REST's canonical forms.
@@ -151,6 +152,9 @@ def test_ticker_spellings_of_every_flat_file(
     read = 0
     for prefix in sources(Transport.FLAT_FILES):
         venue = "cme" if "{venue}" in prefix else None
+        if not flat_files_reached(prefix):
+            evidence(f"{prefix}: the S3 credentials do not reach it")
+            continue
         try:
             result = flat_file_head(prefix, recent_monday, venue)
         except WireEntitlementError as error:

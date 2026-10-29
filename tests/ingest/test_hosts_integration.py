@@ -68,12 +68,12 @@ def test_index_values_stream_on_the_resolved_host(
     """Whether index values (`V.I:SPX`) stream on the host the session resolves for indices.
 
     The documentation names `business.` for `V` while the plan table names `socket.` or
-    `delayed.`; the library uses the indices class's own host. Asserts that the topic is
-    acknowledged on that host, whatever the hour, and records the session's connection and
-    stream (host, state, acknowledgement, error). While `/v1/marketstatus/now` says the S&P
-    indices are not closed it also requires values to arrive; when they are closed it skips
-    after the acknowledgement. Reading it: rows on the resolved host confirm it; a refusal
-    names the host to use instead.
+    `delayed.`; the library uses the indices class's own host. Records the session's
+    connection and stream (host, state, acknowledgement, error) and asserts that Massive
+    acknowledged the topic, whatever the hour. Unless `/v1/marketstatus/now` says the S&P
+    indices are closed, it also requires values to arrive; when they are closed it skips after
+    the acknowledgement. Reading it: the host the evidence names, with rows, is the host that
+    serves index values; a refusal names the host to use instead.
     """
     table = live_session.indices.values("I:SPX").append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)

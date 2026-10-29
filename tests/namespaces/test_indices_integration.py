@@ -384,8 +384,9 @@ def _record_library_index_stamps(
 ) -> None:
     """Record the library's windows of an index's 1-day, week, and longer bars, call by call.
 
-    A longer unit's history that the plan refuses (a range beyond the plan's history) is
-    recorded rather than raised, so the evidence of the other calls is kept.
+    A longer unit's history that the plan refuses is recorded and the other calls still run;
+    the first refusal is then raised, for the run to judge (a day outside the plan's history
+    skips the test).
     """
     rest = dm.HistorySource.REST
     daily = session.indices.bars(index, dm.Timespan.DAY)
@@ -394,13 +395,17 @@ def _record_library_index_stamps(
         + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
     )
     evidence(f"library {index} fetch() (/prev): {library_stamps(daily.fetch)}")
+    refused: list[dm.EntitlementError] = []
     for span in map(dm.Timespan, ("week", *units)):
         query = session.indices.bars(index, span)
         try:
             outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
         except dm.EntitlementError as error:
-            outcome = f"refused, beyond the plan's history? ({error})"
+            outcome = f"refused ({error})"
+            refused.append(error)
         evidence(f"library {index} {span.value} history: {outcome}")
+    if refused:
+        raise refused[0]
 
 
 @pytest.mark.needs("indices:starter")

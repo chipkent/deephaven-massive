@@ -380,10 +380,12 @@ def test_forex_week_bars_start_on_monday_or_sunday(
 
     For each raw week bar of `C:EURUSD` over the four weeks ending with the most recent week without
     a holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
-    own; `MATCH` marks the bucket. Passes when every bar of those weeks matches the week from Monday
-    00:00 UTC, the calendar week the library assumes; a failure names the bars whose bucket starts
-    elsewhere (such as Sunday 17:00 New York, the trading week's open), and the library's forex week
-    windows must start there. The last line shows which bars the library's `history()` keeps.
+    own; `MATCH` marks the bucket. Decides by comparison, not by an absolute tolerance: passes when,
+    for every bar of those weeks, the week from Monday 00:00 UTC, the calendar week the library
+    assumes, is the closest window, ties allowed; a failure names the bars whose closest window
+    starts elsewhere (such as Sunday 17:00 New York, the trading week's open), and the library's
+    forex week windows must start there. The last line shows which bars the library's `history()`
+    keeps.
     """
     lines, checked, misses = week_bar_report("forexTicker", _PAIR, "UTC")
     for line in lines:
@@ -395,7 +397,7 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
     assert checked >= 3, f"only {checked} week bars of the four weeks"
-    assert not misses, f"week bars whose bucket is not Monday 00:00 UTC: {misses}"
+    assert not misses, f"week bars closer to another window than the library's: {misses}"
 
 
 @pytest.mark.needs("currencies:starter")
