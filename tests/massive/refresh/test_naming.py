@@ -7,6 +7,7 @@ import pytest
 from deephaven_massive._massive.refresh.naming import (
     KEY_COLUMNS,
     column_name,
+    is_key_column,
     is_short,
     is_timestamp_like,
     snake,
@@ -68,6 +69,28 @@ def test_other_names_are_not_timestamp_like(name: str) -> None:
     assert not is_timestamp_like(name)
 
 
-def test_the_key_columns_are_the_dataset_keys() -> None:
-    assert {"Symbol", "Timestamp", "Underlying"} == KEY_COLUMNS
-    assert all(column_name([name]) in KEY_COLUMNS for name in ("symbol", "timestamp"))
+def test_the_key_columns_are_the_library_s_columns() -> None:
+    assert {
+        "Symbol",
+        "Underlying",
+        "Date",
+        "Timestamp",
+        "TimestampStart",
+        "TimestampEnd",
+        "TimestampInsert",
+    } == KEY_COLUMNS
+    assert all(column_name([name]) in KEY_COLUMNS for name in ("symbol", "timestamp", "date"))
+
+
+@pytest.mark.parametrize(
+    "column", ["Symbol", "Date", "Timestamp", "TimestampEnd", "TimestampFoo", "TimestampX2"]
+)
+def test_the_library_owns_every_timestamp_with_a_qualifier(column: str) -> None:
+    assert is_key_column(column)
+
+
+@pytest.mark.parametrize(
+    "column", ["SipTimestamp", "EndTimestamp", "Timestamps", "Timestampend", "Dates", "Price"]
+)
+def test_other_names_are_the_vendor_s(column: str) -> None:
+    assert not is_key_column(column)

@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import check_symbol, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
@@ -41,7 +42,12 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import (
+    Namespace,
+    adjustment_notes,
+    build_query,
+    list_params,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -110,6 +116,17 @@ def _keys(symbol: str, time: str | None = None, *, fanout: str | None = None) ->
     )
 
 
+def _stream_bar_keys() -> SourceKeys:
+    """Build the keys of a WebSocket bars channel: its contract, window start, and end `e`.
+
+    Returns:
+        The channel's keys.
+    """
+    return SourceKeys(
+        symbol=KeySpec("Ticker"), time=KeySpec("WindowStart"), end=KeySpec("EndTimestamp")
+    )
+
+
 def _from_path(time: str) -> SourceKeys:
     """Build the keys of a source that takes the contract as its `{optionsTicker}` segment.
 
@@ -171,12 +188,13 @@ BARS: Final = DatasetSpec(
     keys={
         (_REST, _PREV): _keys("Ticker", "WindowStart"),
         (_REST, _RANGE): _from_path("WindowStart"),
-        (_WS, "options/A"): _keys("Ticker", "WindowStart"),
-        (_WS, "options/AM"): _keys("Ticker", "WindowStart"),
+        (_WS, "options/A"): _stream_bar_keys(),
+        (_WS, "options/AM"): _stream_bar_keys(),
         (_FLAT, _MINUTE_FILES): _keys("Ticker", "WindowStart"),
         (_FLAT, _DAY_FILES): _keys("Ticker", "WindowStart"),
     },
     page_size=_TICK_PAGE,
+    column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 
 FMV: Final = DatasetSpec(
@@ -235,9 +253,13 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     summary="The open, high, low, close, and volume of each options contract on one day.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_CLOSE,
-    keys={(_REST, _OPEN_CLOSE): _keys("Symbol")},
+    keys={(_REST, _OPEN_CLOSE): SourceKeys(symbol=KeySpec("Symbol"), date=KeySpec("From"))},
     # One contract a request, which makes this an instrument dataset: its `Symbol` is required.
     per_symbol=True,
+    row_times=RowTimes.DAY,
+    column_notes=adjustment_notes(
+        ("Open", "High", "Low", "Close", "PreMarket", "AfterHours"), ("Volume",)
+    ),
 )
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
@@ -331,11 +353,13 @@ class _Options(Namespace):
         """Trades of US-listed options contracts (OPRA), tick by tick.
 
         One row per trade: its price, size, exchange, condition codes, and SIP timestamp
-        (`Timestamp`). The stream verbs read the WebSocket `T` channel. `history()` reads the
-        REST trades endpoint (`/v3/trades/{optionsTicker}`, one request series per contract) or
-        the `us_options_opra/trades_v1` flat files, and `fetch()` returns each contract's last
-        trade (`/v2/last/trade/{optionsTicker}`). There is no `limit`: `history()` pages
-        internally and returns the whole range.
+        (`Timestamp`). Each row also carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the
+        New York date of `Timestamp`), and `TimestampInsert`, when the library received it. The
+        stream verbs read the WebSocket `T` channel. `history()` reads the REST trades endpoint
+        (`/v3/trades/{optionsTicker}`, one request series per contract) or the
+        `us_options_opra/trades_v1` flat files, and `fetch()` returns each contract's last trade
+        (`/v2/last/trade/{optionsTicker}`). There is no `limit`: `history()` pages internally
+        and returns the whole range.
 
         `dm.ALL` streams every contract (the `T.*` topic) and reads every contract of a day's
         flat file; `fetch()` and REST `history()` take explicit contracts and raise `ValueError`
@@ -371,12 +395,13 @@ class _Options(Namespace):
         """Quotes of US-listed options contracts (OPRA), tick by tick.
 
         One row per quote: bid and ask prices, sizes, and exchanges, and the SIP timestamp
-        (`Timestamp`). The stream verbs read the WebSocket `Q` channel. `history()` reads the
-        REST quotes endpoint (`/v3/quotes/{optionsTicker}`, one request series per contract) or
-        the `us_options_opra/quotes_v1` flat files. Massive has no last-quote endpoint for
-        options, so there is no `fetch()`: `m.options.snapshots(symbols)` gives each contract's
-        latest quote. There is no `limit`: `history()` pages internally and returns the whole
-        range.
+        (`Timestamp`). Each row also carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the
+        New York date of `Timestamp`), and `TimestampInsert`, when the library received it. The
+        stream verbs read the WebSocket `Q` channel. `history()` reads the REST quotes endpoint
+        (`/v3/quotes/{optionsTicker}`, one request series per contract) or the
+        `us_options_opra/quotes_v1` flat files. Massive has no last-quote endpoint for options,
+        so there is no `fetch()`: `m.options.snapshots(symbols)` gives each contract's latest
+        quote. There is no `limit`: `history()` pages internally and returns the whole range.
 
         `dm.ALL` streams every contract (the `Q.*` topic) and reads every contract of a day's
         flat file; REST `history()` takes explicit contracts and raises `ValueError` for
@@ -441,7 +466,9 @@ class _Options(Namespace):
     ) -> HistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
-        One row per contract and bar, keyed by the bar's start (`Timestamp`). The timespan and
+        One row per contract and bar: the bar's window, from `TimestampStart` to the exclusive
+        `TimestampEnd`, its trading day `Date` (ISO `yyyy-MM-dd` text, New York time), its
+        prices and volume, and `TimestampInsert`, when the library received it. The timespan and
         multiplier decide the transports and so the query class:
 
         - `Timespan.SECOND` or `Timespan.MINUTE` with `multiplier=1`: the WebSocket `A` (one
@@ -456,7 +483,31 @@ class _Options(Namespace):
         one-minute and one-day bars with `adjusted=False`, the `us_options_opra/minute_aggs_v1`
         and `us_options_opra/day_aggs_v1` flat files. There is no `limit`: `history()` pages
         internally and returns the whole range. It returns only the bars whose whole window
-        lies inside the range and has ended, so the current day's bar never appears.
+        lies inside the range and has ended, judged by `TimestampEnd`, so the current day's bar
+        never appears.
+
+        `TimestampEnd` is the first instant at which the bar is complete, so join on it
+        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed
+        bars; it is not when Massive published the bar. An intraday bar ends its length
+        after its start. A bar of a day or longer runs from 00:00 New York time of its
+        window's first day to 00:00 after its last, whatever the source: the range and the
+        day files stamp a 1-day bar at the day's start, while `/prev` stamps it at the 16:00
+        session close (13:00 on a short trading day; 16:15 or 13:15 for index options such
+        as SPXW), which is moved to the day's start. A week runs Monday to Friday and a
+        longer period from its first to its last weekday. A bar of several days counts
+        trading days, ending as late as holidays could push it (one weekday more, and one
+        more for every five further days), since there is no holiday calendar. A longer bar
+        must be stamped at 00:00 on the day its period starts: a week on its Monday or the
+        Saturday or Sunday before, a month, quarter, or year on its 1st. Any other stamp
+        fails the call with `MassiveError` naming the source, since the bar may cover other
+        days than its label. `Date` is null for a bar that spans more than one date.
+
+        Prices and volumes are adjusted for splits of the underlying only when `adjusted` is
+        True, the default, and only REST serves adjusted bars; Massive never adjusts for cash
+        dividends. The flat files and the WebSocket are as traded, so `history()` reads the
+        flat files only with `adjusted=False`, and one `history()` never mixes the two bases:
+        every page's own `adjusted` must match the request, or the call raises `MassiveError`.
+        Live bars are never adjusted after the fact, so a live table shows a jump at a split.
 
         `dm.ALL` streams every contract and reads every contract of a day's flat file; `fetch()`
         and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`. One
@@ -478,8 +529,9 @@ class _Options(Namespace):
             timespan: The bar unit; `Timespan.MINUTE` by default. `Timespan.SESSION` is for
                 futures only.
             multiplier: How many units one bar spans, a positive `int`; 1 by default.
-            adjusted: Whether REST bars are adjusted for splits; True by default. The flat
-                files are unadjusted, so `history()` reads them only when this is False.
+            adjusted: Whether REST bars are adjusted for splits of the underlying; True by
+                default. The flat files and the streams are as traded, so `history()` reads the
+                flat files only when this is False.
 
         Returns:
             A `StreamHistoryQuery`, `HistoryLatestQuery`, or `HistoryQuery`, as listed above.
@@ -509,9 +561,11 @@ class _Options(Namespace):
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
         One row per update: the contract's fair market value and the time it was computed
-        (`Timestamp`). It streams only, over the WebSocket `FMV` channel, which Massive serves
-        on its Business plans from `business.massive.com/options`; there is no history, and
-        so no `limit`: `ring(capacity)` bounds how many rows a live table keeps.
+        (`Timestamp`), with its trading day, `Date` (ISO `yyyy-MM-dd` text, the New York date of
+        `Timestamp`), and `TimestampInsert`, when the library received it. It streams only, over
+        the WebSocket `FMV` channel, which Massive serves on its Business plans from
+        `business.massive.com/options`; there is no history, and so no `limit`: `ring(capacity)`
+        bounds how many rows a live table keeps.
 
         `dm.ALL` streams every contract (the `FMV.*` topic). One `/options` connection carries
         at most 1,000 contract topics.
@@ -789,10 +843,11 @@ class _Options(Namespace):
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, high, low, close, and volume of each options contract on one day.
 
-        One row per contract (`Symbol`) for the day (`From`), with its pre-market and
-        after-hours prices. It reads the REST daily open/close endpoint
-        (`/v1/open-close/{optionsTicker}/{date}`), one request per contract; `poll()` re-reads
-        it each interval.
+        One row per contract (`Symbol`) for the day (`Date`, ISO `yyyy-MM-dd` text), with the
+        day's window as a 1-day bar's (`TimestampStart` and `TimestampEnd`, the New York
+        midnights around it) and its pre-market and after-hours prices. It reads the REST daily
+        open/close endpoint (`/v1/open-close/{optionsTicker}/{date}`), one request per contract;
+        `poll()` re-reads it each interval.
 
         It has no `limit`: each contract gives one row. `dm.ALL` is not accepted, because the
         endpoint takes one contract per request; `m.options.snapshots(dm.ALL)` gives every
@@ -812,8 +867,9 @@ class _Options(Namespace):
                 sequence, or a Deephaven table with a `Symbol` column.
             date: The trading day, as an ISO-8601 date or a `date`. It is a calendar date, so a
                 `datetime` raises `ValueError`.
-            adjusted: Whether the prices are adjusted for splits of the underlying; True by
-                default.
+            adjusted: Whether the prices and volume are adjusted for splits of the underlying
+                (never for dividends); True by default. Massive does not echo the basis here,
+                so it cannot be checked.
 
         Returns:
             A query with `fetch()` and `poll()`.

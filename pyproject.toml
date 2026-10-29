@@ -70,6 +70,7 @@ dev = [
     "pytest>=9",
     "pytest-cov>=7",
     "pytest-timeout>=2.4",
+    "pytest-xdist>=3.8",
     "pyright>=1.1.414",
     "pre-commit>=4.7",
     "deephaven-server>=42.0",
@@ -221,6 +222,7 @@ markers = [
     "needs(*plans): the plans a live test needs, each <class>:<plan>, s3, or some:basic; it skips unless MASSIVE_LIVE_PLANS declares them",
     "settles(*items): the open verification items a live test settles, for the run's summary",
     "requests(count): the REST requests a live test makes, which scale its timeout when its class is on Basic",
+    "jvm_held: a test whose own formula hands its frame's locals to the JVM; its leak check asks the JVM to collect once",
     "benchmark(sweep=False): a test that records rates and never asserts; the points marked sweep=True are deselected by default, and -m benchmark runs every point",
 ]
 testpaths = ["tests"]

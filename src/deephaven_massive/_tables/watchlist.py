@@ -154,13 +154,15 @@ class SymbolWatch:
     logged at ERROR by the listener's error callback.
 
     `keep_alive_with(table)` ties the view and the listener to another table's liveness, so
-    they live exactly as long as that table: the transport passes the stream's blink table,
-    so a stream that a derived table keeps alive keeps following its watchlist after the
-    library has released its own results.
+    they are not destroyed while that table lives: the transport passes the stream's blink
+    table, so a stream that a derived table keeps alive keeps following its watchlist after the
+    library has released its own results. Deephaven holds a table's listeners only weakly, so
+    the owner also holds the watch itself (the stream's record does) until it calls `stop()`,
+    rather than resting the stream's correctness on how the keeper manages its referents.
 
     Thread-safety: the symbol counts are touched only by the listener, whose calls Deephaven
     serializes, so they need no lock; `start` and `keep_alive_with` run once, on the caller
-    thread.
+    thread, and `stop` once, on any thread with an execution context.
 
     Example:
         ::
@@ -179,6 +181,7 @@ class SymbolWatch:
                 on_invalid=lambda message: None,
             )
             watch.start()  # reports the current rows, then every change
+            watch.stop()  # no more reports
     """
 
     __slots__ = ("_handle", "_view")
@@ -234,6 +237,15 @@ class SymbolWatch:
         """
         table.j_table.manage(self._handle.j_object)
         table.j_table.manage(self._view.j_table)
+
+    def stop(self) -> None:
+        """Stop reporting changes: the listener leaves the view. Idempotent.
+
+        A Deephaven call: run it on a thread with the session's execution context, outside
+        every library lock and never in a listener (the stream's shutdown queues it on the
+        reaper).
+        """
+        self._handle.stop()
 
 
 class _SymbolCounter(TableListener):

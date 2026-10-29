@@ -125,6 +125,16 @@ def test_stream_updates_can_clear_a_warning() -> None:
     assert StreamUpdate(error="new", clear_error=True).apply(row).error is None
 
 
+@pytest.mark.parametrize("state", [StreamState.FAILED, StreamState.CLOSED])
+def test_stream_updates_keep_the_cause_of_a_stop(state: StreamState) -> None:
+    # A flush or a poll cycle that races a failure or the close never replaces its cause.
+    row = _stream(state=state, error="the cause")
+    for update in (StreamUpdate(error="a warning"), StreamUpdate(clear_error=True)):
+        updated = update.apply(row)
+        assert (updated.state, updated.error) == (state, "the cause")
+    assert StreamUpdate(rows_published=7).apply(row).rows_published == 7  # counts still move
+
+
 def test_rows_map_fields_to_columns() -> None:
     assert list(as_row(STREAM)) == list(STREAMS.column_names)
     connection = ConnectionRow(

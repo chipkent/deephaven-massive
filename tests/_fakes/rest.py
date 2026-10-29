@@ -17,6 +17,10 @@ rejects the client's credentials (407) does. A request
 line with an absolute URL (`GET http://host/path`, forwarding) is answered like any other and
 recorded with `proxied=True`.
 
+`REFUSED_PORT` is a loopback port that refuses every connection, for tests of a connection
+that fails. `LoopbackHTTPServer`, the server class underneath `FakeRestServer`, also serves
+tests that need a plain HTTP server on 127.0.0.1.
+
 Every method is safe to call from any thread: the script and the record sit behind one lock.
 Imported lazily by the `fake_rest` fixture in `tests/conftest.py`.
 """
@@ -42,6 +46,14 @@ from deephaven_massive._types import override
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
+
+
+# A loopback port that refuses connections. Port 1 lies below every operating system's range of
+# ephemeral ports, so no test that binds port 0, in this process or a parallel test worker, is
+# ever handed it, and nothing listens on it. A port bound and released by the test could be
+# taken by another worker before the connection is attempted; one kept bound without listening
+# is not refused on macOS, where the connection waits out its timeout instead.
+REFUSED_PORT = 1
 
 
 @dataclass(frozen=True)

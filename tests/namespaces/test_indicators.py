@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Callable, Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -48,17 +48,22 @@ def test_each_indicator_reads_the_stock_and_crypto_paths(name: str) -> None:
     assert spec.fetch_path == stock
     assert spec.per_symbol
     assert spec.time_axis == ("timestamp.gte", "timestamp.lt")
-    assert spec.poll_keys == ("Symbol", "Timestamp")
+    assert spec.poll_keys == ("Symbol", "TimestampStart")
     assert spec.page_size == 5000
     assert spec.keys_for(R, stock).symbol == KeySpec("stockTicker", from_request=True)
     assert spec.keys_for(R, crypto).symbol == KeySpec("cryptoTicker", from_request=True)
     schema = CATALOG.dataset_schema(spec)
-    assert schema.column_names[:2] == ("Symbol", "Timestamp")
+    # Each value is one bar's: the bar's window and trading day, then the values.
+    times = ("TimestampStart", "TimestampEnd")
+    assert schema.column_names[:4] == ("Symbol", "Date", *times)
+    assert schema.column_names[-1] == "TimestampInsert"
     types = {c.name: c.type for c in schema.columns}
     assert types["Symbol"] is ColumnType.STRING
-    assert types["Timestamp"] is ColumnType.INSTANT
+    assert types["Date"] is ColumnType.STRING
+    assert all(types[t] is ColumnType.INSTANT for t in (*times, "TimestampInsert"))
     extra = {"Histogram", "Signal"} if name == "macd" else set()
-    assert set(schema.column_names) == {"Symbol", "Timestamp", "Value", *extra}
+    library = {"Symbol", "Date", *times, "TimestampInsert"}
+    assert set(schema.column_names) == {*library, "Value", *extra}
 
 
 @pytest.mark.parametrize(("name", "spec"), WINDOWED)
@@ -193,7 +198,10 @@ def test_the_vendor_samples_decode_without_drift(
     assert drift.extra == drift.missing == frozenset()
     rows = batch.to_pylist()
     assert [{k: row[k] for k in value} for row, value in zip(rows, values, strict=True)] == values
-    assert rows[0]["Timestamp"] == 1517562000016
+    # The samples' value stamps are those of a day's aggregate: 00:00 New York time for a
+    # stock (the sample's own underlying bar), 00:00 UTC for a crypto pair.
+    first = {"sma_stock": 1577941200000, "macd_crypto": 1517616000000}
+    assert rows[0]["Timestamp"] == first[fixture]
 
 
 # --- End to end through the fake REST server -------------------------------------------------
@@ -229,7 +237,7 @@ def test_each_symbol_class_is_served_by_its_own_path(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     fake_rest.reply("/v1/indicators/sma/AAPL", sample(load_fixture, "sma_stock"))
-    crypto = envelope({"values": [{"timestamp": 1517562001016, "value": 9001.5}]})
+    crypto = envelope({"values": [{"timestamp": 1517529600000, "value": 9001.5}]})
     fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(crypto))
     query = rest_session.indicators.sma(
         ["X:BTCUSD", "AAPL"],
@@ -262,7 +270,69 @@ def test_each_symbol_class_is_served_by_its_own_path(
         ("X:BTCUSD", 9001.5),
     ]
     aapl = next(r for r in out if r["Symbol"] == "AAPL")
-    assert aapl["Timestamp"] == datetime(2018, 2, 2, 9, 0, 0, 16000, tzinfo=UTC)
+    start = datetime(2020, 1, 2, 5, tzinfo=UTC)
+    # An hourly value's bar ends an hour after its start, on the New York day it starts on.
+    assert (aapl["Date"], aapl["TimestampStart"]) == ("2020-01-02", start)
+    assert aapl["TimestampEnd"] == start + timedelta(hours=1)
+
+
+def test_a_daily_value_takes_the_day_of_its_symbols_class(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # A daily value carries its day's aggregate stamp: 00:00 New York time for a stock, 00:00
+    # UTC for a crypto pair, whose day is the UTC day.
+    def values(moment: datetime) -> Reply:
+        stamp = int(moment.timestamp() * 1000)
+        return Reply(envelope({"values": [{"timestamp": stamp, "value": 1.0}]}))
+
+    fake_rest.reply("/v1/indicators/sma/AAPL", values(datetime(2025, 1, 1, 5, tzinfo=UTC)))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", values(datetime(2025, 1, 2, tzinfo=UTC)))
+    out = dh_to_pylist(rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20).fetch())
+    windows = {r["Symbol"]: (r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out}
+    new_york = timedelta(hours=5)  # UTC-5 in January
+    assert windows == {
+        "AAPL": (
+            "2025-01-01",
+            datetime(2025, 1, 1, tzinfo=UTC) + new_york,
+            datetime(2025, 1, 2, tzinfo=UTC) + new_york,
+        ),
+        "X:BTCUSD": (
+            "2025-01-02",
+            datetime(2025, 1, 2, tzinfo=UTC),
+            datetime(2025, 1, 3, tzinfo=UTC),
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("timespan", "moment"),
+    [
+        # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day.
+        (dm.Timespan.DAY, datetime(2025, 1, 2, 3, tzinfo=UTC)),
+        # A week value must be stamped on its week's Monday (or the Sunday before it).
+        (dm.Timespan.WEEK, datetime(2025, 1, 8, 5, tzinfo=UTC)),
+    ],
+    ids=["day", "week"],
+)
+def test_a_value_of_a_day_or_longer_at_an_unknown_stamp_fails(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    timespan: dm.Timespan,
+    moment: datetime,
+) -> None:
+    stamp = int(moment.timestamp() * 1000)
+    reply = Reply(envelope({"values": [{"timestamp": stamp, "value": 1.0}]}))
+    fake_rest.reply("/v1/indicators/sma/AAPL", reply)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^indicators\.sma: an indicator value from /v1/indicators/sma/\{stockTicker\} is "
+        r"stamped .*; compute the indicator from bars\(\)\.history\(\) of the same timespan",
+    ):
+        rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch()
 
 
 def test_an_explicit_adjusted_reaches_only_a_path_that_takes_it(

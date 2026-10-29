@@ -28,7 +28,7 @@ from deephaven_massive._query import StreamQuery
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._enums import AssetClass, ChannelFamily
@@ -108,6 +108,11 @@ class WsSession:
         session: The session; build queries from its namespaces (`session.stocks.trades`).
         connections: The session's WebSocket transport.
         cond: The condition every recorded event is written and notified under.
+        rows: The rows the futures schedule calendar's REST lookups get, by path template;
+            a path not listed answers no rows.
+        fetched: Each REST lookup of the futures schedule calendar, `(path, query)`, in
+            order; appended under `cond`, so read it under `cond` (in a `wait` predicate) or
+            once the calendar is idle.
         pair_answers: What Massive's crypto ticker list says of each crypto ticker, as the
             REST transport's `crypto_pair` would read it: its `(base, quote)`, or an exception
             to raise. A ticker missing from it is refused as unlisted. Change it under `cond`,
@@ -145,19 +150,19 @@ class WsSession:
         self._statuses: list[Status] = []
         self._states: list[WsState] = []
         self._opens = 0
+        self.fetched: list[tuple[str, dict[str, object]]] = []
+        self.rows: dict[str, list[dict[str, object]]] = {}
         self.pair_answers: dict[str, tuple[str, str] | Exception] = dict(PAIRS)
-        self.session = dm.MassiveSession(
-            dm.MassiveConfig(
-                api_key="test-key",
-                flush_interval=flush_interval,
-                **cast("dict[str, Any]", config),
-            )
+        self.config = dm.MassiveConfig(
+            api_key="test-key", flush_interval=flush_interval, **cast("dict[str, Any]", config)
         )
+        self.session = dm.MassiveSession(self.config)
         clients: Any = self.session._core._ports
         self.connections = ws.WsConnections(
             self.session._core,
             resolve_host=self._resolve,
             record_verdict=self._record_verdict,
+            fetch_rows=self._fetch_rows,
             crypto_pair=self._crypto_pair,
             client_factory=self.factory,
         )
@@ -217,6 +222,17 @@ class WsSession:
         """How many times a client has opened a connection."""
         with self.cond:
             return self._opens
+
+    def _fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Answer a futures schedule calendar lookup from `rows`, recording it.
+
+        Returns:
+            The rows listed for the path, or none.
+        """
+        with self.cond:
+            self.fetched.append((template, dict(query)))
+            self.cond.notify_all()
+            return list(self.rows.get(template, []))
 
     def _crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Split a crypto ticker as the REST transport's lookup in the ticker list does.
@@ -335,13 +351,21 @@ class WsSession:
                 f"states={self._states}, statuses={self._statuses}"
             )
 
-    def query(self, spec: DatasetSpec, symbols: object) -> StreamQuery:
+    def query(
+        self, spec: DatasetSpec, symbols: object, session: dm.MassiveSession | None = None
+    ) -> StreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
+
+        Args:
+            spec: The dataset.
+            symbols: Its symbols.
+            session: The session to build it on; None for this wrapper's own.
 
         Returns:
             The query.
         """
-        q = build_query(self.session._core, spec, symbols=cast("list[str]", symbols))
+        core = (session or self.session)._core
+        q = build_query(core, spec, symbols=cast("list[str]", symbols))
         assert isinstance(q, StreamQuery)
         return q
 
@@ -351,8 +375,8 @@ class WsSession:
         Returns:
             The connection.
         """
-        with self.session._core.registry_lock:
-            return self.connections._connections[url]
+        with self.connections.group.lock:
+            return self.connections.group.connections[url]
 
     def send(self, *items: dict[str, object]) -> None:
         """Send one frame of `items` and wait until the clients have delivered every data item.
@@ -379,8 +403,8 @@ class WsSession:
 
     def flush(self) -> None:
         """Publish the rows every connection holds, on the test thread."""
-        with self.session._core.registry_lock:
-            connections = list(self.connections._connections.values())
+        with self.connections.group.lock:
+            connections = list(self.connections.group.connections.values())
         for connection in connections:
             connection.flusher.flush()
 
