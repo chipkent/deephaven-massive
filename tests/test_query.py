@@ -12,7 +12,6 @@ from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
-from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
@@ -46,6 +45,7 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._tables.liveness import entered, new_scope
+from deephaven_massive._tables.stream import BlinkPublisher
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.stream import FakeStreamTransport
@@ -119,7 +119,7 @@ RowsWhen: TypeAlias = Callable[
 class FakeStreams(Protocol):
     # What the tests read from the `fake_streams` fixture (tests/conftest.py).
     opened: list[tuple[str, str | None]]
-    publishers: dict[int, TablePublisher]
+    publishers: dict[int, BlinkPublisher]
 
 
 class Recorder:

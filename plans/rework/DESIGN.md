@@ -723,6 +723,16 @@ These facts are verified in `deephaven-core` `main`:
 - `StreamToBlinkTableAdapter`: the blink table's `destroy()` calls `adapter.close()`, which
   runs `streamPublisher.shutdown()`, which runs the `on_shutdown_callback` synchronously on the
   calling thread. The adapter holds the table only weakly.
+- `StreamToBlinkTableAdapter` (42.7) delivers a published failure on its next run and then
+  closes itself; the close takes the adapter off the update graph. It never clears its queue
+  of failures, so it relies on running no more once the close has started. A `destroy()` on
+  another thread can claim the close (`alive.compareAndSet`) while a failure is queued: the
+  next run delivers the failure, its own close does nothing, and if the destroying thread has
+  not yet called `removeSource` when the cycle after that starts, the adapter runs again and
+  delivers the same failure a second time. `BaseTable.notifyListenersOnError` asserts the
+  table has not failed yet, and the fatal-error handler calls `System.exit(1)`. Forced with a
+  debugger pause before `removeSource`, it crashes on the first try; under load it happens about
+  once in 1,500 to 4,500 failures whose result is released at once.
 - `LivenessScopeStack` is thread-local. `LivenessScope.release()` decrements the scope's count,
   and referents are dropped on the thread that releases.
 - `deephaven.liveness_scope.LivenessScope` exposes `open()`, `manage()`, `unmanage()`, and
@@ -836,6 +846,14 @@ return result
   failure lands while the shape derives from the blink table. A stream's failure is recorded
   (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
   meets the failed table always finds the failure to name.
+- **A failure pins its table.** Every blink table the library feeds (a stream's, a `poll()`
+  table's) is created by `blink_publisher` (`_tables/stream.py`), whose
+  `BlinkPublisher.publish_failure` first makes a new liveness scope manage the table, then
+  publishes the failure. While the failure is queued nothing can destroy the table, so only
+  the delivery closes the adapter, on the update-graph thread inside the cycle, and no second
+  run follows. The shutdown callback that close runs queues the pin's release on the session's
+  reaper (a Deephaven call, which the callback must not make itself). A table that is already
+  being destroyed cannot be pinned and gets no failure.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
   either may come last. A stream's registry record is deleted only once both have happened:
@@ -3180,8 +3198,8 @@ How a request is built from a `DatasetSpec` and a `Request`:
   tables are created only on the caller thread inside a result scope or a stream scope, and in
   the session's diagnostics scope. The flush thread creates only static tables.
 - Each stream owns one
-  `table_publisher(name=f"massive.{dataset}#{stream_id}", col_defs=<dataset schema>, on_shutdown_callback=...)`,
-  created inside the stream scope under the session's captured `ExecutionContext` by
+  `blink_publisher(name=f"massive.{dataset}#{stream_id}", columns=<dataset schema>, on_shutdown=..., defer=<the session's reaper>)`
+  (a `table_publisher` whose failure pins its table, section 6.1), created inside the stream scope under the session's captured `ExecutionContext` by
   `StreamTransport.open_stream(spec, request, channel, *, stream_id)`. The session mints
   `stream_id` and has registered the stream before the call, so the transport may call
   `SessionCore.fail_stream(stream_id, ...)` as soon as the publisher exists; the callback calls

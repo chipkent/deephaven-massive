@@ -194,6 +194,32 @@ def pytest_configure(config: pytest.Config) -> None:
     cycle = int(jpy.cast(j_update_graph, periodic).getTargetCycleDurationMillis())
     if cycle != _CYCLE_MILLIS:
         raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
+    _copy_jvm_fatal_errors_to_stderr()
+
+
+def _copy_jvm_fatal_errors_to_stderr() -> None:
+    """Make Deephaven's fatal errors write their message to file descriptor 2 as well.
+
+    A fatal error inside the JVM, such as a failed assertion on an update-graph thread, ends
+    the process: Deephaven's fatal-error handler prints a message and calls `System.exit(1)`.
+    The embedded server forwards Java's standard error to Python's `sys.stderr`, which during a
+    test is pytest's capture buffer, so the message dies with the process and the run ends
+    with exit code 1, no summary, and no clue. This adds an interceptor to the handler that
+    writes the message and the Java stack trace straight to file descriptor 2. CI runs pytest
+    with `--capture=sys`, which leaves that descriptor alone, so the message reaches the job
+    log; a local run with the default `--capture=fd` still loses it, and `-s` shows it.
+    """
+    jpy = importlib.import_module("jpy")
+    jcompat = importlib.import_module("deephaven.jcompat")
+    traces = jpy.get_type("org.apache.commons.lang3.exception.ExceptionUtils")
+
+    def intercept(message: str, throwable: object, _uncaught: bool) -> None:
+        trace = traces.getStackTrace(throwable)
+        os.write(2, f"JVM fatal error, the process exits: {message}\n{trace}".encode())
+
+    interceptor = jpy.get_type("io.deephaven.util.process.FatalErrorReporter$Interceptor")
+    process = jpy.get_type("io.deephaven.util.process.ProcessEnvironment")
+    process.getGlobalFatalErrorReporter().addInterceptor(jcompat.j_lambda(intercept, interceptor))
 
 
 # --- JVM shutdown workaround -------------------------------------------------------------------

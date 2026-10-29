@@ -1,7 +1,7 @@
 """Tests for result scopes, records, and the reaper, in the embedded JVM.
 
-The stream tests use a `FakeStreamTransport` whose streams are bare `table_publisher` blink
-tables, so they observe exactly when Deephaven runs a stream's `on_shutdown_callback`.
+The stream tests use a `FakeStreamTransport` whose streams are `blink_publisher` blink tables
+without a network, so they observe exactly when Deephaven runs a stream's `on_shutdown_callback`.
 """
 
 import gc

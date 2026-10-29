@@ -142,6 +142,11 @@ These prevent deadlocks and leaks.
 - **Streams tear down from the blink table's `on_shutdown_callback`**: topic reference counts and
   flush routing are released there, not when a result record is released. The callback only
   updates the registry and calls `call_soon_threadsafe`; it never sends and never calls Java.
+- **Fail a blink table only through `BlinkPublisher`.** Library code creates every publisher
+  with `blink_publisher` (`_tables/stream.py`), never with `table_publisher`. Deephaven queues
+  a published failure until the next update cycle; if another thread destroys the table
+  meanwhile, Deephaven can deliver the failure twice and exit the process. `publish_failure`
+  pins the table until the failure has been delivered.
 - **Connection state is loop-confined.** Only a connection's client thread touches its
   subscription sets; other threads use `loop.call_soon_threadsafe` with plain data.
 - **Never rely on the atomicity of `dict`, `set`, or `list` operations.** Every shared container
