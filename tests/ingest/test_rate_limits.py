@@ -303,7 +303,8 @@ def test_rows_show_each_buckets_state() -> None:
     assert futures.state is RateLimitState.REFUSED
     assert (rows["indices"].state, rows["indices"].limit_source) == (RateLimitState.READY, None)
     assert rows["indices"].paused_until is None
-    assert rows["currencies"].updated_at > 0
+    # Stamped on the governor's clock, the one `PausedUntil` is read on.
+    assert rows["currencies"].updated_at == round(clock.time() * 1e9)
     clock.advance(61.0)
     waiting.join(10)
     assert not waiting.is_alive()

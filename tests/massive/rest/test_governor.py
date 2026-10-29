@@ -959,7 +959,7 @@ def test_a_refusal_after_a_quiet_hour_starts_a_new_run() -> None:
     assert not _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
     state = _state(governor)
     assert not state.gave_up
-    assert state.paused_until == pytest.approx(1_800_000_000.0 + 3600.0 + 15.0)
+    assert state.paused_until == 1_800_000_000.0 + 3600.0 + 15.0
 
 
 def test_a_refusal_within_a_window_of_the_pause_continues_its_run() -> None:
@@ -969,7 +969,7 @@ def test_a_refusal_within_a_window_of_the_pause_continues_its_run() -> None:
     _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
     clock.advance(15.0 + RATE_WINDOW)
     _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))
-    assert _state(governor).paused_until == pytest.approx(1_800_000_000.0 + 76.0 + 30.0)
+    assert _state(governor).paused_until == 1_800_000_000.0 + 76.0 + 30.0
 
 
 def test_a_stale_refusal_after_a_given_up_pause_has_ended_starts_a_new_run() -> None:
@@ -1135,3 +1135,33 @@ def test_an_interrupt_before_the_grant_leaves_its_place_and_holds_nothing() -> N
     governor.unsubscribe(interrupting)
     state = _state(governor)
     assert (state.in_flight, state.waiting, state.attempts) == (0, 0, 1)
+
+
+def test_a_stale_refusal_counts_only_the_pause_it_adds() -> None:
+    # Patience is the time spent paused: a stale refusal that extends a running pause adds only
+    # the extension, so 590 s and then 10 s more come to 600 s, which is still waited for.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    stale = governor.acquire("stocks", Cancel(), lane=object())  # in flight from before
+    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()), retry_after=590.0)
+    clock.advance(100.0)
+    _refuse(governor, stale, retry_after=500.0)  # until 600: 10 s more of pause
+    state = _state(governor)
+    assert not state.gave_up
+    assert state.paused_until == 1_800_000_000.0 + 600.0
+
+
+def test_a_request_never_jumps_a_queue_that_may_start() -> None:
+    # A request finding others queued joins the queue, even when a start is possible now.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    queued = _Waiter(object())
+    with governor._lock:
+        governor._buckets["stocks"].join(queued)
+    waiting = _Waiting(governor, "stocks", lane=object())
+    assert clock.wait_for_sleepers(1) == [math.inf]  # behind the queued request
+    with governor._lock:
+        governor._buckets["stocks"].leave(queued)  # it gives up its place: the next one starts
+    waiting.join()
+    assert waiting.permit is not None
+    governor.done(waiting.permit, answered=True)
