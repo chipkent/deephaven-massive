@@ -11,6 +11,7 @@ import pytest
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.refresh import fetch
+from tests._fakes.rest import REFUSED_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -267,17 +268,9 @@ def test_a_429_without_a_numeric_retry_after_backs_off_then_fails(server: _Serve
     assert len(server.requests) == 6
 
 
-# A loopback port that refuses connections. Port 1 lies below every operating system's range of
-# ephemeral ports, so no test that binds port 0, in this process or a parallel test worker, is
-# ever handed it, and nothing listens on it. A port bound and released by the test could be
-# taken by another worker before the connection is attempted; one kept bound without listening
-# is not refused on macOS, where the connection waits out its timeout instead.
-_REFUSED_PORT = 1
-
-
 def test_a_connection_failure_is_a_fetch_error() -> None:
     with fetch.HttpGetter() as getter, pytest.raises(fetch.FetchError, match="failed"):
-        getter(f"http://127.0.0.1:{_REFUSED_PORT}/x")
+        getter(f"http://127.0.0.1:{REFUSED_PORT}/x")
 
 
 def test_one_pool_serves_each_host(server: _Server) -> None:

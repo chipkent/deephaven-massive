@@ -4225,9 +4225,11 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   that hands out the tests starts none. pytest-cov combines the workers' coverage, so the 100%
   gate is unchanged. A run that only collects or lists fixtures collects in the main process,
   as xdist does, so that process starts a JVM; `-n` together with a `-m` expression that
-  selects live tests is a usage error, since they share rate limits and one evidence log. CI
-  runs the suite in one process: its standard runners have 2 CPUs, where two workers gained
-  nothing once their startup was paid.
+  selects live tests is a usage error, since they share rate limits and one evidence log: the
+  check tries `integration` with every combination of the markers only live tests carry
+  (`integration_limits`, `integration_smoke`, `needs`, `settles`, `requests`), so `-m needs` is
+  refused too. CI runs the suite in one process: its standard runners have 2 CPUs, where two
+  workers gained nothing once their startup was paid.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
   "@(typing\\.)?overload"]`, each with a reason.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in

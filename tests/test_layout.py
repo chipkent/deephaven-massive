@@ -2303,6 +2303,34 @@ def test_both_live_markers_are_registered() -> None:
     }
 
 
+def test_parallel_workers_refuse_the_live_tests_before_any_jvm_starts() -> None:
+    # Only live tests use the `needs` marker, so `-m needs` selects live tests. The pytest-xdist
+    # controller refuses that in its configure hook, before it starts a worker, and it never
+    # starts a JVM itself, so the run stops within about a second.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "2",
+            "-m",
+            "needs",
+            "tests/test_layout.py",
+        ],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert "the live tests run in one process" in result.stderr
+    assert "Server started" not in result.stdout + result.stderr
+
+
 def test_the_live_marker_check_runs_before_deselection() -> None:
     tree = ast.parse((_ROOT / "tests" / "conftest.py").read_text())
     (hook,) = [

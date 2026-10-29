@@ -21,6 +21,7 @@ import contextlib
 import faulthandler
 import gzip
 import importlib
+import itertools
 import os
 import sys
 import threading
@@ -108,17 +109,21 @@ def _is_xdist_controller(config: pytest.Config) -> bool:
 def _selects_live_tests(config: pytest.Config) -> bool:
     """Tell whether the run's `-m` expression selects any live test.
 
-    A live test carries `integration`, alone or with `integration_limits` or
-    `integration_smoke`; its other markers take arguments, which an `-m` expression cannot
-    match by name alone.
+    A live test carries `integration` and any combination of the markers only live tests use:
+    `integration_limits`, `integration_smoke`, `needs`, `settles`, and `requests`. An `-m`
+    expression matches a marker by name whatever its arguments, so `-m needs` selects every
+    live test with a `needs` marker. Each combination of those markers is tried; a keyword
+    form such as `needs(x=1)` is treated as matching nothing, since their arguments are
+    positional.
 
     Args:
         config: The pytest configuration, for the `-m` expression.
 
     Returns:
-        True if a test with one of those marker sets would be selected.
+        True if a test with any of those marker sets would be selected.
     """
     expression = Expression.compile(config.option.markexpr or "")
+    optional = (_LIMITS, _SMOKE, "needs", "settles", "requests")
 
     def carrying(markers: frozenset[str]) -> Callable[..., bool]:
         def matcher(name: str, /, **kwargs: str | int | bool | None) -> bool:
@@ -128,7 +133,8 @@ def _selects_live_tests(config: pytest.Config) -> bool:
 
     return any(
         expression.evaluate(carrying(frozenset({_INTEGRATION, *extra})))
-        for extra in ((), (_LIMITS,), (_SMOKE,))
+        for size in range(len(optional) + 1)
+        for extra in itertools.combinations(optional, size)
     )
 
 

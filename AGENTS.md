@@ -136,7 +136,8 @@ These prevent deadlocks and leaks.
   so test modules may import `deephaven` at module level. Under `-n`, each xdist worker starts
   one and the controller starts none; `-n` with the live tests is refused. Never start or stop
   another `Server` in that process (a subprocess may). Read the comments on its `trylast` hook
-  and JVM shutdown block before touching either. An `hs_err_pid*.log` file is a JVM crash: investigate it.
+  and JVM shutdown block before touching either. An `hs_err_pid*.log` file is a JVM crash:
+  investigate it.
 - The JVM raises SIGSEGV on purpose: never call `faulthandler.enable()` once it runs. Any process
   that starts a `Server` leaves through `os._exit`, as `scripts/render_reference.py` does.
 - Take the execution context, table helpers, and fakes from fixtures (`dh_exec_ctx`,
