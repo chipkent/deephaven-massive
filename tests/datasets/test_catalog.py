@@ -6,6 +6,7 @@ is read by some dataset, or deferred with a reason and an issue in `DEFERRED`.
 """
 
 import dataclasses
+import re
 import threading
 from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,8 @@ import pytest
 
 from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
+from deephaven_massive._datasets.schema import ColumnType, rename
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, ContractType, PollMode, Timespan
 from deephaven_massive._massive import (
     Field,
@@ -38,13 +40,14 @@ def keys(
     time: str | KeySpec | None = None,
     *,
     fanout: str | KeySpec | None = None,
-    session: str | KeySpec | None = None,
+    date: str | KeySpec | None = None,
+    end: str | KeySpec | None = None,
 ) -> SourceKeys:
     # A plain string names the source's own column; a KeySpec says more.
     def key(value: str | KeySpec | None) -> KeySpec | None:
         return KeySpec(value) if isinstance(value, str) else value
 
-    return SourceKeys(key(symbol), key(time), key(fanout), key(session))
+    return SourceKeys(key(symbol), key(time), end=key(end), fanout=key(fanout), date=key(date))
 
 
 def request(parameter: str) -> KeySpec:
@@ -95,11 +98,11 @@ FUTURES_TRADES = DatasetSpec(
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
     keys={
         (R, "/futures/v1/trades/{ticker}"): keys(
-            request("ticker"), "Timestamp", session="SessionEndDate"
+            request("ticker"), "Timestamp", date="SessionEndDate"
         ),
-        # The stream carries no session date, so it declares no session key.
+        # The stream carries no session date, so it declares no date key.
         (W, "futures/T"): keys("Ticker", "Timestamp"),
-        (F, "us_futures_{venue}/trades_v1"): keys("Ticker", "Timestamp", session="SessionEndDate"),
+        (F, "us_futures_{venue}/trades_v1"): keys("Ticker", "Timestamp", date="SessionEndDate"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
 )
@@ -176,11 +179,15 @@ def problems(*specs: DatasetSpec) -> tuple[str, ...]:
 
 
 def test_source_keys_list_their_roles_in_order() -> None:
-    declared = keys(request("stockTicker"), "SipTimestamp", session="SessionEndDate")
+    declared = keys(
+        request("stockTicker"), "WindowStart", fanout="U", date="SessionEndDate", end="E"
+    )
     assert declared.declared() == (
         ("symbol", KeySpec("stockTicker", from_request=True)),
-        ("time", KeySpec("SipTimestamp")),
-        ("session", KeySpec("SessionEndDate")),
+        ("time", KeySpec("WindowStart")),
+        ("end", KeySpec("E")),
+        ("fanout", KeySpec("U")),
+        ("date", KeySpec("SessionEndDate")),
     )
     assert SourceKeys().declared() == ()
     assert STOCK_TRADES.keys_for(R, "/nowhere") == SourceKeys()
@@ -283,33 +290,79 @@ def test_keys_are_declared_only_for_the_sources_read() -> None:
         change(STOCK_TRADES, keys={**STOCK_TRADES.keys, (W, "stocks/Q"): keys("Ticker")})
 
 
-@pytest.mark.parametrize("role", ["time", "session"])
+ROLE_TIMES = {"end": RowTimes.BAR, "date": RowTimes.TICK}
+"""The row times a dataset needs to declare each role at all; the others need none."""
+
+
+def with_role(role: str, key: KeySpec) -> DatasetSpec:
+    # The reference exchanges declaring one key of a role, with the row times the role needs.
+    times = ROLE_TIMES.get(role)
+    return change(
+        EXCHANGES, row_times=times, keys={(R, "/v3/reference/exchanges"): SourceKeys(**{role: key})}
+    )
+
+
+@pytest.mark.parametrize("role", ["time", "end", "date"])
 def test_only_the_symbol_and_fanout_keys_come_from_the_request(role: str) -> None:
-    bad = SourceKeys(**{role: request("stocksTicker")})
     with pytest.raises(ValueError, match=rf"the {role} key cannot come from the request"):
-        change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
+        with_role(role, request("stocksTicker"))
 
 
-@pytest.mark.parametrize("role", ["symbol", "time", "session"])
+@pytest.mark.parametrize("role", ["symbol", "time", "end", "date"])
 def test_only_a_fanout_key_can_be_no_instrument(role: str) -> None:
-    bad = SourceKeys(**{role: KeySpec("Id", instrument=False)})
     with pytest.raises(ValueError, match=r"only a fanout key can be no instrument"):
-        change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
+        with_role(role, KeySpec("Id", instrument=False))
 
 
 @pytest.mark.parametrize(
     ("role", "spec"),
     [
         ("time", KeySpec("Id", required=False)),
+        ("end", KeySpec("Id", required=False)),
         ("fanout", KeySpec("Id", required=False)),
-        ("session", KeySpec("Id", required=False)),
+        ("date", KeySpec("Id", required=False)),
         ("symbol", KeySpec("stocksTicker", from_request=True, required=False)),
     ],
 )
 def test_only_a_symbol_from_rest_rows_can_be_optional(role: str, spec: KeySpec) -> None:
-    bad = SourceKeys(**{role: spec})
     with pytest.raises(ValueError, match=r"only a symbol key read from a REST path's rows"):
-        change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): bad})
+        with_role(role, spec)
+
+
+def test_an_end_key_needs_bars_and_a_date_key_a_dated_dataset() -> None:
+    with pytest.raises(ValueError, match=r"only a bars dataset declares an end key"):
+        change(STOCK_TRADES, keys={**STOCK_TRADES.keys, (W, "stocks/T"): keys("Ticker", end="E")})
+    with pytest.raises(ValueError, match=r"a date key needs a dataset whose rows have a Date"):
+        change(EXCHANGES, keys={(R, "/v3/reference/exchanges"): keys(date="Date")})
+
+
+def test_a_daily_summary_needs_its_date_key_on_every_source() -> None:
+    path = "/v1/open-close/{stocksTicker}/{date}"
+    summary = DatasetSpec(
+        name="stocks.daily_open_close",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.STOCKS,
+        fetch_path=path,
+        keys={(R, path): keys("Symbol", date="From")},
+        per_symbol=True,
+        row_times=RowTimes.DAY,
+    )
+    assert problems(summary) == ()
+    with pytest.raises(ValueError, match=r"a daily summary needs a date key on \['REST "):
+        change(summary, keys={(R, path): keys("Symbol")})
+
+
+def test_row_times_follow_the_kind_unless_declared() -> None:
+    assert STOCK_TRADES.times is RowTimes.TICK
+    assert EXCHANGES.times is RowTimes.NONE
+    bars = CATALOG.by_name["stocks.bars"]
+    assert bars.row_times is RowTimes.BY_KIND
+    assert bars.times is RowTimes.BAR
+    assert CATALOG.by_name["indicators.sma"].times is RowTimes.BAR
+    assert CATALOG.by_name["stocks.daily_open_close"].times is RowTimes.DAY
+    assert change(EXCHANGES, row_times=RowTimes.TICK).times is RowTimes.TICK
+    # No dataset of the catalog resolves to the declaration default.
+    assert all(spec.times is not RowTimes.BY_KIND for spec in CATALOG.by_name.values())
 
 
 def test_a_stream_symbol_cannot_be_optional() -> None:
@@ -602,7 +655,8 @@ def test_the_trades_pair_has_identical_columns_with_one_timestamp() -> None:
     assert [(c.name, c.type) for c in stocks.columns] == [(c.name, c.type) for c in crypto.columns]
     assert (stocks.name, crypto.name) == ("stocks.trades", "crypto.trades")
     names = stocks.column_names
-    assert names[:2] == ("Symbol", "Timestamp")
+    assert names[:3] == ("Symbol", "Date", "Timestamp")
+    assert names[-1] == "TimestampInsert"
     assert names.count("Timestamp") == 1
     # Crypto's participant time is its Timestamp; stocks keeps its own ParticipantTimestamp,
     # which crypto rows hold null. Every source's own symbol key became Symbol.
@@ -618,7 +672,7 @@ def test_the_trades_pair_has_identical_columns_with_one_timestamp() -> None:
 def test_a_projected_member_renames_through_its_projection() -> None:
     schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES)
     # The snapshot joins the values kind with three of its fields; its other fields stay out.
-    assert schema.column_names == ("Symbol", "Timestamp", "Value")
+    assert schema.column_names == ("Symbol", "Date", "Timestamp", "Value", "TimestampInsert")
     assert Catalog((INDEX_VALUES,)).problems() == ()
 
 
@@ -630,10 +684,14 @@ def test_keys_rename_to_symbol_timestamp_and_underlying() -> None:
     assert "Underlying" in contracts
     assert {"Ticker", "UnderlyingTicker"}.isdisjoint(contracts)
     # The peer is the row's symbol, and the company asked about comes from the request.
-    assert catalog.dataset_schema(RELATED).column_names == ("Symbol", "Underlying")
+    assert catalog.dataset_schema(RELATED).column_names == (
+        "Symbol",
+        "Underlying",
+        "TimestampInsert",
+    )
     futures = catalog.dataset_schema(FUTURES_TRADES).column_names
-    assert futures[:2] == ("Symbol", "Timestamp")
-    assert "SessionEndDate" in futures  # the session key keeps its column
+    assert futures[:3] == ("Symbol", "Date", "Timestamp")
+    assert "SessionEndDate" not in futures  # the session is the row's Date
 
 
 def test_a_fanout_key_that_is_no_instrument_keeps_its_column() -> None:
@@ -788,7 +846,7 @@ def test_declared_keys_gate_needs_a_column_of_the_source() -> None:
 def test_a_per_ticker_path_and_a_futures_channel_pass_the_declared_keys_gate() -> None:
     # The symbol of /v3/trades/{t} comes from the request; the futures stream has no session.
     assert STOCK_TRADES.keys_for(R, "/v3/trades/{stockTicker}").symbol == request("stockTicker")
-    assert FUTURES_TRADES.keys_for(W, "futures/T").session is None
+    assert FUTURES_TRADES.keys_for(W, "futures/T").date is None
     assert problems(STOCK_TRADES, FUTURES_TRADES) == ()
 
 
@@ -1485,3 +1543,44 @@ def test_the_valid_filters_named_are_only_those_the_caller_can_pass() -> None:
     assert "'distribution_type'" in named
     with pytest.raises(ValueError, match=r"has no filter 'frequency_gte'"):
         catalog.check_filters(DIVIDENDS, {"frequency_gte": 4}, typed=("frequency",))
+
+
+LIBRARY_NAME = re.compile(r"Timestamp(?:[A-Z][A-Za-z0-9]*)?")
+"""`Timestamp` alone or with a qualifier: the names of the library's time columns."""
+
+
+def library_name_violations(spec: DatasetSpec) -> list[str]:
+    # Every column of the dataset's sources named like a library time column (`Timestamp`,
+    # `Timestamp<Qualifier>`, and on a dataset whose rows carry a trading day `Date`) that a
+    # vendor field keeps under its own name, outside a declared key.
+    found = []
+    dated = spec.times is not RowTimes.NONE
+    for transport, key in spec.sources:
+        claimed = {k.column for _, k in spec.keys_for(transport, key).declared()}
+        for column in rename(spec, CATALOG.source(transport, key)):
+            named = None if column.field is None else column.field.column
+            owned = LIBRARY_NAME.fullmatch(column.column) or (dated and column.column == "Date")
+            if owned and named == column.column and named not in claimed:
+                found.append(f"{spec.name}: {transport.value} {key}: {column.column}")
+    return found
+
+
+def test_no_vendor_field_keeps_a_library_time_column_s_name() -> None:
+    # The library owns these names: each such column comes from a declared key (time, end, or
+    # date) or is one the library fills, never a vendor field that merely carries the name.
+    assert [v for spec in CATALOG.by_name.values() for v in library_name_violations(spec)] == []
+    for spec in CATALOG.by_name.values():
+        names = CATALOG.dataset_schema(spec).column_names
+        assert names[-1] == "TimestampInsert"
+        assert {n for n in names if LIBRARY_NAME.fullmatch(n)} <= LIBRARY_COLUMNS, spec.name
+
+
+def test_the_naming_gate_catches_a_vendor_timestamp_outside_a_key() -> None:
+    # The futures schedules carry a vendor `timestamp`, which the dataset declares as its time
+    # key; without the declaration it would be a vendor column named like the library's.
+    schedules = CATALOG.by_name["futures.schedules"]
+    (path,) = schedules.rest_paths
+    assert schedules.keys_for(R, path).time == KeySpec("Timestamp")
+    assert library_name_violations(change(schedules, keys={})) == [
+        f"futures.schedules: REST {path}: Timestamp"
+    ]

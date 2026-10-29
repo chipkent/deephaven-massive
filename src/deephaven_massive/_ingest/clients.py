@@ -27,6 +27,8 @@ from deephaven_massive._ingest.rest import RestEndpoints, RestState
 from deephaven_massive._ingest.ws import WsConnections, WsTransport
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from deephaven_massive._datasets.request import HostDecision
     from deephaven_massive._enums import AssetClass, ChannelFamily
     from deephaven_massive._massive import FlatFileClient
@@ -157,6 +159,7 @@ class SessionClients:
                     core,
                     resolve_host=self._resolve_host,
                     record_verdict=self._record_verdict,
+                    fetch_rows=self._fetch_rows,
                     crypto_pair=self._crypto_pair,
                 )
         if created:
@@ -200,6 +203,21 @@ class SessionClients:
             decision: The decision the verdict implies (`DELAYED`, evidence `server verdict: ...`).
         """
         self.rest().record_verdict(asset_class, family, decision)
+
+    def _fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Return every raw row of a REST path through the session's REST transport.
+
+        The WebSocket transport's futures schedule calendar reads the futures contracts and
+        schedules with it, on its own worker thread.
+
+        Args:
+            template: The path template; it takes no path parameter.
+            query: The query parameters, by wire name.
+
+        Returns:
+            The rows of every page.
+        """
+        return self.rest().fetch_rows(template, query)
 
     def flat_files(self) -> FlatFileTransport:
         """Return a flat-file transport for one `history()` call.

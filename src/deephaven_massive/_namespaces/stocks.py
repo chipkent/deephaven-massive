@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -41,6 +42,7 @@ from deephaven_massive._enums import (
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     Namespace,
+    adjustment_notes,
     build_query,
     list_params,
     one_or_any_of,
@@ -88,6 +90,11 @@ def _request(parameter: str) -> KeySpec:
 def _ticker_keys(time: str | None = None) -> SourceKeys:
     """Return the keys of a source whose rows name their stock in `Ticker`."""
     return SourceKeys(symbol=_row("Ticker"), time=None if time is None else _row(time))
+
+
+def _stream_bar_keys() -> SourceKeys:
+    """Return the keys of a WebSocket bars channel: its ticker, window start, and end `e`."""
+    return SourceKeys(symbol=_row("Ticker"), time=_row("WindowStart"), end=_row("EndTimestamp"))
 
 
 # --- Market data ------------------------------------------------------------------------------
@@ -153,12 +160,13 @@ BARS: Final = DatasetSpec(
         (_R, _PREV): _ticker_keys("WindowStart"),
         (_R, _RANGE): SourceKeys(symbol=_request("stocksTicker"), time=_row("WindowStart")),
         (_R, _GROUPED): _ticker_keys("WindowStart"),
-        (_W, "stocks/A"): _ticker_keys("WindowStart"),
-        (_W, "stocks/AM"): _ticker_keys("WindowStart"),
+        (_W, "stocks/A"): _stream_bar_keys(),
+        (_W, "stocks/AM"): _stream_bar_keys(),
         (_F, _MINUTE_FILES): _ticker_keys("WindowStart"),
         (_F, _DAY_FILES): _ticker_keys("WindowStart"),
     },
     page_size=50_000,
+    column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 LULD: Final = DatasetSpec(
     name="stocks.luld",
@@ -220,8 +228,12 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     summary="The open, close, and pre- and after-market prices of US stocks on one day.",
     asset_class=_STOCKS,
     fetch_path=_OPEN_CLOSE,
-    keys={(_R, _OPEN_CLOSE): SourceKeys(symbol=_row("Symbol"))},
+    keys={(_R, _OPEN_CLOSE): SourceKeys(symbol=_row("Symbol"), date=_row("From"))},
     per_symbol=True,
+    row_times=RowTimes.DAY,
+    column_notes=adjustment_notes(
+        ("Open", "High", "Low", "Close", "PreMarket", "AfterHours"), ("Volume",)
+    ),
 )
 
 # --- Corporate actions and short data ----------------------------------------------------------
@@ -1999,7 +2011,9 @@ class _Stocks(Namespace):
         """Trades of US-listed stocks, tick by tick.
 
         Each row is one trade reported to the SIP: price, size, exchange, conditions, and the
-        SIP, participant, and TRF timestamps (`Timestamp` is the SIP time). Streams over the
+        SIP, participant, and TRF timestamps (`Timestamp` is the SIP time). Each row also
+        carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the New York date of
+        `Timestamp`), and `TimestampInsert`, when the library received it. Streams over the
         WebSocket (`T`) through `blink()`, `append_only()`, `ring()`, and `last_by()`;
         `history()` reads REST (`/v3/trades/{stockTicker}`) or the flat files
         (`us_stocks_sip/trades_v1`); `fetch()` returns each symbol's last trade
@@ -2035,9 +2049,11 @@ class _Stocks(Namespace):
         """National best bid and offer quotes of US-listed stocks, tick by tick.
 
         Each row is one NBBO update: bid and ask prices, sizes, and exchanges, conditions,
-        indicators, and the SIP and participant timestamps (`Timestamp` is the SIP time).
-        Streams over the WebSocket (`Q`) through `blink()`, `append_only()`, `ring()`, and
-        `last_by()`; `history()` reads REST (`/v3/quotes/{stockTicker}`) or the flat files
+        indicators, and the SIP and participant timestamps (`Timestamp` is the SIP time). Each
+        row also carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the New York date of
+        `Timestamp`), and `TimestampInsert`, when the library received it. Streams over the
+        WebSocket (`Q`) through `blink()`, `append_only()`, `ring()`, and `last_by()`;
+        `history()` reads REST (`/v3/quotes/{stockTicker}`) or the flat files
         (`us_stocks_sip/quotes_v1`); `fetch()` returns each symbol's last NBBO
         (`/v2/last/nbbo/{stocksTicker}`), one request per symbol.
 
@@ -2102,22 +2118,57 @@ class _Stocks(Namespace):
     ) -> HistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 
-        Each row is one bar of `multiplier` times `timespan` starting at `Timestamp`, with its
-        volume, VWAP, and trade count. The timespan picks the transports and the query
-        class: one-second and one-minute bars also stream over the WebSocket (`A`, `AM`) as a
+        Each row is one bar of `multiplier` times `timespan`: its window, from `TimestampStart`
+        to the exclusive `TimestampEnd`, its trading day `Date` (ISO `yyyy-MM-dd` text, New York
+        time), its open, high, low, close, volume, VWAP, and trade count, and `TimestampInsert`,
+        when the library received it. The timespan picks the transports and the query class:
+        one-second and one-minute bars also stream over the WebSocket (`A`, `AM`) as a
         `StreamHistoryQuery`; one-day bars add `fetch()` of the previous completed session
         (`/v2/aggs/ticker/{stocksTicker}/prev`, one request per symbol) as a
         `HistoryLatestQuery`; every other combination is history only. `history()` reads REST
-        (`/v2/aggs/ticker/{stocksTicker}/range/...`) or, for unadjusted one-minute and
-        one-day bars, the flat files (`us_stocks_sip/minute_aggs_v1`,
-        `us_stocks_sip/day_aggs_v1`); with `dm.ALL`, one-day REST history reads the grouped
-        daily bars (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), one request per day.
+        (`/v2/aggs/ticker/{stocksTicker}/range/...`) or, for unadjusted one-minute and one-day
+        bars, the flat files (`us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1`); with
+        `dm.ALL`, one-day REST history reads the grouped daily bars
+        (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), one request per day.
 
-        `history()` has no `limit`: it pages internally. It returns only the bars whose whole
-        window lies inside the range and has ended: a week runs Monday to Friday and a month
-        from its first to its last weekday, so the current day's, week's, or month's bar never
-        appears. `dm.ALL` streams every ticker and works with `history()` where a flat file or
-        the grouped daily path serves it; `fetch()` refuses it. Columns:
+        `TimestampEnd` is the first instant at which the bar is complete, so join on it
+        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only bars whose
+        window had closed; it is not when Massive published the bar. An intraday bar ends
+        its length after its start. A bar of a day or longer runs from 00:00 New York time
+        of its window's first day to 00:00 after its last, whatever the source: the range
+        stamps a 1-day bar at the day's start, while grouped daily, `/prev`, and the day
+        files stamp it at the 16:00 session close (13:00 on a short trading day), which is
+        moved to the day's start. A week runs Monday to Friday and a month, quarter, or year
+        from its first to its last weekday. A bar of several days counts trading days,
+        ending as late as holidays could push it (one weekday more, and one more for every
+        five further days), since there is no holiday calendar. A longer bar must be stamped
+        at 00:00 on the day its period starts: a week on its Monday or the Saturday or
+        Sunday before, a month, quarter, or year on its 1st. Any other stamp fails the call
+        with `MassiveError` naming the source, since the bar may cover other days than its
+        label. `Date` is null for a bar that spans more than one date: several days, a week
+        or longer, or an intraday bar across midnight. Joining an intraday row to the same
+        day's daily bar on `Date` attaches values not known until that day ended.
+
+        Prices are split-adjusted only when `adjusted` is True, the default, and only REST
+        serves adjusted bars: a price from before a split is restated in the split's terms, so
+        it is not the price that traded, and volumes are restated the other way. Massive
+        adjusts for splits only, never for cash dividends. The flat files and the WebSocket are
+        as traded, so `history()` reads the flat files only with `adjusted=False`, and one
+        `history()` never mixes the two bases: every page's own `adjusted` must match the
+        request, or the call raises `MassiveError`. So the default
+        `bars(dm.ALL, dm.Timespan.MINUTE).history(...)` raises `ValueError`: the flat files need
+        `adjusted=False`, and REST needs explicit symbols. Live bars are never adjusted after
+        the fact, so a live table, or a merge of adjusted history and live bars, shows a jump
+        at a split's execution date; rebuild from history after a split, or adjust
+        unadjusted bars yourself with the factors of `splits()`.
+
+        `history()` has no `limit`: it pages internally. It returns only the bars whose
+        whole window lies inside the range and has ended, judged by `TimestampEnd`: a week
+        runs Monday to Friday and a month from its first to its last weekday, so the current
+        day's, week's, or month's bar never appears, and a 2-day bar from a Thursday is left
+        out of a range that ends on the Friday, since a holiday could carry it into Monday.
+        `dm.ALL` streams every ticker and works with `history()` where a flat file or the
+        grouped daily path serves it; `fetch()` refuses it. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#bars,
         the web UI's column tooltips, or `columns()`.
 
@@ -2133,8 +2184,9 @@ class _Stocks(Namespace):
                 `MINUTE`.
             multiplier: The number of `timespan` units per bar, a positive `int`; defaults to
                 1. Only 1 streams or has `fetch()`.
-            adjusted: True (the default) for bars adjusted for splits; False for unadjusted
-                bars, which the flat files can also serve.
+            adjusted: True (the default) for bars adjusted for splits, from REST only; False
+                for bars as traded, which the flat files can also serve. Streams are always as
+                traded.
 
         Returns:
             The query, of the class the timespan and multiplier give; nothing is requested
@@ -2164,8 +2216,10 @@ class _Stocks(Namespace):
 
         Each row is one band update from the SIP: the upper and lower price limits, the
         indicators, and the tape. Streams over the WebSocket (`LULD`) through `blink()`,
-        `append_only()`, `ring()`, and `last_by()`; there is no REST or flat-file source, so
-        the query has no `fetch()` or `history()`.
+        `append_only()`, `ring()`, and `last_by()`; there is no REST or flat-file source, so the
+        query has no `fetch()` or `history()`. Each row also carries its time, `Timestamp`, its
+        trading day, `Date` (ISO `yyyy-MM-dd` text, the New York date of `Timestamp`), and
+        `TimestampInsert`, when the library received it.
 
         No verb takes a `limit`. `dm.ALL` streams every ticker. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#luld,
@@ -2192,10 +2246,12 @@ class _Stocks(Namespace):
     def imbalances(self, symbols: Symbols) -> StreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
-        Each row is one imbalance message: the auction type and time, the imbalance and
-        paired quantities, the book clearing price, and the exchange. Streams over the
-        WebSocket (`NOI`) through `blink()`, `append_only()`, `ring()`, and `last_by()`;
-        there is no REST or flat-file source, so the query has no `fetch()` or `history()`.
+        Each row is one imbalance message: the auction type and time, the imbalance and paired
+        quantities, the book clearing price, and the exchange. Streams over the WebSocket
+        (`NOI`) through `blink()`, `append_only()`, `ring()`, and `last_by()`; there is no REST
+        or flat-file source, so the query has no `fetch()` or `history()`. Each row also carries
+        its time, `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the New York date
+        of `Timestamp`), and `TimestampInsert`, when the library received it.
 
         No verb takes a `limit`. `dm.ALL` streams every ticker. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#imbalances,
@@ -2223,9 +2279,11 @@ class _Stocks(Namespace):
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
         Each row is one fair market value with the time it was computed. Streams over the
-        WebSocket (`FMV`) from the Business host (`business.massive.com/stocks`), which needs
-        a Business plan, through `blink()`, `append_only()`, `ring()`, and `last_by()`;
-        there is no REST or flat-file source, so the query has no `fetch()` or `history()`.
+        WebSocket (`FMV`) from the Business host (`business.massive.com/stocks`), which needs a
+        Business plan, through `blink()`, `append_only()`, `ring()`, and `last_by()`; there is
+        no REST or flat-file source, so the query has no `fetch()` or `history()`. Each row also
+        carries its time, `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the New
+        York date of `Timestamp`), and `TimestampInsert`, when the library received it.
 
         No verb takes a `limit`. `dm.ALL` streams every ticker. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#fmv,
@@ -2331,11 +2389,12 @@ class _Stocks(Namespace):
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, close, and pre- and after-market prices of US stocks on one day.
 
-        Each row is one ticker's session on `date`: open, high, low, close, volume, and the
-        pre-market and after-hours prices. Served by REST (`/v1/open-close/{stocksTicker}/{date}`)
-        through `fetch()` and `poll()`, one request per symbol; a symbol with no session that
-        day (a holiday) is dropped with a warning. `poll()` replaces the table each cycle,
-        keyed by `Symbol`.
+        Each row is one ticker's session on `date`: its `Date` (ISO `yyyy-MM-dd` text), the
+        day's window as a 1-day bar's (`TimestampStart` and `TimestampEnd`, the New York
+        midnights around it), open, high, low, close, volume, and the pre-market and after-hours
+        prices. Served by REST (`/v1/open-close/{stocksTicker}/{date}`) through `fetch()` and
+        `poll()`, one request per symbol; a symbol with no session that day (a holiday) is
+        dropped with a warning. `poll()` replaces the table each cycle, keyed by `Symbol`.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is
         refused: use `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)`. Columns:
@@ -2352,7 +2411,9 @@ class _Stocks(Namespace):
                 column (re-read each `poll()` cycle).
             date: The trading day: an ISO-8601 date or a `date`. It is a calendar date, so a
                 `datetime` raises `ValueError`.
-            adjusted: True (the default) for prices adjusted for splits; False for unadjusted.
+            adjusted: True (the default) for prices and volume adjusted for splits (never for
+                dividends); False for the prices as traded. Massive does not echo the basis
+                here, so it cannot be checked.
 
         Returns:
             The query; nothing is requested until a verb runs.
@@ -2448,10 +2509,20 @@ class _Stocks(Namespace):
     ) -> Query:
         """Stock splits, reverse splits, and stock dividends of US-listed stocks.
 
-        Each row is one split: its execution date, the split ratio (`SplitFrom` to
-        `SplitTo`), the adjustment type, and the factor that adjusts earlier prices. Served
-        by REST (`/stocks/v1/splits`) through `fetch()` and `poll()`; `poll()` replaces the
-        table each cycle, keyed by `Id`.
+        Each row is one split: its execution date (`ExecutionDate`, ISO `yyyy-MM-dd` text), the
+        split ratio (`SplitFrom` to `SplitTo`), the adjustment type, and the factor that adjusts
+        earlier prices (`HistoricalAdjustmentFactor`). Served by REST (`/stocks/v1/splits`)
+        through `fetch()` and `poll()`; `poll()` replaces the table each cycle, keyed by `Id`.
+
+        Use it to adjust bars as traded (`bars(..., adjusted=False)`, the flat files, or a
+        stream) yourself. The factor is cumulative: for a bar dated D, take the first split
+        whose execution date is after D and multiply the bar's prices by its factor and divide
+        its volume by it; a bar with no later split is already on today's basis. Both dates are
+        ISO text, which orders as dates do, so a reverse as-of join finds that split:
+        `bars.raj(splits, on=["Symbol", "Date<ExecutionDate"],
+        joins=["F=HistoricalAdjustmentFactor"])`, then `Close * F` and `Volume / F`, with a
+        null `F` meaning 1. A split takes effect overnight: on its execution date all trading,
+        the pre-market included, is already on the new basis.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
@@ -2484,6 +2555,19 @@ class _Stocks(Namespace):
             ::
 
                 t = m.stocks.splits(start="2025-01-01", end="2025-06-30").fetch()
+
+                # NVDA's daily bars as traded, adjusted for its splits by hand.
+                bars = m.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
+                    "2024-06-03", "2024-06-14"
+                )
+                splits = m.stocks.splits("NVDA").fetch()
+                adjusted = bars.raj(
+                    splits,
+                    on=["Symbol", "Date<ExecutionDate"],
+                    joins=["F=HistoricalAdjustmentFactor"],
+                ).update(
+                    ["F = isNull(F) ? 1.0 : F", "AdjClose = Close * F", "AdjVolume = Volume / F"]
+                )
         """
         return _list_query(
             self._core,

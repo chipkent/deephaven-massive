@@ -11,8 +11,10 @@ import threading
 from collections.abc import Callable
 from typing import Any, cast
 
+import pyarrow as pa
 import pytest
-from deephaven import dtypes, new_table
+from deephaven import arrow as dh_arrow
+from deephaven import dtypes, merge, new_table
 from deephaven.column import double_col, string_col
 from deephaven.execution_context import ExecutionContext
 from deephaven.stream import blink_to_append_only
@@ -24,10 +26,12 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._massive import Transport
+from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
     COLUMN_TABLE_DESCRIPTIONS,
     col_defs,
     column_table,
+    dataset_table,
     describe,
     dh_type,
 )
@@ -61,7 +65,6 @@ TABLE_DESCRIPTION = "stocks.trades: Trades of US-listed stocks, tick by tick."
 def test_every_column_type_has_a_deephaven_type() -> None:
     assert {t: dh_type(t) for t in ColumnType} == {
         ColumnType.INSTANT: dtypes.Instant,
-        ColumnType.LOCAL_DATE: dtypes.LocalDate,
         ColumnType.DOUBLE: dtypes.double,
         ColumnType.LONG: dtypes.long,
         ColumnType.INT: dtypes.int32,
@@ -302,3 +305,63 @@ def test_the_column_table_lists_every_column(
     assert list(COLUMN_TABLE_DESCRIPTIONS) == ["Name", "Type", "Description", "SuppliedBy"]
     with pytest.raises(TypeError):  # read-only: no caller can change the header text
         cast("dict[str, str]", COLUMN_TABLE_DESCRIPTIONS)["Name"] = "changed"
+
+
+def _string_objects(table: Table, column: str) -> int:
+    # Identity is read inside Deephaven: a string crossing to Python is copied.
+    ids = table.update(f"Id = java.lang.System.identityHashCode({column})")
+    return ids.where(f"!isNull({column})").select_distinct("Id").size
+
+
+def test_a_dataset_table_shares_one_string_per_date_across_calls(dh_exec_ctx: object) -> None:
+    # Rows in runs of one date, as every transport sends them, nulls among them.
+    days = [None, *["2025-03-03"] * 1000, *[None] * 3, *["2025-03-04"] * 777, "2025-03-03"]
+    rows = pa.table(
+        {"Note": pa.array(days), "Date": pa.array(days), "Price": pa.array([1.0] * len(days))}
+    )
+    first, second = dataset_table(rows, ("Date",)), dataset_table(rows, ("Date",))
+    # The column holds one string per distinct date, the same one in every table the process
+    # builds; any other text column is as made. The columns keep their order and values.
+    both = merge([first, second])
+    assert _string_objects(both, "Date") == 2
+    assert _string_objects(first, "Note") > 2
+    assert first.column_names == ["Note", "Date", "Price"]
+    assert dh_arrow.to_arrow(first).column("Date").to_pylist() == days
+    assert dh_arrow.to_arrow(first).column("Price").to_pylist() == [1.0] * len(days)
+
+
+def test_dates_in_runs_never_take_the_formula(
+    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rows in runs, as every transport sends them, are built from the pool: the formula, whose
+    # fixed cost would fall on every flush, is only for interleaved dates.
+    def refused(*_: object) -> Table:
+        raise AssertionError("the formula path was taken")
+
+    monkeypatch.setattr(columns, "_interned", refused)
+    days = [*["2025-03-03"] * 500, None, *["2025-03-04"] * 500]
+    table = dataset_table(
+        pa.table({"Date": pa.array(days), "Price": pa.array([1.0] * 1001)}), ("Date",)
+    )
+    assert _string_objects(table, "Date") == 2
+
+
+def test_interleaved_dates_are_shared_through_a_formula(dh_exec_ctx: object) -> None:
+    # More runs than are worth copying one by one: the column is interned by a formula.
+    days = [None if n % 7 == 0 else f"2025-03-0{1 + n % 3}" for n in range(30_000)]
+    rows = pa.table({"Date": pa.array(days), "Note": pa.array(days)})
+    table = dataset_table(rows, ("Date",))
+    assert _string_objects(table, "Date") == 3
+    assert _string_objects(table, "Note") > 3
+    assert dh_arrow.to_arrow(table).column("Date").to_pylist() == days
+
+
+def test_an_empty_dataset_table_keeps_its_columns(dh_exec_ctx: object) -> None:
+    rows = pa.table({"Date": pa.array([], pa.string()), "Price": pa.array([], pa.float64())})
+    table = dataset_table(rows, ("Date",))
+    assert (table.size, table.column_names) == (0, ["Date", "Price"])
+
+
+def test_a_dataset_table_without_dates_is_converted_as_is(dh_exec_ctx: object) -> None:
+    table = dataset_table(pa.table({"Price": pa.array([1.5])}), ())
+    assert table.size == 1

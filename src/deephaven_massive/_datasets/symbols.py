@@ -98,6 +98,7 @@ __all__ = [
     "forex_codes",
     "is_canonical",
     "is_forex_currency",
+    "is_futures_contract",
     "normalize",
     "option_roots",
     "symbol_class",
@@ -236,8 +237,11 @@ def _occ_ok(symbol: str) -> bool:
     return True
 
 
-def _is_future(text: str) -> bool:
-    """Tell whether text is a single futures contract ticker (`ESZ5`).
+def is_futures_contract(text: str) -> bool:
+    """Tell whether text is a single futures contract ticker (`ESZ5`), not a spread.
+
+    The futures schedule calendar looks up only such tickers: every other futures ticker is a
+    spread or combination, which Massive's contracts list does not hold.
 
     Args:
         text: The text.
@@ -480,7 +484,7 @@ def _convert_single_future(text: str) -> str:
         ValueError: If the text is a spread (`canonical_symbol_future_spread` takes it) or no
             futures ticker at all (`_convert_future`).
     """
-    if _is_future(text):
+    if is_futures_contract(text):
         return text
     if _is_spread(text):
         raise ValueError(
@@ -505,7 +509,7 @@ def _convert_spread(text: str) -> str:
     """
     if _is_spread(text):
         return text
-    if _is_future(text):
+    if is_futures_contract(text):
         raise ValueError(
             f"{text!r} is a single futures contract, not a spread; call dm.canonical_symbol_future"
         )

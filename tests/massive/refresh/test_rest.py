@@ -826,11 +826,25 @@ def test_a_vendor_symbol_keeps_its_name() -> None:
     assert [f.column for f in _one(_row(symbol={"type": "string"})).fields] == ["Symbol"]
 
 
-@pytest.mark.parametrize("long_name", ["symbol", "underlying", "timestamp"])
+@pytest.mark.parametrize(
+    "long_name", ["symbol", "underlying", "timestamp", "date", "timestamp_start", "timestampFoo"]
+)
 def test_gate_column_collision_names_never_coins_a_key_column(long_name: str) -> None:
     hand = _hand(names={(_PATH, "sym"): overrides.Name(long_name=long_name, description="")})
     snapshot = _snapshot({_PATH: _item(_row(sym={"type": "boolean"}))})
     assert _problems(snapshot, hand) == [("column-collision", _PATH, "sym")]
+
+
+def test_gate_column_collision_names_the_library_column() -> None:
+    hand = _hand(names={(_PATH, "sym"): overrides.Name(long_name="timestamp_end", description="")})
+    snapshot = _snapshot({_PATH: _item(_row(sym={"type": "boolean"}))})
+    with pytest.raises(RefreshError) as caught:
+        generate.generate(snapshot, hand)
+    (problem,) = caught.value.problems
+    assert problem.message == (
+        "NAMES coins the library column 'TimestampEnd'; only the dataset key rename and the "
+        "library's time columns produce it"
+    )
 
 
 def test_gate_stale_entry_a_names_quote_the_specification_no_longer_gives() -> None:

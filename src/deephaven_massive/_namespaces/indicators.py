@@ -9,9 +9,17 @@ selects its class (`X:` crypto, `C:` forex, `I:` indices, `O:` options, none for
 URL serves every class, but Massive documents the crypto form apart, without the `adjusted`
 parameter, so each dataset reads two generated paths: the `{stockTicker}` template for every
 class but crypto, and the `{cryptoTicker}` template for crypto (`fetch_paths_by_class`).
-`adjusted` defaults to None, which sends nothing; an explicit value goes only to a path that
-declares it, so it raises `ValueError` for a crypto symbol. Each row is one indicator value
-at one bar's start, `Timestamp`, for the requested `Symbol`.
+`adjusted` defaults to None, which sends nothing, so Massive's own default applies: the bars
+behind the values are adjusted for splits (never for dividends). An explicit value goes only
+to a path that declares it, so it raises `ValueError` for a crypto symbol; Massive does not
+echo the basis of an indicator, so it cannot be checked. Each row is one indicator value of
+one bar of the requested `Symbol`: the bar's window, `TimestampStart` to the exclusive
+`TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class (UTC for
+crypto and forex, New York otherwise), as for that class's bars. A value of a day or longer
+carries the stamp of the aggregate it is computed over, which the aggregates range puts at
+00:00 of the period's first day (01:00 New York time for indices), so it is checked as that
+class's bars are: `fetch()` and `poll()` raise `MassiveError` for a value stamped otherwise,
+since it may cover other days than its label.
 
 Each dataset is one factory method on `_Indicators` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. This module owns the
@@ -26,6 +34,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
@@ -57,7 +66,7 @@ def _indicator(name: str, summary: str) -> DatasetSpec:
     Returns:
         The dataset: `fetch()` from `/v1/indicators/<name>/{stockTicker}` (and the
         `{cryptoTicker}` form for crypto), one request per symbol, the symbol filled from the
-        request, `Timestamp` from the row's `timestamp`, and `start`/`end` on the half-open
+        request, `TimestampStart` from the row's `timestamp`, and `start`/`end` on the half-open
         `timestamp.gte`/`timestamp.lt` pair.
     """
     stock = f"/v1/indicators/{name}/{{stockTicker}}"
@@ -76,8 +85,10 @@ def _indicator(name: str, summary: str) -> DatasetSpec:
             ),
         },
         time_axis=("timestamp.gte", "timestamp.lt"),
-        poll_keys=("Symbol", "Timestamp"),
+        poll_keys=("Symbol", "TimestampStart"),
         per_symbol=True,
+        # One value per bar of the query's timespan: a bar's window and trading day.
+        row_times=RowTimes.BAR,
         # Its underlying bars are not rows of the table, so the library never asks for them.
         fixed_params={"expand_underlying": False},
         page_size=_PAGE_SIZE,
@@ -170,9 +181,10 @@ class _Indicators(Namespace):
                 windows), each a positive `int`.
             timespan: The bar timespan.
             series_type: The bar price the indicator is computed from.
-            adjusted: Whether the bars are adjusted for splits, or None for Massive's default.
-            start: The lower bound of `Timestamp`, or None.
-            end: The upper bound of `Timestamp`, or None.
+            adjusted: Whether the bars are adjusted for splits, or None for Massive's default,
+                which is adjusted.
+            start: The lower bound of `TimestampStart`, or None.
+            end: The upper bound of `TimestampStart`, or None.
             order: The timestamp order, or None.
             limit: The total-row cap, or None.
             filters: Further query parameters, or None.
@@ -223,8 +235,10 @@ class _Indicators(Namespace):
 
         Served over REST (`/v1/indicators/sma/{ticker}`), one request per symbol; `fetch()`
         returns every value in range and `poll()` re-fetches it, keyed by `Symbol` and
-        `Timestamp`. `dm.ALL` is not accepted: the endpoint takes one ticker per request. Its
-        columns, and what each means, are in
+        `TimestampStart`. Each value is one bar's: its window, `TimestampStart` to the exclusive
+        `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class.
+        `dm.ALL` is not accepted: the endpoint takes one ticker per request. Its columns, and
+        what each means, are in
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.md#sma,
         in the web UI's column tooltips, and in the query's `columns()`.
 
@@ -235,8 +249,9 @@ class _Indicators(Namespace):
             timespan: The bar size the average is computed over; `MINUTE` or longer.
             series_type: The bar price averaged.
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default. The crypto endpoint has no such parameter, so an
-                explicit value fails the verb with `ValueError` for a crypto symbol.
+                leaves Massive's default, which is adjusted for splits (never for dividends).
+                The crypto endpoint has no such parameter, so an explicit value fails the verb
+                with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,
@@ -292,8 +307,10 @@ class _Indicators(Namespace):
 
         Served over REST (`/v1/indicators/ema/{ticker}`), one request per symbol; `fetch()`
         returns every value in range and `poll()` re-fetches it, keyed by `Symbol` and
-        `Timestamp`. `dm.ALL` is not accepted: the endpoint takes one ticker per request. Its
-        columns, and what each means, are in
+        `TimestampStart`. Each value is one bar's: its window, `TimestampStart` to the exclusive
+        `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class.
+        `dm.ALL` is not accepted: the endpoint takes one ticker per request. Its columns, and
+        what each means, are in
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.md#ema,
         in the web UI's column tooltips, and in the query's `columns()`.
 
@@ -304,8 +321,9 @@ class _Indicators(Namespace):
             timespan: The bar size the average is computed over; `MINUTE` or longer.
             series_type: The bar price averaged.
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default. The crypto endpoint has no such parameter, so an
-                explicit value fails the verb with `ValueError` for a crypto symbol.
+                leaves Massive's default, which is adjusted for splits (never for dividends).
+                The crypto endpoint has no such parameter, so an explicit value fails the verb
+                with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,
@@ -361,8 +379,10 @@ class _Indicators(Namespace):
 
         Served over REST (`/v1/indicators/rsi/{ticker}`), one request per symbol; `fetch()`
         returns every value in range and `poll()` re-fetches it, keyed by `Symbol` and
-        `Timestamp`. `dm.ALL` is not accepted: the endpoint takes one ticker per request. Its
-        columns, and what each means, are in
+        `TimestampStart`. Each value is one bar's: its window, `TimestampStart` to the exclusive
+        `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class.
+        `dm.ALL` is not accepted: the endpoint takes one ticker per request. Its columns, and
+        what each means, are in
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.md#rsi,
         in the web UI's column tooltips, and in the query's `columns()`.
 
@@ -373,8 +393,9 @@ class _Indicators(Namespace):
             timespan: The bar size the index is computed over; `MINUTE` or longer.
             series_type: The bar price the index is computed from.
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default. The crypto endpoint has no such parameter, so an
-                explicit value fails the verb with `ValueError` for a crypto symbol.
+                leaves Massive's default, which is adjusted for splits (never for dividends).
+                The crypto endpoint has no such parameter, so an explicit value fails the verb
+                with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,
@@ -431,10 +452,12 @@ class _Indicators(Namespace):
         """The moving average convergence/divergence of a ticker's bars, one row per bar.
 
         Each row holds the MACD line (`Value`), its signal line, and their difference (the
-        histogram). Served over REST (`/v1/indicators/macd/{ticker}`), one request per
-        symbol; `fetch()` returns every value in range and `poll()` re-fetches it, keyed by
-        `Symbol` and `Timestamp`. `dm.ALL` is not accepted: the endpoint takes one ticker per
-        request. Its columns, and what each means, are in
+        histogram). Served over REST (`/v1/indicators/macd/{ticker}`), one request per symbol;
+        `fetch()` returns every value in range and `poll()` re-fetches it, keyed by `Symbol` and
+        `TimestampStart`. Each value is one bar's: its window, `TimestampStart` to the exclusive
+        `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class.
+        `dm.ALL` is not accepted: the endpoint takes one ticker per request. Its columns, and
+        what each means, are in
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.md#macd,
         in the web UI's column tooltips, and in the query's `columns()`.
 
@@ -447,8 +470,9 @@ class _Indicators(Namespace):
             timespan: The bar size the averages are computed over; `MINUTE` or longer.
             series_type: The bar price the averages are computed from.
             adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default. The crypto endpoint has no such parameter, so an
-                explicit value fails the verb with `ValueError` for a crypto symbol.
+                leaves Massive's default, which is adjusted for splits (never for dividends).
+                The crypto endpoint has no such parameter, so an explicit value fails the verb
+                with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,

@@ -143,14 +143,17 @@ def test_quotes_join_the_last_quote_through_its_projection() -> None:
     columns = _schema(forex.QUOTES)
     assert list(columns) == [
         "Symbol",
+        "Date",
         "Timestamp",
         "AskExchange",
         "AskPrice",
         "BidExchange",
         "BidPrice",
         "Exchange",
+        "TimestampInsert",
     ]
     assert columns["Timestamp"] is ColumnType.INSTANT
+    assert columns["Date"] is ColumnType.STRING
     assert columns["AskPrice"] is ColumnType.DOUBLE
     # The last quote's `ask` and `bid` are the stream's prices, not columns of their own.
     assert {"Ask", "Bid", "Ticker", "ParticipantTimestamp"}.isdisjoint(columns)
@@ -158,18 +161,21 @@ def test_quotes_join_the_last_quote_through_its_projection() -> None:
 
 def test_bars_rename_the_pair_and_window_start() -> None:
     columns = _schema(forex.BARS)
-    assert list(columns)[:2] == ["Symbol", "Timestamp"]
+    assert list(columns)[:4] == ["Symbol", "Date", "TimestampStart", "TimestampEnd"]
+    assert list(columns)[-1] == "TimestampInsert"
     assert {"Open", "High", "Low", "Close", "Volume", "Vwap", "Transactions"} <= set(columns)
-    assert "EndTimestamp" in columns  # the stream's window end
-    assert {"Pair", "Ticker", "WindowStart"}.isdisjoint(columns)
+    # The stream's window end `e` becomes `TimestampEnd`, which the library recomputes.
+    assert {"Pair", "Ticker", "WindowStart", "EndTimestamp", "Timestamp"}.isdisjoint(columns)
     assert columns["Volume"] is ColumnType.DOUBLE  # the stream's long joins REST's double
 
 
 def test_fmv_holds_the_fair_value_per_pair() -> None:
     assert _schema(forex.FMV) == {
         "Symbol": ColumnType.STRING,
+        "Date": ColumnType.STRING,
         "Timestamp": ColumnType.INSTANT,
         "Fmv": ColumnType.DOUBLE,
+        "TimestampInsert": ColumnType.INSTANT,
     }
 
 
@@ -495,8 +501,10 @@ def test_quotes_fetch_reads_the_last_quote_of_each_pair(
     table = rest_session.forex.quotes("C:AUDUSD").fetch()
     # The pair goes out as two path segments, and the whole pair comes back as `Symbol`.
     assert sent(fake_rest) == [("/v1/last_quote/currencies/AUD/USD", {})]
-    columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "Exchange")
-    assert pick(table, *columns) == [("C:AUDUSD", 1_605_557_756_000 * MS, 0.73124, 0.73122, 48)]
+    columns = ("Symbol", "Date", "Timestamp", "AskPrice", "BidPrice", "Exchange")
+    assert pick(table, *columns) == [
+        ("C:AUDUSD", "2020-11-16", 1_605_557_756_000 * MS, 0.73124, 0.73122, 48)
+    ]
 
 
 def test_quotes_history_reads_the_quote_history(
@@ -531,7 +539,19 @@ def test_quotes_history_reads_the_quote_history(
     ]
 
 
-BAR_COLUMNS = ("Symbol", "Timestamp", "Open", "High", "Low", "Close", "Volume", "Vwap")
+BAR_COLUMNS = (
+    "Symbol",
+    "Date",
+    "TimestampStart",
+    "TimestampEnd",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Vwap",
+)
+DAY_NS = 86_400 * NS
 
 
 def test_daily_bars_fetch_reads_the_previous_session(
@@ -545,9 +565,21 @@ def test_daily_bars_fetch_reads_the_previous_session(
     )
     table = rest_session.forex.bars("C:EURUSD", dm.Timespan.DAY).fetch()
     assert sent(fake_rest) == [("/v2/aggs/ticker/C:EURUSD/prev", {})]
-    # Stamped 23:59:59.999 UTC by `/prev`, at the start of its UTC day here.
+    # Stamped 23:59:59.999 UTC by `/prev`, its window here is its whole UTC day.
+    start = 1_651_622_400_000 * MS
     assert pick(table, *BAR_COLUMNS) == [
-        ("C:EURUSD", 1_651_622_400_000 * MS, 1.05252, 1.0631, 1.0505, 1.06206, 180300.0, 1.055)
+        (
+            "C:EURUSD",
+            "2022-05-04",
+            start,
+            start + DAY_NS,
+            1.05252,
+            1.0631,
+            1.0505,
+            1.06206,
+            180300.0,
+            1.055,
+        )
     ]
 
 
@@ -570,8 +602,20 @@ def test_bars_history_reads_the_aggregate_range(
             {"limit": ["50000"], "sort": ["asc"]},
         )
     ]
+    start = 1_626_912_000_000 * MS
     assert pick(table, *BAR_COLUMNS) == [
-        ("C:EURUSD", 1_626_912_000_000 * MS, 1.17921, 1.18305, 1.1756, 1.17721, 125329.0, 1.1789)
+        (
+            "C:EURUSD",
+            "2021-07-22",
+            start,
+            start + 3_600 * NS,  # an hour bar ends an hour after it starts
+            1.17921,
+            1.18305,
+            1.1756,
+            1.17721,
+            125329.0,
+            1.1789,
+        )
     ]
 
 
@@ -705,16 +749,20 @@ def test_a_bar_frame_lands_in_blink(
         "e": 1_700_000_100_000,
     }
     ws_session.publish(frame)
-    columns = ("Symbol", "Timestamp", "Open", "Close", "Volume", "EndTimestamp")
+    columns = ("Symbol", "Date", "TimestampStart", "Open", "Close", "Volume", "TimestampEnd")
     (row,) = rows_when(table, bool)
+    # The end is the start plus the bar's length, whatever `e` says (60 s here for both).
+    length = 60_000 if timespan is dm.Timespan.MINUTE else 1_000
     assert tuple(row[c] for c in columns) == (
         "C:EURUSD",
+        "2023-11-14",  # the UTC day of the start
         at_ms(1_700_000_040_000),
         1.08,
         1.09,
         20.0,
-        at_ms(1_700_000_100_000),
+        at_ms(1_700_000_040_000 + length),
     )
+    assert row["TimestampInsert"] is not None
 
 
 def test_a_fair_value_frame_lands_in_blink(ws_session: WsSession, rows_when: RowsWhen) -> None:
@@ -831,10 +879,11 @@ BAR_HEADER = ("ticker", "volume", "open", "close", "high", "low", "window_start"
 
 
 @pytest.mark.parametrize(
-    ("timespan", "prefix"),
+    ("timespan", "prefix", "offset"),
     [
-        (dm.Timespan.MINUTE, "global_forex/minute_aggs_v1"),
-        (dm.Timespan.DAY, "global_forex/day_aggs_v1"),
+        (dm.Timespan.MINUTE, "global_forex/minute_aggs_v1", 0),
+        # The day files stamp a day at its last millisecond; it is stamped at its start here.
+        (dm.Timespan.DAY, "global_forex/day_aggs_v1", 86_400 * 10**9 - 10**6),
     ],
 )
 def test_bar_files_round_trip(
@@ -843,16 +892,29 @@ def test_bar_files_round_trip(
     fake_s3: FakeS3,
     timespan: dm.Timespan,
     prefix: str,
+    offset: int,
 ) -> None:
     start = epoch_ns(datetime(2025, 3, 3, tzinfo=UTC))
-    values = ("C:EURUSD", 120, 1.08063, 1.08033, 1.0807, 1.0803, start, 120)
+    values = ("C:EURUSD", 120, 1.08063, 1.08033, 1.0807, 1.0803, start + offset, 120)
     fake_s3.put_csv(file_key(prefix), BAR_HEADER, [dict(zip(BAR_HEADER, values, strict=True))])
     # With no `adjusted` to rule them out, AUTO reads every pair's bars from the files.
     query = files_session.forex.bars(dm.ALL, timespan)
     table = query.history(FILE_DAY, FILE_DAY)
     assert fake_s3.requests == [("flatfiles", file_key(prefix))]
+    length = 60 * NS if timespan is dm.Timespan.MINUTE else DAY_NS
     assert pick(table, *BAR_COLUMNS) == [
-        ("C:EURUSD", start, 1.08063, 1.0807, 1.0803, 1.08033, 120.0, None)
+        (
+            "C:EURUSD",
+            "2025-03-03",
+            start,
+            start + length,
+            1.08063,
+            1.0807,
+            1.0803,
+            1.08033,
+            120.0,
+            None,
+        )
     ]
 
 
