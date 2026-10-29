@@ -271,7 +271,8 @@ def test_the_rest_client_never_shows_the_api_key(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", reply)
     with pytest.raises(WireError) as info:
-        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
+        # A 429 fails once its pauses outlast the call's patience, quoting the refusal.
+        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks", give_up_at=600.0)
     # The server's words are kept, with the key replaced, so the failure still explains itself.
     assert REDACTED in info.value.message
     _assert_no_secret(every_logger_at_debug, info.value)
