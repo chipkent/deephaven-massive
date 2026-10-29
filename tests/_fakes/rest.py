@@ -67,6 +67,11 @@ class Reply:
             replaces the server's own, which states the real time.
         reset: Close the connection without any response (a connection reset).
         gzip: Compress the body and send `Content-Encoding: gzip`.
+        hold: When set, send only the first `hold_after` bytes of the body, then wait (ten
+            seconds at most) until the test sets this event before sending the rest, as a
+            slow server does. The rest is dropped quietly if the client has closed the
+            connection by then.
+        hold_after: How many bytes of the (compressed) body `hold` sends before it waits.
     """
 
     body: object = b""
@@ -74,6 +79,8 @@ class Reply:
     headers: Mapping[str, str] = field(default_factory=dict)
     reset: bool = False
     gzip: bool = False
+    hold: threading.Event | None = None
+    hold_after: int = 0
 
     def payload(self) -> bytes:
         """Return the body's bytes, compressed when `gzip` is set."""
@@ -307,7 +314,20 @@ class FakeRestServer:
                 for name, value in reply.headers.items():
                     self.send_header(name, value)
                 self.end_headers()
-                self.wfile.write(data)
+                if reply.hold is None:
+                    self.wfile.write(data)
+                    return
+                self.wfile.write(data[: reply.hold_after])
+                self.wfile.flush()
+                reply.hold.wait(10)
+                # The client may have hung up while the tail waited: send the tail if it can,
+                # and never read another request from this connection.
+                self.close_connection = True
+                try:
+                    self.wfile.write(data[reply.hold_after :])
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
             def do_CONNECT(self) -> None:
                 fake._record(

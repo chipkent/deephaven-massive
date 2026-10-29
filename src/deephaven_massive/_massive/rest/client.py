@@ -94,11 +94,19 @@ and converts it in others; this value means the same in every supported release.
 MAX_BODY_BYTES = 256 * 1024 * 1024
 """The most bytes a response body may hold once decompressed; a larger one is refused.
 
-Massive's largest pages (50,000 trades or quotes) decompress to tens of megabytes, so 256 MiB
-leaves ample room for any real page. The client asks for gzip, and a few kilobytes of gzip can
-expand to gigabytes: a broken or hostile server or proxy could exhaust the process's memory
-with one reply, and urllib3 sets no limit of its own. The body is read and decompressed in
-`_READ_CHUNK` pieces, so the cap is enforced before any more than one piece past it is held.
+The client asks for gzip, and a few kilobytes of gzip can expand to gigabytes: a broken or
+hostile server or proxy could exhaust the process's memory with one reply, and urllib3 sets no
+limit of its own. The body is read and decompressed in `_READ_CHUNK` pieces and refused as
+soon as it passes the cap.
+
+The cap sits well above the largest page the library asks for, estimated from each
+endpoint's row schema and page size. A page of short rows (trades, quotes, bars, ratings: at
+most 50,000 rows of a few hundred bytes) decompresses to some 10 to 40 MB. Datasets whose rows
+are long ask for fewer at a time, so their pages stay at tens of megabytes: Benzinga news 1,000
+(each article carries its whole HTML body), analyst insights and filing risk factors 5,000,
+financial statements 10,000, and 10-K sections and 8-K texts 100. The cap bounds a
+decompression bomb, not every memory risk: a body under it still parses into Python objects
+several times its size.
 """
 
 _READ_CHUNK = 1024 * 1024
@@ -518,7 +526,7 @@ class RestClient:
 
         A failure that is not retryable raises `WireError`: a status that is neither 200, 429,
         nor a transient 5xx (`http_error` chooses the subclass), a body that decompresses to
-        more than `MAX_BODY_BYTES` (from `_body`), and from `_permit`,
+        more than `MAX_BODY_BYTES` (`_oversized`), and from `_permit`,
         `_unanswered`, and `_refused` a closed client or a cancelled caller, a failed TLS
         verification, a proxy that refused its credentials (HTTP 407), or a bucket Massive
         kept refusing for longer than the governor waits (status 429).
@@ -560,14 +568,23 @@ class RestClient:
                 self._governor.release(permit)  # no connection, so nothing reached Massive
             return self._unanswered(request, error)
         try:
-            body = self._body(request, response)
+            body = self._body(response)
         except urllib3.exceptions.HTTPError as error:  # the body broke off or would not decode
             return self._unanswered(request, error)
         elapsed = self._clock.monotonic() - started
         if response.status == HTTPStatus.TOO_MANY_REQUESTS:
-            self._refused(permit, http_error(response.status, body, request), response)
+            # A refusal pauses the bucket even when its body is too large to read.
+            self._refused(
+                permit,
+                http_error(response.status, b"" if body is None else body, request),
+                response,
+            )
+            if body is None:
+                raise self._oversized(request, response)
             return _REFUSED
-        self._governor.done(permit, answered=True)
+        self._governor.done(permit, answered=True)  # an oversized body is still an answer
+        if body is None:
+            raise self._oversized(request, response)
         if response.status == HTTPStatus.OK:
             page = decode_page(body, job.rest_path, request)
             _log.debug(
@@ -590,54 +607,60 @@ class RestClient:
             return _Retryable(failure)
         raise failure
 
-    def _body(self, request: Request, response: BaseHTTPResponse) -> bytes:
+    def _body(self, response: BaseHTTPResponse) -> bytearray | None:
         """Read a response's whole body, decompressed, and hand its connection back to the pool.
 
-        The body is read in `_READ_CHUNK` pieces and refused once it passes `MAX_BODY_BYTES`, so
-        a small compressed reply that expands without bound never fills memory. A body read in
-        full returns its connection to the pool for reuse; a body abandoned part way, by the cap
-        or by an error, closes its connection first, because the unread rest of the body would
-        otherwise be read as the next response. urllib3's own errors pass through unchanged
-        (an `HTTPError` when the body breaks off, times out, or does not decompress), for
-        `_send` to treat as an attempt that got no answer.
+        The body is read in `_READ_CHUNK` pieces into one buffer, and abandoned once it passes
+        `MAX_BODY_BYTES`, so a small compressed reply that expands without bound never fills
+        memory. A body read in full returns its connection to the pool for reuse; a body
+        abandoned part way, by the cap or by an error, closes its connection first, because
+        the unread rest of the body would otherwise be read as the next response. urllib3's
+        own errors pass through unchanged (an `HTTPError` when the body breaks off, times out,
+        or does not decompress), for `_send` to treat as an attempt that got no answer.
 
         Args:
-            request: The request, for messages.
             response: The response, its body not yet read.
 
         Returns:
-            The decompressed body.
-
-        Raises:
-            WireError: If the decompressed body passes `MAX_BODY_BYTES`. It carries the
-                response's status and names the request and the cap, never the body. It is
-                not retried: a reply that large is no page of Massive's, and the same request
-                would bring the same reply.
+            The decompressed body, or None when it passes `MAX_BODY_BYTES` (`_send` then
+            raises `_oversized`).
         """
-        chunks: list[bytes] = []
-        size = 0
+        body = bytearray()
         whole = False
         try:
             for chunk in response.stream(_READ_CHUNK, decode_content=True):
-                size += len(chunk)
-                if size > MAX_BODY_BYTES:
+                if len(body) + len(chunk) > MAX_BODY_BYTES:
                     break
-                chunks.append(chunk)
+                body += chunk
             else:
                 whole = True
         finally:
             if not whole:
                 response.close()  # the rest of the body is unread, so the connection is not reused
             response.release_conn()
-        if not whole:
-            raise WireError(
-                f"GET {request.target}: the response from {self._host} decompresses to more "
-                f"than {MAX_BODY_BYTES} bytes, the most the client reads",
-                status=response.status,
-                host=self._host,
-                path=request.target,
-            )
-        return b"".join(chunks)
+        return body if whole else None
+
+    def _oversized(self, request: Request, response: BaseHTTPResponse) -> WireError:
+        """Return the error of a response whose body decompresses past `MAX_BODY_BYTES`.
+
+        It is never retried: a reply that large is no page of Massive's, and the same request
+        would bring the same reply.
+
+        Args:
+            request: The request.
+            response: The response, for its status.
+
+        Returns:
+            A `WireError` with the response's status that names the request and the cap,
+            never the body.
+        """
+        return WireError(
+            f"GET {request.target}: the response from {self._host} decompresses to more "
+            f"than {MAX_BODY_BYTES} bytes, the most the client reads",
+            status=response.status,
+            host=self._host,
+            path=request.target,
+        )
 
     def _permit(self, request: Request, job: _Job, stop: Cancel) -> Permit:
         """Wait for the governor to admit an attempt, in the call's lane.

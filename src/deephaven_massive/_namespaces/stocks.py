@@ -343,7 +343,9 @@ def _statement(dataset: str, path: str, *, summary: str) -> DatasetSpec:
         time_axis=("period_end.gte", "period_end.lte"),
         symbol_param="tickers.any_of",
         poll_keys=_STATEMENT_KEYS,
-        page_size=50_000,
+        # Below the documented 50,000: a statement row holds some fifty line items, over a
+        # kilobyte of JSON, so a full page would pass 60 MB; 10,000 keeps it near 15 MB.
+        page_size=10_000,
     )
 
 
@@ -428,7 +430,8 @@ def _filing(
         nullable_poll_keys: The poll keys the vendor leaves empty on some rows, each with
             its reason; a null there is a value, not a data failure. None for no such key.
         keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
-        page_size: The largest `limit` the path documents.
+        page_size: The largest `limit` the path documents, or less for rows that carry long
+            text.
 
     Returns:
         The spec.
@@ -499,7 +502,9 @@ RISK_FACTORS: Final = _filing(
     _RISK_FACTORS,
     symbol_param="ticker.any_of",
     poll_keys=("Cik", "FilingDate", *_CATEGORIES, "SupportingText"),
-    page_size=50_000,
+    # Below the documented 50,000: each row quotes the filing's text for its risk factor, so a
+    # page of 5,000 stays at a few megabytes.
+    page_size=5_000,
     summary="Risk factors disclosed in company filings, classified by category, one row each.",
 )
 _13F_AMOUNTS: Final = (

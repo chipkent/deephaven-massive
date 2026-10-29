@@ -303,7 +303,10 @@ class DatasetSpec:
         symbols_per_request: The most symbols one request carries in a list-valued symbol
             parameter (`ticker.any_of`), such as 250 for the unified snapshot; a longer list is
             split over several requests. None sends every symbol in one request.
-        page_size: The REST page size requested; `limit` is a separate total-row cap.
+        page_size: The REST page size requested: the endpoint's documented maximum `limit`,
+            lowered where the rows are long (article bodies, quoted filing text, financial
+            statements), so one page decompresses to some tens of megabytes at most, far below
+            the REST client's cap on a response body. `limit` is a separate total-row cap.
         fixed_params: Query parameters the library sets itself on every REST request, by wire
             name, such as the options snapshot's `{"type": "options"}`; they have no argument
             of their own. Every REST path of the dataset must take each one (the catalog's

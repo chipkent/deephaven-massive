@@ -227,6 +227,62 @@ def test_a_gzip_bomb_is_refused_at_the_cap_and_never_retried(
     assert clock.waits == []
 
 
+def test_an_abandoned_body_never_stands_in_for_the_next_reply(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 4 * 1024)
+    tail = threading.Event()
+    bomb = Reply(b"\0" * (64 * 1024 * 1024), gzip=True, hold=tail, hold_after=32 * 1024)
+    fake_rest.reply("/v3/trades/AAPL", bomb, _ok())
+    try:
+        with pytest.raises(WireError, match="more than 1048576 bytes"):
+            client.get(_TRADES, _AAPL, {}, bucket="stocks")
+        # The bomb's tail has not arrived, so its connection looks idle to the pool; reusing
+        # it would read the tail as the next reply.
+        assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+        assert clock.waits == []
+    finally:
+        tail.set()
+
+
+def test_an_oversized_429_still_pauses_its_bucket(
+    fake_rest: FakeRestServer, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024)
+    governor = _governor(clock)
+    rest = _client(fake_rest, governor=governor)
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"x" * 4096, status=429, headers={"Retry-After": "5"}))
+    with pytest.raises(WireError, match="more than 1024 bytes") as caught:
+        rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert caught.value.status == 429
+    state = governor.snapshot()[0]
+    assert (state.refusals, state.in_flight) == (1, 0)
+    assert state.paused_until is not None
+    rest.close()
+
+
+def test_an_oversized_reply_ends_the_run_of_refusals_as_any_answer_does(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024)
+    limited = Reply({"message": "slow down"}, status=429)
+    fake_rest.reply("/v3/trades/AAPL", limited, Reply(b"x" * 4096), limited, _ok())
+    with pytest.raises(WireError, match="more than 1024 bytes"):
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    # Massive answered between the two refusals, so the second pause starts the schedule over.
+    assert clock.waits == [15.0, 15.0]
+
+
 def test_a_body_of_exactly_the_cap_is_read(
     client: RestClient, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
