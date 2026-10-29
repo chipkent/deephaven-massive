@@ -281,6 +281,11 @@ class Subscriptions:
         return self._deferred
 
     @property
+    def acknowledged(self) -> frozenset[str]:
+        """The topics acknowledged in the current generation, for the connection's summary."""
+        return frozenset(self._acked)
+
+    @property
     def explicit(self) -> int:
         """How many explicit topics streams want and the server has not refused."""
         return sum(1 for t in self._refs if not is_wildcard(t) and t not in self._refused)
@@ -334,6 +339,17 @@ class Subscriptions:
         wire = self._wire()
         adds, removes = wire - self._sent, self._sent - wire
         generation = self.generation
+        if adds or removes:
+            logger.debug(
+                "generation %d: subscribe %s, unsubscribe %s (desired %d, acknowledged %d, "
+                "deferred by the options cap %d)",
+                generation,
+                sorted(adds),
+                sorted(removes),
+                len(self._refs),
+                len(self._acked - removes),
+                len(self._deferred),
+            )
         if adds:
             ordered = sorted(adds)
             self._sender.subscribe(generation, ordered)

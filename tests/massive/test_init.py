@@ -19,6 +19,7 @@ from deephaven_massive._massive.spec import types, values
 
 EXPECTED_INTERFACE = [
     "DriftReport",
+    "DriftSample",
     "Field",
     "FlatFile",
     "FlatFileClient",
@@ -66,7 +67,8 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.source is spec.source
     assert _massive.sources is spec.sources
     assert _massive.provenance is spec.provenance
-    for name in ("DriftReport", "Field", "ParamKind", "Provenance", "RestPath", "Source"):
+    shared = ("DriftReport", "DriftSample", "Field", "ParamKind", "Provenance", "RestPath")
+    for name in (*shared, "Source"):
         assert getattr(_massive, name) is getattr(types, name)
     assert _massive.Transport is types.Transport
     assert _massive.WireType is types.WireType

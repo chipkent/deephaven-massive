@@ -353,6 +353,29 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
     return len(symbols), f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
+def _drift_context(drift: DriftReport, field: str, *, where: str, symbol: str | None) -> str:
+    """Return where a drifted field was seen, for its WARNING.
+
+    Args:
+        drift: The payload's drift, with its samples.
+        field: The drifted wire key.
+        where: Where the payload came from.
+        symbol: The payload's symbol when its sample has none, or None.
+
+    Returns:
+        `where`, then `; symbol <symbol>` when one is known and `; first value <value>` for an
+        extra field's sample, such as `"wss://h/stocks channel T; symbol AAPL; first value 1"`.
+    """
+    sample = drift.samples.get(field)
+    parts = [where]
+    shown = sample.symbol if sample is not None and sample.symbol is not None else symbol
+    if shown is not None:
+        parts.append(f"symbol {shown}")
+    if sample is not None and sample.value is not None:
+        parts.append(f"first value {sample.value}")
+    return "; ".join(parts)
+
+
 class DriftRegistry:
     """The session's record of runtime schema drift: the WARNINGs and the `SchemaDrift` text.
 
@@ -393,8 +416,9 @@ class DriftRegistry:
 
             drift = DriftReport(extra=frozenset({"halted"}), missing=frozenset({"trf_id"}))
             registry = DriftRegistry()
-            registry.report("stocks.trades", Transport.REST, drift)  # two WARNINGs
-            registry.report("stocks.trades", Transport.REST, drift)  # nothing new: no log
+            where = "GET /v3/trades/{stockTicker}"
+            registry.report("stocks.trades", Transport.REST, drift, where=where)  # two WARNINGs
+            registry.report("stocks.trades", Transport.REST, drift, where=where)  # no log
             registry.record(7, Transport.REST.value, drift)  # "REST:halted+, REST:trf_id-"
             registry.record(7, Transport.REST.value, drift)  # unchanged: None
     """
@@ -408,15 +432,32 @@ class DriftRegistry:
         self._statuses: set[tuple[str, str]] = set()
         self._owners: dict[Hashable, frozenset[str]] = {}
 
-    def report(self, dataset: str, transport: Transport, drift: DriftReport) -> None:
+    def report(
+        self,
+        dataset: str,
+        transport: Transport,
+        drift: DriftReport,
+        *,
+        where: str,
+        symbol: str | None = None,
+    ) -> None:
         """Log a WARNING for each field of `drift` not yet reported for the dataset and transport.
 
-        Ignores `drift.statuses`; see `report_statuses`.
+        Each WARNING names the dataset, the transport, and the field, then where the payload
+        came from, the symbol of the first row that showed the field, and for an extra field
+        that row's value (`DriftReport.samples`), so the log says enough to reproduce it: `...
+        (schema drift) at wss://delayed.massive.com/stocks channel T; symbol AAPL; first value
+        182.33`. A field is reported once per process and dataset; the first sample is the one
+        a fix needs. Ignores `drift.statuses`; see `report_statuses`.
 
         Args:
             dataset: The dataset name, such as `"stocks.trades"`.
             transport: The transport the payload arrived on.
             drift: The payload's drift, as a wire decoder returned it.
+            where: Where the payload came from: the REST request (`"GET /v3/trades/AAPL"`),
+                the WebSocket URL and channel, or the flat file.
+            symbol: The symbol the payload is about when its sample cannot say (a REST
+                request for one symbol), or None.
         """
         changes = [(field, True) for field in drift.extra]
         changes += [(field, False) for field in drift.missing]
@@ -426,19 +467,22 @@ class DriftRegistry:
             ]
             self._warned.update((dataset, transport, f) for f, _ in new)
         for field, extra in sorted(new):
+            context = _drift_context(drift, field, where=where, symbol=symbol)
             if extra:
                 logger.warning(
-                    "%s: %s field %r is not in the schema; it is dropped (schema drift)",
+                    "%s: %s field %r is not in the schema; it is dropped (schema drift) at %s",
                     dataset,
                     transport.value,
                     field,
+                    context,
                 )
             else:
                 logger.warning(
-                    "%s: %s field %r is missing; it reads as null (schema drift)",
+                    "%s: %s field %r is missing; it reads as null (schema drift) at %s",
                     dataset,
                     transport.value,
                     field,
+                    context,
                 )
 
     def report_statuses(self, path: str, statuses: frozenset[str]) -> None:

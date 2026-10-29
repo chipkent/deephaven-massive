@@ -612,10 +612,12 @@ class _Drift:
     Attributes:
         channel: The channel.
         drift: The frame's drift for the channel.
+        where: The connection's URL and the channel, for the drift WARNING.
     """
 
     channel: str
     drift: DriftReport
+    where: str
 
 
 class Flusher:
@@ -719,14 +721,16 @@ class Flusher:
         """
         self._control.put(_Fail(tuple(stream_ids), error))
 
-    def drift(self, channel: str, drift: DriftReport) -> None:
+    def drift(self, channel: str, drift: DriftReport, *, where: str) -> None:
         """Ask the flush thread to report a channel's drift for the streams on it. Never blocks.
 
         Args:
             channel: The channel.
             drift: The frame's drift for the channel.
+            where: Where the frame came from, such as `"wss://delayed.massive.com/stocks
+                channel T"`, named in the drift WARNING.
         """
-        self._control.put(_Drift(channel, drift))
+        self._control.put(_Drift(channel, drift, where))
 
     def _run(self) -> None:
         """Flush every interval until `stop()`; a failing flush is logged and the next one runs."""
@@ -772,7 +776,8 @@ class Flusher:
                     self._publish(core, rows, sinks, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
-                    self._report_drift(core, routes.get(item.channel, ()), item.drift)
+                    sinks = routes.get(item.channel, ())
+                    self._report_drift(core, sinks, item.drift, where=item.where)
             if updates:
                 core.update_streams(updates)
 
@@ -839,16 +844,19 @@ class Flusher:
                 updates[sink.stream_id] = StreamUpdate(rows_published=sink.rows_published)
 
     @staticmethod
-    def _report_drift(core: SessionCore, sinks: tuple[StreamSink, ...], drift: DriftReport) -> None:
+    def _report_drift(
+        core: SessionCore, sinks: tuple[StreamSink, ...], drift: DriftReport, *, where: str
+    ) -> None:
         """Log a channel's drift once per dataset and field, and add it to each stream's row.
 
         Args:
             core: The session's core.
             sinks: The channel's streams.
             drift: The drift.
+            where: The connection's URL and the channel.
         """
         for dataset in dict.fromkeys(sink.plan.dataset for sink in sinks):
-            core.drift.report(dataset, Transport.WS, drift)
+            core.drift.report(dataset, Transport.WS, drift, where=where)
         for sink in sinks:
             core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
 

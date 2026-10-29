@@ -322,6 +322,27 @@ def test_the_streams_row_follows_the_cycles_and_the_release(
     assert pollers._live == set()
 
 
+def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.rows(("AAPL", 1.0), ("MSFT", 2.0))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        table = start(massive_session, script=script, pollers=pollers, clock=clock)
+        until(lambda: len(pairs(table, dh_to_pylist)) == 2)
+        script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+        next_cycle(clock)
+    assert caplog.messages == [
+        "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in 0.000 s",
+        "stocks.dividends poll() stream 1: HTTP 503 from GET /stocks/v1/dividends",
+    ]
+
+
 def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
     *,
     massive_session: dm.MassiveSession,

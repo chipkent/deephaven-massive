@@ -521,6 +521,10 @@ class FlatFileHistory:
         the session is closed during the call. Errors that come from S3 carry its
         `x-amz-request-id` as `request_id`. An extra or missing documented header is not an
         error: it logs a WARNING once per header and session.
+
+        Raises:
+            MassiveError: Each error above (`AuthenticationError` and `EntitlementError` are
+                its subclasses), first logged at ERROR as `call <id> failed: <message>`.
         """
         prefix = spec.flat_file_prefixes[request.timespan]
         transform = _Transform.build(
@@ -534,7 +538,11 @@ class FlatFileHistory:
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
         threads = f"{self._core.thread_prefix} call-{call} files"
-        return self._read(spec, transform, keys, last=dates[-1], roll=roll, threads=threads)
+        try:
+            return self._read(spec, transform, keys, last=dates[-1], roll=roll, threads=threads)
+        except MassiveError as error:
+            _report(error, call)
+            raise
 
     def _read(
         self,
@@ -583,6 +591,7 @@ class FlatFileHistory:
         self._check_open()
         parts = [_outcome(future) for future in futures]
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
+        _warn_if_none_exist(spec, keys, missing)
         self._skip_missing(spec, missing, last=last)
         logger.info(
             "%s history: source=S3 files=%d skipped=%s",
@@ -798,7 +807,11 @@ class FlatFileHistory:
                 self._check(cancel)
                 try:
                     return self._gather(
-                        batches, transform, limit=_TABLE_BLOCKS * plan.block_size, cancel=cancel
+                        batches,
+                        transform,
+                        limit=_TABLE_BLOCKS * plan.block_size,
+                        cancel=cancel,
+                        where=file.location,
                     )
                 except pa.ArrowException as error:
                     raise MassiveError(f"cannot read {file.location}: {error}") from error
@@ -822,6 +835,7 @@ class FlatFileHistory:
         *,
         limit: int,
         cancel: threading.Event,
+        where: str,
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
@@ -834,6 +848,8 @@ class FlatFileHistory:
             transform: The request's block transform.
             limit: The bytes of surviving rows that make one table.
             cancel: The call's cancel event, checked after each block.
+            where: The file's location (`s3://<bucket>/<key> at <endpoint>`), for the drift
+                WARNING.
 
         Returns:
             The file's tables, in file order.
@@ -845,7 +861,9 @@ class FlatFileHistory:
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
                 if not reported:  # every batch of a file carries the same report
-                    self._core.drift.report(transform.dataset, Transport.FLAT_FILES, drift)
+                    self._core.drift.report(
+                        transform.dataset, Transport.FLAT_FILES, drift, where=where
+                    )
                     reported = True
                 rows = transform.apply(batch)
                 if rows.num_rows:
@@ -898,6 +916,51 @@ class FlatFileHistory:
             logger.warning(
                 "%s: %s does not exist; skipping %s (a market holiday?)", spec.name, key.key, day
             )
+
+
+def _report(error: MassiveError, call: int) -> None:
+    """Log a failed call at ERROR with its id and exactly the text its exception carries.
+
+    The exception itself propagates to the caller, whose traceback shows where it came from;
+    the call's id ties the record to its `call <id> start` line and to its reader threads'
+    lines.
+
+    Args:
+        error: The failure.
+        call: The id of the `history()` call that failed.
+    """
+    logger.error("call %d failed: %s", call, error)
+
+
+def _warn_if_none_exist(spec: DatasetSpec, keys: Sequence[_Key], missing: Sequence[_Key]) -> None:
+    """Warn when not one of several trading days' files exists: the address may be wrong.
+
+    Each missing weekday file is otherwise skipped as a likely holiday, so a wrong prefix,
+    bucket, or venue would read as a run of holidays and return an empty table quietly. Two
+    or more trading days' files, all missing, are logged at WARNING with the count and where
+    they were looked for.
+
+    Args:
+        spec: The dataset.
+        keys: Every file the call read, in date order.
+        missing: The files S3 reported as missing.
+    """
+    trading = [
+        key
+        for key in keys
+        if spec.asset_class is AssetClass.CRYPTO or key.day.weekday() < _SATURDAY
+    ]
+    absent = set(missing)
+    if len(trading) > 1 and all(key in absent for key in trading):
+        logger.warning(
+            "%s: 0 of %d trading days' files exist (%s..%s, first looked for at %s); "
+            "the bucket, prefix, or venue may be wrong",
+            spec.name,
+            len(trading),
+            trading[0].day.isoformat(),
+            trading[-1].day.isoformat(),
+            trading[0].key,
+        )
 
 
 def _released(error: WireError) -> WireError:

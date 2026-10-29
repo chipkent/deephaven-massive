@@ -510,7 +510,10 @@ def test_a_row_without_a_symbol_fails_only_the_all_streams(
     harness.flush()
     rows = streams_of(harness, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
-    assert caplog.text.count("has no valid symbol; failing the channel's ALL streams") == 2
+    assert caplog.text.count("; failing the channel's ALL streams") == 2
+    # Each line says why the row has no symbol: none at all, or the raw one that is not valid.
+    assert "a T row has no valid symbol (it has none)" in caplog.text
+    assert "a T row has no valid symbol ('not a symbol' is not a symbol)" in caplog.text
     del aapl, every
 
 
@@ -1622,3 +1625,60 @@ def test_a_topic_reconnects_once_per_session(harness: Harness) -> None:
     assert harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert not harness.connections.first_no_ack("/stocks", "T.AAPL")
     assert harness.connections.first_no_ack("/options", "T.AAPL")
+
+
+# --- logging -------------------------------------------------------------------------------------
+
+_URL = "wss://socket.test/stocks"
+
+
+def test_the_connection_logs_drift_rejects_and_a_summary(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    connection = harness.connection()
+    with caplog.at_level(logging.DEBUG):
+        harness.send(trade("AAPL", zz=1), trade("AAPL", p="bad"))
+        harness.flush()
+        harness.on_loop(connection, connection._summarize)
+    assert f"(schema drift) at {_URL} channel T; symbol AAPL; first value 1" in caplog.text
+    [rejected] = [m for m in caplog.messages if "a rejected row fails" in m]
+    assert rejected.startswith(f"{_URL} channel T: a rejected row fails streams [1]: ")
+    assert rejected.endswith('"p":"bad","q":1,"t":1700000000000,"s":100,"z":3,"ds":"100"}')
+    [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
+    assert summary.startswith(
+        f"{_URL}: last 60 s: 1 data batches, rows T=1, 1 rejected; 1 of 1 topics acknowledged "
+        "['T.AAPL'], 0 pending, 0 with no acknowledgement; last data T "
+    )
+    assert summary.endswith(" s ago; state CONNECTED, 0 reconnects")
+    # The next window starts empty; with DEBUG off the summary is counted but not logged.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        harness.on_loop(connection, connection._summarize)
+    assert "1 data batches" not in caplog.text
+    assert "0 data batches, rows none, 0 rejected" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        harness.on_loop(connection, connection._summarize)
+    assert "last 60 s" not in caplog.text
+    del result
+
+
+def test_symbol_changes_and_shutdowns_are_logged(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    with caplog.at_level(logging.DEBUG, logger=ws.__name__):
+        result = harness.query(TRADES, watchlist).append_only()
+        harness.subscribed("T.AAPL")
+        watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+        harness.subscribed("T.MSFT")
+        harness.session.release(result)
+        harness.unsubscribed("T.AAPL")  # the stream shut down and released its topics
+    assert "stream 1: its symbol table added ['MSFT'] and removed []" in caplog.messages
+    assert (
+        f"stream 1 shut down: its route is removed and 2 topics released on {_URL}"
+        in caplog.messages
+    )

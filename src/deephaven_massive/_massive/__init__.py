@@ -25,7 +25,8 @@ Interface:
     - `provenance`, `Provenance`: the day the vendor sources were fetched and the vendor URL
       of each source, for documents that cite them.
     - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
-      `DriftReport`: the value types of that description. A `RestPath`'s parameters are
+      `DriftReport`, `DriftSample`: the value types of that description, and a drift report
+      with the first row that showed each drifted key. A `RestPath`'s parameters are
       `Param`s, reached through `RestPath.params`.
     - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
       client, one file being decoded into Arrow batches, what to read from it, and where a
@@ -61,6 +62,7 @@ from typing import TYPE_CHECKING
 
 __all__ = [
     "DriftReport",
+    "DriftSample",
     "Field",
     "FlatFile",
     "FlatFileClient",
@@ -111,6 +113,7 @@ _EXPORTS: dict[str, str] = {
     "source": "deephaven_massive._massive.spec",
     "sources": "deephaven_massive._massive.spec",
     "DriftReport": "deephaven_massive._massive.spec.types",
+    "DriftSample": "deephaven_massive._massive.spec.types",
     "Field": "deephaven_massive._massive.spec.types",
     "ParamKind": "deephaven_massive._massive.spec.types",
     "Provenance": "deephaven_massive._massive.spec.types",
@@ -141,6 +144,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.spec import provenance, source, sources
     from deephaven_massive._massive.spec.types import (
         DriftReport,
+        DriftSample,
         Field,
         ParamKind,
         Provenance,

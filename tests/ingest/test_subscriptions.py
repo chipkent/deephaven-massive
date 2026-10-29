@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._ingest import subscriptions
 from deephaven_massive._ingest.subscriptions import (
     Subscriptions,
     channel_of,
@@ -527,3 +528,27 @@ def test_topic_helpers() -> None:
     assert not is_wildcard("T.AAPL")
     assert channel_of("C.EUR-USD") == "C"
     assert stream_topics(AssetClass.FOREX, "C", ["C:EURUSD"]) == {"C.EUR-USD"}
+
+
+def test_each_step_and_the_acknowledged_topics_are_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = make_loop()
+    loop.subs.add(["T.MSFT", "T.AAPL"])
+    with caplog.at_level(logging.DEBUG, logger=subscriptions.__name__):
+        loop.subs.opened(1)
+        loop.subs.status(ack("T.AAPL", "T.MSFT"))
+        loop.subs.remove(["T.MSFT"])
+        loop.subs.reconcile()
+        loop.subs.reconcile()  # nothing changed: no line
+    assert loop.subs.acknowledged == frozenset({"T.AAPL"})
+    assert caplog.messages == [
+        (
+            "generation 1: subscribe ['T.AAPL', 'T.MSFT'], unsubscribe [] (desired 2, "
+            "acknowledged 0, deferred by the options cap 0)"
+        ),
+        (
+            "generation 1: subscribe [], unsubscribe ['T.MSFT'] (desired 1, acknowledged 1, "
+            "deferred by the options cap 0)"
+        ),
+    ]

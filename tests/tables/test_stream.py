@@ -423,7 +423,7 @@ def test_drift_is_reported_for_the_streams_of_the_channel(
     sink, _ = make_sink(massive_session._core, ALL)
     flusher.routes.add("T", sink)
     with caplog.at_level(logging.WARNING):
-        flusher.drift("T", DriftReport(extra=frozenset({"zz"})))
+        flusher.drift("T", DriftReport(extra=frozenset({"zz"})), where="wss://h/stocks channel T")
         flusher.flush()
     assert "test.trades: WS field 'zz' is not in the schema" in caplog.text
 

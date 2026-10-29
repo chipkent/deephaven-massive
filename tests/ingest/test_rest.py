@@ -952,6 +952,27 @@ def test_drift_is_reported_once_per_field_and_status(
         fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert caplog.text.count("'brand_new' is not in the schema") == 1
     assert caplog.text.count("undocumented response status 'PARTIAL'") == 1
+    # The WARNING says where the field was seen and the first value it held.
+    assert "(schema drift) at GET /stocks/v1/dividends; first value 1\n" in caplog.text
+
+
+def test_drift_of_a_per_symbol_request_names_the_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    last = {"conditions": [1], "exchange": 1, "price": 1.5, "size": 0.1, "timestamp": 1704310200000}
+    body = {
+        "status": "success",
+        "request_id": "r",
+        "symbol": "BTC-USD",
+        "last": {**last, "new": "x"},
+    }
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(body))
+    with caplog.at_level(logging.WARNING):
+        fetch(session, CRYPTO_LAST, symbols=["BTC-USD"])
+    assert (
+        "crypto.last: REST field 'new' is not in the schema; it is dropped (schema drift) "
+        f'at GET {CRYPTO_LAST_PATH}; symbol X:BTCUSD; first value "x"'
+    ) in caplog.messages
 
 
 def test_a_row_without_its_symbol_is_a_data_failure(
@@ -964,7 +985,8 @@ def test_a_row_without_its_symbol_is_a_data_failure(
         pytest.raises(RowDataError, match=r"^stocks.dividends: "),
     ):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
-    assert "stocks.dividends: " in caplog.text  # logged at ERROR with the same text
+    # Logged at ERROR with the same text, after the id of the call that failed.
+    assert "call 1 failed: stocks.dividends: " in caplog.text
 
 
 def test_a_row_without_an_optional_symbol_keeps_a_null_symbol(

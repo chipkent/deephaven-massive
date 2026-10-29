@@ -1392,6 +1392,7 @@ _WIRE_VOCABULARY = frozenset(
         "WireAuthError",
         "WireEntitlementError",
         "DriftReport",
+        "DriftSample",
         "Field",
         "ParamKind",
         "Provenance",

@@ -114,6 +114,9 @@ JOIN_TIMEOUT: Final = 5.0
 _MESSAGE_ROW_NS: Final = 1_000_000_000
 """How often, at most, a connection's row is rewritten only to advance `LastMessageAt`."""
 
+SUMMARY_INTERVAL: Final = 60.0
+"""Seconds between a connection's DEBUG summaries of its traffic, so a stall shows in the log."""
+
 
 class _Client(Sender, Protocol):
     """What a connection needs of its client: `WsClient`'s interface."""
@@ -294,6 +297,12 @@ class Connection:
         self._next_reconnect_at: int | None = None
         self._last_error: str | None = None
         self._drift: str | None = None
+        # The traffic of the summary's window (`_summarize`), counted on the loop thread.
+        self._summary: Timer | None = None
+        self._window_batches = 0
+        self._window_rows: dict[str, int] = {}
+        self._window_rejects = 0
+        self._last_data: dict[str, int] = {}
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -435,6 +444,12 @@ class Connection:
         self.flusher.routes.remove(stream_id)
         self._deferred_shown.pop(stream_id, None)
         self.subscriptions.remove(stream.topics, static=stream.static)
+        logger.debug(
+            "stream %d shut down: its route is removed and %d topics released on %s",
+            stream_id,
+            len(stream.topics),
+            self.url,
+        )
         self._after_change()
 
     def change_symbols(
@@ -455,6 +470,12 @@ class Connection:
         topics = stream_topics(self.asset_class, stream.channel, symbols)
         self.subscriptions.add(topics - stream.topics)
         self.subscriptions.remove(stream.topics - topics)
+        logger.debug(
+            "stream %d: its symbol table added %s and removed %s",
+            stream_id,
+            sorted(added),
+            sorted(removed),
+        )
         stream.symbols, stream.topics = symbols, topics
         stream.sink.set_symbols(symbols)
         count, text = describe_symbols(tuple(sorted(symbols)))
@@ -574,6 +595,8 @@ class Connection:
         """
         if generation > 1:
             self._reconnects += 1
+        if self._summary is None:
+            self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
         self._state = ConnectionState.CONNECTED
         self._next_reconnect_at = None
         self.subscriptions.opened(generation)
@@ -604,16 +627,59 @@ class Connection:
             rejects: The rows that failed validation.
             drift: The frame's drift for the channel.
         """
+        now = time.time_ns()
+        self._window_batches += 1
         if rows:
             self.flusher.rows(channel, rows)
+            self._window_rows[channel] = self._window_rows.get(channel, 0) + len(rows)
+            self._last_data[channel] = now
+        self._window_rejects += len(rejects)
         for reject in rejects:
             self._reject(channel, reject)
         if drift.extra or drift.missing:
             self._record_drift(channel, drift)
-        now = time.time_ns()
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
+
+    def _summarize(self) -> None:
+        """Log the last window's traffic at DEBUG, then start the next window.
+
+        Runs on the loop thread every `SUMMARY_INTERVAL` seconds from the first generation on,
+        whether or not DEBUG is on (the line is built only when it is): the data batches and
+        rows per channel received, the rejected rows, the acknowledged topics, and how long
+        ago each channel last had data, so a stream that went quiet shows in the log even
+        though nothing failed.
+        """
+        self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
+        if logger.isEnabledFor(logging.DEBUG):
+            now = time.time_ns()
+            topics, acked, pending, no_ack = self.subscriptions.counts()
+            rows = ", ".join(f"{c}={n}" for c, n in sorted(self._window_rows.items()))
+            ages = ", ".join(
+                f"{c} {(now - at) / 1e9:.0f} s ago" for c, at in sorted(self._last_data.items())
+            )
+            logger.debug(
+                "%s: last %.0f s: %d data batches, rows %s, %d rejected; %d of %d topics "
+                "acknowledged %s, %d pending, %d with no acknowledgement; last data %s; "
+                "state %s, %d reconnects",
+                self.url,
+                SUMMARY_INTERVAL,
+                self._window_batches,
+                rows or "none",
+                self._window_rejects,
+                acked,
+                topics,
+                sorted(self.subscriptions.acknowledged),
+                pending,
+                no_ack,
+                ages or "never",
+                self._state.value,
+                self._reconnects,
+            )
+        self._window_batches = 0
+        self._window_rows = {}
+        self._window_rejects = 0
 
     def _on_state(self, state: WsState, detail: float | WireError | None) -> None:
         """Show the client's state; on a fatal failure, fail every stream.
@@ -672,17 +738,19 @@ class Connection:
             reject: The rejected row, with its raw wire symbol.
         """
         symbol = None
+        why = "it has none"
         if reject.symbol is not None:
             try:
                 symbol = canonical(self.asset_class, reject.symbol)
-            except ValueError:
-                symbol = None
+            except ValueError as error:
+                why = str(error)
         if symbol is None:
             logger.error(
-                "%s%s: a %s row has no valid symbol; failing the channel's ALL streams: %s",
+                "%s%s: a %s row has no valid symbol (%s); failing the channel's ALL streams: %s",
                 self.decision.host,
                 self.path,
                 channel,
+                why,
                 reject.error.message,
             )
         ids = [
@@ -691,6 +759,14 @@ class Connection:
             if s.channel == channel
             and (s.symbols is None or (symbol is not None and symbol in s.symbols))
         ]
+        logger.debug(
+            "%s channel %s: a rejected row fails streams %s: %s; the row: %s",
+            self.url,
+            channel,
+            ids,
+            reject.error.message,
+            reject.raw,
+        )
         if ids:
             self.flusher.fail(ids, from_wire(reject.error))
 
@@ -748,7 +824,7 @@ class Connection:
             if text is not None:
                 self._drift = text
                 self._write_row()
-        self.flusher.drift(channel, drift)
+        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
 
     # --- loop thread: diagnostics --------------------------------------------------------------
 

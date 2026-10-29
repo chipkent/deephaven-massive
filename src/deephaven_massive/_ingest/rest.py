@@ -114,7 +114,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
-    from deephaven_massive._massive import RestClient, RestPath
+    from deephaven_massive._massive import DriftSample, RestClient, RestPath
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.diagnostics import DriftRegistry
 
@@ -711,6 +711,7 @@ class _Converter:
         batches: list[pa.RecordBatch] = []
         extra: set[str] = set()
         missing: set[str] = set()
+        samples: dict[str, DriftSample] = {}
         kept = [] if self.projected else flagged
         for part, required in ((good, self.required), (kept, self.required_on_error)):
             if not part:
@@ -724,7 +725,9 @@ class _Converter:
                 raise RowDataError(str(error)) from error
             extra |= drift.extra
             missing |= drift.missing
-        return batches, DriftReport(extra=frozenset(extra), missing=frozenset(missing)), flagged
+            samples = {**drift.samples, **samples}  # the first part's sample of a key wins
+        drift = DriftReport(extra=frozenset(extra), missing=frozenset(missing), samples=samples)
+        return batches, drift, flagged
 
     def _apply(self, batch: pa.RecordBatch, symbol: str | None) -> pa.RecordBatch:
         """Turn one decoded batch into a batch of the dataset's schema.
@@ -1104,7 +1107,9 @@ class RestReader:
                 requests += 1
                 self.drift.report_statuses(template, page.drift.statuses)
                 batches, drift, flagged = converter.convert(page.rows, call.symbol)
-                self.drift.report(spec.name, Transport.REST, drift)
+                self.drift.report(
+                    spec.name, Transport.REST, drift, where=f"GET {template}", symbol=call.symbol
+                )
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
@@ -1452,7 +1457,7 @@ class RestEndpoints:
                 )
             )
             future.set_exception(failure)
-            _report(failure)
+            _report(failure, call=None)
             self._core.diagnostics.write(
                 ConnectionRow(
                     transport=Transport.REST,
@@ -1551,7 +1556,7 @@ class RestEndpoints:
         try:
             table, _ = reader.read_fetch(spec, request, symbols=request.symbols)
         except MassiveError as error:
-            _report(error)
+            _report(error, call=call)
             raise
         return self._static(table)
 
@@ -1613,7 +1618,7 @@ class RestEndpoints:
                 stamps=stamp_rule(spec, request),
             )
         except MassiveError as error:
-            _report(error)
+            _report(error, call=call)
             raise
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
         return self._static(table)
@@ -1665,16 +1670,23 @@ class RestEndpoints:
         )
 
 
-def _report(error: MassiveError) -> None:
-    """Log a failure at ERROR with exactly the text its exception carries.
+def _report(error: MassiveError, *, call: int | None) -> None:
+    """Log a failure at ERROR with exactly the text its exception carries, and its call's id.
 
     The exception itself propagates to the caller, whose traceback shows where it came from,
-    so the record holds the message alone: the HTTP status, the path, and the request id.
+    so the record holds the call and the message alone: `call 3 failed: HTTP 400 from GET
+    /v3/reference/tickers?... on api.massive.com (request_id ab12): <Massive's message>`. The
+    call's id ties the line to its `call 3 start` line and to its worker threads' lines.
 
     Args:
         error: The failure.
+        call: The id of the verb call that failed, or None for a failure no verb call owns
+            (a host decision, which its waiting callers share).
     """
-    logger.error("%s", error)
+    if call is None:
+        logger.error("%s", error)
+    else:
+        logger.error("call %d failed: %s", call, error)
 
 
 def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict[str, object]:
