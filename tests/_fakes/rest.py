@@ -18,7 +18,8 @@ line with an absolute URL (`GET http://host/path`, forwarding) is answered like 
 recorded with `proxied=True`.
 
 `REFUSED_PORT` is a loopback port that refuses every connection, for tests of a connection
-that fails.
+that fails. `LoopbackHTTPServer`, the server class underneath `FakeRestServer`, also serves
+tests that need a plain HTTP server on 127.0.0.1.
 
 Every method is safe to call from any thread: the script and the record sit behind one lock.
 Imported lazily by the `fake_rest` fixture in `tests/conftest.py`.
@@ -31,6 +32,7 @@ import http.server
 import json
 import select
 import socket
+import socketserver
 import ssl
 import threading
 from collections import deque
@@ -38,6 +40,8 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
+
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -124,6 +128,23 @@ def envelope(
     return body
 
 
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    """A `ThreadingHTTPServer` that binds without a reverse DNS lookup of its address.
+
+    `HTTPServer.server_bind` names the server with `socket.getfqdn(host)`, a reverse lookup that
+    costs a millisecond or more per server, and much more where DNS is slow. No test reads that
+    name, so the address itself stands in for it. `FakeRestServer` and any test that needs a
+    plain HTTP server on 127.0.0.1 use this class.
+    """
+
+    @override
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+
+
 class FakeRestServer:
     """A scripted HTTP server speaking Massive's REST envelope; see the module docstring.
 
@@ -142,7 +163,7 @@ class FakeRestServer:
         self._received: list[Received] = []
         self._on_request: Callable[[Received], None] | None = None
         self._tunnel_status: int | None = None
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self._server = LoopbackHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._scheme = "http"
         if tls is not None:

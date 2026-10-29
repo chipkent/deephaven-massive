@@ -381,7 +381,9 @@ def make_csv_gz() -> Callable[[str], bytes]:
     """
 
     def compress(csv_text: str) -> bytes:
-        return gzip.compress(csv_text.encode())
+        # The fastest level: the reader decompresses any level alike, and the default, 9, spends
+        # about 20 times as long on the suite's largest files.
+        return gzip.compress(csv_text.encode(), compresslevel=1)
 
     return compress
 

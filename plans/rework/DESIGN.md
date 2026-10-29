@@ -399,7 +399,12 @@ test code imports helpers as `tests._fakes…`. So `tests/massive/` can never sh
 
 Integration tests end in `_integration` and carry the `integration` marker, which `addopts`
 deselects in every default run (CI's included); `uv run pytest -m integration` runs them, and
-each skips unless `MASSIVE_API_KEY` is set (and always under CI).
+each skips unless `MASSIVE_API_KEY` is set (and always under CI). The same expression
+deselects the `benchmark` marker, which the extra points of the stream fan-out benchmark carry:
+that test records rates and never asserts, so the default run keeps only its default point,
+and `-m benchmark` runs the other eight. `-m` applies to a node id too, so a single extra
+point runs with its node id and `-m benchmark`. No test pins the `addopts` string or the
+marker list: pytest's `strict` setting already rejects an unregistered marker.
 [`docs/live-tests.md`](../../docs/live-tests.md) is the runbook for them. The live tests that deliberately exceed Massive's subscription and connection
 limits also carry `integration_limits`, and the smoke tier (every dataset and verb once,
 checked automatically) carries `integration_smoke`: `-m integration` deselects both, and only
@@ -3006,7 +3011,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   and one that holds all of them (and the batch has no row without a valid symbol) gets the
   whole batch with no filter, so the common single-stream case costs one `add`. A non-gating
   benchmark test records warmed median rows per second for 1, 10, and 100 streams at 200,
-  2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping.
+  2,000, and 20,000 rows per flush, against one-pass per-stream Python grouping. The default
+  run records only 10 streams at 2,000 rows; the other points are marked `benchmark` and
+  deselected by default, and `-m benchmark` runs them.
 - Each flush applies the failures queued before it, then publishes, so a failed stream gets no
   row after its failure; rows buffered for it in that flush are dropped. A batch that cannot
   be converted or published fails that dataset's streams on the channel, with a `MassiveError`
@@ -4772,7 +4779,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `websockets`, and `certifi` ship their own. No other override is allowed. Pyright runs as a
   non-gating second checker.
 - **Pytest 9** (native `[tool.pytest]` table). `strict = true`, `filterwarnings = ["error"]`,
-  `addopts = ["-ra", "--import-mode=importlib"]`, `pythonpath = ["."]` (test code imports
+  `addopts = ["-ra", "--import-mode=importlib", "-m",
+  "not integration and not benchmark"]`, `pythonpath = ["."]` (test code imports
   helpers as `tests._fakes…`, so `tests/massive/` never shadows a top-level `massive`),
   `faulthandler_timeout = 120` with
   `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Neither coverage
