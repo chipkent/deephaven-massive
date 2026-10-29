@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import gc
 import logging
+import math
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
@@ -499,6 +500,35 @@ def test_a_crypto_indicator_takes_utc_days_and_a_stock_new_york_days(
     assert by_path["/v1/indicators/sma/X:BTCUSD"]["timestamp.gte"] == [str(utc_day)]
     assert by_path["/v1/indicators/sma/X:BTCUSD"]["timestamp.lt"] == [str(utc_day + one_day)]
     assert by_path["/v1/indicators/sma/AAPL"]["timestamp.gte"] == [str(new_york_day)]
+
+
+def test_a_read_of_several_paths_shares_one_patience(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The stock and crypto indicator paths are one fetch: its patience is taken once, so the
+    # second path never gets a fresh ten minutes after the first spent its own.
+    fake_rest.reply("/v1/indicators/sma/X:BTCUSD", Reply(envelope({"values": []})))
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
+    taken: list[float] = []
+    deadlines: list[float] = []
+
+    def patience(_reader: rest.RestReader) -> float:
+        taken.append(1234.0 + len(taken))
+        return taken[-1]
+
+    admission = _massive.RequestGovernor.admission
+
+    def recording(
+        governor: _massive.RequestGovernor, bucket: str, *, lane: object, give_up_at: float
+    ) -> object:
+        deadlines.append(give_up_at)
+        return admission(governor, bucket, lane=lane, give_up_at=give_up_at)
+
+    monkeypatch.setattr(rest.RestReader, "give_up_at", patience)
+    monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
+    fetch(session, SMA, symbols=["X:BTCUSD", "AAPL"], start="2025-03-03", end="2025-03-03")
+    assert taken == [1234.0]
+    assert deadlines == [1234.0, 1234.0]
 
 
 def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> None:
@@ -2016,7 +2046,13 @@ def test_a_read_fans_out_on_the_callers_pool(
     calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
     with ThreadPoolExecutor(2) as pool:
         table, requests = reader.read(
-            CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool
+            CRYPTO_LAST,
+            path,
+            calls,
+            request=request,
+            limit=None,
+            executor=pool,
+            give_up_at=math.inf,
         )
         assert not pool._shutdown  # the caller's pool stays open
     assert (table.num_rows, requests) == (2, 2)
@@ -2099,7 +2135,15 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     monkeypatch.setattr(pool, "submit", recorded)
     request = Request(symbols=symbols)
     with pool, pytest.raises(dm.AuthenticationError):
-        reader.read(CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool)
+        reader.read(
+            CRYPTO_LAST,
+            path,
+            calls,
+            request=request,
+            limit=None,
+            executor=pool,
+            give_up_at=math.inf,
+        )
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(sent(fake_rest)) <= 2
 

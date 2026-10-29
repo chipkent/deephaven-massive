@@ -1238,6 +1238,7 @@ class RestReader:
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
+        give_up_at: float,
     ) -> tuple[pa.Table, int]:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
@@ -1268,6 +1269,9 @@ class RestReader:
                 of this read's own.
             cancel: Ends the read's waits when set, such as a poller's stop token; None when
                 only the session's close should.
+            give_up_at: When the whole read stops waiting for its buckets' pauses
+                (`give_up_at()`, taken once when the read began, on its own thread), shared
+                by every path of a read that spans several.
 
         Returns:
             The rows, in call order and then page order, and the number of requests made.
@@ -1280,7 +1284,6 @@ class RestReader:
         converter = _Converter.build(
             self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
         )
-        deadline = self.give_up_at()  # on this thread, before any fan-out
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
                 self._call,
@@ -1292,7 +1295,7 @@ class RestReader:
                 record=record,
                 spec=spec,
                 stop=stop,
-                give_up_at=deadline,
+                give_up_at=give_up_at,
             )
             if len(calls) <= 1:
                 outcomes = [run(call) for call in calls]
@@ -1796,6 +1799,7 @@ class RestReader:
         """
         tables = []
         requests = 0
+        deadline = self.give_up_at()  # once for every path, on this thread, before any fan-out
         for rest_path, calls in planned:
             table, made = self.read(
                 spec,
@@ -1807,6 +1811,7 @@ class RestReader:
                 record=record,
                 executor=executor,
                 cancel=cancel,
+                give_up_at=deadline,
             )
             tables.append(table)
             requests += made
@@ -2117,6 +2122,7 @@ class RestEndpoints:
                 limit=None,
                 window=window,
                 remedy=_history_remedy(request),
+                give_up_at=reader.give_up_at(),
             )
         except MassiveError as error:
             _report(error)
