@@ -301,8 +301,9 @@ class Harness:
         with self.session._core.registry_lock:
             connections = list(self.connections._connections.values())
         for connection in connections:
-            if connection._client.loop.is_running():
-                self.on_loop(connection, lambda: None)
+            done = threading.Event()
+            if connection.post(done.set):  # False: the loop has ended, with nothing queued
+                assert done.wait(TIMEOUT)
 
     def subscribed(self, *topics: str) -> None:
         # Wait until the latest connection has received a subscribe frame naming each topic.
@@ -1127,6 +1128,7 @@ def test_last_message_rows_are_throttled(harness: Harness, monkeypatch: pytest.M
     # message is due a rewrite and the second, however late it arrives, is not.
     interval = 10**18
     monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", interval)
+    monkeypatch.setattr(ws, "_BACKLOG_ROW_DELAY", 10**9)  # the buffered rows' rewrite never fires
     written: list[int] = []
 
     def write() -> None:
@@ -1781,6 +1783,42 @@ def test_a_connections_drift_key_is_fixed_when_it_is_created(harness: Harness) -
     assert connection.key == key
     harness.session.release(forex)
     harness.session.release(fmv)
+
+
+def test_the_backlog_rewrite_repeats_until_the_rows_are_published(
+    harness: Harness,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One message, then silence: the rewrite its rows scheduled must schedule the next one
+    # while rows remain, so BufferedRows reaches 0 however long the flush stays behind.
+    monkeypatch.setattr(ws, "_BACKLOG_ROW_DELAY", 0.01)
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.wait(lambda h: any(s.message == "subscribed to: T.AAPL" for s in h.statuses))
+    connection = harness.connection()
+    monkeypatch.setattr(ws, "_MESSAGE_ROW_NS", 10**18)  # messages never rewrite the row
+    fired: list[int] = []
+    twice = threading.Event()
+    rewrite = connection._backlog_row
+
+    def counted() -> None:
+        rewrite()
+        fired.append(connection.flusher.backlog)
+        if len(fired) == 2:
+            twice.set()
+
+    monkeypatch.setattr(connection, "_backlog_row", counted)
+    harness.send(trade("AAPL"))
+    assert twice.wait(TIMEOUT)  # a second rewrite, with no message since the first
+    assert fired[:2] == [1, 1]
+    harness.flush()
+
+    def shown() -> int:
+        [row] = connections_of(harness, dh_to_pylist)
+        return cast("int", row["BufferedRows"])
+
+    wait_for(lambda: shown() == 0)
+    harness.session.release(result)
 
 
 def test_buffered_rows_are_shown_until_they_are_published(
