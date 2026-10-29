@@ -9,12 +9,14 @@ names the member to use; `Timespan("minute")` is the documented way to convert t
 An enum of a library setting that never reaches the wire (`HistorySource`, `SymbolConvention`,
 `OnError`, `UnknownSymbols`, `Subscription`) takes its member names in lower case as values.
 
-Three further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
+Four further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is) and `ChannelFamily` (which host a channel is served from), which appear as values in
 the diagnostics tables, beside the wire package's `Transport`, which names WebSocket, REST, or
-flat files once for both sides of the wire boundary; and `ClassFromPrefix`, a plain `Enum`
+flat files once for both sides of the wire boundary; `ClassFromPrefix`, a plain `Enum`
 (not a `StrEnum`, so it never equals an `AssetClass` value), whose one member `ANY` is the
-class of a dataset whose symbols span classes, each read from its prefix.
+class of a dataset whose symbols span classes, each read from its prefix; and `NotBars`, a
+plain `Enum` too (so it never equals a `Timespan` value), whose one member `ANY` keys the one
+WebSocket channel and flat-file prefix of a dataset that is not bars.
 
 The nineteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private. `subscription_of` maps an asset class to the subscription that covers it.
@@ -37,6 +39,7 @@ __all__ = [
     "HistorySource",
     "Locale",
     "Market",
+    "NotBars",
     "OnError",
     "Order",
     "PollMode",
@@ -121,6 +124,20 @@ class Timespan(StrEnum):
     QUARTER = "quarter"
     YEAR = "year"
     SESSION = "session"
+
+
+class NotBars(Enum):
+    """The timespan key of a dataset that is not bars: its one channel or flat-file prefix.
+
+    A dataset's WebSocket channels and flat-file prefixes are a mapping from the bar timespan
+    they serve. A `bars()` dataset keys them by `Timespan`; every other dataset (trades,
+    quotes, values, and the like) has at most one of each, serves every request with it, and
+    keys it by `NotBars.ANY`. A request without a timespan selects that key through
+    `catalog.timespan_key`. Internal: no public signature takes it.
+    """
+
+    ANY = "any"
+    """Every request of the dataset, which has no timespan."""
 
 
 class PollMode(StrEnum):

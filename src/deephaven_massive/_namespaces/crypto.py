@@ -24,7 +24,14 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
-from deephaven_massive._enums import AssetClass, ChannelFamily, Direction, Timespan, _require_enum
+from deephaven_massive._enums import (
+    AssetClass,
+    ChannelFamily,
+    Direction,
+    NotBars,
+    Timespan,
+    _require_enum,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query
 
@@ -99,8 +106,8 @@ TRADES: Final = DatasetSpec(
     kind="trades",
     fetch_path=_LAST_TRADE,
     history_path=_TRADES,
-    channels={None: "XT"},
-    flat_file_prefixes={None: _TRADE_FILES},
+    channels={NotBars.ANY: "XT"},
+    flat_file_prefixes={NotBars.ANY: _TRADE_FILES},
     keys={
         # The last trade holds the pair outside its `last` object and has no participant time.
         (_R, _LAST_TRADE): _keys(_request("from"), "Timestamp"),
@@ -118,7 +125,7 @@ QUOTES: Final = DatasetSpec(
     summary="Quotes of crypto pairs: each exchange's best bid and ask, as they change.",
     asset_class=AssetClass.CRYPTO,
     kind="quotes",
-    channels={None: "XQ"},
+    channels={NotBars.ANY: "XQ"},
     keys={(_W, "crypto/XQ"): _keys(KeySpec("Pair"), "ParticipantTimestamp")},
 )
 """`m.crypto.quotes`: the `XQ` stream only; Massive serves no crypto quote history."""
@@ -158,7 +165,7 @@ FMV: Final = DatasetSpec(
     summary="Massive's fair market value of crypto pairs, streamed as it updates.",
     asset_class=AssetClass.CRYPTO,
     kind="fmv",
-    channels={None: "FMV"},
+    channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
     keys={(_W, "crypto/FMV"): _keys(KeySpec("Ticker"), "FmvLastUpdated")},
 )

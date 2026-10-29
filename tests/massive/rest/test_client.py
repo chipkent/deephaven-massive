@@ -813,10 +813,58 @@ def test_a_next_url_that_repeats_the_page_is_refused(
     pages = client.pages(_TRADES, _AAPL, {}, bucket="stocks")
     next(pages)
     next(pages)
-    with pytest.raises(WireError, match=r"next_url repeats the page just fetched") as caught:
+    with pytest.raises(
+        WireError,
+        match=r"^/v3/trades/\{stockTicker\}: next_url /v3/trades/AAPL\?cursor=1 repeats a page",
+    ) as caught:
         next(pages)
     assert caught.value.path == "/v3/trades/AAPL?cursor=1"
+    assert "apiKey" not in caught.value.message
     assert len(fake_rest.requests) == 2
+
+
+def test_a_next_url_cycle_through_earlier_pages_is_refused(
+    client: RestClient, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=1"))
+    fake_rest.reply(
+        "/v3/trades/AAPL?cursor=1", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=2")
+    )
+    fake_rest.reply(
+        "/v3/trades/AAPL?cursor=2", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=1")
+    )
+    pages = client.pages(_TRADES, _AAPL, {}, bucket="stocks")
+    for _ in range(3):
+        next(pages)
+    with pytest.raises(
+        WireError, match=r"repeats a page this pagination already fetched"
+    ) as caught:
+        next(pages)
+    assert caught.value.path == "/v3/trades/AAPL?cursor=1"
+    assert [r.target for r in fake_rest.requests] == [
+        "/v3/trades/AAPL",
+        "/v3/trades/AAPL?cursor=1",
+        "/v3/trades/AAPL?cursor=2",
+    ]
+
+
+def test_a_next_url_back_to_the_first_page_is_refused(
+    client: RestClient, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=1"))
+    fake_rest.reply("/v3/trades/AAPL?cursor=1", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL"))
+    with pytest.raises(WireError, match=r"next_url /v3/trades/AAPL repeats") as caught:
+        list(client.pages(_TRADES, _AAPL, {}, bucket="stocks"))
+    assert caught.value.path == "/v3/trades/AAPL"
+    assert len(fake_rest.requests) == 2
+
+
+def test_separate_paginations_may_fetch_the_same_targets(
+    client: RestClient, fake_rest: FakeRestServer
+) -> None:
+    expected = _paged(fake_rest, "AAPL", 3)
+    assert _numbers(client.pages(_TRADES, _AAPL, {}, bucket="stocks")) == expected
+    assert _numbers(client.pages(_TRADES, _AAPL, {}, bucket="stocks")) == expected
 
 
 def test_a_bad_body_on_a_later_page_is_an_error(

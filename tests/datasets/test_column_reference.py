@@ -32,7 +32,7 @@ from deephaven_massive._datasets.column_reference import (
     render,
     sync,
 )
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Field, Provenance, Source, Transport, WireType, source
 from deephaven_massive._namespaces.base import Namespace
 from deephaven_massive._session import CATALOG
@@ -392,8 +392,8 @@ _STOCK_TRADES = DatasetSpec(
     kind="trades",
     fetch_path="/last/{ticker}",
     history_path="/trades/{ticker}",
-    channels={None: "T"},
-    flat_file_prefixes={None: "us_stocks/trades"},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks/trades"},
     keys={
         (R, "/last/{ticker}"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp")),
         (R, "/trades/{ticker}"): SourceKeys(
@@ -411,7 +411,7 @@ _CRYPTO_TRADES = DatasetSpec(
     summary="Trades of crypto pairs.",
     asset_class=AssetClass.CRYPTO,
     kind="trades",
-    channels={None: "XT"},
+    channels={NotBars.ANY: "XT"},
     keys={(W, "crypto/XT"): SourceKeys(KeySpec("Pair"), KeySpec("SipTimestamp"))},
 )
 _CATALOG = Catalog(

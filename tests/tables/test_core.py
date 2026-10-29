@@ -34,7 +34,7 @@ from deephaven_massive._datasets import catalog as _catalog
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import DriftReport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
@@ -78,7 +78,7 @@ SPEC = DatasetSpec(
     name="test.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
 )
 
 
