@@ -217,69 +217,114 @@ Inside the private modules, a name used by other modules is bare (`QueryBase`, `
 names this document fixes with an underscore: `_All`, `_require_enum`, and the namespace classes
 (`_Stocks`, `_Partners`, ...), whose underscore keeps them out of users' completion lists.
 
+**One subject per module.** A module is named for its content and holds one subject, named in
+the first line of its docstring. New code goes in the module whose first line already names its
+subject; if none does, it gets a new module named for that subject, never a widened summary
+("…, and X") on a neighbor. Module names are subject nouns, never pattern words such as `base`,
+`core`, `common`, `helpers` or `util`. A rule or helper has one body, in the module that owns
+its concept. An exception is defined in the module that raises it, or in `_errors.py` when
+several modules raise it. A module above about 1,000 lines, or one whose first line lists more
+than two subjects, is split or says in its docstring why it is one subject. Review enforces
+these rules, not a test: checks of placement over source text would be brittle and costly to
+keep for little protection.
+
+The tree below is the target layout. [`LAYOUT.md`](LAYOUT.md) schedules the moves that reach it;
+until each lands, the code still has the module it replaces.
+
 ```
 src/deephaven_massive/
 __init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
-_config.py               MassiveConfig (section 5)
+_config.py               MassiveConfig (section 5), HostMap, environment readers, the shared
+                         positive-number checks
 _enums.py                the fifteen public enums, Recency, ChannelFamily, _require_enum
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
-                         from_wire
+                         from_wire, and the errors more than one module raises
+_log_limits.py           rate-limited log records: once per process, or once per value up to a
+                         bound
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
                          (section 6)
-_query.py                the six query classes and their verbs, through the core's ports (section 7)
+_query.py                the six query classes and their verbs, through the core's ports, and
+                         query_class/bar_query_class, which choose among them (section 7)
 _namespaces/
   __init__.py            docstring only
-  base.py                the shared dataset factory
-  stocks.py options.py futures.py indices.py forex.py crypto.py
-  reference.py indicators.py economy.py partners.py      namespace class + DATASETS
+  query_building.py      Namespace, build_query, list_query, ticker_key: everything a namespace
+                         method does to turn its arguments into a query
+  stocks.py              m.stocks
+  stock_financials.py    m.stocks.financials
+  stock_filings.py       m.stocks.filings: SEC filings and insiders
+  options.py futures.py indices.py forex.py crypto.py
+  reference.py indicators.py economy.py partners.py      a namespace and its sub-namespaces,
+                                                         and DATASETS
 _datasets/               dataset semantics: no network I/O, no threads, no Deephaven calls;
                          only column_reference.sync writes files
   __init__.py            docstring only
   catalog.py             DatasetSpec (summary, role paths and fetch paths by symbol class,
                          kind, per-source key columns, channels, prefixes, poll defaults,
                          page size, symbols per request), Catalog (the specs by name,
-                         members(kind)), filter validation
-  schema.py              ColumnType, Column, Schema, WireType -> ColumnType, rename(),
-                         dataset_schema() with column descriptions (section 19.4)
-  request.py             Request, StreamKey, ParamValue, HostDecision
+                         members(kind))
+  filters.py             the filters= rules: parameter families, filter keys, value checks
+                         (section 9)
+  schema.py              ColumnType, Column, Schema, WireType -> ColumnType, dataset_schema()
+                         (the merge, section 19.4)
+  source_columns.py      SourceColumn, the key rename (rename(), key columns, required fields),
+                         join and widen of source columns
+  column_descriptions.py the authored column descriptions (section 7.4), transport labels and
+                         their order
+  request.py             Request, StreamKey, ParamValue
   timestamps.py          the one timestamp routine (section 12), the FMV magnitude rule
-  dates.py               DateLike parsing, day zones, sessions, publish_time, [start, end)
+  dates.py               DateLike parsing, [start, end) ranges, bounds, day zones, is_trading_day
+  futures_sessions.py    the 17:00-Chicago futures session rule, scalar and Arrow; the weekday
+                         roll
+  bar_periods.py         intraday bars: bar periods, bar starts, bar days, bar sessions
   symbols.py             normalization, symbol_class(), the Symbol/Underlying rule
-                         (section 10)
-  history_source.py      partition dates, publication grace, REST capability, the AUTO choice
+                         (section 10), the scalar converters
+  wire_symbols.py        a symbol's transport spellings, both ways
+  history_source.py      partition dates, publication time and grace, REST capability, the AUTO
+                         choice
   column_reference.py    the column reference: render(catalog, provenance) -> {file name:
                          Markdown} (pure); sync(directory, pages) owns docs/datasets/
                          (section 7.4)
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
-  core.py                SessionCore, registry_lock, registries, closers, stream ids, the
-                         transport ports, IngestPorts, attach (sections 4.3, 6)
+  session_core.py        SessionCore, registry_lock, registries, closers, stream ids, attach
+                         (sections 4.3, 6)
+  transports.py          the transport ports (RestTransport, StreamTransport, FlatFileTransport),
+                         IngestPorts, StreamHandle, HostDecision (section 4.3)
+  execution_context.py   entered(), the execution-context and update-graph probes (section 18)
   liveness.py            result and stream scopes, records, reaper queue (section 6.1)
   diagnostics.py         connections() and streams() with SchemaDrift; DriftRegistry (section 17)
   columns.py             ColumnType -> Deephaven type, column definitions; describe() (section 7.4)
   watchlist.py           canonical_view; reactive symbol tables
   stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
                          (section 14)
+  poll.py                poll(): REPLACE/UPSERT/APPEND publishers and their thread, fan-out,
+                         data failures -> publish_failure; reads rows through a reader the
+                         ingest layer supplies
 _ingest/                 the only holder of wire clients
   __init__.py            docstring only
   clients.py             SessionClients: the session's wire clients and connections, the ports
   flatfiles.py           flat-file transport: read plans, reader pool, cancellation, conversion,
                          merge to tables, missing-file policy, drift routing (section 16)
-  rest.py                REST transport: requests from a DatasetSpec, batches renamed and
-                         converted, 403/429 policy, drift routing, host-decision cache
-                         (single-flight)
-  hosts.py               host resolution from REST evidence (section 13.2)
-  poll.py                poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
+  rest.py                REST transport: RestState, RestReader, RestEndpoints; 403/429 policy,
+                         drift routing, the single-flight host decision
+  rest_requests.py       the requests of a call, planned from a DatasetSpec (pure)
+  rest_rows.py           REST page rows to dataset batches: renamed, converted, error rows
+                         dropped
+  host_decision.py       host resolution from REST evidence (section 13.2), its probes, and its
+                         cache
   subscriptions.py       topics and the reconcile loop of one connection: wildcards,
                          watchdogs, the NO_ACK rule, the options cap's admission (section 13.3)
-  ws.py                  connections over WsClient: leases, the verdict rule, rejects and drift
-                         routing, the options cap's verb check (section 13.3)
+  ws.py                  the session's connections: WsConnections, WsTransport, leases, the
+                         options cap's verb check (section 13.3)
+  ws_connection.py       one connection over WsClient and its client factories: its loop, the
+                         verdict rule, rejects and drift routing (section 13.3)
 _massive/                the wire package (section 19)
 py.typed
 ```
 
-The root holds the vocabulary every layer names (`_config`, `_enums`, `_errors`, `_types`) and
+The root holds the vocabulary every layer names (`_config`, `_enums`, `_errors`, `_types`,
+`_log_limits`) and
 the API users touch (`__init__`, `_session`, `_query`, `_namespaces/`). The rest of the library
 is grouped into three packages: `_datasets/` describes datasets (and renders their column
 reference from a catalog it is given), `_tables/` is the Deephaven side, and `_ingest/` is the
@@ -287,8 +332,11 @@ only code that holds wire clients. The `__init__.py` of each of the three, and o
 `_namespaces/`, holds only a docstring. [Section 4.3](#43-layers) orders these groups into
 layers.
 
-`_namespaces/` holds plain modules, one namespace class each; it is not a PEP 420 namespace
-package. Each namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
+`_namespaces/` holds plain modules, one namespace and its sub-namespaces each (`m.partners` and
+its partner sub-namespaces share a module because each partner is small; `m.stocks.financials`
+and `m.stocks.filings` are large enough to get their own); it is not a PEP 420 namespace
+package. Each namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`),
+and `query_building.py`, the one module that is not a namespace, holds what they share.
 `_datasets/history_source.py` decides where `history()` reads from; `_ingest/flatfiles.py` does
 flat-file I/O through `_massive` and never chooses a source.
 
@@ -334,8 +382,8 @@ with `_`. Examples:
 | `_config.py` | `tests/test_config.py` | |
 | `_datasets/__init__.py` | `tests/datasets/test_init.py` | |
 | `_datasets/catalog.py` | `tests/datasets/test_catalog.py` | |
-| `_tables/core.py` | `tests/tables/test_core.py` | |
-| `_ingest/hosts.py` | `tests/ingest/test_hosts.py` | `tests/ingest/test_hosts_integration.py` |
+| `_tables/session_core.py` | `tests/tables/test_session_core.py` | |
+| `_ingest/host_decision.py` | `tests/ingest/test_host_decision.py` | `tests/ingest/test_host_decision_integration.py` |
 | `_ingest/flatfiles.py` | `tests/ingest/test_flatfiles.py` | `tests/ingest/test_flatfiles_integration.py` |
 | `_datasets/column_reference.py` | `tests/datasets/test_column_reference.py` (also the parity test of `docs/datasets/`) | |
 | `_namespaces/__init__.py` | `tests/namespaces/test_init.py` | |
@@ -344,7 +392,7 @@ with `_`. Examples:
 | `_massive/rest/client.py` | `tests/massive/rest/test_client.py` | |
 | `_massive/refresh/__main__.py` | `tests/massive/refresh/test_main.py` | |
 | `_massive/refresh/generate.py` | `tests/massive/refresh/test_generate.py` (also the parity test) | |
-| `_massive/refresh/rest.py` | `tests/massive/refresh/test_rest.py` | |
+| `_massive/refresh/rest_sources.py` | `tests/massive/refresh/test_rest_sources.py` | |
 
 **Import roots.** `[tool.pytest] pythonpath = ["."]` and `[tool.mypy] mypy_path = ["src"]`;
 test code imports helpers as `tests._fakes…`. So `tests/massive/` can never shadow a top-level
@@ -387,9 +435,9 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | Rank | Layer | Home | What justifies the boundary |
 |---|---|---|---|
 | 0 | wire | `_massive/` | The only network I/O, and no Deephaven ([section 19](#19-wire-clients-and-the-spec-snapshot)). |
-| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
+| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types`, `_log_limits` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
-| 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
+| 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers (the stream and `poll()` publishers among them), library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
 | 5 | API | the root `__init__`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. |
 
@@ -398,7 +446,7 @@ namespace module statically and names each once, in `NAMESPACE_MODULES` (a test 
 tuple with the modules of `_namespaces/`); at import it builds `CATALOG` from their `DATASETS`,
 so the dataset layer never finds the namespaces itself. `MassiveSession.__init__` builds the
 `SessionCore` with that catalog, then `SessionClients(core)`, then calls `core.attach(clients)`
-once. The core defines the transport ports (`RestTransport`, `StreamTransport`,
+once. `_tables/transports.py` defines the transport ports (`RestTransport`, `StreamTransport`,
 `FlatFileTransport`) and `IngestPorts`, the protocol `SessionClients` implements
 (`rest()`, `streams()`, `flat_files()`); the core's transport hooks call the attached ports, and
 the transports read the catalog as `core.catalog`. A dependency therefore never points from the

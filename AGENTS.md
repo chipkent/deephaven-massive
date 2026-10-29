@@ -350,6 +350,7 @@ These are the rules that keep the library free of deadlocks and leaks (`DESIGN.m
 |---|---|
 | Public API, exports, enums | `DESIGN.md` § 3, § 7, § 11 |
 | Package and test layout, layers | `DESIGN.md` § 4, § 4.3 |
+| Where new code goes; the layout cleanup and its feature pause | `DESIGN.md` § 4.1, `plans/rework/LAYOUT.md` |
 | Session lifecycle and liveness | `DESIGN.md` § 6 |
 | Datasets per namespace | `DESIGN.md` § 8 |
 | Hosts, connections, subscriptions | `DESIGN.md` § 13 |
