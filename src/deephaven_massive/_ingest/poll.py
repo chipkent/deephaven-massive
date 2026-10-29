@@ -639,15 +639,18 @@ class Poller:
         return pa.concat_tables([rows, tombstones]), keys
 
     def _fail(self, core: SessionCore, error: MassiveError) -> None:
-        """Fail the table with `error`, mark its row `FAILED`, and log it at ERROR.
+        """Mark the table's row `FAILED`, then fail the table with `error`; log it at ERROR.
+
+        The failure is recorded first, as `StreamSink.fail` does for a stream, so the `FAILED`
+        row is on its way to `m.streams()` before anyone can see the table failed.
 
         Args:
             core: The session's core.
             error: The failure.
         """
         logger.error("%s poll() failed: %s", self._spec.name, error)
-        self._publisher.publish_failure(error)
         core.fail_stream(self._stream_id, str(error))
+        self._publisher.publish_failure(error)
 
 
 _SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})

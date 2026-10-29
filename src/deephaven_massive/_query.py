@@ -141,7 +141,7 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
 def _read_symbol_table(
     core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
 ) -> tuple[str, ...]:
-    """Read a reactive symbol table once, refusing a row that is not Massive's exact ticker.
+    """Read a symbol table once, refusing a row that is not Massive's exact ticker.
 
     The table is read as one consistent snapshot (`read_symbols` in `_tables/watchlist.py`),
     on the caller thread, inside the session's execution context, with no library lock held.
@@ -151,7 +151,7 @@ def _read_symbol_table(
     Args:
         core: The session core, for its execution context.
         spec: The dataset, whose asset class the rows must follow.
-        symbols: The boxed reactive table.
+        symbols: The boxed table, static or refreshing.
 
     Returns:
         The table's symbols, sorted and de-duplicated; null rows are ignored.
@@ -246,10 +246,10 @@ class QueryBase:
             return describe(table, spec, schema)
 
     def _static_request(self) -> Request:
-        """Return the request with a reactive symbol table read once, for a static verb.
+        """Return the request with a symbol table read once, for a static verb.
 
         Returns:
-            The request; for a reactive table, with its valid symbols (`_read_symbol_table`).
+            The request; for a symbol table, with its symbols (`_read_symbol_table`).
         """
         request = self._request
         if isinstance(request.symbols, SymbolTable):
@@ -285,7 +285,7 @@ class Query(QueryBase):
 
         Before any request it raises `ValueError` if a path the call reads does not take a
         parameter or filter the query set (an explicit `adjusted` on a path without it), or a
-        reactive symbol table holds no valid symbol. A failed request raises
+        symbol table holds no symbol or a row that is not canonical. A failed request raises
         `AuthenticationError` on HTTP 401, `EntitlementError` on HTTP 403, and `MassiveError`
         for a rate limit that outlived the retries, a row that breaks the dataset's schema, or
         any other failure.
@@ -378,6 +378,13 @@ class StreamQuery(QueryBase):
     connection raise `ValueError` at once; those of a reactive symbol table are deferred
     instead (`Deferred` in `m.streams()`).
 
+    A refreshing `Table` passed as symbols is reactive: the stream subscribes and unsubscribes
+    as its rows change. A static (non-refreshing) `Table` is a fixed symbol list instead, read
+    once when the verb is called, as `fetch()` and `history()` read one: the stream is the one
+    an equal symbol list opens. A row that is not Massive's exact ticker raises `ValueError`
+    in either kind; a static table with no symbol raises `ValueError` too, while an empty
+    refreshing table opens its stream and subscribes as rows arrive.
+
     Built by a dataset method, such as `m.stocks.luld(...)`; immutable and reusable.
 
     Example:
@@ -398,7 +405,24 @@ class StreamQuery(QueryBase):
         """
         return self._spec.channels[self._request.timespan]
 
-    def _stream(self, shape: Callable[[Table], Table]) -> Table:
+    def _stream_request(self) -> Request:
+        """Return the request the stream is opened for, with a static symbol table read once.
+
+        A static table cannot be listened to, so it is read now, like `fetch()` reads one
+        (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
+        stays reactive. A static table with no symbol, or with a row that is not canonical,
+        raises the `ValueError` of `_read_symbol_table`.
+
+        Returns:
+            The request.
+        """
+        request = self._request
+        symbols = request.symbols
+        if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
+            return replace(request, symbols=_read_symbol_table(self._core, self._spec, symbols))
+        return request
+
+    def _stream(self, shape: Callable[[Table], Table], request: Request) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.
 
         The result is the shape, described last (`describe`): an append-only or ring table
@@ -412,6 +436,7 @@ class StreamQuery(QueryBase):
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
                 `blink()`, whose described copy is then a new table of its own.
+            request: The request from `_stream_request`.
 
         Returns:
             The tracked live result.
@@ -420,14 +445,14 @@ class StreamQuery(QueryBase):
         `_tables/watchlist.py`.
         """
         spec = self._spec
-        symbols = self._request.symbols
+        symbols = request.symbols  # a static table is already read: never read it twice
         if isinstance(symbols, SymbolTable):
             with entered(self._core.exec_ctx):
                 read_symbols(spec, symbols.table)
         schema = self._core.dataset_schema(spec)
         return self._core.stream_result(
             spec,
-            self._request,
+            request,
             channel=self._channel,
             build=lambda blink: describe(shape(blink), spec, schema),
         )
@@ -438,6 +463,9 @@ class StreamQuery(QueryBase):
         Each call returns a new table, a described copy of the stream's blink table, with its
         own liveness scope, so two `blink()` results are released independently.
 
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -445,12 +473,15 @@ class StreamQuery(QueryBase):
             A live blink table in the dataset's schema.
         """
         self._core.require_verb_thread()
-        return self._stream(lambda blink: blink)
+        return self._stream(lambda blink: blink, self._stream_request())
 
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
 
         Memory grows with the stream; use `ring()` to bound it.
+
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -459,13 +490,16 @@ class StreamQuery(QueryBase):
             A live append-only table in the dataset's schema.
         """
         self._core.require_verb_thread()
-        return self._stream(blink_to_append_only)
+        return self._stream(blink_to_append_only, self._stream_request())
 
     def ring(self, capacity: int) -> Table:
         """Return the most recent `capacity` rows received.
 
         A `capacity` that is not an `int` raises `TypeError`, and one outside 1 to 2**31 - 1
         raises `ValueError` (`require_positive_int`).
+
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -478,7 +512,7 @@ class StreamQuery(QueryBase):
         """
         self._core.require_verb_thread()
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
-        return self._stream(lambda blink: ring_table(blink, rows))
+        return self._stream(lambda blink: ring_table(blink, rows), self._stream_request())
 
     def last_by(self, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
@@ -496,6 +530,9 @@ class StreamQuery(QueryBase):
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.
 
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -509,15 +546,20 @@ class StreamQuery(QueryBase):
         """
         self._core.require_verb_thread()
         keys = self._last_by_keys(by)
-        symbols = self._request.symbols
+        request = self._stream_request()
+        symbols = request.symbols
         if not isinstance(symbols, SymbolTable):
-            return self._stream(lambda blink: blink.last_by(list(keys)))
+            return self._stream(lambda blink: blink.last_by(list(keys)), request)
         watch = symbols.table
         if "Symbol" in keys:
             # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
-            return self._stream(lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"))
+            return self._stream(
+                lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"), request
+            )
         # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
-        return self._stream(lambda blink: blink.where_in(watch, "Symbol").last_by(list(keys)))
+        return self._stream(
+            lambda blink: blink.where_in(watch, "Symbol").last_by(list(keys)), request
+        )
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:
         """Validate the `by` argument of `last_by`.
@@ -617,8 +659,8 @@ class HistoryQuery(QueryBase):
         the UTC day cut fails loudly, whichever source serves it, so the source never changes
         which days a bar covers; `source=` picks a source explicitly. A reactive symbol table
         is read once, when the verb is called, and every source receives the same sorted
-        canonical symbols; rows that are not valid symbols of the class are ignored with a
-        WARNING. Flat-file reads skip a missing weekend file silently and a missing weekday
+        canonical symbols; a row that is not Massive's exact ticker raises `ValueError`.
+        Flat-file reads skip a missing weekend file silently and a missing weekday
         file (a holiday) with a WARNING. Futures trades and quotes named by session dates are
         read over REST one request series per weekday session and symbol; a long
         one-request-per-day download logs its request count first, at INFO.
@@ -642,25 +684,24 @@ class HistoryQuery(QueryBase):
             symbol over REST, in file order over flat files; empty, with every column, when
             no row lies in the range.
 
-        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
-        `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
-        unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
-        `end` is None); a reactive symbol table without a valid symbol; futures trades or
-        quotes named by session dates on a query that also filters `session_end_date` in any
-        form; futures bars of a session or longer with `multiplier` above 1 named by dates; a
-        source that cannot serve the request (`REST` without REST history or with `dm.ALL` and
-        no grouped-daily endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO`
-        when neither can, with every violated condition listed); or a call on a Deephaven
-        update-graph thread. `MassiveError` when a request fails (`EntitlementError` on HTTP
-        403, which for futures flat files names the venue and the `venue=` parameter;
-        `AuthenticationError` when S3 rejects the flat-file credentials); when the flat file of
-        the last requested day is missing within a day after its publication time ("... is not
-        yet published (flat files land ~11:00 ET next day), or was a market holiday"; after
-        that the day is skipped with a WARNING, as a holiday); when a futures range named by
-        instants ends on a holiday and the next session's file, which holds the holiday's
-        hours, is not published yet or does not exist within 7 days; when a crypto bar of a
-        day or longer is stamped off the UTC day cut (a 1-day bar elsewhere than its day's first
-        or last millisecond, a longer one elsewhere than 00:00 UTC); or once the session is
+        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`, `date`,
+        or `datetime`. `ValueError`, synchronously, before any request: a naive or unparseable
+        bound; a date mixed with a datetime; `start` after `end` (or after now when `end` is None);
+        a symbol table without a symbol, or with a row that is not canonical; futures trades or
+        quotes named by session dates on a query that also filters `session_end_date` in any form;
+        futures bars of a session or longer with `multiplier` above 1 named by dates; a source that
+        cannot serve the request (`REST` without REST history or with `dm.ALL` and no grouped-daily
+        endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither can, with
+        every violated condition listed); or a call on a Deephaven update-graph thread.
+        `MassiveError` when a request fails (`EntitlementError` on HTTP 403, which for futures flat
+        files names the venue and the `venue=` parameter; `AuthenticationError` when S3 rejects the
+        flat-file credentials); when the flat file of the last requested day is missing within a day
+        after its publication time ("... is not yet published (flat files land ~11:00 ET next day),
+        or was a market holiday"; after that the day is skipped with a WARNING, as a holiday); when
+        a futures range named by instants ends on a holiday and the next session's file, which holds
+        the holiday's hours, is not published yet or does not exist within 7 days; when a crypto bar
+        of a day or longer is stamped off the UTC day cut (a 1-day bar elsewhere than its day's
+        first or last millisecond, a longer one elsewhere than 00:00 UTC); or once the session is
         closed.
 
         Example:

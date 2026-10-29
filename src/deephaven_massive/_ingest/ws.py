@@ -116,6 +116,9 @@ JOIN_TIMEOUT: Final = 5.0
 _MESSAGE_ROW_NS: Final = 1_000_000_000
 """How often, at most, a connection's row is rewritten only to advance `LastMessageAt`."""
 
+_BACKLOG_ROW_DELAY: Final = 1.0
+"""Seconds after a connection's row showed buffered rows that it is written again."""
+
 
 class _Client(Sender, Protocol):
     """What a connection needs of its client: `WsClient`'s interface."""
@@ -236,6 +239,7 @@ class Connection:
         self.asset_class: Final = asset_class
         self.decision: Final = decision
         self.path: Final = f"/{asset_class.value}"
+        self._key: Final = (Transport.WS.value, asset_class.value, family.value)
         self._transport = transport
         self._core = weakref.ref(core)
         self._lock: Final = core.registry_lock
@@ -293,13 +297,19 @@ class Connection:
         self._next_reconnect_at: int | None = None
         self._last_error: str | None = None
         self._drift: str | None = None
+        self._moving = False
+        self._backlog_timer: Timer | None = None
+        self._change_scheduled = False
 
     @property
     def key(self) -> tuple[str, str, str]:
-        """The connection's owner key in the drift registry: transport, class, and family."""
-        with self._lock:
-            family = min(self.families)
-        return Transport.WS.value, self.asset_class.value, family.value
+        """The connection's owner key in the drift registry: transport, class, and family.
+
+        Fixed when the connection is created, from the family of the stream that created it,
+        so a stream of another family that joins later (an FMV stream on a `business.`
+        connection opened for trades) never moves the connection's drift to a new owner.
+        """
+        return self._key
 
     # --- lifecycle (any thread) ----------------------------------------------------------------
 
@@ -607,6 +617,7 @@ class Connection:
         """
         if rows:
             self.flusher.rows(channel, rows)
+            self._arm_backlog_row()  # the row write below may be throttled
         for reject in rejects:
             self._reject(channel, reject)
         if drift.extra or drift.missing:
@@ -624,6 +635,7 @@ class Connection:
             detail: The next attempt's time (seconds since the epoch) for `RECONNECTING` and
                 `WAITING_SLOT`, the `WireError` for `FAILED`, None otherwise.
         """
+        self._next_reconnect_at = None  # shown only while a reconnect waits for its time
         if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
             self.subscriptions.ended()
             self._next_reconnect_at = int(cast("float", detail) * 1e9)
@@ -632,7 +644,6 @@ class Connection:
             self._failed(cast("WireError", detail))
         elif state is WsState.CLOSED:
             self.subscriptions.ended()
-            self._next_reconnect_at = None
         self._state = ConnectionState(state.value)
         self._write_row()
 
@@ -714,6 +725,11 @@ class Connection:
     def _step_refused(self, status: Status) -> bool:
         """Decide whether a refusal of a whole step is the server's real-time verdict.
 
+        The verdict can arrive more than once for one step: a step of more than 1,000 topics
+        goes out in several subscribe frames, and the server refuses each of them. The first
+        verdict starts the move; each later one finds the connection already moving and is
+        handled by that move too, so it never fails the streams being moved.
+
         Args:
             status: A refusal naming no topic, of a step none of whose topics was resolved.
 
@@ -731,7 +747,9 @@ class Connection:
             or not decision.host.startswith("socket.")
         ):
             return False
-        return self._transport.reroute(self, status.message)
+        if not self._moving:
+            self._moving = self._transport.reroute(self, status.message)
+        return self._moving
 
     def _record_drift(self, channel: str, drift: DriftReport) -> None:
         """Add a frame's drift to the connection's row and hand it to the flush thread.
@@ -751,7 +769,23 @@ class Connection:
     # --- loop thread: diagnostics --------------------------------------------------------------
 
     def _changed(self) -> None:
-        """Publish the options-cap state and rewrite the row after a subscription change."""
+        """Schedule one publication of the subscription state for this turn of the loop.
+
+        `Subscriptions` reports a change after every acknowledgement, refusal, and `NO_ACK`,
+        and one frame from Massive can carry a status for each of thousands of topics.
+        Publishing reads every topic, so doing it per status would cost O(topics²) per step
+        and stall the loop for seconds on a large subscription. Instead the first change of
+        a loop turn schedules `_publish_change` with `call_soon`, and later changes in the
+        same turn ride on it: the row is still rewritten after each frame's statuses.
+        """
+        if self._change_scheduled:
+            return
+        self._change_scheduled = True
+        self._client.loop.call_soon(self._publish_change)
+
+    def _publish_change(self) -> None:
+        """Publish the options-cap state and rewrite the row for the changes of a loop turn."""
+        self._change_scheduled = False
         self._show_deferred()
         self._write_row()
 
@@ -803,12 +837,38 @@ class Connection:
         if core is not None:
             core.update_streams(updates)
 
+    def _arm_backlog_row(self) -> None:
+        """Schedule a rewrite of the row `_BACKLOG_ROW_DELAY` seconds from now, unless one is.
+
+        Called when rows are buffered and when a written row shows buffered rows. The
+        rewrite shows the backlog as it is then, and schedules the next one while it is not
+        zero, so `BufferedRows` shows rows that arrived while row writes were throttled and
+        falls back to zero once the flush thread catches up.
+        """
+        if self._backlog_timer is None:
+            self._backlog_timer = self._client.loop.call_later(
+                _BACKLOG_ROW_DELAY, self._backlog_row
+            )
+
+    def _backlog_row(self) -> None:
+        """Rewrite the row that showed buffered rows, to show the backlog as it is now."""
+        self._backlog_timer = None
+        self._write_row()
+
     def _write_row(self) -> None:
-        """Write the connection's diagnostics rows, if it is still its keys' connection."""
+        """Write the connection's diagnostics rows, if it is still its keys' connection.
+
+        A row that shows buffered rows is written again `_BACKLOG_ROW_DELAY` seconds later,
+        and so on until it shows none, so `BufferedRows` falls back to zero once the flush
+        thread catches up, even when no message arrives to rewrite the row.
+        """
         core = self._core()
         if core is None:
             return
         topics, acked, pending, no_ack = self.subscriptions.counts()
+        backlog = self.flusher.backlog
+        if backlog:
+            self._arm_backlog_row()
         now = time.time_ns()
         self._message_row_at = now
         with self._lock:
@@ -829,6 +889,7 @@ class Connection:
                         acked_topics=acked,
                         pending_topics=pending,
                         no_ack_topics=no_ack,
+                        buffered_rows=backlog,
                         reconnects=self._reconnects,
                         last_message_at=self._last_message_at,
                         next_reconnect_at=self._next_reconnect_at,
