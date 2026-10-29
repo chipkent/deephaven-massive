@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.stocks.trades`, `m.stocks.quotes`, `m.stocks.bars`, `m.stocks.luld`, `m.stocks.imbalances`, `m.stocks.fmv`, `m.stocks.snapshots`, `m.stocks.movers`, `m.stocks.daily_open_close`, `m.stocks.dividends`, `m.stocks.splits`, `m.stocks.ipos`, `m.stocks.short_interest`, `m.stocks.short_volume`, `m.stocks.share_float`, `m.stocks.financials.ratios`, `m.stocks.filings.index`, `m.stocks.filings.sections_10k`, `m.stocks.filings.text_8k`, and `m.stocks.filings.risk_factors` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+
 <a id="trades"></a>
 
 ## `m.stocks.trades`
@@ -13,6 +15,7 @@ Trades of US-listed stocks, tick by tick.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
 | `Correction` | long | The trade correction indicator. | REST, flat files | `e`, `correction` | `correction` |  |
@@ -27,9 +30,9 @@ Trades of US-listed stocks, tick by tick.
 | `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST, flat files, WebSocket | `f`, `trf_timestamp` | `trf_timestamp` | `trft` |
 | `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. | REST, WebSocket | `ds`, `decimal_size` |  | `ds` |
 | `ReportSequence` | long | Always null for `stocks.trades`; supplied by `futures.trades`. |  |  |  |  |
-| `SessionEndDate` | LocalDate | Always null for `stocks.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `Channel` | long | Always null for `stocks.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `stocks.trades`; supplied by `crypto.trades`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -47,6 +50,7 @@ National best bid and offer quotes of US-listed stocks, tick by tick.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `AskExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `X`, `ask_exchange` | `ask_exchange` | `ax` |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `P`, `ask_price` | `ask_price` | `ap` |
@@ -63,10 +67,10 @@ National best bid and offer quotes of US-listed stocks, tick by tick.
 | `ReportSequence` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `AskTimestamp` | Instant | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `BidTimestamp` | Instant | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `SessionEndDate` | LocalDate | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Channel` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Exchange` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`, `forex.quotes`, `crypto.quotes`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `stocks.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -84,14 +88,16 @@ Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stocksTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
-| `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
-| `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
-| `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
-| `High` | double | The highest price for the symbol in the given time period. | REST, flat files, WebSocket | `h` | `high` | `h` |
-| `Low` | double | The lowest price for the symbol in the given time period. | REST, flat files, WebSocket | `l` | `low` | `l` |
+| `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
+| `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
+| `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST, flat files, WebSocket | `v` | `volume` | `v` |
+| `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `o` | `open` | `o` |
+| `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `c` | `close` | `c` |
+| `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `h` | `high` | `h` |
+| `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `l` | `low` | `l` |
 | `Transactions` | long | The number of transactions in the aggregate window. | REST, flat files | `n` | `transactions` |  |
-| `Vwap` | double | The volume weighted average price. | REST, WebSocket | `vw` |  | `vw` |
+| `Vwap` | double | The volume weighted average price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, WebSocket | `vw` |  | `vw` |
 | `Otc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST, WebSocket | `otc` |  | `otc` |
 | `DecimalVolume` | String | The tick volume including fractional shares, respresented as a string decimal number | WebSocket |  |  | `dv` |
 | `AccumulatedVolume` | long | Today's accumulated volume. | WebSocket |  |  | `av` |
@@ -99,11 +105,10 @@ Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 | `OfficialOpen` | double | Today's official opening price. | WebSocket |  |  | `op` |
 | `DayVwap` | double | Today's volume weighted average price. | WebSocket |  |  | `a` |
 | `AverageTradeSize` | long | The average trade size for this aggregate window. | WebSocket |  |  | `z` |
-| `EndTimestamp` | Instant | The end timestamp of this aggregate window in Unix Milliseconds. | WebSocket |  |  | `e` |
-| `SessionEndDate` | LocalDate | Always null for `stocks.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `DollarVolume` | double | Always null for `stocks.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `SettlementPrice` | double | Always null for `stocks.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `Exchange` | long | Always null for `stocks.bars`; supplied by `futures.bars`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -124,12 +129,14 @@ Limit up-limit down price bands of US-listed stocks, as they change.
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock." | WebSocket | `T` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS." | WebSocket | `t` |
 | `HighPrice` | double | The high price. | WebSocket | `h` |
 | `LowPrice` | double | The low price. | WebSocket | `l` |
 | `Indicators` | int[] | The Indicators. See Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators) for a glossary (LULD indicators are located near the bottom). | WebSocket | `i` |
 | `Tape` | long | The tape. (1 = NYSE, 2 = AMEX, 3 = Nasdaq). | WebSocket | `z` |
 | `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | WebSocket | `q` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
 Massive's documentation of this dataset:
 
@@ -144,6 +151,7 @@ Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock." | WebSocket | `T` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix Ns." | WebSocket | `t` |
 | `AuctionTime` | long | The time that the auction is planned to take place in the format (hour x 100) + minutes in Eastern Standard Time, for example 930 would be 9:30 am EST, and 1600 would be 4:00 pm EST. | WebSocket | `at` |
 | `AuctionType` | String | The auction type. `O` - Early Opening Auction (non-NYSE only) `M` - Core Opening Auction `H` - Reopening Auction (Halt Resume) `C` - Closing Auction `P` - Extreme Closing Imbalance (NYSE only) `R` - Regulatory Closing Imbalance (NYSE only) | WebSocket | `a` |
@@ -152,6 +160,7 @@ Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 | `ImbalanceQuantity` | long | The imbalance quantity. | WebSocket | `o` |
 | `PairedQuantity` | long | The paired quantity. | WebSocket | `p` |
 | `BookClearingPrice` | double | The book clearing price. | WebSocket | `b` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
 Massive's documentation of this dataset:
 
@@ -166,8 +175,10 @@ Massive's fair market value estimate of US-listed stocks, as it updates.
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
 Massive's documentation of this dataset:
 
@@ -225,6 +236,7 @@ Current market snapshots of US-listed stocks, one row per ticker.
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -282,6 +294,7 @@ The twenty US stocks with the largest percentage move today, up or down.
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -296,15 +309,18 @@ The open, close, and pre- and after-market prices of US stocks on one day.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The exchange symbol that this item is traded under." | REST | `symbol` |
-| `AfterHours` | double | The close price of the ticker symbol in after hours trading. | REST | `afterHours` |
-| `Close` | double | The close price for the symbol in the given time period. | REST | `close` |
-| `From` | LocalDate | The requested date. | REST | `from` |
-| `High` | double | The highest price for the symbol in the given time period. | REST | `high` |
-| `Low` | double | The lowest price for the symbol in the given time period. | REST | `low` |
-| `Open` | double | The open price for the symbol in the given time period. | REST | `open` |
+| `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a New York calendar day. From REST `from`: "The requested date." | REST | `from` |
+| `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. | REST |  |
+| `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. | REST |  |
+| `AfterHours` | double | The close price of the ticker symbol in after hours trading. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `afterHours` |
+| `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `close` |
+| `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `high` |
+| `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `low` |
+| `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `open` |
 | `Otc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST | `otc` |
-| `PreMarket` | double | The open price of the ticker symbol in pre-market trading. | REST | `preMarket` |
-| `Volume` | double | The trading volume of the symbol in the given time period. | REST | `volume` |
+| `PreMarket` | double | The open price of the ticker symbol in pre-market trading. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `preMarket` |
+| `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST | `volume` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -321,15 +337,16 @@ Cash dividends of US-listed stocks, one row per distribution.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock symbol for the company issuing the dividend". | REST | `ticker` |
 | `CashAmount` | double | Original dividend amount per share in the specified currency | REST | `cash_amount` |
 | `Currency` | String | Currency code for the dividend payment (e.g., USD, CAD) | REST | `currency` |
-| `DeclarationDate` | LocalDate | Date when the company officially announced the dividend | REST | `declaration_date` |
+| `DeclarationDate` | String | Date when the company officially announced the dividend | REST | `declaration_date` |
 | `DistributionType` | String | Classification describing the nature of this dividend's recurrence pattern: recurring (paid on a regular schedule), special (one-time or commemorative), supplemental (extra beyond the regular schedule), irregular (unpredictable or non-recurring), unknown (cannot be classified from available data) | REST | `distribution_type` |
-| `ExDividendDate` | LocalDate | Date when the stock begins trading without the dividend value | REST | `ex_dividend_date` |
+| `ExDividendDate` | String | Date when the stock begins trading without the dividend value | REST | `ex_dividend_date` |
 | `Frequency` | long | How many times per year this dividend is expected to occur. A value of 0 means the distribution is non-recurring or irregular (e.g., special, supplemental, or a one-off dividend). Other possible values include 1 (annual), 2 (semi-annual), 3 (trimester), 4 (quarterly), 12 (monthly), 24 (bi-monthly), 52 (weekly), 104 (bi-weekly), and 365 (daily) depending on the issuer's declared or inferred payout cadence. | REST | `frequency` |
 | `HistoricalAdjustmentFactor` | double | Cumulative adjustment factor used to offset dividend effects on historical prices. To adjust a historical price for dividends: for a price on date D, find the first dividend whose `ex_dividend_date` is after date D and multiply the price by that dividend's `historical_adjustment_factor`. | REST | `historical_adjustment_factor` |
 | `Id` | String | Unique identifier for each dividend record | REST | `id` |
-| `PayDate` | LocalDate | Date when the dividend payment is distributed to shareholders | REST | `pay_date` |
-| `RecordDate` | LocalDate | Date when shareholders must be on record to be eligible for the dividend payment | REST | `record_date` |
+| `PayDate` | String | Date when the dividend payment is distributed to shareholders | REST | `pay_date` |
+| `RecordDate` | String | Date when shareholders must be on record to be eligible for the dividend payment | REST | `record_date` |
 | `SplitAdjustedCashAmount` | double | Dividend amount adjusted for stock splits that occurred after the dividend was paid, expressed on a current share basis | REST | `split_adjusted_cash_amount` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -345,11 +362,12 @@ Stock splits, reverse splits, and stock dividends of US-listed stocks.
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock symbol for the company that executed the split". | REST | `ticker` |
 | `AdjustmentType` | String | Classification of the share-change event. Possible values include: forward_split (share count increases), reverse_split (share count decreases), stock_dividend (shares issued as a dividend) | REST | `adjustment_type` |
-| `ExecutionDate` | LocalDate | Date when the stock split takes effect. The adjustment is applied overnight. On the prior trading day, the post-market session is the last session that shows pre-split prices. On the execution date, all trading is already adjusted for the split. This includes the pre-market session. | REST | `execution_date` |
+| `ExecutionDate` | String | Date when the stock split takes effect. The adjustment is applied overnight. On the prior trading day, the post-market session is the last session that shows pre-split prices. On the execution date, all trading is already adjusted for the split. This includes the pre-market session. | REST | `execution_date` |
 | `HistoricalAdjustmentFactor` | double | Cumulative adjustment factor used to offset split effects on historical prices. To adjust a historical price for splits: for a price on date D, find the first split whose `execution_date` is after date D and multiply the unadjusted price by the `historical_adjustment_factor`. | REST | `historical_adjustment_factor` |
 | `Id` | String | Unique identifier for each stock split event | REST | `id` |
 | `SplitFrom` | double | Denominator of the split ratio (old shares) | REST | `split_from` |
 | `SplitTo` | double | Numerator of the split ratio (new shares) | REST | `split_to` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -364,15 +382,15 @@ Initial public offerings on US exchanges, upcoming and past, one row per offerin
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker symbol of the IPO event." | REST | `ticker` |
-| `AnnouncedDate` | LocalDate | The date when the IPO event was announced. | REST | `announced_date` |
+| `AnnouncedDate` | String | The date when the IPO event was announced. | REST | `announced_date` |
 | `CurrencyCode` | String | Underlying currency of the security. | REST | `currency_code` |
 | `FinalIssuePrice` | double | The price set by the company and its underwriters before the IPO goes live. | REST | `final_issue_price` |
 | `HighestOfferPrice` | double | The highest price within the IPO price range that the company might use to price the shares. | REST | `highest_offer_price` |
 | `IpoStatus` | String | The status of the IPO event. IPO events start out as status "rumor" or "pending". On listing day, the status changes to "new". After the listing day, the status changes to "history". The status "direct_listing_process" corresponds to a type of offering where, instead of going through all the IPO processes, the company decides to list its shares directly on an exchange, without using an investment bank or other intermediaries. This is called a direct listing, direct placement, or direct public offering (DPO). | REST | `ipo_status` |
 | `Isin` | String | International Securities Identification Number. This is a unique twelve-digit code that is assigned to every security issuance in the world. | REST | `isin` |
 | `IssuerName` | String | Name of issuer. | REST | `issuer_name` |
-| `LastUpdated` | LocalDate | The date when the IPO event was last modified. | REST | `last_updated` |
-| `ListingDate` | LocalDate | First trading date for the newly listed entity. | REST | `listing_date` |
+| `LastUpdated` | String | The date when the IPO event was last modified. | REST | `last_updated` |
+| `ListingDate` | String | First trading date for the newly listed entity. | REST | `listing_date` |
 | `LotSize` | double | The minimum number of shares that can be bought or sold in a single transaction. | REST | `lot_size` |
 | `LowestOfferPrice` | double | The lowest price within the IPO price range that the company is willing to offer its shares to investors. | REST | `lowest_offer_price` |
 | `MaxSharesOffered` | double | The upper limit of the shares that the company is offering to investors. | REST | `max_shares_offered` |
@@ -383,6 +401,7 @@ Initial public offerings on US exchanges, upcoming and past, one row per offerin
 | `SharesOutstanding` | double | The total number of shares that the company has issued and are held by investors. | REST | `shares_outstanding` |
 | `TotalOfferSize` | double | The total amount raised by the company for IPO. | REST | `total_offer_size` |
 | `UsCode` | String | This is a unique nine-character alphanumeric code that identifies a North American financial security for the purposes of facilitating clearing and settlement of trades. | REST | `us_code` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -399,8 +418,9 @@ Short interest of US-listed stocks, one row per ticker and FINRA settlement date
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
 | `AvgDailyVolume` | long | The average daily trading volume for the stock over a specified period, typically used to contextualize short interest. | REST | `avg_daily_volume` |
 | `DaysToCover` | double | Calculated as short_interest divided by avg_daily_volume, representing the estimated number of days it would take to cover all short positions based on average trading volume. | REST | `days_to_cover` |
-| `SettlementDate` | LocalDate | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. | REST | `settlement_date` |
+| `SettlementDate` | String | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. | REST | `settlement_date` |
 | `ShortInterest` | long | The total number of shares that have been sold short but have not yet been covered or closed out. | REST | `short_interest` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -417,7 +437,7 @@ Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
 | `AdfShortVolume` | long | Short volume reported via the Alternative Display Facility (ADF), excluding exempt volume. | REST | `adf_short_volume` |
 | `AdfShortVolumeExempt` | long | Short volume reported via ADF that was marked as exempt. | REST | `adf_short_volume_exempt` |
-| `Date` | LocalDate | The date of trade activity reported in the format YYYY-MM-DD | REST | `date` |
+| `Date` | String | The date of trade activity reported in the format YYYY-MM-DD | REST | `date` |
 | `ExemptVolume` | double | Portion of short volume that was marked as exempt from regulation SHO. | REST | `exempt_volume` |
 | `NasdaqCarteretShortVolume` | long | Short volume reported from Nasdaq's Carteret facility, excluding exempt volume. | REST | `nasdaq_carteret_short_volume` |
 | `NasdaqCarteretShortVolumeExempt` | long | Short volume from Nasdaq Carteret that was marked as exempt. | REST | `nasdaq_carteret_short_volume_exempt` |
@@ -429,6 +449,7 @@ Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 | `ShortVolume` | double | Total number of shares sold short across all venues for the ticker on the given date. | REST | `short_volume` |
 | `ShortVolumeRatio` | double | The percentage of total volume that was sold short. Calculated as (short_volume / total_volume) * 100. | REST | `short_volume_ratio` |
 | `TotalVolume` | double | Total reported volume across all venues for the ticker on the given date. | REST | `total_volume` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -443,9 +464,10 @@ The free float of US-listed stocks: the latest count of shares the public can tr
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
-| `EffectiveDate` | LocalDate | The effective date of the free float measurement. | REST | `effective_date` |
+| `EffectiveDate` | String | The effective date of the free float measurement. | REST | `effective_date` |
 | `FreeFloat` | long | Number of shares freely tradable in the market. Free float shares represent the portion of a company's outstanding shares that is freely tradable in the market, excluding any holdings considered strategic, controlling, or long term. This excludes insiders, directors, founders, 5 percent plus shareholders, cross holdings, government stakes except pensions, restricted or locked up shares, employee plans, and any entities with board influence, leaving only shares that are genuinely available for public trading. | REST | `free_float` |
 | `FreeFloatPercent` | double | Percentage of total shares outstanding that are available for public trading, rounded to two decimal places. | REST | `free_float_percent` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -469,7 +491,7 @@ Balance sheets of US public companies, one row per filer and reporting period.
 | `CommonStock` | double | Par or stated value of common shares outstanding representing basic ownership in the company. | REST | `common_stock` |
 | `DebtCurrent` | double | Short-term borrowings and the current portion of long-term debt due within one year. | REST | `debt_current` |
 | `DeferredRevenueCurrent` | double | Customer payments received in advance for goods or services to be delivered within one year. | REST | `deferred_revenue_current` |
-| `FilingDate` | LocalDate | The date of the most recent SEC filing that included this period's data. This is not necessarily the date this period was originally filed. Because SEC filings restate comparative data for prior periods, multiple records can share the same filing_date. For example, an annual 10-K reports three years of results, and a 10-Q includes prior period comparatives. To find the original filing date for a specific 10-K or 10-Q, use the SEC EDGAR filings index endpoint (/stocks/filings/vX/index). | REST | `filing_date` |
+| `FilingDate` | String | The date of the most recent SEC filing that included this period's data. This is not necessarily the date this period was originally filed. Because SEC filings restate comparative data for prior periods, multiple records can share the same filing_date. For example, an annual 10-K reports three years of results, and a 10-Q includes prior period comparatives. To find the original filing date for a specific 10-K or 10-Q, use the SEC EDGAR filings index endpoint (/stocks/filings/vX/index). | REST | `filing_date` |
 | `FiscalQuarter` | long | The fiscal quarter number (1, 2, 3, or 4) for the reporting period. | REST | `fiscal_quarter` |
 | `FiscalYear` | long | The fiscal year for the reporting period. | REST | `fiscal_year` |
 | `Goodwill` | double | Intangible asset representing the excess of purchase price over fair value of net assets acquired in business combinations. | REST | `goodwill` |
@@ -481,7 +503,7 @@ Balance sheets of US public companies, one row per filer and reporting period.
 | `OtherCurrentAssets` | double | Current assets not classified elsewhere, including prepaid expenses, taxes receivable, and other assets expected to be converted to cash within one year. | REST | `other_current_assets` |
 | `OtherEquity` | double | Equity components not classified elsewhere in shareholders' equity. | REST | `other_equity` |
 | `OtherNoncurrentLiabilities` | double | Non-current liabilities not classified elsewhere, including deferred tax liabilities, pension obligations, and other long-term liabilities. | REST | `other_noncurrent_liabilities` |
-| `PeriodEnd` | LocalDate | The last date of the reporting period, representing the specific point in time when the balance sheet snapshot was taken. | REST | `period_end` |
+| `PeriodEnd` | String | The last date of the reporting period, representing the specific point in time when the balance sheet snapshot was taken. | REST | `period_end` |
 | `PreferredStock` | double | Par or stated value of preferred shares outstanding with preferential rights over common stock. | REST | `preferred_stock` |
 | `PropertyPlantEquipmentNet` | double | Tangible fixed assets used in operations, reported net of accumulated depreciation. | REST | `property_plant_equipment_net` |
 | `Receivables` | double | Amounts owed to the company by customers and other parties, primarily accounts receivable, net of allowances for doubtful accounts. | REST | `receivables` |
@@ -497,6 +519,7 @@ Balance sheets of US public companies, one row per filer and reporting period.
 | `TotalLiabilities` | double | Sum of all current and non-current liabilities representing everything the company owes. | REST | `total_liabilities` |
 | `TotalLiabilitiesAndEquity` | double | Sum of total liabilities and total equity, which should equal total assets per the fundamental accounting equation. | REST | `total_liabilities_and_equity` |
 | `TreasuryStock` | double | Cost of the company's own shares that have been repurchased and are held in treasury, typically reported as a negative value. | REST | `treasury_stock` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -522,7 +545,7 @@ Income statements of US public companies, one row per filer and reporting period
 | `Ebitda` | double | Earnings before interest, taxes, depreciation, and amortization, a measure of operating performance. | REST | `ebitda` |
 | `EquityInAffiliates` | double | The company's share of income or losses from equity method investments in affiliated companies. | REST | `equity_in_affiliates` |
 | `ExtraordinaryItems` | double | Unusual and infrequent gains or losses that are both unusual in nature and infrequent in occurrence. | REST | `extraordinary_items` |
-| `FilingDate` | LocalDate | The date of the most recent SEC filing that included this period's data. This is not necessarily the date this period was originally filed. Because SEC filings restate comparative data for prior periods, multiple records can share the same filing_date. For example, an annual 10-K reports three years of results, and a 10-Q includes prior period comparatives. To find the original filing date for a specific 10-K or 10-Q, use the SEC EDGAR filings index endpoint (/stocks/filings/vX/index). | REST | `filing_date` |
+| `FilingDate` | String | The date of the most recent SEC filing that included this period's data. This is not necessarily the date this period was originally filed. Because SEC filings restate comparative data for prior periods, multiple records can share the same filing_date. For example, an annual 10-K reports three years of results, and a 10-Q includes prior period comparatives. To find the original filing date for a specific 10-K or 10-Q, use the SEC EDGAR filings index endpoint (/stocks/filings/vX/index). | REST | `filing_date` |
 | `FiscalQuarter` | long | The fiscal quarter number (1, 2, 3, or 4) for the reporting period. | REST | `fiscal_quarter` |
 | `FiscalYear` | long | The fiscal year for the reporting period. | REST | `fiscal_year` |
 | `GrossProfit` | double | Revenue minus cost of revenue, representing profit before operating expenses. | REST | `gross_profit` |
@@ -535,7 +558,7 @@ Income statements of US public companies, one row per filer and reporting period
 | `OperatingIncome` | double | Income from operations calculated as gross profit minus total operating expenses, excluding non-operating items. | REST | `operating_income` |
 | `OtherIncomeExpense` | double | Non-operating income and expenses not related to the company's core business operations. | REST | `other_income_expense` |
 | `OtherOperatingExpenses` | double | Operating expenses not classified in the main expense categories. | REST | `other_operating_expenses` |
-| `PeriodEnd` | LocalDate | The last date of the reporting period (formatted as YYYY-MM-DD). | REST | `period_end` |
+| `PeriodEnd` | String | The last date of the reporting period (formatted as YYYY-MM-DD). | REST | `period_end` |
 | `PreferredStockDividendsDeclared` | double | Dividends declared on preferred stock during the period. | REST | `preferred_stock_dividends_declared` |
 | `ResearchDevelopment` | double | Expenses incurred for research and development activities to create new products or improve existing ones. | REST | `research_development` |
 | `Revenue` | double | Total revenue or net sales for the period, representing the company's gross income from operations. | REST | `revenue` |
@@ -544,6 +567,7 @@ Income statements of US public companies, one row per filer and reporting period
 | `Timeframe` | String | The reporting period type. Possible values include: quarterly, annual, trailing_twelve_months. | REST | `timeframe` |
 | `TotalOperatingExpenses` | double | Sum of all operating expenses including cost of revenue, SG&A, R&D, depreciation, and other operating expenses. | REST | `total_operating_expenses` |
 | `TotalOtherIncomeExpense` | double | Net total of all non-operating income and expenses including interest income, interest expense, and other items. | REST | `total_other_income_expense` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -564,7 +588,7 @@ Cash flow statements of US public companies, one row per filer and reporting per
 | `DepreciationDepletionAndAmortization` | double | Non-cash charges for the reduction in value of tangible and intangible assets over time. | REST | `depreciation_depletion_and_amortization` |
 | `Dividends` | double | Cash payments to shareholders in the form of dividends, typically reported as negative values. | REST | `dividends` |
 | `EffectOfCurrencyExchangeRate` | double | Impact of foreign exchange rate changes on cash and cash equivalents denominated in foreign currencies. | REST | `effect_of_currency_exchange_rate` |
-| `FilingDate` | LocalDate | The date of the most recent SEC filing that included this period's data. This is not necessarily the date this period was originally filed. Because SEC filings restate comparative data for prior periods, multiple records can share the same filing_date. For example, an annual 10-K reports three years of results, and a 10-Q includes prior period comparatives. To find the original filing date for a specific 10-K or 10-Q, use the SEC EDGAR filings index endpoint (/stocks/filings/vX/index). | REST | `filing_date` |
+| `FilingDate` | String | The date of the most recent SEC filing that included this period's data. This is not necessarily the date this period was originally filed. Because SEC filings restate comparative data for prior periods, multiple records can share the same filing_date. For example, an annual 10-K reports three years of results, and a 10-Q includes prior period comparatives. To find the original filing date for a specific 10-K or 10-Q, use the SEC EDGAR filings index endpoint (/stocks/filings/vX/index). | REST | `filing_date` |
 | `FiscalQuarter` | long | The fiscal quarter number (1, 2, 3, or 4) for the reporting period. | REST | `fiscal_quarter` |
 | `FiscalYear` | long | The fiscal year for the reporting period. | REST | `fiscal_year` |
 | `IncomeLossFromDiscontinuedOperations` | double | After-tax income or loss from business operations that have been discontinued. | REST | `income_loss_from_discontinued_operations` |
@@ -583,12 +607,13 @@ Cash flow statements of US public companies, one row per filer and reporting per
 | `OtherFinancingActivities` | double | Cash flows from financing activities not classified elsewhere, including share repurchases and other equity transactions. | REST | `other_financing_activities` |
 | `OtherInvestingActivities` | double | Cash flows from investing activities not classified elsewhere, including acquisitions, divestitures, and investments. | REST | `other_investing_activities` |
 | `OtherOperatingActivities` | double | Other adjustments to reconcile net income to operating cash flow not classified elsewhere. | REST | `other_operating_activities` |
-| `PeriodEnd` | LocalDate | The last date of the reporting period (formatted as YYYY-MM-DD). | REST | `period_end` |
+| `PeriodEnd` | String | The last date of the reporting period (formatted as YYYY-MM-DD). | REST | `period_end` |
 | `PurchaseOfPropertyPlantAndEquipment` | double | Cash outflows for capital expenditures on fixed assets, typically reported as negative values. | REST | `purchase_of_property_plant_and_equipment` |
 | `SaleOfPropertyPlantAndEquipment` | double | Cash inflows from disposing of fixed assets, typically reported as positive values. | REST | `sale_of_property_plant_and_equipment` |
 | `ShortTermDebtIssuancesRepayments` | double | Net cash flows from issuing or repaying short-term debt obligations. | REST | `short_term_debt_issuances_repayments` |
 | `Tickers` | String | A list of ticker symbols under which the company is listed. Multiple symbols may indicate different share classes for the same company. | REST | `tickers` |
 | `Timeframe` | String | The reporting period type. Possible values include: quarterly, annual, trailing_twelve_months. | REST | `timeframe` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -607,7 +632,7 @@ Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 | `Cash` | double | Cash ratio, calculated as cash and cash equivalents divided by current liabilities, measuring the most liquid form of liquidity coverage. | REST | `cash` |
 | `Cik` | String | Central Index Key (CIK) number assigned by the SEC to identify the company. | REST | `cik` |
 | `Current` | double | Current ratio, calculated as total current assets divided by total current liabilities, measuring short-term liquidity. | REST | `current` |
-| `Date` | LocalDate | Date for which the ratios are calculated, representing the trading date with available price data. | REST | `date` |
+| `Date` | String | Date for which the ratios are calculated, representing the trading date with available price data. | REST | `date` |
 | `DebtToEquity` | double | Debt-to-equity ratio, calculated as total debt (current debt plus long-term debt) divided by total shareholders' equity, measuring financial leverage. | REST | `debt_to_equity` |
 | `DividendYield` | double | Dividend yield, calculated as annual dividends per share divided by stock price, measuring the income return on investment. | REST | `dividend_yield` |
 | `EarningsPerShare` | double | Earnings per share, calculated as trailing twelve months (TTM) net income available to common shareholders divided by point-in-time shares outstanding as of the price date, assuming all shares of other share classes are converted to this share class. This is not weighted average basic or diluted shares outstanding, so this value will not match the reported basic or diluted EPS on the income statements endpoint. | REST | `earnings_per_share` |
@@ -625,6 +650,7 @@ Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 | `Quick` | double | Quick ratio (acid-test ratio), calculated as (current assets minus inventories) divided by current liabilities, measuring immediate liquidity. | REST | `quick` |
 | `ReturnOnAssets` | double | Return on assets ratio, calculated as net income divided by total assets, measuring how efficiently a company uses its assets to generate profit. | REST | `return_on_assets` |
 | `ReturnOnEquity` | double | Return on equity ratio, calculated as net income divided by total shareholders' equity, measuring profitability relative to shareholders' equity. | REST | `return_on_equity` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -641,10 +667,11 @@ The index of SEC EDGAR filings by US-listed companies, one row per filing and fi
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the filing entity, if available." | REST | `ticker` |
 | `AccessionNumber` | String | SEC accession number uniquely identifying the filing (e.g., '0000320193-24-000123'). | REST | `accession_number` |
 | `Cik` | String | SEC Central Index Key (CIK) identifying the filing entity. | REST | `cik` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | Direct URL to the filing on the SEC EDGAR website. | REST | `filing_url` |
 | `FormType` | String | SEC form type (e.g., '10-K', '10-Q', '8-K', 'S-1', '4', etc.). | REST | `form_type` |
 | `IssuerName` | String | Name of the company or entity that submitted the filing. | REST | `issuer_name` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -660,11 +687,12 @@ The text of sections of 10-K annual reports, one row per filing and section.
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | SEC URL source for the full filing. | REST | `filing_url` |
-| `PeriodEnd` | LocalDate | Period end date that the filing relates to (formatted as YYYY-MM-DD). | REST | `period_end` |
+| `PeriodEnd` | String | Period end date that the filing relates to (formatted as YYYY-MM-DD). | REST | `period_end` |
 | `Section` | String | Standardized section identifier from the filing (e.g. 'business', 'risk_factors', etc.). | REST | `section` |
 | `Text` | String | Full raw text content of the section, including headers and formatting. | REST | `text` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -681,10 +709,11 @@ The item text of 8-K current reports, one row per filing and filer.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
 | `AccessionNumber` | String | SEC accession number uniquely identifying the filing (e.g., '0000004962-25-000002'). | REST | `accession_number` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | SEC URL source for the full filing. | REST | `filing_url` |
 | `FormType` | String | SEC form type (e.g., '8-K', '8-K/A' for amendments). | REST | `form_type` |
 | `ItemsText` | String | Parsed text content from the 8-K filing, including item numbers and descriptions. | REST | `items_text` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -700,13 +729,14 @@ Disclosures in 8-K current reports, classified by category, one row per disclosu
 | --- | --- | --- | --- | --- |
 | `AccessionNumber` | String | Unique SEC accession number for the filing (e.g., '0000320193-25-000010'). | REST | `accession_number` |
 | `Cik` | String | SEC Central Index Key of the filer (10 digits, zero-padded). | REST | `cik` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | Direct URL to the full submission text file for the filing on SEC EDGAR. | REST | `filing_url` |
 | `PrimaryCategory` | String | Top-level disclosure category (e.g., 'financial_results'). See the full taxonomy at /stocks/taxonomies/vX/disclosures. | REST | `primary_category` |
 | `SecondaryCategory` | String | Mid-level disclosure category (e.g., 'earnings_announcement'). See the full taxonomy at /stocks/taxonomies/vX/disclosures. | REST | `secondary_category` |
 | `SupportingText` | String | A verbatim excerpt from the filing text supporting the assigned categories. | REST | `supporting_text` |
 | `TertiaryCategory` | String | Most specific disclosure category (e.g., 'quarterly_results'). Filtering on this column must use an exact match. See the full taxonomy at /stocks/taxonomies/vX/disclosures. | REST | `tertiary_category` |
 | `Tickers` | String | A list of ticker symbols for the filing company. Multiple symbols may indicate different share classes; empty if no ticker is currently mapped to the filer. | REST | `tickers` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -722,11 +752,12 @@ Risk factors disclosed in company filings, classified by category, one row each.
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `PrimaryCategory` | String | Top-level risk category | REST | `primary_category` |
 | `SecondaryCategory` | String | Mid-level risk category | REST | `secondary_category` |
 | `SupportingText` | String | Snippet of text to support the given label | REST | `supporting_text` |
 | `TertiaryCategory` | String | Most specific risk classification | REST | `tertiary_category` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -744,7 +775,7 @@ Holdings that institutional managers report on Form 13-F, one row per position.
 | `Cusip` | String | The CUSIP identifier for the held security. | REST | `cusip` |
 | `FileNumber` | String | The 13F-specific file number assigned to the filer. | REST | `file_number` |
 | `FilerCik` | String | SEC Central Index Key (10 digits, zero-padded) of the filing entity. | REST | `filer_cik` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | Direct URL to the filing on the SEC EDGAR website. | REST | `filing_url` |
 | `FilmNumber` | String | SEC EDGAR film number for the filing. | REST | `film_number` |
 | `FormType` | String | SEC form type (e.g., '13F-HR' for holdings report, '13F-HR/A' for amended report). | REST | `form_type` |
@@ -752,7 +783,7 @@ Holdings that institutional managers report on Form 13-F, one row per position.
 | `IssuerName` | String | Name of the company whose securities are held. | REST | `issuer_name` |
 | `MarketValue` | long | Market value of the holding in USD. | REST | `market_value` |
 | `OtherManagers` | String | List of names of other manager(s) sharing investment discretion over the reported holdings, if applicable. | REST | `other_managers` |
-| `Period` | LocalDate | The quarter end date that the filing covers (formatted as YYYY-MM-DD). | REST | `period` |
+| `Period` | String | The quarter end date that the filing covers (formatted as YYYY-MM-DD). | REST | `period` |
 | `PutCall` | String | Indicates if the holding is a put or call option. Possible values: PUT, CALL, or empty for common stock. | REST | `put_call` |
 | `SharesOrPrincipalAmount` | long | Number of shares or principal amount held. | REST | `shares_or_principal_amount` |
 | `SharesOrPrincipalType` | String | Type of amount reported. Possible values: SH (shares), PRN (principal amount). | REST | `shares_or_principal_type` |
@@ -760,6 +791,7 @@ Holdings that institutional managers report on Form 13-F, one row per position.
 | `VotingAuthorityNone` | long | Number of shares with no voting authority. | REST | `voting_authority_none` |
 | `VotingAuthorityShared` | long | Number of shares with shared voting authority. | REST | `voting_authority_shared` |
 | `VotingAuthoritySole` | long | Number of shares with sole voting authority. | REST | `voting_authority_sole` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -775,11 +807,11 @@ Initial insider ownership statements (SEC Form 3), one row per reported holding.
 | --- | --- | --- | --- | --- |
 | `AccessionNumber` | String | Unique SEC accession number for the filing (e.g., '0001209191-25-012345'). | REST | `accession_number` |
 | `Aff10b5One` | boolean | Whether the transaction was made pursuant to a Rule 10b5-1 trading plan. | REST | `aff_10b5_one` |
-| `DateOfOriginalSubmission` | LocalDate | Date of the original filing submission for amendment filings (3/A). Null for initial filings (formatted as YYYY-MM-DD). | REST | `date_of_original_submission` |
+| `DateOfOriginalSubmission` | String | Date of the original filing submission for amendment filings (3/A). Null for initial filings (formatted as YYYY-MM-DD). | REST | `date_of_original_submission` |
 | `DirectOrIndirect` | String | Whether ownership is direct ('D') or indirect ('I'). | REST | `direct_or_indirect` |
-| `ExerciseDate` | LocalDate | Date exercisable for derivative securities (formatted as YYYY-MM-DD). | REST | `exercise_date` |
+| `ExerciseDate` | String | Date exercisable for derivative securities (formatted as YYYY-MM-DD). | REST | `exercise_date` |
 | `ExercisePrice` | double | Exercise or conversion price of derivative securities in USD. | REST | `exercise_price` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | Direct URL to the filing on the SEC EDGAR website. | REST | `filing_url` |
 | `Footnotes` | String | List of footnotes from the filing that are relevant to this row, each with an id and description. | REST | `footnotes` |
 | `FormType` | String | SEC form type ('3' for initial filing, '3/A' for amendments). | REST | `form_type` |
@@ -794,7 +826,7 @@ Initial insider ownership statements (SEC Form 3), one row per reported holding.
 | `OfficerTitle` | String | Title of the officer, if the reporting owner is an officer. | REST | `officer_title` |
 | `OwnerCik` | String | SEC Central Index Key of the reporting owner (10 digits, zero-padded). | REST | `owner_cik` |
 | `OwnerName` | String | Name of the reporting owner (individual or entity). | REST | `owner_name` |
-| `PeriodOfReport` | LocalDate | Date of the event triggering the filing (formatted as YYYY-MM-DD). | REST | `period_of_report` |
+| `PeriodOfReport` | String | Date of the event triggering the filing (formatted as YYYY-MM-DD). | REST | `period_of_report` |
 | `Remarks` | String | Additional remarks included in the filing. | REST | `remarks` |
 | `SecurityTitle` | String | Title or description of the security (e.g., 'Common Stock', 'Stock Option'). | REST | `security_title` |
 | `SecurityType` | String | Type of security ('non-derivative' or 'derivative'). | REST | `security_type` |
@@ -802,6 +834,7 @@ Initial insider ownership statements (SEC Form 3), one row per reported holding.
 | `Tickers` | String | A list of ticker symbols for the issuer company. Multiple symbols may indicate different share classes. | REST | `tickers` |
 | `UnderlyingSecurityShares` | double | Number of underlying shares for derivative holdings. | REST | `underlying_security_shares` |
 | `UnderlyingSecurityTitle` | String | Title of the underlying security for derivative holdings. | REST | `underlying_security_title` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -817,14 +850,14 @@ Insider transactions (SEC Form 4), one row per reported transaction or holding.
 | --- | --- | --- | --- | --- |
 | `AccessionNumber` | String | Unique SEC accession number for the filing (e.g., '0001209191-25-012345'). | REST | `accession_number` |
 | `Aff10b5One` | boolean | Whether the transaction was made pursuant to a Rule 10b5-1 trading plan. | REST | `aff_10b5_one` |
-| `DateOfOriginalSubmission` | LocalDate | Date of the original filing submission for amendment filings (4/A). Null for standard filings (formatted as YYYY-MM-DD). | REST | `date_of_original_submission` |
-| `DeemedExecutionDate` | LocalDate | Deemed execution date if different from transaction date (formatted as YYYY-MM-DD). | REST | `deemed_execution_date` |
+| `DateOfOriginalSubmission` | String | Date of the original filing submission for amendment filings (4/A). Null for standard filings (formatted as YYYY-MM-DD). | REST | `date_of_original_submission` |
+| `DeemedExecutionDate` | String | Deemed execution date if different from transaction date (formatted as YYYY-MM-DD). | REST | `deemed_execution_date` |
 | `DirectOrIndirect` | String | Whether ownership is direct ('D') or indirect ('I'). | REST | `direct_or_indirect` |
 | `EquitySwapInvolved` | boolean | Whether an equity swap was involved in the transaction. | REST | `equity_swap_involved` |
-| `ExerciseDate` | LocalDate | Date exercisable for derivative securities (formatted as YYYY-MM-DD). | REST | `exercise_date` |
+| `ExerciseDate` | String | Date exercisable for derivative securities (formatted as YYYY-MM-DD). | REST | `exercise_date` |
 | `ExercisePrice` | double | Exercise or conversion price of derivative securities in USD. | REST | `exercise_price` |
-| `ExpirationDate` | LocalDate | Expiration date for derivative securities (formatted as YYYY-MM-DD). | REST | `expiration_date` |
-| `FilingDate` | LocalDate | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
+| `ExpirationDate` | String | Expiration date for derivative securities (formatted as YYYY-MM-DD). | REST | `expiration_date` |
+| `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | Direct URL to the filing on the SEC EDGAR website. | REST | `filing_url` |
 | `Footnotes` | String | List of footnotes from the filing that are relevant to this row, each with an id and description. | REST | `footnotes` |
 | `FormType` | String | SEC form type ('4' for standard filing, '4/A' for amendments). | REST | `form_type` |
@@ -839,7 +872,7 @@ Insider transactions (SEC Form 4), one row per reported transaction or holding.
 | `OfficerTitle` | String | Title of the officer, if the reporting owner is an officer. | REST | `officer_title` |
 | `OwnerCik` | String | SEC Central Index Key of the reporting owner (10 digits, zero-padded). | REST | `owner_cik` |
 | `OwnerName` | String | Name of the reporting owner (individual or entity). | REST | `owner_name` |
-| `PeriodOfReport` | LocalDate | Date of the event triggering the filing (formatted as YYYY-MM-DD). | REST | `period_of_report` |
+| `PeriodOfReport` | String | Date of the event triggering the filing (formatted as YYYY-MM-DD). | REST | `period_of_report` |
 | `RecordType` | String | Type of record in the filing (e.g., 'transaction', 'holding'). | REST | `record_type` |
 | `Remarks` | String | Additional remarks included in the filing. | REST | `remarks` |
 | `SecurityTitle` | String | Title or description of the security (e.g., 'Common Stock', 'Stock Option'). | REST | `security_title` |
@@ -848,13 +881,14 @@ Insider transactions (SEC Form 4), one row per reported transaction or holding.
 | `Tickers` | String | A list of ticker symbols for the issuer company. Multiple symbols may indicate different share classes. | REST | `tickers` |
 | `TransactionAcquiredDisposed` | String | Whether shares were acquired ('A') or disposed of ('D'). | REST | `transaction_acquired_disposed` |
 | `TransactionCode` | String | SEC transaction code indicating the type of transaction (e.g., 'P' for purchase, 'S' for sale, 'A' for grant/award, 'M' for exercise/conversion). | REST | `transaction_code` |
-| `TransactionDate` | LocalDate | Date of the transaction (formatted as YYYY-MM-DD). | REST | `transaction_date` |
+| `TransactionDate` | String | Date of the transaction (formatted as YYYY-MM-DD). | REST | `transaction_date` |
 | `TransactionPricePerShare` | double | Price per share of the transaction in USD. | REST | `transaction_price_per_share` |
 | `TransactionShares` | double | Number of shares involved in the transaction. | REST | `transaction_shares` |
 | `TransactionTimeliness` | String | Timeliness of the filing: 'O' (on time) or 'L' (late). | REST | `transaction_timeliness` |
 | `TransactionValue` | double | Total value of the transaction in USD (transaction_shares x transaction_price_per_share). Null when shares or price is not reported. | REST | `transaction_value` |
 | `UnderlyingSecurityShares` | double | Number of underlying shares for derivative transactions. | REST | `underlying_security_shares` |
 | `UnderlyingSecurityTitle` | String | Title of the underlying security for derivative transactions. | REST | `underlying_security_title` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -870,7 +904,7 @@ Open-market insider purchases and sales, summed per company and transaction day.
 | --- | --- | --- | --- | --- |
 | `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST | `issuer_cik` |
 | `IssuerName` | String | Name of the issuer company as reported in the filings. | REST | `issuer_name` |
-| `LastFilingDate` | LocalDate | Filing date of the latest filing that reported one of these transactions (formatted as YYYY-MM-DD). Transactions are usually filed within two business days. | REST | `last_filing_date` |
+| `LastFilingDate` | String | Filing date of the latest filing that reported one of these transactions (formatted as YYYY-MM-DD). Transactions are usually filed within two business days. | REST | `last_filing_date` |
 | `NetShares` | double | Shares purchased minus shares sold. | REST | `net_shares` |
 | `NetValue` | double | Value purchased minus value sold in USD. | REST | `net_value` |
 | `PlannedPurchaseValue` | double | Value of shares purchased under a Rule 10b5-1 trading plan in USD. Zero on filings before the plan checkbox was introduced in 2023. | REST | `planned_purchase_value` |
@@ -884,7 +918,8 @@ Open-market insider purchases and sales, summed per company and transaction day.
 | `SaleValue` | double | Value of shares sold in USD. | REST | `sale_value` |
 | `SellerCount` | long | Number of distinct insiders who sold. | REST | `seller_count` |
 | `Tickers` | String | Ticker symbols of the issuer as of the transaction date. Multiple symbols may indicate different share classes; the totals cover the issuer, not each ticker. | REST | `tickers` |
-| `TransactionDate` | LocalDate | Date of the transactions (formatted as YYYY-MM-DD). | REST | `transaction_date` |
+| `TransactionDate` | String | Date of the transactions (formatted as YYYY-MM-DD). | REST | `transaction_date` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -899,12 +934,12 @@ Each company's insiders and the shares each one holds now, one row per insider.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `FilingCount` | long | Number of Form 3, 4, and 5 filings by the owner for this issuer. | REST | `filing_count` |
-| `FirstFilingDate` | LocalDate | Date of the owner's first Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). Filings begin in 2003. | REST | `first_filing_date` |
+| `FirstFilingDate` | String | Date of the owner's first Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). Filings begin in 2003. | REST | `first_filing_date` |
 | `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). | REST | `issuer_cik` |
 | `IssuerName` | String | Name of the issuer company as reported in the most recent filing. | REST | `issuer_name` |
-| `LastFilingDate` | LocalDate | Date of the owner's most recent Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). | REST | `last_filing_date` |
+| `LastFilingDate` | String | Date of the owner's most recent Form 3, 4, or 5 filing for this issuer (formatted as YYYY-MM-DD). | REST | `last_filing_date` |
 | `OfficerTitle` | String | Title of the officer in the most recent filing, if the reporting owner is an officer. | REST | `officer_title` |
-| `OldestPositionDate` | LocalDate | Earliest as_of_date among the summed positions (formatted as YYYY-MM-DD). A date far behind last_filing_date means at least one position has not been restated recently and may be stale. | REST | `oldest_position_date` |
+| `OldestPositionDate` | String | Earliest as_of_date among the summed positions (formatted as YYYY-MM-DD). A date far behind last_filing_date means at least one position has not been restated recently and may be stale. | REST | `oldest_position_date` |
 | `OwnerCik` | String | SEC Central Index Key of the reporting owner (10 digits, zero-padded). Stable across issuers and years; use it to follow a person through the Form 3, 4, and 5 endpoints. | REST | `owner_cik` |
 | `OwnerName` | String | Name of the reporting owner (individual or entity) as reported in the most recent filing. | REST | `owner_name` |
 | `OwnershipPct` | double | shares_owned as a percentage of the issuer's shares outstanding (largest share class) as of last_filing_date. Absent when shares outstanding is not available for the issuer. | REST | `ownership_pct` |
@@ -914,6 +949,7 @@ Each company's insiders and the shares each one holds now, one row per insider.
 | `SharesOwnedDirect` | double | Shares held directly, in the owner's own name. | REST | `shares_owned_direct` |
 | `SharesOwnedIndirect` | double | Shares held indirectly through trusts, LLCs, family members, and other vehicles. | REST | `shares_owned_indirect` |
 | `Tickers` | String | Ticker symbols of the issuer as of the owner's most recent filing. Multiple symbols may indicate different share classes. | REST | `tickers` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -932,6 +968,7 @@ The taxonomy that classifies filing risk factors, one row per category.
 | `SecondaryCategory` | String | Mid-level risk category | REST | `secondary_category` |
 | `Taxonomy` | String | Version identifier (e.g., '1.0', '1.1') for the taxonomy | REST | `taxonomy` |
 | `TertiaryCategory` | String | Most specific risk classification | REST | `tertiary_category` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -950,6 +987,7 @@ The taxonomy that classifies 8-K disclosures, one row per category.
 | `SecondaryCategory` | String | Mid-level disclosure category. | REST | `secondary_category` |
 | `Taxonomy` | String | Taxonomy version that defines this classification (e.g., '1.0'). | REST | `taxonomy` |
 | `TertiaryCategory` | String | Most specific disclosure category. | REST | `tertiary_category` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 

@@ -1,5 +1,6 @@
 """Tests for `poll()` tables: the three modes, the cycle's failures, rows, and lifetime."""
 
+import copy
 import dataclasses
 import functools
 import gc
@@ -10,13 +11,15 @@ import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
+from deephaven.execution_context import ExecutionContext
+from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 
 import deephaven_massive as dm
@@ -25,17 +28,22 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode
+from deephaven_massive._errors import PermanentError
 from deephaven_massive._ingest import poll
 from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, open_poll
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import Query
-from deephaven_massive._tables.liveness import ResultRegistry, new_scope
+from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, entered, new_scope
+from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
 from tests._fakes.rest import FakeRestServer, Reply, envelope
+
+if TYPE_CHECKING:
+    from deephaven.liveness_scope import LivenessScope
 
 R = Transport.REST
 TIMEOUT = 30.0
@@ -65,7 +73,9 @@ class Script:
         self.outcomes.put(pa.Table.from_pylist(data, schema=self.schema))
 
     def fail(self, error: BaseException) -> None:
-        self.outcomes.put(error)
+        # A copy: a test's parameter lives as long as the run, and the raised exception's
+        # traceback would keep the poller's frames, and its session, alive with it.
+        self.outcomes.put(copy.copy(error))
 
     def __call__(
         self,
@@ -93,9 +103,21 @@ def script(massive_session: dm.MassiveSession) -> Script:
     return Script(massive_session)
 
 
+class RecordingPollers(Pollers):
+    # Remembers every poller it registered: a poller leaves the set when its thread ends.
+    def __init__(self, label: str) -> None:
+        super().__init__(label)
+        self.added: list[poll.Poller] = []
+
+    @override
+    def add(self, poller: poll.Poller) -> None:
+        super().add(poller)
+        self.added.append(poller)
+
+
 @pytest.fixture
 def pollers(massive_session: dm.MassiveSession) -> Pollers:
-    return Pollers(massive_session._core.label)
+    return RecordingPollers(massive_session._core.label)
 
 
 def start(
@@ -119,6 +141,11 @@ def start(
         path=PATH,
         clock=clock,
     )
+
+
+def dm_exec(m: dm.MassiveSession) -> ExecutionContext:
+    # The session's execution context, for releasing a user scope from the test thread.
+    return entered(m._core.exec_ctx)
 
 
 def until(condition: Callable[[], bool]) -> None:
@@ -159,6 +186,8 @@ def fail_one_poll_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def poller_of(pollers: Pollers) -> poll.Poller:
+    if isinstance(pollers, RecordingPollers):
+        return pollers.added[-1]
     (one,) = tuple(pollers._live)
     return one
 
@@ -211,29 +240,34 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     dh_exec_ctx: object,
     rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
 ) -> None:
-    # Every column of the related companies is a poll key, so a `last_by` would have nothing
-    # to aggregate: the table holds each distinct row once, across cycles.
+    # Every vendor column of the related companies is a poll key; only the arrival time is
+    # left to aggregate, so the table holds each distinct row once, across cycles, with the
+    # time of the latest cycle that returned it.
     spec = _session.CATALOG.by_name["reference.related_companies"]
     schema = _session.CATALOG.dataset_schema(spec)
-    assert set(spec.poll_keys) == set(schema.column_names)
+    assert {*spec.poll_keys, "TimestampInsert"} == set(schema.column_names)
     scope = new_scope()
     with scope.open():
         table, publisher = poll.build_table(
-            spec, schema, PollMode.UPSERT, stream_id=1, stop=threading.Event()
+            spec, schema, PollMode.UPSERT, stream_id=1, on_shutdown=threading.Event().set
         )
 
-    def cycle(*pairs: tuple[str, str]) -> None:
+    def cycle(arrived: int, *pairs: tuple[str, str]) -> None:
         names = ("Underlying", "Symbol")
-        data = pa.table({n: [p[i] for p in pairs] for i, n in enumerate(names)})
-        publisher.add(dh_arrow.to_table(data.select(list(schema.column_names))))
+        data = {n: [p[i] for p in pairs] for i, n in enumerate(names)}
+        stamps = pa.array([arrived] * len(pairs), pa.int64()).cast(pa.timestamp("ns", "UTC"))
+        table = pa.table({**data, "TimestampInsert": stamps})
+        publisher.add(dh_arrow.to_table(table.select(list(schema.column_names))))
 
-    def held(rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
-        return sorted((row["Underlying"], row["Symbol"]) for row in rows)
+    def held(rows: list[dict[str, Any]]) -> list[tuple[str, str, int]]:
+        return sorted(
+            (row["Underlying"], row["Symbol"], int(row["TimestampInsert"].value)) for row in rows
+        )
 
-    cycle(("AAPL", "MSFT"), ("AAPL", "GOOGL"), ("AAPL", "MSFT"))
-    rows_when(table, lambda rows: held(rows) == [("AAPL", "GOOGL"), ("AAPL", "MSFT")])
-    cycle(("AAPL", "MSFT"), ("AAPL", "AMZN"))  # GOOGL absent: UPSERT never deletes
-    expected = [("AAPL", "AMZN"), ("AAPL", "GOOGL"), ("AAPL", "MSFT")]
+    cycle(1, ("AAPL", "MSFT"), ("AAPL", "GOOGL"), ("AAPL", "MSFT"))
+    rows_when(table, lambda rows: held(rows) == [("AAPL", "GOOGL", 1), ("AAPL", "MSFT", 1)])
+    cycle(2, ("AAPL", "MSFT"), ("AAPL", "AMZN"))  # GOOGL absent: UPSERT never deletes
+    expected = [("AAPL", "AMZN", 2), ("AAPL", "GOOGL", 1), ("AAPL", "MSFT", 2)]
     rows = rows_when(table, lambda rows: held(rows) == expected)
     assert len(rows) == 3
     scope.release()
@@ -360,6 +394,38 @@ def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
     assert stream_rows()[0]["State"] == "FAILED"  # a failed row keeps its state
 
 
+def test_a_failure_is_recorded_before_the_table_fails(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Whoever sees the table failed must find the failure already recorded, as for a stream.
+    order: list[str] = []
+    core = massive_session._core
+    record, publish = core.fail_stream, TablePublisher.publish_failure
+
+    def recording(stream_id: int, error: str) -> None:
+        order.append("recorded")
+        record(stream_id, error)
+
+    def failing(publisher: TablePublisher, error: Exception) -> None:
+        order.append("table failed")
+        publish(publisher, error)
+
+    monkeypatch.setattr(core, "fail_stream", recording)
+    monkeypatch.setattr(TablePublisher, "publish_failure", failing)
+    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    poller = poller_of(pollers)
+    poller.thread.join(TIMEOUT)
+    assert not poller.thread.is_alive()  # the poller is done with `order`
+    assert order == ["recorded", "table failed"]
+    massive_session.release(table)
+
+
 @pytest.mark.parametrize(
     "error",
     [dm.AuthenticationError("HTTP 401"), RowDataError("stocks.dividends: row 0 lacks ticker")],
@@ -420,7 +486,7 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
-    watch.add(new_table([string_col("Symbol", ["msft", "AAPL", "not a symbol!"])]))
+    watch.add(new_table([string_col("Symbol", ["MSFT", "AAPL", None])]))
     script.drift = DriftReport(missing=frozenset({"ticker"}))  # every cycle: shown once
     script.rows()
     table = start(
@@ -435,6 +501,63 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     assert script.symbols[-1] == ("AAPL", "IBM", "MSFT")
     assert stream_rows()[0]["SchemaDrift"] == "REST:ticker-"
     del table
+
+
+def test_a_failing_upstream_watchlist_fails_the_poll(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    source = input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["AAPL"])]))
+    watch = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+    until(lambda: bool(watch.j_table.isFailed()))
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert "the symbol table failed, so the result can no longer follow it" in row["Error"]
+    assert script.symbols == [("AAPL",)]
+
+
+def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    watch.add(new_table([string_col("Symbol", ["msft"])]))
+    until(lambda: watch.size == 2)
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = stream_rows()
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("stocks.dividends poll(): a symbol table holds 'msft'")
+    assert (
+        "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.NULL)"
+        in (row["Error"])
+    )
+    assert script.symbols == [("AAPL",)]
 
 
 # --- Lifetime ------------------------------------------------------------------------------------
@@ -454,13 +577,50 @@ def test_close_stops_every_poller_and_marks_the_rows(
     streams = massive_session.streams()
     poller = poller_of(pollers)
     massive_session.close()
+    assert poller.stopped
     clock.advance(60)
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
-    assert pairs(table, dh_to_pylist) == [("AAPL", 1.0)]  # static, with its rows
+    # The table failed, naming the close, and keeps its rows for a snapshot.
+    until(lambda: bool(table.j_table.isFailed()))
+    assert pairs(table.snapshot(), dh_to_pylist) == [("AAPL", 1.0)]
+    (row,) = dh_to_pylist(streams)  # a view taken before the close keeps the final rows
+    assert (row["State"], row["Error"]) == (
+        "CLOSED",
+        f"{massive_session._core.label} was closed; this table no longer updates",
+    )
     del streams
     with pytest.raises(dm.MassiveError, match="is closed"):
         start(massive_session, script=script, pollers=pollers, clock=clock)
+
+
+def test_a_poll_racing_close_after_registering_never_starts(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
+) -> None:
+    # The session closes after the poll is tracked but before its poller starts: the poll
+    # fails, its result is released, and the poller never runs.
+    track = ResultRegistry.track
+
+    def track_then_close(self: ResultRegistry, *args: object) -> ResultRecord:
+        record = track(self, *cast("tuple[Table, LivenessScope, Callable[[], None]]", args))
+        massive_session.close()
+        return record
+
+    monkeypatch.setattr(ResultRegistry, "track", track_then_close)
+    with pytest.raises(dm.MassiveError, match="is closed"):
+        start(massive_session, script=script, pollers=pollers, clock=clock)
+    monkeypatch.undo()
+    poller = poller_of(pollers)
+    assert poller.stopped
+    assert poller.thread.ident is None  # never started
+    drain()
+    until(lambda: not massive_session._core._polls)
 
 
 def test_a_poll_racing_close_never_starts(
@@ -493,6 +653,7 @@ def test_a_failed_registration_releases_everything(
     monkeypatch.setattr(ResultRegistry, "track", refuse)
     with pytest.raises(KeyboardInterrupt):
         start(massive_session, script=script, pollers=pollers, clock=clock)
+    monkeypatch.undo()
     assert pollers._live == set()
     assert massive_session._core._polls == {}
     (row,) = stream_rows()
@@ -514,24 +675,120 @@ def test_a_collected_table_stops_its_poller(
     assert not poller.thread.is_alive()
 
 
-def test_a_poller_never_keeps_its_session_alive(
+def test_a_poll_keeps_its_session_alive_while_its_table_is_used(
     *, script: Script, clock: FakeClock, fake_rest: FakeRestServer
 ) -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     pollers = cast("Any", m._core.rest_transport())._state.pollers
     script.rows()
-    table = start(m, script=script, pollers=pollers, clock=clock)
+    tables = [start(m, script=script, pollers=pollers, clock=clock)]
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
     core = weakref.ref(m._core)
     del m
     gc.collect()
-    assert core() is None
-    until(lambda: poller.stopped)  # the collected session's closer stopped it
+    assert core() is not None  # the running poll holds its session
+    script.rows(("AAPL", 1.0))
+    next_cycle(clock)  # and keeps polling
+    until(lambda: tables[0].size == 1)
+    tables.clear()  # nothing uses the poll any more: it stops, and the session is freed
+    gc.collect()
+    until(lambda: poller.stopped)
     clock.advance(60)
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
+    until(lambda: core() is None)
+
+
+def test_a_poll_keeps_polling_while_a_derived_table_remains(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    poller = poller_of(pollers)
+    scope = new_scope()  # the user's own scope, released below
+    with scope.open():
+        # Not a formula: `where` would capture this frame's locals, the session's fixtures
+        # among them, in the query scope until the JVM collects the table.
+        derived = [table.tail(100)]
+    massive_session.release(table)
     del table
+    gc.collect()
+    (row,) = stream_rows()
+    assert (row["State"], row["HeldResults"]) == ("RELEASED", 0)
+    assert not poller.stopped
+    script.rows(("AAPL", 1.0), ("MSFT", 2.0))
+    next_cycle(clock)
+    until(lambda: pairs(derived[0], dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
+    assert stream_rows()[0]["RowsPublished"] == 3
+    derived.clear()
+    with dm_exec(massive_session):
+        scope.release()  # the last use of the poll: its poller stops
+    until(lambda: poller.stopped)
+    clock.advance(60)
+    poller.thread.join(TIMEOUT)
+    assert not poller.thread.is_alive()
+    until(lambda: not massive_session._core._polls)
+
+
+def test_a_poll_fails_once_and_publishes_nothing_after(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers, clock: FakeClock
+) -> None:
+    # A poll the session fails (a close, a dying thread) fails once, and publishes nothing
+    # more, even from a cycle that read its rows before the failure.
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    poller = poller_of(pollers)
+    clock.wait_for_sleepers(1)
+    error = dm.MassiveError("gone")
+    assert poller.fail(error)
+    assert not poller.fail(error)
+    rows = pa.Table.from_pylist([{"Symbol": "IBM", "CashAmount": 3.0}], schema=script.schema)
+    assert poller._publish(rows) == 0
+    until(lambda: bool(table.j_table.isFailed()))
+    clock.advance(60)
+    poller.thread.join(TIMEOUT)
+
+
+def test_a_failure_after_the_close_fails_the_poll_with_the_close(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A cycle's fatal error that loses the race to the close: the close marked the row first,
+    # so the table names the close, as its row does, and the failure is not logged.
+    script.rows()
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    poller = poller_of(pollers)
+    clock.wait_for_sleepers(1)
+    core = massive_session._core
+    closed = f"{core.label} was closed; this table no longer updates"
+    monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
+    failures: list[str] = []
+    publisher = poller._publisher
+
+    class _Recording:
+        def publish_failure(self, error: Exception) -> None:
+            failures.append(str(error))
+            publisher.publish_failure(error)
+
+    poller._publisher = cast("Any", _Recording())
+    with caplog.at_level(logging.ERROR, LOGGER):
+        assert poller.fail(dm.AuthenticationError("HTTP 401"))
+    assert failures == [closed]
+    assert not caplog.records
+    until(lambda: bool(table.j_table.isFailed()))
+    poller.thread.join(TIMEOUT)
 
 
 def test_a_cycle_after_the_core_is_gone_ends_the_poller(
@@ -607,7 +864,7 @@ def test_an_error_after_a_stop_is_not_reported(
     def stopped(**kwargs: object) -> tuple[pa.Table, int]:
         reading.set()
         gate.wait(TIMEOUT)
-        raise error
+        raise copy.copy(error)  # the parameter outlives the test; its traceback must not
 
     table = open_poll(
         massive_session._core,
@@ -704,9 +961,15 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
     dh_to_pylist: ToPylist,
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
-    watch = new_table([string_col("Symbol", ["aapl"])])
+    watch = new_table([string_col("Symbol", ["AAPL"])])
     q = build_query(rest_session._core, DIVIDENDS, symbols=watch)
     assert isinstance(q, Query)
+    bad = build_query(
+        rest_session._core, DIVIDENDS, symbols=new_table([string_col("Symbol", ["aapl"])])
+    )
+    assert isinstance(bad, Query)
+    with pytest.raises(ValueError, match=r"^a symbol table holds 'aapl'"):
+        bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
     assert "ticker.any_of=AAPL" in fake_rest.requests[0].target
@@ -1170,3 +1433,73 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
     rendered = row["Error"].removeprefix(prefix)
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
+
+
+def test_polled_rows_share_one_stored_string_per_date(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    string_objects: Callable[[Table, str], int],
+) -> None:
+    data = [
+        {"Symbol": symbol, "CashAmount": 1.0, "PayDate": "2025-03-14", "Id": symbol}
+        for symbol in ("AAPL", "MSFT", "IBM")
+    ]
+    script.outcomes.put(pa.Table.from_pylist(data, schema=script.schema))
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, mode=PollMode.UPSERT
+    )
+    until(lambda: table.size == 3)
+    assert string_objects(table, "PayDate") == 1
+    massive_session.release(table)
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    # Under WARN a row Massive spelled in a way the library cannot read keeps a null Symbol
+    # and its text in RawSymbol; keyed on Symbol, it neither fails the null-key check nor
+    # merges with another such row, and REPLACE removes it by its text.
+    monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    spec = dataclasses.replace(FEED, poll_keys=("Symbol",))
+    rows = [
+        {"id": "a", "ticker": "AAPL"},
+        {"id": "b", "ticker": "@@1"},
+        {"id": "c", "ticker": "@@2"},
+    ]
+    fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
+    )
+    with dm.MassiveSession(config) as m:
+        q = build_query(m._core, spec, symbols=["AAPL"])
+        assert isinstance(q, Query)
+        table = q.poll(60, mode=mode)
+        expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
+
+        def held() -> list[tuple[str, str | None, str | None]]:
+            return sorted((r["Id"], r["Symbol"], r["RawSymbol"]) for r in dh_to_pylist(table))
+
+        until(lambda: held() == expected)
+        next_cycle(clock)  # @@2 leaves: REPLACE removes its row alone; the others keep it
+        until(lambda: len(fake_rest.requests) == 2)
+        until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
+        assert m._core.diagnostics.barrier().wait(30.0)
+        assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
+        assert not table.j_table.isFailed()
+
+
+def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:
+    # A poll() table fails on a PermanentError, its fatal set names only the base.
+    for error in (poll.RowDataError, poll.UnsupportedParameterError, poll.SymbolRowError):
+        assert issubclass(error, PermanentError)
+    assert (dm.AuthenticationError, dm.EntitlementError, PermanentError) == poll._FATAL

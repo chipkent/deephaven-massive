@@ -5,8 +5,9 @@ the evidence, not a pass, answers the question. Raw rows come from the wire REST
 clients, because the library moves the very stamps in question; the library's own answer to
 the same request is recorded beside them. How to run these tests is in `docs/live-tests.md`.
 
-The library's rule under test: a forex 1-day bar is moved to 00:00 UTC of the UTC day its
-stamp falls on, whatever the source, without a check.
+The library's rule under test: a forex 1-day bar stamped at 00:00 UTC or at its UTC day's last
+millisecond is moved to 00:00 UTC of that day, whatever the source, and any other stamp fails
+the call with `MassiveError`.
 """
 
 from __future__ import annotations
@@ -337,6 +338,26 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     assert filed
 
 
+@pytest.mark.needs("currencies:starter", "s3")
+@pytest.mark.settles("64")
+@pytest.mark.timeout(100)
+def test_forex_flat_files_of_a_weekend(
+    *, flat_file_tickers: FlatFileTickers, evidence: Evidence
+) -> None:
+    """Whether Massive publishes forex day files for a Saturday and a Sunday.
+
+    Reads `global_forex/day_aggs_v1` for Saturday 2026-05-30 and Sunday 2026-05-31 and records,
+    for each, whether the file exists and how many pairs it holds. Reading it: the library
+    takes a forex Saturday for a day without trading, so a missing Saturday file is skipped
+    silently and a Sunday's is reported as a possible holiday; a Saturday file with rows, or
+    no Sunday file at all, means that rule must change.
+    """
+    for day in (_FILE_DAY - timedelta(days=2), _FILE_DAY - timedelta(days=1)):
+        read = flat_file_tickers(_DAY_FILE, day, None)
+        pairs = None if read is None else len(read[0])
+        evidence(f"{_DAY_FILE} {day} ({day:%A}): {'no file' if read is None else f'{pairs} rows'}")
+
+
 @pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("33")
 @pytest.mark.requests(4)
@@ -364,7 +385,7 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     kept = live_session.forex.bars(_PAIR, dm.Timespan.WEEK).history(
         date(2026, 3, 2), date(2026, 3, 15), source=dm.HistorySource.REST
     )
-    stamps = [instant_text(row["Timestamp"]) for row in table_rows(kept)]
+    stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history 2026-03-02..2026-03-15 keeps the bars stamped {stamps}")
     assert len(lines) > 1
 

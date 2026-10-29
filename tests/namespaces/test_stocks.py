@@ -256,11 +256,14 @@ def test_every_dataset_docstring_links_its_column_reference(
 
 
 @pytest.mark.parametrize("name", STREAMED)
-def test_streamed_datasets_lead_with_symbol_and_timestamp(name: str) -> None:
+def test_streamed_datasets_lead_with_symbol_date_and_their_instants(name: str) -> None:
     found = columns(name)
-    assert list(found)[:2] == ["Symbol", "Timestamp"]
+    times = ["TimestampStart", "TimestampEnd"] if name == "bars" else ["Timestamp"]
+    assert list(found)[: 2 + len(times)] == ["Symbol", "Date", *times]
+    assert list(found)[-1] == "TimestampInsert"
     assert found["Symbol"] is ColumnType.STRING
-    assert found["Timestamp"] is ColumnType.INSTANT
+    assert found["Date"] is ColumnType.STRING
+    assert all(found[time] is ColumnType.INSTANT for time in [*times, "TimestampInsert"])
 
 
 @pytest.mark.parametrize(
@@ -307,10 +310,10 @@ def test_no_dataset_has_an_underlying(name: str) -> None:
 
 
 @pytest.mark.parametrize(("name", "axis"), list(AXES.items()))
-def test_date_axes_bound_a_local_date_column(name: str, axis: tuple[str, str]) -> None:
+def test_date_axes_bound_a_date_column(name: str, axis: tuple[str, str]) -> None:
     wire, column = axis
     assert spec_of(name).time_axis == (f"{wire}.gte", f"{wire}.lte")
-    assert columns(name)[column] is ColumnType.LOCAL_DATE
+    assert columns(name)[column] is ColumnType.STRING  # every date is ISO text
 
 
 @pytest.mark.parametrize(
@@ -324,7 +327,7 @@ def test_datasets_without_a_date_axis_have_no_start_or_end(
 
 
 def test_share_float_keeps_its_effective_date_as_a_column() -> None:
-    assert columns("share_float")["EffectiveDate"] is ColumnType.LOCAL_DATE
+    assert columns("share_float")["EffectiveDate"] is ColumnType.STRING
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
@@ -537,7 +540,7 @@ def test_list_datasets_filter_by_optional_symbols(
     make = factory(massive_session, name)
     assert type(make()) is Query
     assert make()._request.symbols is None
-    assert make("aapl")._request.symbols == ("AAPL",)
+    assert make("AAPL")._request.symbols == ("AAPL",)
     with pytest.raises(ValueError, match="use symbols=None, which returns every ticker"):
         make(dm.ALL)
 
@@ -775,7 +778,7 @@ def test_trades_fetch_reads_each_symbols_last_trade(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, last_trade="/v2/last/trade/AAPL")
-    out = table_rows(rest_session.stocks.trades("aapl").fetch())
+    out = table_rows(rest_session.stocks.trades("AAPL").fetch())
     assert sent(fake_rest) == [("/v2/last/trade/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["Price"], r["Size"]) for r in out] == [
         ("AAPL", 1617901342969834000, 129.8473, 25.0)
@@ -835,22 +838,76 @@ def test_daily_bars_fetch_the_previous_session(
     serve(fake_rest, load_fixture, bars_prev="/v2/aggs/ticker/AAPL/prev")
     out = table_rows(rest_session.stocks.bars("AAPL", dm.Timespan.DAY).fetch())
     assert sent(fake_rest) == [("/v2/aggs/ticker/AAPL/prev", {"adjusted": "true"})]
-    assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
-        ("AAPL", 1605042000000 * 10**6, 115.97, 116.3058)
+    # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
+    # whole New York day, as the range stamps it, and its `Date` that day.
+    assert [
+        (r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"], r["Vwap"])
+        for r in out
+    ] == [
+        (
+            "AAPL",
+            "2020-11-10",
+            new_york_midnight_ns(date(2020, 11, 10)),
+            new_york_midnight_ns(date(2020, 11, 11)),
+            115.97,
+            116.3058,
+        )
     ]
+    assert out[0]["TimestampInsert"] is not None
 
 
 def test_bars_history_over_rest_fills_the_range_path(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
-    serve(fake_rest, load_fixture, bars_range=RANGE_PATH)
+    # The sample echoes `adjusted: true`; unadjusted bars come back saying so.
+    body = json.loads(load_fixture(FIXTURES, "bars_range.json"))
+    fake_rest.reply(RANGE_PATH, Reply(body={**body, "adjusted": False}))
     query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, adjusted=False)
     out = table_rows(query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(RANGE_PATH, {"adjusted": "false", "sort": "asc", "limit": "50000"})]
-    assert [(r["Symbol"], r["Timestamp"], r["Close"]) for r in out] == [
-        ("AAPL", 1577941200000 * 10**6, 75.0875),
-        ("AAPL", 1578027600000 * 10**6, 74.3575),
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Close"]) for r in out] == [
+        ("AAPL", "2020-01-02", 1577941200000 * 10**6, 75.0875),
+        ("AAPL", "2020-01-03", 1578027600000 * 10**6, 74.3575),
     ]
+    assert [r["TimestampEnd"] for r in out] == [
+        new_york_midnight_ns(date(2020, 1, 3)),
+        new_york_midnight_ns(date(2020, 1, 4)),
+    ]
+
+
+def test_a_page_on_another_adjustment_basis_fails_the_call(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # One history() never mixes split bases: Massive's echo of the basis must match the request.
+    serve(fake_rest, load_fixture, bars_range=RANGE_PATH)  # the sample says adjusted: true
+    query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, adjusted=False)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^stocks\.bars: Massive answered .* with adjusted=True although adjusted=False was "
+        r"requested, so the call would mix split-adjusted and as-traded prices",
+    ):
+        query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST)
+
+
+def test_a_symbol_without_data_returns_no_rows_but_a_cut_short_one_fails(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # A symbol Massive has no data for answers HTTP 404 on its first request: no rows.
+    missing = RANGE_PATH.replace("AAPL", "NOPE")
+    fake_rest.reply(missing, Reply(status=404, body={"status": "NOT_FOUND"}))
+    serve(fake_rest, load_fixture, bars_range=RANGE_PATH)
+    query = rest_session.stocks.bars(["AAPL", "NOPE"], dm.Timespan.DAY)
+    out = table_rows(query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST))
+    assert {r["Symbol"] for r in out} == {"AAPL"}
+    # A 404 on a later page means the data was cut short: an error, never a short table.
+    first = json.loads(load_fixture(FIXTURES, "bars_range.json"))
+    later = f"{fake_rest.url}/v2/aggs/ticker/AAPL/next-page"
+    fake_rest.reply_first(RANGE_PATH, Reply(body={**first, "next_url": later}))
+    fake_rest.reply("/v2/aggs/ticker/AAPL/next-page", Reply(status=404, body={"status": "x"}))
+    with pytest.raises(dm.MassiveError, match=r"^stocks\.bars: AAPL's data was cut short"):
+        rest_session.stocks.bars("AAPL", dm.Timespan.DAY).history(
+            "2020-01-02", "2020-01-03", source=dm.HistorySource.REST
+        )
 
 
 def test_all_daily_bars_read_the_grouped_daily_path(
@@ -861,7 +918,10 @@ def test_all_daily_bars_read_the_grouped_daily_path(
     query = rest_session.stocks.bars(dm.ALL, dm.Timespan.DAY)
     out = table_rows(query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"adjusted": "true"})]
-    assert {r["Timestamp"] for r in out} == {1602705600000 * 10**6}
+    # Grouped daily stamps its bars at the 16:00 close (1602705600000), moved to the day's start.
+    assert {(r["Date"], r["TimestampStart"]) for r in out} == {
+        ("2020-10-14", new_york_midnight_ns(date(2020, 10, 14)))
+    }
     assert len(out) == 3
 
 
@@ -930,8 +990,12 @@ def test_daily_open_close_requests_each_symbol_on_its_day(
     query = rest_session.stocks.daily_open_close("AAPL", date(2023, 1, 9), adjusted=False)
     out = table_rows(query.fetch())
     assert sent(fake_rest) == [("/v1/open-close/AAPL/2023-01-09", {"adjusted": "false"})]
-    assert [(r["Symbol"], r["From"], r["Close"], r["PreMarket"]) for r in out] == [
-        ("AAPL", date(2023, 1, 9), 325.12, 324.5)
+    assert [(r["Symbol"], r["Date"], r["Close"], r["PreMarket"]) for r in out] == [
+        ("AAPL", "2023-01-09", 325.12, 324.5)
+    ]
+    # Its window is the New York day of its date.
+    assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (new_york_midnight_ns(date(2023, 1, 9)), new_york_midnight_ns(date(2023, 1, 10)))
     ]
 
 
@@ -942,8 +1006,8 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         "dividends",
         {
             "symbols": ["AAPL"],
-            "start": date(2025, 1, 1),
-            "end": date(2025, 12, 31),
+            "start": "2025-01-01",
+            "end": "2025-12-31",
             "sort": "ex_dividend_date",
             "order": dm.Order.DESC,
         },
@@ -955,7 +1019,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
             "sort": "ex_dividend_date.desc",
             "limit": "5000",
         },
-        ("ExDividendDate", date(2025, 8, 11)),
+        ("ExDividendDate", "2025-08-11"),
     ),
     (
         "splits",
@@ -966,10 +1030,10 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
     ),
     (
         "ipos",
-        {"symbols": "RAPP", "start": date(2024, 6, 1)},
+        {"symbols": "RAPP", "start": "2024-06-01"},
         "/vX/reference/ipos",
         {"ticker": "RAPP", "listing_date.gte": "2024-06-01", "limit": "1000"},
-        ("ListingDate", date(2024, 6, 7)),
+        ("ListingDate", "2024-06-07"),
     ),
     (
         "short_interest",
@@ -980,7 +1044,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
     ),
     (
         "short_volume",
-        {"start": date(2025, 3, 25), "end": date(2025, 3, 25)},
+        {"start": "2025-03-25", "end": "2025-03-25"},
         "/stocks/v1/short-volume",
         {"date.gte": "2025-03-25", "date.lte": "2025-03-25", "limit": "50000"},
         ("ShortVolumeRatio", 31.57),
@@ -990,11 +1054,11 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         {"symbols": ["AAPL"]},
         "/stocks/vX/float",
         {"ticker.any_of": "AAPL", "limit": "5000"},
-        ("EffectiveDate", date(2025, 11, 1)),
+        ("EffectiveDate", "2025-11-01"),
     ),
     (
         "financials.balance_sheets",
-        {"symbols": "AAPL", "timeframe": dm.Timeframe.QUARTERLY, "start": date(2025, 1, 1)},
+        {"symbols": "AAPL", "timeframe": dm.Timeframe.QUARTERLY, "start": "2025-01-01"},
         "/stocks/financials/v1/balance-sheets",
         {
             "tickers.any_of": "AAPL",
@@ -1002,32 +1066,32 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
             "period_end.gte": "2025-01-01",
             "limit": "50000",
         },
-        ("PeriodEnd", date(2025, 6, 28)),
+        ("PeriodEnd", "2025-06-28"),
     ),
     (
         "financials.income_statements",
-        {"timeframe": dm.Timeframe.TRAILING_TWELVE_MONTHS, "end": date(2025, 6, 30)},
+        {"timeframe": dm.Timeframe.TRAILING_TWELVE_MONTHS, "end": "2025-06-30"},
         "/stocks/financials/v1/income-statements",
         {"timeframe": "trailing_twelve_months", "period_end.lte": "2025-06-30", "limit": "50000"},
-        ("PeriodEnd", date(2025, 6, 28)),
+        ("PeriodEnd", "2025-06-28"),
     ),
     (
         "financials.cash_flow_statements",
         {"symbols": ["MSFT", "AAPL"]},
         "/stocks/financials/v1/cash-flow-statements",
         {"tickers.any_of": "AAPL,MSFT", "limit": "50000"},
-        ("PeriodEnd", date(2025, 6, 28)),
+        ("PeriodEnd", "2025-06-28"),
     ),
     (
         "financials.ratios",
         {"symbols": "AAPL", "sort": "market_cap"},
         "/stocks/financials/v1/ratios",
         {"ticker.any_of": "AAPL", "sort": "market_cap", "limit": "50000"},
-        ("Date", date(2024, 9, 19)),
+        ("Date", "2024-09-19"),
     ),
     (
         "filings.index",
-        {"form_type": "10-K", "end": date(2025, 12, 31)},
+        {"form_type": "10-K", "end": "2025-12-31"},
         "/stocks/filings/vX/index",
         {"form_type": "10-K", "filing_date.lte": "2025-12-31", "limit": "10000"},
         ("Symbol", "AAPL"),
@@ -1041,7 +1105,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
     ),
     (
         "filings.text_8k",
-        {"start": date(2025, 1, 14)},
+        {"start": "2025-01-14"},
         "/stocks/filings/8-K/vX/text",
         {"filing_date.gte": "2025-01-14", "limit": "100"},
         ("Symbol", "AXP"),
@@ -1072,14 +1136,14 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         {"symbols": ["NVDA", "GOOGL"], "issuer_cik": "0000320193"},
         "/stocks/filings/vX/form-3",
         {"tickers.any_of": "GOOGL,NVDA", "issuer_cik": "0000320193", "limit": "10000"},
-        ("FilingDate", date(2026, 3, 30)),
+        ("FilingDate", "2026-03-30"),
     ),
     (
         "filings.insider_transactions",
         {"owner_cik": "0001214156", "filters": {"transaction_code": "S"}},
         "/stocks/filings/vX/form-4",
         {"owner_cik": "0001214156", "transaction_code": "S", "limit": "10000"},
-        ("FilingDate", date(2026, 3, 30)),
+        ("FilingDate", "2026-03-30"),
     ),
     (
         "filings.insider_activity",
@@ -1097,7 +1161,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
             "transaction_date.lte": "2026-09-30",
             "limit": "10000",
         },
-        ("TransactionDate", date(2026, 9, 17)),
+        ("TransactionDate", "2026-09-17"),
     ),
     (
         "filings.insider_holdings",
@@ -1175,7 +1239,7 @@ INSIDER_ROWS = {
     "filings.insider_activity": {
         "IssuerCik": "0001045810",
         "IssuerName": "NVIDIA CORP",
-        "LastFilingDate": date(2026, 9, 18),
+        "LastFilingDate": "2026-09-18",
         "NetShares": -34918.0,
         "NetValue": -7648632.45,
         "PlannedPurchaseValue": 0.0,
@@ -1189,16 +1253,16 @@ INSIDER_ROWS = {
         "SaleValue": 7648632.45,
         "SellerCount": 1,
         "Tickers": '["NVDA"]',
-        "TransactionDate": date(2026, 9, 17),
+        "TransactionDate": "2026-09-17",
     },
     "filings.insider_holdings": {
         "FilingCount": 94,
-        "FirstFilingDate": date(2013, 10, 9),
+        "FirstFilingDate": "2013-10-09",
         "IssuerCik": "0001045810",
         "IssuerName": "NVIDIA CORP",
-        "LastFilingDate": date(2026, 9, 18),
+        "LastFilingDate": "2026-09-18",
         "OfficerTitle": "EVP & Chief Financial Officer",
-        "OldestPositionDate": date(2021, 9, 15),
+        "OldestPositionDate": "2021-09-15",
         "OwnerCik": "0001588670",
         "OwnerName": "Kress Colette",
         "OwnershipPct": 0.0198,
@@ -1220,7 +1284,11 @@ def test_insider_datasets_normalize_every_documented_field(
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
     table = cast("Query", factory(rest_session, name)()).fetch()
     assert sent(fake_rest) == [(path, {"limit": "10000"})]
-    assert table_rows(table) == [INSIDER_ROWS[name]]
+    (row,) = table_rows(table)
+    # Every row carries the instant its page arrived, last.
+    assert list(row)[-1] == "TimestampInsert"
+    assert row.pop("TimestampInsert") is not None
+    assert row == INSIDER_ROWS[name]
 
 
 def test_ipos_fan_out_one_request_per_ticker(
@@ -1342,7 +1410,14 @@ STREAM_CASES: list[
             "s": 1610144868000,
             "e": 1610144869000,
         },
-        {"Symbol": "MSFT", "Timestamp": 1610144868000 * 10**6, "Close": 25.39, "Vwap": 25.3981},
+        {
+            "Symbol": "MSFT",
+            "Date": "2021-01-08",
+            "TimestampStart": 1610144868000 * 10**6,
+            "TimestampEnd": 1610144869000 * 10**6,
+            "Close": 25.39,
+            "Vwap": 25.3981,
+        },
     ),
     (
         "bars.minute",
@@ -1364,7 +1439,14 @@ STREAM_CASES: list[
             "s": 1610144640000,
             "e": 1610144700000,
         },
-        {"Symbol": "MSFT", "Timestamp": 1610144640000 * 10**6, "Close": 0.4486, "Volume": 4110.0},
+        {
+            "Symbol": "MSFT",
+            "Date": "2021-01-08",  # 17:24 New York time
+            "TimestampStart": 1610144640000 * 10**6,
+            "TimestampEnd": 1610144700000 * 10**6,
+            "Close": 0.4486,
+            "Volume": 4110.0,
+        },
     ),
     (
         "luld",
@@ -1433,6 +1515,8 @@ def test_a_frame_lands_in_blink(
     ws_session.publish(frame)
     (row,) = _rows_when(seen, 1)
     assert {k: row[k] for k in expected} == expected
+    assert row["Date"] is not None
+    assert row["TimestampInsert"] is not None  # when the frame arrived
     ws_session.session.release(result)
 
 
@@ -1448,6 +1532,114 @@ def flat_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
     )
     yield m
     m.close()
+
+
+HOUR_NS = 3600 * 10**9
+
+
+def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
+    *, fake_rest: FakeRestServer, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # The range stamps a day at its start; grouped daily, `/prev`, and the files at the close.
+    day = date(2023, 3, 28)
+    start = new_york_midnight_ns(day)
+    close = start // 10**6 + 16 * 3_600_000
+    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
+    )
+    after = new_york_midnight_ns(date(2023, 3, 29)) // 10**6 - 1
+    fake_rest.reply(
+        f"/v2/aggs/ticker/BCC/range/1/day/{start // 10**6}/{after}",
+        Reply({"status": "OK", "results": [{"t": start // 10**6, "c": 61.99}]}),
+    )
+    bar = {"T": "BCC", "t": close, "c": 61.99}
+    fake_rest.reply("/v2/aggs/ticker/BCC/prev", Reply({"status": "OK", "results": [bar]}))
+    fake_rest.reply(
+        "/v2/aggs/grouped/locale/us/market/stocks/2023-03-28",
+        Reply({"status": "OK", "results": [bar]}),
+    )
+    fake_s3.put(
+        "us_stocks_sip/day_aggs_v1/2023/03/2023-03-28.csv.gz",
+        make_csv_gz(
+            "ticker,volume,open,close,high,low,window_start,transactions\n"
+            f"BCC,248274,61.68,61.99,62.565,61.41,{close * 10**6},4073\n"
+        ),
+    )
+    with dm.MassiveSession(config) as m:
+        bars = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
+        every = m.stocks.bars(dm.ALL, dm.Timespan.DAY, adjusted=False)
+        tables = [
+            bars.history(day, day, source=dm.HistorySource.REST),
+            every.history(day, day, source=dm.HistorySource.REST),
+            bars.history(day, day, source=dm.HistorySource.FLAT_FILES),
+            m.stocks.bars("BCC", dm.Timespan.DAY).fetch(),
+        ]
+        stamped = [
+            [
+                (r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"])
+                for r in table_rows(t)
+            ]
+            for t in tables
+        ]
+    end = new_york_midnight_ns(date(2023, 3, 29))
+    assert stamped == [[("BCC", "2023-03-28", start, end)]] * 4
+
+
+def test_longer_bars_cover_their_whole_window_and_have_no_date(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A week bar stamped on the Sunday before its week covers that Monday-to-Friday week; a
+    # month bar of June 2024 (whose 1st is a Saturday) its weekdays, Monday 3rd to Friday 28th.
+    sunday = new_york_midnight_ns(date(2025, 3, 2)) // 10**6
+    saturday = new_york_midnight_ns(date(2025, 3, 1)) // 10**6
+    week_end = new_york_midnight_ns(date(2025, 3, 8)) // 10**6 - 1
+    fake_rest.reply(
+        f"/v2/aggs/ticker/AAPL/range/1/week/{saturday}/{week_end}",
+        Reply({"status": "OK", "adjusted": True, "results": [{"t": sunday, "c": 1.0}]}),
+    )
+    week = rest_session.stocks.bars("AAPL", dm.Timespan.WEEK)
+    out = table_rows(week.history("2025-03-03", "2025-03-07", source=dm.HistorySource.REST))
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (None, new_york_midnight_ns(date(2025, 3, 3)), new_york_midnight_ns(date(2025, 3, 8)))
+    ]
+    first = new_york_midnight_ns(date(2024, 6, 1)) // 10**6
+    month_end = new_york_midnight_ns(date(2024, 6, 29)) // 10**6 - 1
+    fake_rest.reply(
+        f"/v2/aggs/ticker/AAPL/range/1/month/{first}/{month_end}",
+        Reply({"status": "OK", "adjusted": True, "results": [{"t": first, "c": 1.0}]}),
+    )
+    month = rest_session.stocks.bars("AAPL", dm.Timespan.MONTH)
+    out = table_rows(month.history("2024-06-03", "2024-06-28", source=dm.HistorySource.REST))
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (None, new_york_midnight_ns(date(2024, 6, 3)), new_york_midnight_ns(date(2024, 6, 29)))
+    ]
+
+
+def test_a_day_file_moves_an_early_close_and_refuses_an_unknown_stamp(
+    *, flat_session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # The day after Thanksgiving closes at 13:00 New York time; that close means its day.
+    day = new_york_midnight_ns(date(2024, 11, 29))
+    key = "us_stocks_sip/day_aggs_v1/2024/11/2024-11-29.csv.gz"
+    header = "ticker,volume,open,close,high,low,window_start,transactions\n"
+    query = flat_session.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
+    fake_s3.put(
+        key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{day + 13 * HOUR_NS},1\n")
+    )
+    out = table_rows(query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES))
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in out] == [
+        ("BCC", "2024-11-29", day)
+    ]
+    # 14:30 is no stamp Massive is known to use: the bar may cover another day, so it fails.
+    afternoon = day + 29 * HOUR_NS // 2
+    fake_s3.put(key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{afternoon},1\n"))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^stocks\.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is "
+        r"stamped 2024-11-29T19:30:00\+00:00 .*; read REST with source=dm\.HistorySource\.REST",
+    ):
+        query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES)
 
 
 # Each flat-file prefix: the call, the file's fixture (the vendor's documented example rows,
@@ -1481,7 +1673,8 @@ FLAT_CASES: list[tuple[str, Callable[[Any], HistoryQuery], str, str, list[tuple[
         lambda s: s.bars(["BCC"], dm.Timespan.DAY, adjusted=False),
         "day_aggs_v1_2023-03-28.csv",
         "Close",
-        [("BCC", 1680033600000000000, 61.99)],
+        # Stamped at the 16:00 New York close in the file, at the start of its day here.
+        [("BCC", 1679976000000000000, 61.99)],
     ),
 ]
 
@@ -1509,7 +1702,9 @@ def test_a_flat_file_block_round_trips(
     fake_s3.put(key, make_csv_gz(load_fixture(FIXTURES, fixture).decode()))
     query = make(flat_session.stocks)
     out = table_rows(query.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES))
-    assert [(r["Symbol"], r["Timestamp"], r[column]) for r in out] == expected
+    time = "TimestampStart" if "aggs" in prefix else "Timestamp"
+    assert [(r["Symbol"], r[time], r[column]) for r in out] == expected
+    assert {r["Date"] for r in out} == {"2023-03-28"}
     assert fake_s3.requests == [("flatfiles", key)]
 
 
@@ -1805,3 +2000,48 @@ def test_every_other_symbol_key_is_required(name: str) -> None:
     spec = spec_of(name)
     symbols = [keys.symbol for keys in spec.keys.values() if keys.symbol is not None]
     assert all(key.required for key in symbols)
+
+
+@pytest.mark.jvm_held  # its formula hands the session in its frame to the JVM
+def test_the_split_factors_adjust_bars_as_traded(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # NVDA split 10 for 1, executed 2024-06-10. As traded, its 06-07 close is about 1208.88 and
+    # its 06-10 close 121.79; the documented recipe restates 06-07 on today's basis.
+    friday = new_york_midnight_ns(date(2024, 6, 7)) // 10**6
+    monday = new_york_midnight_ns(date(2024, 6, 10)) // 10**6
+    after = new_york_midnight_ns(date(2024, 6, 11)) // 10**6 - 1
+    fake_rest.reply(
+        f"/v2/aggs/ticker/NVDA/range/1/day/{friday}/{after}",
+        Reply(
+            {
+                "status": "OK",
+                "adjusted": False,
+                "results": [
+                    {"t": friday, "c": 1208.88, "v": 41_238_580.0},
+                    {"t": monday, "c": 121.79, "v": 314_162_700.0},
+                ],
+            }
+        ),
+    )
+    split = {
+        "adjustment_type": "forward_split",
+        "execution_date": "2024-06-10",
+        "historical_adjustment_factor": 0.1,
+        "id": "nvda-2024",
+        "split_from": 1,
+        "split_to": 10,
+        "ticker": "NVDA",
+    }
+    fake_rest.reply("/stocks/v1/splits", Reply({"status": "OK", "results": [split]}))
+    bars = rest_session.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
+        "2024-06-07", "2024-06-10", source=dm.HistorySource.REST
+    )
+    splits = rest_session.stocks.splits("NVDA").fetch()
+    adjusted = bars.raj(
+        splits, on=["Symbol", "Date<ExecutionDate"], joins=["F=HistoricalAdjustmentFactor"]
+    ).update(["F = isNull(F) ? 1.0 : F", "AdjClose = Close * F", "AdjVolume = Volume / F"])
+    out = [
+        (r["Date"], round(r["AdjClose"], 3), round(r["AdjVolume"])) for r in table_rows(adjusted)
+    ]
+    assert out == [("2024-06-07", 120.888, 412_385_800), ("2024-06-10", 121.79, 314_162_700)]

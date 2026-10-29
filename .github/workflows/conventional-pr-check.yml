@@ -1,14 +1,18 @@
 name: 'Conventional PR'
 
 on:
+  # The check reads only the title. A push cannot change it, so pushes do not run the check; an
+  # edit that leaves the title alone, such as a rewritten description, skips the job below. The
+  # check is not a required one, so a new commit without its status blocks nothing.
   pull_request_target:
     types:
       - opened
+      - reopened
       - edited
-      - synchronize
 
 jobs:
   pr-check:
+    if: github.event.action != 'edited' || github.event.changes.title != null
     runs-on: ubuntu-latest
     permissions:
       contents: read

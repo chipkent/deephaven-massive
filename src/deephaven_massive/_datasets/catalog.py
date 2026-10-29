@@ -35,8 +35,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.schema import dataset_schema, rename
-from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan
+from deephaven_massive._enums import AssetClass, ChannelFamily, ClassFromPrefix, PollMode, Timespan
 from deephaven_massive._massive import ParamKind, Transport, WireType, encode_value, sources
 
 if TYPE_CHECKING:
@@ -117,7 +118,7 @@ class KeySpec:
             row through with a null key column; it is for a symbol Massive documents as
             present only "if available", such as a filing's `ticker`. Only a `symbol` key read
             from a REST path's rows may set it False: a flat file and a stream filter and
-            route rows by their symbol, and the `time`, `fanout`, and `session` keys are
+            route rows by their symbol, and the `time`, `end`, `fanout`, and `date` keys are
             always required (`DatasetSpec` rejects the rest, when it is created).
     """
 
@@ -132,38 +133,45 @@ class SourceKeys:
     """The key columns one source declares for one dataset, at most one per role.
 
     Every source of a dataset in a kind declares `symbol` and `time`, every source of an
-    instrument dataset declares `symbol`, and `fanout` and (futures) `session` are declared only
-    on the sources that carry them. A dataset whose rows describe no instrument may declare no
-    key at all.
+    instrument dataset declares `symbol`, every source of a daily summary its `date`, and
+    `fanout`, `date`, and `end` are otherwise declared only on the sources that carry them. A
+    dataset whose rows describe no instrument may declare no key at all.
 
     Attributes:
         symbol: The instrument the row describes; renamed to `Symbol`.
-        time: The row's primary time; renamed to `Timestamp`.
+        time: The row's primary time; renamed to `Timestamp`, or for a bar to `TimestampStart`,
+            the start of its window (`row_times.time_column`).
+        end: The end of a bar's window as the source sends it (the WebSocket bars' `e`);
+            renamed to `TimestampEnd`, which the library recomputes (`row_times.TimeRule`), so
+            the vendor's column is not kept beside it.
         fanout: The key a request fans out over when it differs from the row's instrument:
             an instrument (the options underlying, the related company asked about), renamed
             to `Underlying`, or, with `KeySpec.instrument` False, another identifier (a filer
             CIK), which keeps its column.
-        session: The futures trading session the row belongs to; keeps its column
-            (`SessionEndDate`). Only `symbol` and `fanout` may come from the request.
+        date: The row's trading day as the source sends it: the futures `session_end_date`, a
+            daily summary's `from` or `day`; renamed to `Date`. Only `symbol` and `fanout`
+            may come from the request.
     """
 
     symbol: KeySpec | None = None
     time: KeySpec | None = None
+    end: KeySpec | None = None
     fanout: KeySpec | None = None
-    session: KeySpec | None = None
+    date: KeySpec | None = None
 
     def declared(self) -> tuple[tuple[str, KeySpec], ...]:
         """Return the declared keys and their roles.
 
         Returns:
-            `(role, key)` pairs in the order `symbol`, `time`, `fanout`, `session`, for the
+            `(role, key)` pairs in the order `symbol`, `time`, `end`, `fanout`, `date`, for the
             roles that are declared.
         """
         roles = (
             ("symbol", self.symbol),
             ("time", self.time),
+            ("end", self.end),
             ("fanout", self.fanout),
-            ("session", self.session),
+            ("date", self.date),
         )
         return tuple((role, key) for role, key in roles if key is not None)
 
@@ -232,8 +240,9 @@ class DatasetSpec:
             `"Trades of US-listed stocks, tick by tick."`. The dataset method's docstring
             starts with the same sentence; the library keeps it here so it never reads
             `__doc__` at run time, where `python -OO` would have removed it.
-        asset_class: The instruments' asset class, or None for datasets that span classes or
-            have no instruments (reference data, economy, most partner datasets). Its value is
+        asset_class: The instruments' asset class, or `ClassFromPrefix.ANY`, the default, for
+            datasets that span classes or have no instruments (reference data, economy, most
+            partner datasets): each symbol's prefix then names its class. Its value is
             the WebSocket cluster of the channels and the group of the dataset's kind.
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
             by `Timespan`, and the factory picks the query class from the timespan and
@@ -300,11 +309,25 @@ class DatasetSpec:
             of their own. Every REST path of the dataset must take each one (the catalog's
             `wire parameters` gate), so a request never carries a parameter its path lacks.
             Each is reserved, with its whole family, from `filters`.
+        row_times: Which of the library's time columns the rows carry (`RowTimes`);
+            `RowTimes.BY_KIND`, the default, derives it (`times`): `BAR` for a `bars` dataset,
+            `TICK` for any other dataset in a kind, `NONE` otherwise. The indicators declare
+            `BAR` and the daily open-close summaries `DAY`.
+        column_notes: A sentence the library appends to a column's description for this
+            dataset, by column, where the column's meaning depends on the query in a way no
+            vendor text says, such as the split adjustment of a bar's prices. Empty by
+            default.
+        symbols_as_written: True for a dataset whose symbols are a third party's global
+            tickers rather than Massive's US-market ones (the TMX corporate events, a global
+            calendar): `symbols=`, the rows of a symbol table, and the rows' symbols are then
+            taken exactly as Massive writes them (`symbols.is_canonical`), not through the
+            asset class's grammar. Only a REST dataset may set it: a stream's topics and a
+            flat file's filter follow the class's spellings.
     """
 
     name: str
     summary: str
-    asset_class: AssetClass | None = None
+    asset_class: AssetClass | ClassFromPrefix = ClassFromPrefix.ANY
     is_bars: bool = False
     kind: str | None = None
     fetch_path: str | None = None
@@ -327,25 +350,32 @@ class DatasetSpec:
     symbols_per_request: int | None = None
     page_size: int | None = None
     fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    row_times: RowTimes = RowTimes.BY_KIND
+    column_notes: Mapping[str, str] = field(default_factory=dict)
+    symbols_as_written: bool = False
 
     def __post_init__(self) -> None:
         """Check the spec's internal consistency; nothing here reads the generated files.
 
         Raises:
             ValueError: If the name is not `"<namespace>.<dataset>"`; the summary is not one
-                line of text ending in a period (`_check_summary`); the keys of `channels`
-                or `flat_file_prefixes` do not match `is_bars`; a dataset with channels or a
-                kind has no `asset_class`; `keys` names a source the dataset does not use,
-                fills a `time` or `session` key from the request, marks a key other than
-                `fanout` as no instrument, or fills a non-instrument fan-out key from the
-                request, or makes a key optional other than a `symbol` key read from a REST
-                path's rows; `poll_keys` holds the `Symbol` of an optional symbol key, is empty
-                on an `APPEND` dataset, is empty together with `revision_keys`, or shares a
-                column with `revision_keys`; `nullable_poll_keys` names a column that is no
-                poll key, or gives an empty reason; a flat-file prefix does not
-                declare its `symbol` and `time` keys from its own columns (and, for futures,
-                its `session` key, against which every futures file is checked); or the
-                transports match no query class (see the class docstring and `_check_verbs`).
+                line of text ending in a period (`_check_summary`); the keys of `channels` or
+                `flat_file_prefixes` do not match `is_bars`; a dataset with channels, flat
+                files, or a kind has no `asset_class` (`ClassFromPrefix.ANY`); `keys` names a
+                source the dataset does not use, fills a `time`, `end`, or `date` key from the
+                request, marks a key other than `fanout` as no instrument, or fills a
+                non-instrument fan-out key from the request, or makes a key optional other than
+                a `symbol` key read from a REST path's rows, declares an `end` key outside a
+                bars dataset or a `date` key on a dataset without row times, or, for a daily
+                summary, leaves a source without its `date` key; `poll_keys` holds the `Symbol`
+                of an optional symbol key, is empty on an `APPEND` dataset, is empty together
+                with `revision_keys`, or shares a column with `revision_keys`;
+                `nullable_poll_keys` names a column that is no poll key, or gives an empty
+                reason; a flat-file prefix does not declare its `symbol` and `time` keys from
+                its own columns (and, for futures, its `date` key, the session against which
+                every futures file is checked); a dataset that keeps its symbols as written has
+                channels or flat-file prefixes; or the transports match no query class (see the
+                class docstring and `_check_verbs`).
         """
         namespace, _, dataset = self.name.partition(".")
         if not namespace or not dataset:
@@ -357,10 +387,16 @@ class DatasetSpec:
             raise ValueError(
                 f"{self.name}: channels and flat_file_prefixes must be keyed by {kind}"
             )
-        if self.channels and self.asset_class is None:
+        if self.channels and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
-        if self.kind is not None and self.asset_class is None:
+        if self.kind is not None and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a dataset in a kind needs a class (its group)")
+        if self.flat_file_prefixes and self.asset_class is ClassFromPrefix.ANY:
+            # A file filter looks for the spellings of one class (`symbols.wire_spellings`).
+            raise ValueError(f"{self.name}: a flat-file dataset needs a class")
+        if self.symbols_as_written and (self.channels or self.flat_file_prefixes):
+            # A stream subscribes and a flat file filters by the class's spellings.
+            raise ValueError(f"{self.name}: symbols kept as written are for REST datasets only")
         self._check_keys()
         self._check_poll_keys()
         self._check_flat_files()
@@ -381,9 +417,23 @@ class DatasetSpec:
             )
 
     @property
+    def times(self) -> RowTimes:
+        """Which of the library's time columns the rows carry: `row_times`, or derived from it.
+
+        `BAR` for a `bars` dataset, `TICK` for any other dataset in a kind (trades, quotes,
+        values, LULD, imbalances, FMV), and `NONE` for the rest, unless `row_times` says
+        otherwise.
+        """
+        if self.row_times is not RowTimes.BY_KIND:
+            return self.row_times
+        if self.is_bars:
+            return RowTimes.BAR
+        return RowTimes.NONE if self.kind is None else RowTimes.TICK
+
+    @property
     def group(self) -> str | None:
         """The dataset's group within its kind: its asset class's value, or None."""
-        return None if self.asset_class is None else self.asset_class.value
+        return None if self.asset_class is ClassFromPrefix.ANY else self.asset_class.value
 
     @property
     def rest_paths(self) -> tuple[str, ...]:
@@ -468,8 +518,11 @@ class DatasetSpec:
         """Check that keys are declared only for the dataset's sources, and fit their roles.
 
         Raises:
-            ValueError: If `keys` names a source the dataset does not read; a `time` or
-                `session` key is filled from the request; or a key other than `fanout` is
+            ValueError: If `keys` names a source the dataset does not read; a `time`, `end`, or
+                `date` key is filled from the request; an `end` key is declared outside a bars
+                dataset, or a `date` key on a dataset whose rows have no `Date` (`times` is
+                `NONE`); a daily summary (`DAY`) leaves a source without its `date` key; or a
+                key other than `fanout` is
                 marked as no instrument, a fan-out key that is no instrument is filled from
                 the request (it would have no column to keep), or a key other than a `symbol`
                 key read from a REST path's rows is optional (`KeySpec.required` False), or a
@@ -482,8 +535,19 @@ class DatasetSpec:
             raise ValueError(
                 f"{self.name}: keys are declared for sources it does not read {unused}"
             )
+        times = self.times
+        if times is RowTimes.DAY:
+            lacking = sorted(
+                f"{t.value} {k}" for t, k in self.sources if self.keys_for(t, k).date is None
+            )
+            if lacking:
+                raise ValueError(f"{self.name}: a daily summary needs a date key on {lacking}")
         for (transport, key), declared in self.keys.items():
             where = f"{self.name}: {transport.value} {key}"
+            if declared.end is not None and times is not RowTimes.BAR:
+                raise ValueError(f"{where}: only a bars dataset declares an end key")
+            if declared.date is not None and times is RowTimes.NONE:
+                raise ValueError(f"{where}: a date key needs a dataset whose rows have a Date")
             for role, spec in declared.declared():
                 if spec.from_request and role not in _FROM_REQUEST_ROLES:
                     raise ValueError(f"{where}: the {role} key cannot come from the request")
@@ -539,15 +603,15 @@ class DatasetSpec:
         """Check that every flat-file prefix can be filtered and checked.
 
         Every flat-file read filters on the symbol and time columns, and every futures file is
-        checked against its key's session, so each prefix must declare those keys from its
-        own columns.
+        checked against its key's session, so each prefix must declare those keys (for futures,
+        the session as its `date` key) from its own columns.
 
         Raises:
             ValueError: If a prefix lacks its `symbol` or `time` key, or, for futures, its
-                `session` key, or fills one from the request.
+                `date` key (the session), or fills one from the request.
         """
         futures = self.asset_class is AssetClass.FUTURES
-        needed = ("symbol", "time", *(("session",) if futures else ()))
+        needed = ("symbol", "time", *(("date",) if futures else ()))
         for prefix in self.flat_file_prefixes.values():
             declared = dict(self.keys_for(Transport.FLAT_FILES, prefix).declared())
             lacking = [r for r in needed if r not in declared or declared[r].from_request]
@@ -851,7 +915,7 @@ class Catalog:
         self._by_name: Final = MappingProxyType(by_name)
         self._sources: Final = source_tables
         self._lock: Final = threading.Lock()
-        self._schemas: dict[DatasetSpec, Schema] = {}
+        self._schemas: dict[tuple[DatasetSpec, bool], Schema] = {}
 
     @property
     def by_name(self) -> Mapping[str, DatasetSpec]:
@@ -905,8 +969,8 @@ class Catalog:
             ranked.append((ranks[str(spec.group)], min(positions, default=0), index, spec))
         return tuple(spec for *_, spec in sorted(ranked, key=lambda r: r[:3]))
 
-    def dataset_schema(self, spec: DatasetSpec) -> Schema:
-        """Return a dataset's merged schema, computed once and cached on the catalog.
+    def dataset_schema(self, spec: DatasetSpec, *, raw_symbol: bool = False) -> Schema:
+        """Return a dataset's merged schema, computed once per shape and cached on the catalog.
 
         The merge of `schema.dataset_schema` over the members of the dataset's kind, or over
         the dataset alone when it is in no kind. The first call for a dataset computes it
@@ -916,10 +980,13 @@ class Catalog:
 
         Args:
             spec: The dataset; a dataset in a kind must be in this catalog.
+            raw_symbol: True for a session whose `unknown_symbols` is `WARN`: a dataset that
+                reads its symbol from rows then has a `RawSymbol` column
+                (`schema.dataset_schema`).
 
         Returns:
             The schema: `Symbol` and `Timestamp` first where the dataset
-            declares them, then every other column of the kind.
+            declares them, then the derived columns, then every other column of the kind.
 
         Raises:
             LookupError: If `spec` has a kind but is not one of this catalog's datasets.
@@ -928,7 +995,7 @@ class Catalog:
         key, and an unknown source the `KeyError` of `source`.
         """
         with self._lock:
-            cached = self._schemas.get(spec)
+            cached = self._schemas.get((spec, raw_symbol))
         if cached is not None:
             return cached
         if spec.kind is None:
@@ -937,9 +1004,9 @@ class Catalog:
             members = self.members(spec.kind)
             if spec not in members:
                 raise LookupError(f"{spec.name} is not in the catalog of its kind {spec.kind}")
-        schema = dataset_schema(spec, members, self.source)
+        schema = dataset_schema(spec, members, self.source, raw_symbol=raw_symbol)
         with self._lock:
-            return self._schemas.setdefault(spec, schema)
+            return self._schemas.setdefault((spec, raw_symbol), schema)
 
     def check_filters(
         self,

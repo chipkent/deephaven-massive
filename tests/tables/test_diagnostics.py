@@ -71,6 +71,7 @@ def test_column_sets() -> None:
         "AckedTopics",
         "PendingTopics",
         "NoAckTopics",
+        "BufferedRows",
         "Reconnects",
         "LastMessageAt",
         "NextReconnectAt",
@@ -122,6 +123,16 @@ def test_stream_updates_can_clear_a_warning() -> None:
     cleared = StreamUpdate(deferred=0, clear_error=True).apply(row)
     assert (cleared.deferred, cleared.error, cleared.state) == (0, None, StreamState.RUNNING)
     assert StreamUpdate(error="new", clear_error=True).apply(row).error is None
+
+
+@pytest.mark.parametrize("state", [StreamState.FAILED, StreamState.CLOSED])
+def test_stream_updates_keep_the_cause_of_a_stop(state: StreamState) -> None:
+    # A flush or a poll cycle that races a failure or the close never replaces its cause.
+    row = _stream(state=state, error="the cause")
+    for update in (StreamUpdate(error="a warning"), StreamUpdate(clear_error=True)):
+        updated = update.apply(row)
+        assert (updated.state, updated.error) == (state, "the cause")
+    assert StreamUpdate(rows_published=7).apply(row).rows_published == 7  # counts still move
 
 
 def test_rows_map_fields_to_columns() -> None:
@@ -355,7 +366,14 @@ def test_fresh_rows_start_at_zero() -> None:
             transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
         )
     )
-    counts = ("Topics", "AckedTopics", "PendingTopics", "NoAckTopics", "Reconnects")
+    counts = (
+        "Topics",
+        "AckedTopics",
+        "PendingTopics",
+        "NoAckTopics",
+        "BufferedRows",
+        "Reconnects",
+    )
     assert {name: connection[name] for name in counts} == dict.fromkeys(counts, 0)
     assert connection["State"] == "RESOLVING"
     stream = as_row(STREAM)

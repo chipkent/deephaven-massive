@@ -45,7 +45,7 @@ from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, Re
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
-from tests._fakes.rest import FakeRestServer, Reply
+from tests._fakes.rest import REFUSED_PORT, FakeRestServer, Reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -1165,14 +1165,6 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
             assert ACCESS_KEY not in text
 
 
-def _closed_port() -> int:
-    """Return a loopback port nothing listens on: bound by this process, then released."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port: int = probe.getsockname()[1]
-    return port
-
-
 @pytest.mark.parametrize(
     ("user", "password"),
     [("alice", "topsecret"), ("h", "h")],
@@ -1184,7 +1176,7 @@ def test_an_unreachable_proxy_is_retried_and_its_password_stays_out_of_the_error
     # botocore masks a proxy password by replacing its first occurrence in the URL, which for
     # `http://h:h@...` is the `h` of `http`; the client names the proxy without credentials.
     caplog.set_level(logging.DEBUG)
-    port = _closed_port()
+    port = REFUSED_PORT
     trusted.setenv("HTTPS_PROXY", f"http://{user}:{password}@127.0.0.1:{port}")
     clock = FakeClock()
     client = make_client(clock=clock)

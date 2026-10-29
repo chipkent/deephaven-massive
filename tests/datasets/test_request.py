@@ -41,7 +41,7 @@ def test_describe_shows_only_the_fields_that_differ_from_their_defaults() -> Non
 def test_describe_renders_all_and_a_reactive_table(dh_exec_ctx: object) -> None:
     assert Request(symbols=dm.ALL).describe() == "symbols=ALL"
     table = new_table([string_col("Symbol", ["A"])])
-    assert Request(symbols=SymbolTable(table)).describe() == "symbols=<reactive table>"
+    assert Request(symbols=SymbolTable(table)).describe() == "symbols=<symbol table>"
 
 
 def test_requests_and_host_decisions_are_hashable_values() -> None:
