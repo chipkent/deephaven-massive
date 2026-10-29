@@ -1040,10 +1040,10 @@ def canonical_symbol_crypto(text: str | None) -> str | None:
     """Convert a crypto pair to Massive's ticker: `BTC-USD` to `X:BTCUSD`.
 
     Accepts `BTC-USD`, `BTC/USD`, and `BTCUSD`, with or without `X:`, in any case, whatever the
-    quote currency. A pair that no quote the library knows ends (`X:BTCXYZ`), or that several
-    end (`X:ETHTUSD`), is a valid ticker for every verb except the streams, which need the pair
-    split for the topic without a guess. Pure and
-    thread-safe.
+    quote currency, and joins the two codes; any such ticker is canonical. A stream, the
+    last-trade path, and the daily open/close path need the pair split into its two codes, and
+    take the split only from Massive's crypto ticker list, so they refuse a pair that list does
+    not hold; every other verb takes any pair. Pure and thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_crypto`) for a `String` column; called through the module it makes an `Object`

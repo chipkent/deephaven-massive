@@ -79,7 +79,7 @@ CANONICAL = [
     (FX, "C:EURUSD"),
     (CRY, "X:BTCUSD"),
     (CRY, "X:1INCHUSDT"),
-    (CRY, "X:BTCXYZ"),  # a quote the library does not know: canonical, though not streamable
+    (CRY, "X:BTCXYZ"),  # any pair is canonical; a stream needs it in Massive's ticker list
     (CRY, "X:BTCPYUSD"),  # ends in PYUSD and in USD: canonical, though not streamable
 ]
 

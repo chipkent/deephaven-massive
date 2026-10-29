@@ -74,7 +74,7 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
     bad = [f"b{i:02}" for i in range(25)]
     # Out of order in the table: the values are logged sorted, before the formula runs.
     table = new_table([string_col("Symbol", ["EUR/USD", *reversed(bad), "b00"])])
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.watchlist"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
         result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.NULL)
     assert values(result) == ["C:EURUSD", *[None] * 26]
     messages = [r.getMessage() for r in caplog.records]
@@ -116,7 +116,7 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
     scope = new_scope()
     with scope.open():
         result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.NULL)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.watchlist"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
         source.add(new_table([string_col("Symbol", ["BTC-USD", "no pe!", None, "no pe!"])]))
         wait_for(lambda: result.size == 4)
     assert values(result) == ["X:BTCUSD", None, None, None]
