@@ -188,8 +188,8 @@ nothing is kept or shimmed for compatibility.
       symbol, and the call or stream id. Every layer logs what it knows. Log too much rather
       than too little.
     - Log nothing per row or per frame except a failure.
-    - Never pass the API key, the S3 secret, a header, or the auth frame to a log call. Excerpts
-      of a server's words go through the client's secret replacement (`net.secrets`).
+    - Never pass the API key, the S3 secret, a header, or the auth frame to a log call. A client
+      cleans what it receives of its own secret (`net.secrets`) before anything reads it.
     - Use `%` arguments. Name every new thread or pool `massive #<session> <role>`. Never log
       while holding `registry_lock` or any other leaf lock.
 
