@@ -2197,6 +2197,83 @@
    "memberships": []
   },
   {
+   "key": "/stocks/insiders/vX/activity",
+   "result_key": "results",
+   "params": [
+    {"in_path": false, "kind": "string", "name": "tickers", "unit": null, "values": []},
+    {"in_path": false, "kind": "string", "name": "tickers.all_of", "unit": null, "values": []},
+    {"in_path": false, "kind": "list", "name": "tickers.any_of", "unit": null, "values": []},
+    {"in_path": false, "kind": "string", "name": "issuer_cik", "unit": null, "values": []},
+    {"in_path": false, "kind": "list", "name": "issuer_cik.any_of", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "transaction_date", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "transaction_date.gt", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "transaction_date.gte", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "transaction_date.lt", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "transaction_date.lte", "unit": null, "values": []},
+    {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []},
+    {"in_path": false, "kind": "string", "name": "sort", "unit": null, "values": []}
+   ],
+   "fields": [
+    {"column": "IssuerCik", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "issuer_cik"},
+    {"column": "IssuerName", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "issuer_name"},
+    {"column": "LastFilingDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "last_filing_date"},
+    {"column": "NetShares", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "net_shares"},
+    {"column": "NetValue", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "net_value"},
+    {"column": "PlannedPurchaseValue", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "planned_purchase_value"},
+    {"column": "PlannedSaleValue", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "planned_sale_value"},
+    {"column": "PurchaseCount", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "purchase_count"},
+    {"column": "PurchaseShares", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "purchase_shares"},
+    {"column": "PurchaseValue", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "purchase_value"},
+    {"column": "PurchaserCount", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "purchaser_count"},
+    {"column": "SaleCount", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sale_count"},
+    {"column": "SaleShares", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "sale_shares"},
+    {"column": "SaleValue", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "sale_value"},
+    {"column": "SellerCount", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "seller_count"},
+    {"column": "Tickers", "conversion": null, "required": false, "type": "json-text", "unit": null, "wire_key": "tickers"},
+    {"column": "TransactionDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "transaction_date"}
+   ],
+   "memberships": []
+  },
+  {
+   "key": "/stocks/insiders/vX/holdings",
+   "result_key": "results",
+   "params": [
+    {"in_path": false, "kind": "string", "name": "tickers", "unit": null, "values": []},
+    {"in_path": false, "kind": "string", "name": "tickers.all_of", "unit": null, "values": []},
+    {"in_path": false, "kind": "list", "name": "tickers.any_of", "unit": null, "values": []},
+    {"in_path": false, "kind": "string", "name": "issuer_cik", "unit": null, "values": []},
+    {"in_path": false, "kind": "list", "name": "issuer_cik.any_of", "unit": null, "values": []},
+    {"in_path": false, "kind": "string", "name": "owner_cik", "unit": null, "values": []},
+    {"in_path": false, "kind": "list", "name": "owner_cik.any_of", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "last_filing_date", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "last_filing_date.gt", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "last_filing_date.gte", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "last_filing_date.lt", "unit": null, "values": []},
+    {"in_path": false, "kind": "date", "name": "last_filing_date.lte", "unit": null, "values": []},
+    {"in_path": false, "kind": "integer", "name": "limit", "unit": null, "values": []},
+    {"in_path": false, "kind": "string", "name": "sort", "unit": null, "values": []}
+   ],
+   "fields": [
+    {"column": "FilingCount", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "filing_count"},
+    {"column": "FirstFilingDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "first_filing_date"},
+    {"column": "IssuerCik", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "issuer_cik"},
+    {"column": "IssuerName", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "issuer_name"},
+    {"column": "LastFilingDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "last_filing_date"},
+    {"column": "OfficerTitle", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "officer_title"},
+    {"column": "OldestPositionDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "oldest_position_date"},
+    {"column": "OwnerCik", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "owner_cik"},
+    {"column": "OwnerName", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "owner_name"},
+    {"column": "OwnershipPct", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "ownership_pct"},
+    {"column": "PositionCount", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "position_count"},
+    {"column": "Roles", "conversion": null, "required": false, "type": "json-text", "unit": null, "wire_key": "roles"},
+    {"column": "SharesOwned", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "shares_owned"},
+    {"column": "SharesOwnedDirect", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "shares_owned_direct"},
+    {"column": "SharesOwnedIndirect", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "shares_owned_indirect"},
+    {"column": "Tickers", "conversion": null, "required": false, "type": "json-text", "unit": null, "wire_key": "tickers"}
+   ],
+   "memberships": []
+  },
+  {
    "key": "/stocks/taxonomies/vX/disclosures",
    "result_key": "results",
    "params": [
