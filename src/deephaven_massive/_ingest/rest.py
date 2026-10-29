@@ -339,14 +339,15 @@ def _filter_days(
     return sent
 
 
-def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit | None) -> tuple[str, str]:
+def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]:
     """Split a forex or crypto symbol into the two currencies a `{from}/{to}` path takes.
 
     Args:
         spec: The dataset, whose asset class is forex or crypto.
         symbol: The canonical symbol, such as `C:EURUSD` or `X:BTCUSD`.
         split: Splits a crypto symbol by Massive's crypto ticker list
-            (`RestReader.crypto_pair`); None for a forex dataset.
+            (`RestReader.crypto_pair`); a forex pair never needs it, since its two codes have
+            three letters each.
 
     Returns:
         The base and quote currencies, such as `("EUR", "USD")`.
@@ -354,13 +355,12 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit | None) -> tuple[st
     Raises:
         ValueError: If the dataset's class has no currency pairs.
 
-    A crypto symbol `split` cannot split raises its `MassiveError`; without `split`, any
-    crypto symbol raises the `KeyError` of `ws_symbol`, since no split is ever guessed.
+    A crypto symbol `split` cannot split raises its `MassiveError`; no split is ever guessed.
     """
     asset_class = spec.asset_class
     if asset_class is not AssetClass.FOREX and asset_class is not AssetClass.CRYPTO:
         raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
-    if asset_class is AssetClass.CRYPTO and split is not None:
+    if asset_class is AssetClass.CRYPTO:
         return split(symbol)
     base, _, quote = ws_symbol(asset_class, symbol).partition("-")
     return base, quote
@@ -412,7 +412,7 @@ def _symbol_parts(
     *,
     slot: str | None,
     pair: bool = False,
-    split: CryptoSplit | None = None,
+    split: CryptoSplit,
 ) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
     """Return how a request's symbols spread over requests of one path.
 
@@ -433,8 +433,7 @@ def _symbol_parts(
         slot: The path's one placeholder that no parameter, key, or window fills, or None.
         pair: True when the path's `{from}` and `{to}` placeholders are filled by nothing
             else, so each symbol's currency pair (`_pair`) fills them.
-        split: Splits a crypto symbol into its two currencies (`_pair`); None
-            for none.
+        split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
         `(symbol, path parameters, query parameters)` per request: `symbol` is set for a
@@ -621,12 +620,12 @@ def plan_calls(
     fixed: Mapping[str, object] | None = None,
     dates: tuple[date | None, date | None] = (None, None),
     extra: Mapping[str, object] | None = None,
-    split: CryptoSplit | None = None,
+    split: CryptoSplit,
 ) -> list[Call]:
     """Plan the requests that serve a dataset call on one REST path.
 
-    Pure: no I/O. The REST client checks the parameters against the path again before it
-    sends anything.
+    Makes no request itself; only `split` may, the first time a crypto pair is split. The
+    REST client checks the parameters against the path again before it sends anything.
 
     Args:
         spec: The dataset.
@@ -641,7 +640,7 @@ def plan_calls(
             `session_end_date`; None adds none.
         split: Splits a crypto symbol a `{from}/{to}` path takes as two currencies, by
             Massive's crypto ticker list (`RestReader.crypto_pair`); called only for such a
-            path, and needed for every crypto dataset with one.
+            path.
 
     Returns:
         The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
@@ -1066,11 +1065,13 @@ class RestReader:
         A joined ticker does not say where its quote starts (`X:DOTUSD` could be `DOT-USD` or
         `DO-TUSD`; `X:ETHWBTC` ends in `BTC` but quotes in `WBTC`), so every split comes from
         Massive's reference data: the session reads Massive's whole list of crypto tickers
-        once, on first need (`/v3/reference/tickers?market=crypto`, every
-        page), keeping each ticker's `base_currency_symbol` and `currency_symbol`, whose join
-        must be the ticker. Blocks the calling thread for that read, or while another thread
-        makes it; holds no lock meanwhile. A failed read is not kept, so the next call tries
-        again.
+        once, on first need (`/v3/reference/tickers?market=crypto`, every page, first with
+        `active=true` and then with `active=false`, so a delisted pair splits too), keeping
+        each ticker's `base_currency_symbol` and `currency_symbol`, whose join must be the
+        ticker. Blocks the calling thread for that read, or while another thread makes it;
+        holds no lock meanwhile. A failed read is not kept, so the next call tries again. A
+        read that succeeds is kept for the session as it is, even when it lists no pair: every
+        pair is then refused.
 
         Args:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
@@ -1117,14 +1118,15 @@ class RestReader:
             return future.result()
         tickers: dict[str, tuple[str, str] | str] = {}
         try:
-            pages = self.state.client.pages(
-                self.rest_path(_TICKERS_PATH), {}, {"market": "crypto", "limit": _TICKERS_PAGE}
-            )
-            for page in pages:
-                for row in page.rows:
-                    ticker = row.get("ticker")
-                    if isinstance(ticker, str):
-                        tickers[ticker] = _crypto_entry(ticker, row)
+            # Listed pairs first, then delisted ones, so that a past date of a delisted pair
+            # still splits; a ticker in both keeps its listed entry.
+            for active in (True, False):
+                query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
+                for page in self.state.client.pages(self.rest_path(_TICKERS_PATH), {}, query):
+                    for row in page.rows:
+                        ticker = row.get("ticker")
+                        if isinstance(ticker, str):
+                            tickers.setdefault(ticker, _crypto_entry(ticker, row))
         except WireError as error:
             public = self._public(error)
             self.state.forget_crypto()

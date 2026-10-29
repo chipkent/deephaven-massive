@@ -1748,7 +1748,7 @@ def test_a_topic_reconnects_once_per_session(harness: Harness) -> None:
     assert harness.connections.first_no_ack("/options", "T.AAPL")
 
 
-# Each of these ends in two quote currencies, so only Massive's list can split it.
+# Each of these reads as two different pairs (DOT-USD or DO-TUSD); only Massive's list says which.
 AMBIGUOUS = {
     "X:DOTUSD": ("DOT", "USD"),  # DOT-USD or DO-TUSD
     "X:SHIBUSD": ("SHIB", "USD"),  # SHIB-USD or SHI-BUSD
@@ -1758,7 +1758,7 @@ AMBIGUOUS = {
 
 
 def test_an_ambiguous_crypto_pair_subscribes_the_topic_massive_gives(harness: Harness) -> None:
-    # The quote list cannot split these, so Massive's reference data does, once per ticker.
+    # Massive's crypto ticker list splits every pair, and each ticker is looked up once.
     harness.pair_answers.update(AMBIGUOUS)
     harness.pair_answers["X:ETHWBTC"] = ("ETH", "WBTC")  # ends in BTC, quotes in WBTC
     result = harness.query(CRYPTO, [*AMBIGUOUS, "X:BTCUSD", "X:ETHWBTC"]).blink()
@@ -1862,4 +1862,57 @@ def test_every_crypto_pair_streams_without_a_lookup(harness: Harness) -> None:
     result = harness.query(CRYPTO, dm.ALL).blink()
     harness.subscribed("XT.*")
     assert harness.lookups == []
+    harness.session.release(result)
+
+
+def test_a_removal_never_overtakes_a_slow_lookup_of_the_same_pair(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The crypto pairs worker runs one change at a time, in order: a pair removed while its
+    # addition still waits on the lookup is removed after it is added, never before, so the
+    # stream does not end up subscribed to a pair its table no longer holds.
+    gate, started = threading.Event(), threading.Event()
+    lookup = harness.connections._crypto_pair
+    change = harness.connections._change_pairs
+    done: list[tuple[list[str], list[str]]] = []
+
+    def slow(symbol: str) -> tuple[str, str]:
+        if symbol == "X:DOTUSD":
+            started.set()
+            assert gate.wait(TIMEOUT)
+        return lookup(symbol)
+
+    def recorded(stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
+        change(stream_id, added, removed)
+        with harness.cond:
+            done.append((sorted(added), sorted(removed)))
+
+    harness.connections._crypto_pair = slow
+    # Records the order in which the worker finishes the changes.
+    monkeypatch.setattr(harness.connections, "_change_pairs", recorded)
+    harness.pair_answers["X:DOTUSD"] = ("DOT", "USD")
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["X:BTCUSD"])]))
+    result = harness.query(CRYPTO, watchlist).append_only()
+    harness.subscribed("XT.BTC-USD")
+    watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    assert started.wait(TIMEOUT)  # the addition waits on its lookup
+    watchlist.delete(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    watchlist.add(new_table([string_col("Symbol", ["X:ETHUSD"])]))
+    gate.set()
+
+    def position(entry: Callable[[tuple[list[str], list[str]]], bool]) -> int | None:
+        with harness.cond:
+            return next((i for i, e in enumerate(done) if entry(e)), None)
+
+    def added_dot(e: tuple[list[str], list[str]]) -> bool:
+        return "X:DOTUSD" in e[0]
+
+    def removed_dot(e: tuple[list[str], list[str]]) -> bool:
+        return "X:DOTUSD" in e[1]
+
+    wait_for(lambda: position(added_dot) is not None and position(removed_dot) is not None)
+    assert cast("int", position(added_dot)) < cast("int", position(removed_dot))
+    harness.subscribed("XT.ETH-USD")
+    harness.unsubscribed("XT.DOT-USD")
     harness.session.release(result)

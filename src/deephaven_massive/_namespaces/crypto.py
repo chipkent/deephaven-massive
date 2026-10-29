@@ -221,7 +221,7 @@ class _Crypto(Namespace):
 
             m = dm.MassiveSession()
             btc = m.crypto.trades("X:BTCUSD").last_by()  # the latest trade, live
-            daily = m.crypto.bars(["X:BTCUSD", "ETH-USD"], dm.Timespan.DAY).history(
+            daily = m.crypto.bars(["X:BTCUSD", "X:ETHUSD"], dm.Timespan.DAY).history(
                 "2026-01-01", "2026-01-31"
             )
     """
@@ -250,11 +250,14 @@ class _Crypto(Namespace):
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#trades.
 
-        Synchronous errors: a symbol that is not a crypto pair ending in a known quote
-        currency, or that carries another class's prefix, an empty sequence or exhausted
-        generator, or a table without a `Symbol` column raises `ValueError`; `symbols` of
-        another type than a string, a sequence of strings, a table, or `dm.ALL` raises
-        `TypeError`.
+        Synchronous errors: a symbol that is not Massive's `X:` crypto ticker, or that carries
+        another class's prefix, an empty sequence or exhausted generator, or a table without a
+        `Symbol` column raises `ValueError`; `symbols` of another type than a string, a sequence of
+        strings, a table, or `dm.ALL` raises `TypeError`. A pair missing from Massive's crypto
+        ticker list (read once per session, listed and delisted pairs alike) is refused later, since
+        the last trade's path takes the pair as two currencies: a stream verb raises `MassiveError`
+        when it starts, a symbol table that adds one fails the stream, `fetch()` raises it, and a
+        `poll()` table fails with it.
 
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
@@ -288,11 +291,13 @@ class _Crypto(Namespace):
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#quotes.
 
-        Synchronous errors: a symbol that is not a crypto pair ending in a known quote
-        currency, or that carries another class's prefix, an empty sequence or exhausted
-        generator, or a table without a `Symbol` column raises `ValueError`; `symbols` of
-        another type than a string, a sequence of strings, a table, or `dm.ALL` raises
-        `TypeError`.
+        Synchronous errors: a symbol that is not Massive's `X:` crypto ticker, or that carries
+        another class's prefix, an empty sequence or exhausted generator, or a table without a
+        `Symbol` column raises `ValueError`; `symbols` of another type than a string, a sequence of
+        strings, a table, or `dm.ALL` raises `TypeError`. A pair missing from Massive's crypto
+        ticker list (read once per session, listed and delisted pairs alike) is refused later: a
+        stream verb raises `MassiveError` when it starts, and a symbol table that adds one fails the
+        stream.
 
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
@@ -388,13 +393,15 @@ class _Crypto(Namespace):
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#bars.
 
-        Synchronous errors: `Timespan.SESSION` (futures only), a `multiplier` that is not
-        positive, or a symbol that is not a crypto pair ending in a known quote currency, or
-        that carries another class's prefix, an empty sequence or exhausted generator, or a
-        table without a `Symbol` column raises `ValueError`; a `timespan` that is not a
-        `dm.Timespan` (a plain string such as `"minute"` included), a `multiplier` that is
-        not an `int`, or `symbols` of another type than a string, a sequence of strings, a
-        table, or `dm.ALL` raises `TypeError`.
+        Synchronous errors: `Timespan.SESSION` (futures only), a `multiplier` that is not positive,
+        or a symbol that is not Massive's `X:` crypto ticker, or that carries another class's
+        prefix, an empty sequence or exhausted generator, or a table without a `Symbol` column
+        raises `ValueError`; a `timespan` that is not a `dm.Timespan` (a plain string such as
+        `"minute"` included), a `multiplier` that is not an `int`, or `symbols` of another type than
+        a string, a sequence of strings, a table, or `dm.ALL` raises `TypeError`. A pair missing
+        from Massive's crypto ticker list (read once per session, listed and delisted pairs alike)
+        is refused later: a stream verb raises `MassiveError` when it starts, and a symbol table
+        that adds one fails the stream. `history()` needs no split.
 
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
@@ -444,11 +451,13 @@ class _Crypto(Namespace):
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#fmv.
 
-        Synchronous errors: a symbol that is not a crypto pair ending in a known quote
-        currency, or that carries another class's prefix, an empty sequence or exhausted
-        generator, or a table without a `Symbol` column raises `ValueError`; `symbols` of
-        another type than a string, a sequence of strings, a table, or `dm.ALL` raises
-        `TypeError`.
+        Synchronous errors: a symbol that is not Massive's `X:` crypto ticker, or that carries
+        another class's prefix, an empty sequence or exhausted generator, or a table without a
+        `Symbol` column raises `ValueError`; `symbols` of another type than a string, a sequence of
+        strings, a table, or `dm.ALL` raises `TypeError`. A pair missing from Massive's crypto
+        ticker list (read once per session, listed and delisted pairs alike) is refused later: a
+        stream verb raises `MassiveError` when it starts, and a symbol table that adds one fails the
+        stream.
 
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
@@ -487,11 +496,10 @@ class _Crypto(Namespace):
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#snapshots.
 
-        Synchronous errors: a symbol that is not a crypto pair ending in a known quote
-        currency, or that carries another class's prefix, an empty sequence or exhausted
-        generator, or a table without a `Symbol` column raises `ValueError`; `symbols` of
-        another type than a string, a sequence of strings, a table, or `dm.ALL` raises
-        `TypeError`.
+        Synchronous errors: a symbol that is not Massive's `X:` crypto ticker, or that carries
+        another class's prefix, an empty sequence or exhausted generator, or a table without a
+        `Symbol` column raises `ValueError`; `symbols` of another type than a string, a sequence of
+        strings, a table, or `dm.ALL` raises `TypeError`.
 
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
@@ -562,12 +570,15 @@ class _Crypto(Namespace):
         Columns: `columns()` on the query, the web UI's column tooltips, or
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md#daily_open_close.
 
-        Synchronous errors: `dm.ALL`, a symbol that is not a crypto pair ending in a known
-        quote currency, or that carries another class's prefix, an empty sequence or
-        exhausted generator, or a table without a `Symbol` column, or a `date` that is not
-        ISO-8601 text or is a time without a timezone raises `ValueError`; `symbols` of
-        another type than a string, a sequence of strings, a table, or `dm.ALL`, or a `date`
-        that is not a `str`, `date`, or `datetime`, raises `TypeError`.
+        Synchronous errors: `dm.ALL`, a symbol that is not Massive's `X:` crypto ticker, or that
+        carries another class's prefix, an empty sequence or exhausted generator, or a table without
+        a `Symbol` column, or a `date` that is not ISO-8601 text or is a time without a timezone
+        raises `ValueError`; `symbols` of another type than a string, a sequence of strings, a
+        table, or `dm.ALL`, or a `date` that is not a `str`, `date`, or `datetime`, raises
+        `TypeError`. A pair missing from Massive's crypto ticker list (read once per session, listed
+        and delisted pairs alike) is refused later, since the path takes the pair as two currencies:
+        `fetch()` raises `MassiveError`, and a `poll()` table fails with it. Since the list holds
+        delisted pairs too, a past date of a pair no longer traded still resolves.
 
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a

@@ -595,7 +595,8 @@ def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
     serve_pairs(fake_rest)
     out = fetch(session, CRYPTO_OPEN_CLOSE, symbols=["X:BTCUSD"], params={"date": date(2025, 3, 3)})
     assert [path for path, _ in sent(fake_rest)] == [
-        TICKERS_PATH,  # the pair's split comes from Massive's crypto ticker list
+        TICKERS_PATH,  # the pair's split comes from Massive's listed crypto tickers,
+        TICKERS_PATH,  # and its delisted ones
         "/v1/open-close/crypto/BTC/USD/2025-03-03",
     ]
     assert [(r["Symbol"], r["Open"]) for r in out] == [("X:BTCUSD", 90000.5)]
@@ -623,8 +624,9 @@ PAIRS = {
 
 def serve_pairs(server: FakeRestServer) -> None:
     # Massive's crypto ticker list, which a `{from}/{to}` path reads once per session.
+    # It is read as two lists: the listed pairs, then the delisted ones (none here).
     rows = [_ticker(symbol, base, quote) for symbol, (base, quote) in PAIRS.items()]
-    server.reply(TICKERS_PATH, Reply(envelope(rows)))
+    server.reply(TICKERS_PATH, Reply(envelope(rows)), Reply(envelope([])))
 
 
 def sent_data(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
@@ -637,8 +639,10 @@ def split_pair(symbol: str) -> tuple[str, str]:
     return PAIRS[symbol]
 
 
-LIST_QUERY = {"market": ["crypto"], "limit": ["1000"]}
-"""The query of the first page of Massive's crypto ticker list."""
+LIST_QUERY = {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of listed crypto tickers."""
+DELISTED_QUERY = {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of delisted crypto tickers."""
 
 
 def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once(
@@ -648,7 +652,10 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
     # The whole list is read once, every page, and serves every later pair of the session.
     second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
     first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
-    fake_rest.reply("/v3/reference/tickers?market=crypto&limit=1000", Reply(first_page))
+    fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
     fake_rest.reply(
         "/v3/reference/tickers?cursor=two",
         Reply(envelope([_ticker("X:SHIBUSD", "SHIB", "USD"), _ticker("X:ETHWBTC", "ETH", "WBTC")])),
@@ -667,8 +674,31 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
     assert sent(fake_rest) == [
         ("/v3/reference/tickers", LIST_QUERY),
         ("/v3/reference/tickers", {"cursor": ["two"]}),
+        ("/v3/reference/tickers", DELISTED_QUERY),
         ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),
         ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),  # the list is kept
+    ]
+
+
+def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A past date of a delisted pair still needs its split; a ticker in both lists keeps the
+    # listed pair's currencies.
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
+        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD")])),
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000",
+        Reply(envelope([_ticker("X:FTTUSD", "FTT", "USD"), _ticker("X:BTCUSD", "BT", "CUSD")])),
+    )
+    reader = cast("Any", session._core.rest_transport())._reader()
+    assert reader.crypto_pair("X:FTTUSD") == ("FTT", "USD")
+    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", DELISTED_QUERY),
     ]
 
 
@@ -695,7 +725,7 @@ def test_a_crypto_pair_lookup_never_guesses(
     rows: list[dict[str, object]],
     message: str | None,
 ) -> None:
-    fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)))
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)), Reply(envelope([])))
     reader = cast("Any", session._core.rest_transport())._reader()
     if message is None:  # the row of the ticker itself decides
         assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
@@ -711,6 +741,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
         "/v3/reference/tickers",
         Reply({"status": "ERROR"}, status=403),
         Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+        Reply(envelope([])),
     )
     reader = cast("Any", session._core.rest_transport())._reader()
     with pytest.raises(
@@ -720,7 +751,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
         reader.crypto_pair("X:DOTUSD")
     assert raised.value.status == 403
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the failure was not kept
-    assert len(sent(fake_rest)) == 2
+    assert len(sent(fake_rest)) == 3  # the failed read, then both lists
 
 
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
@@ -801,7 +832,7 @@ def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
 ) -> None:
     # Static symbols are planned at the call; a symbol table's are planned each cycle, and
     # since every later cycle would read the same list, the table fails at its first cycle.
-    fake_rest.reply("/v3/reference/tickers", Reply(envelope([])))
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([])), Reply(envelope([])))
     params = {"date": date(2025, 3, 3)}
     static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
     assert isinstance(static, Query)
@@ -818,7 +849,10 @@ def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
             break
         failed.wait(0.01)
     assert failed.is_set()
-    assert sent(fake_rest) == [("/v3/reference/tickers", LIST_QUERY)]
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", DELISTED_QUERY),
+    ]
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
@@ -945,13 +979,15 @@ def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
     )
     path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
     with pytest.raises(ValueError, match="only forex and crypto symbols are currency pairs"):
-        rest.plan_calls(spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",))
+        rest.plan_calls(spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",), split=split_pair)
 
 
 def test_a_per_symbol_path_needs_explicit_symbols() -> None:
     path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
     with pytest.raises(ValueError, match="needs explicit symbols"):
-        rest.plan_calls(CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL)
+        rest.plan_calls(
+            CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL, split=split_pair
+        )
 
 
 def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
@@ -963,22 +999,24 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
         keys={(R, "/v2/reference/news"): SourceKeys()},
     )
     path = cast("RestPath", _massive.source(R, "/v2/reference/news"))
-    calls = rest.plan_calls(news, path, Request(), symbols=("AAPL", "MSFT"))
+    calls = rest.plan_calls(news, path, Request(), symbols=("AAPL", "MSFT"), split=split_pair)
     assert [(c.symbol, dict(c.query)) for c in calls] == [
         ("AAPL", {"ticker": "AAPL"}),
         ("MSFT", {"ticker": "MSFT"}),
     ]
-    assert rest.plan_calls(news, path, Request(), symbols=()) == []
+    assert rest.plan_calls(news, path, Request(), symbols=(), split=split_pair) == []
     # A path that takes no symbols ignores them: one request.
     movers = cast("RestPath", _massive.source(R, MOVERS_PATH))
     request = Request(params=(("direction", Direction.LOSERS),))
-    (call,) = rest.plan_calls(MOVERS, movers, request, symbols=("AAPL", "MSFT"))
+    (call,) = rest.plan_calls(MOVERS, movers, request, symbols=("AAPL", "MSFT"), split=split_pair)
     assert (call.symbol, dict(call.path_params), dict(call.query)) == (
         None,
         {"direction": Direction.LOSERS},
         {},
     )
-    assert [c.symbol for c in rest.plan_calls(news, path, Request(), symbols=None)] == [None]
+    assert [
+        c.symbol for c in rest.plan_calls(news, path, Request(), symbols=None, split=split_pair)
+    ] == [None]
 
 
 def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None:
@@ -992,7 +1030,7 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     )
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A", "B"))
+    calls = rest.plan_calls(spec, path, Request(), symbols=("A", "B"), split=split_pair)
     assert [dict(c.query) for c in calls] == [{"ticker.any_of": ("A",)}, {"ticker.any_of": ("B",)}]
 
 
@@ -1005,7 +1043,7 @@ def test_a_symbol_filled_into_a_query_parameter() -> None:
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A",))
+    calls = rest.plan_calls(spec, path, Request(), symbols=("A",), split=split_pair)
     assert [(c.symbol, dict(c.path_params), dict(c.query)) for c in calls] == [
         ("A", {}, {"ticker": "A"})
     ]
@@ -1591,13 +1629,17 @@ def test_a_caller_direction_folded_into_sort_is_not_overridden() -> None:
         params=(("order", Order.DESC), ("sort", "window_start")),
     )
     order = rest._ascending(FUTURES_BARS, rest_path, mine)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order)
+    (call,) = rest.plan_calls(
+        FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order, split=split_pair
+    )
     assert call.query["sort"] == "window_start.desc"
     assert "order" not in call.query
     # Without a caller direction, the ascending one is sent.
     plain = Request(symbols=("ESZ5",), timespan=Timespan.MINUTE)
     order = rest._ascending(FUTURES_BARS, rest_path, plain)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order)
+    (call,) = rest.plan_calls(
+        FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order, split=split_pair
+    )
     assert call.query["sort"] == "window_start.asc"
 
 
@@ -1972,7 +2014,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
 
 def test_an_empty_symbol_tuple_plans_no_request() -> None:
     path = cast("RestPath", _massive.source(R, INDEX_SNAPSHOT_PATH))
-    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=()) == []
+    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=(), split=split_pair) == []
     assert rest.fetch_paths(SMA, ()) == [(SMA_STOCK, ())]
 
 

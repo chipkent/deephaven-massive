@@ -580,7 +580,9 @@ def test_trades_fetch_reads_the_last_trade_of_each_pair(
     serve_pairs(fake_rest)
     out = rows(rest_session.crypto.trades("X:BTCUSD").fetch())
     assert sent(fake_rest) == [
-        ("/v3/reference/tickers", {"market": ["crypto"], "limit": ["1000"]}),  # the pair's split
+        # The pair's split: Massive's listed crypto tickers, then the delisted ones.
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
         ("/v1/last/crypto/BTC/USD", {}),
     ]
     [row] = out
@@ -678,7 +680,7 @@ def test_a_daily_bar_stamped_inside_its_utc_day_fails_loudly(
         )
 
 
-# X:BTCXYZ no listed quote ends: this path's {from}/{to} are the range, not the pair's two
+# X:BTCXYZ is in no ticker list: this path's {from}/{to} are the range, not the pair's two
 # currencies, so it needs no split and reads no ticker list.
 @pytest.mark.parametrize("symbol", ["X:BTCUSD", "X:BTCXYZ"])
 def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
@@ -766,7 +768,9 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
     q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
     [row] = rows(q.fetch())
     assert sent(fake_rest) == [
-        ("/v3/reference/tickers", {"market": ["crypto"], "limit": ["1000"]}),  # the pair's split
+        # The pair's split: Massive's listed crypto tickers, then the delisted ones.
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
         (path, {}),
     ]
     # The body's `BTC-USD` is canonical in `Symbol`; the trades stay JSON text.
@@ -1066,15 +1070,17 @@ def serve_pairs(server: FakeRestServer) -> None:
         {"ticker": t, "market": "crypto", "base_currency_symbol": b, "currency_symbol": q}
         for t, (b, q) in PAIRS.items()
     ]
-    server.reply("/v3/reference/tickers", Reply({"status": "OK", "results": rows_}))
+    empty = Reply({"status": "OK", "results": []})  # no delisted pair
+    server.reply("/v3/reference/tickers", Reply({"status": "OK", "results": rows_}), empty)
 
 
 def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Any X: ticker is Massive's; only a stream needs the pair split for its topic, and no
-    # listed quote ends this one, so the stream asks Massive's reference data and is refused.
-    fake_rest.reply("/v3/reference/tickers", Reply({"status": "OK", "results": []}))
+    # Any X: ticker is Massive's; only a stream needs the pair split for its topic, and
+    # Massive's crypto ticker list does not hold this one, so the stream is refused.
+    empty = Reply({"status": "OK", "results": []})
+    fake_rest.reply("/v3/reference/tickers", empty, empty)
     q = rest_session.crypto.trades("X:BTCXYZ")
     assert request_of(q).symbols == ("X:BTCXYZ",)
     with pytest.raises(
@@ -1083,4 +1089,7 @@ def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
         r"Massive's reference data does not list it$",
     ):
         q.blink()
-    assert sent(fake_rest) == [("/v3/reference/tickers", {"market": ["crypto"], "limit": ["1000"]})]
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
+        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
+    ]
