@@ -43,7 +43,7 @@ section it implements, and `AGENTS.md`. For each changed file ask:
   in the layer and package that own the concept? Should the module be split, merged or renamed?
   Do the tests mirror the new location? Fix a misplaced item by moving it in the same PR, not by
   noting it.
-- **Explicit choices.** A parameter whose `None` selects a mode or a behaviour (`convention=None`
+- **Explicit choices.** A parameter whose `None` selects a mode or a behavior (`convention=None`
   meaning "the default convention") should take an explicit enum member as its default instead.
   `None` means only a value that is genuinely absent.
 - **Generated data.** No hand-written schema, no edit to `spec/*.json`; hand input only in the
