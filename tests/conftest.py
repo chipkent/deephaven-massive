@@ -377,13 +377,14 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     Autouse, and named to sort first (pytest orders autouse fixtures by name), so it is set up
     first and runs after every other fixture's teardown (a closed `massive_session` included).
     The library frees an unused session by reference counting alone, so the check runs with
-    the cyclic collector off and polls, bounded and in Python, until nothing is left. Each
-    look after the first collects with `gc.DEBUG_SAVEALL`, which keeps what it would free in
-    `gc.garbage`: a session found there is reachable only through a reference cycle, which
-    reference counting never frees, and the test fails with "freed only by the cyclic
-    collector", unless the cycle is an exception's traceback (`_held_by_tracebacks`). A session
-    still alive after a second, though out of the live set, may be one a test's formula handed
-    to the JVM, so the check asks the JVM to collect once before it waits on.
+    the cyclic collector off and polls, bounded and in Python, until nothing is left. Unless
+    the first look finds nothing, it collects with `gc.DEBUG_SAVEALL`, at most once a second,
+    which keeps what it would free in `gc.garbage`: a session a cycle there holds
+    (`_held_by_cycles`) is one reference counting never frees, and the test fails with "freed
+    only by the cyclic collector", unless the cycle is an exception's traceback
+    (`_held_by_tracebacks`). What is still alive or running after a second may be what a
+    test's formula handed to the JVM, so the check then asks the JVM to collect once before it
+    waits on.
     """
     before = _running()
     yield
@@ -411,10 +412,11 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
                 break
             if time.monotonic() > deadline:
                 pytest.fail(f"left running after the test: {_left(before)}")
-            if alive and not sessions and not jvm_collected and time.monotonic() > started + 1.0:
+            if not jvm_collected and time.monotonic() > started + 1.0:
                 # A formula a test ran (`t.update("...")`) copies its frame's locals into the
-                # query scope through jpy, and a session among them lives until the JVM
-                # collects them: that is Deephaven's, not a leak of the library.
+                # query scope through jpy, and a session, a result, or a table derived from it
+                # among them lives until the JVM collects them: that is Deephaven's, not a leak
+                # of the library.
                 jpy = importlib.import_module("jpy")
                 jpy.get_type("java.lang.System").gc()
                 jvm_collected = True
@@ -487,12 +489,45 @@ def _collect_cycles(before: _Running) -> set[str]:
         gc.garbage.clear()
     finally:
         gc.set_debug(0)
-    cyclic = {id(item) for item in garbage} & set(wanted)
+    cyclic = _held_by_cycles(garbage) & set(wanted)
     if not cyclic:
         return set()
     excused = _held_by_tracebacks(garbage, cyclic)
     del garbage
     return {wanted[key] for key in cyclic - excused}
+
+
+def _held_by_cycles(garbage: list[object]) -> set[int]:
+    """Return the ids of the garbage that a reference cycle holds.
+
+    Not everything the collector finds is held by a cycle. On a free-threaded build a reference
+    another thread dropped waits for its object's creating thread to merge it, and the
+    collector merges it first; an object that then has no reference left is garbage too,
+    although reference counting alone frees it. So the references among the garbage are
+    counted, and what nothing else in the garbage refers to is let go, repeatedly, as
+    reference counting would let it go; what remains is held by a cycle.
+
+    Args:
+        garbage: What the collector found unreachable.
+
+    Returns:
+        The ids of the objects reference counting alone would never free.
+    """
+    ids = {id(item) for item in garbage}
+    holds: dict[int, list[int]] = {}
+    held = dict.fromkeys(ids, 0)
+    for item in garbage:
+        referents = [id(each) for each in gc.get_referents(item) if id(each) in ids]
+        holds[id(item)] = referents
+        for key in referents:
+            held[key] += 1
+    free = [key for key, count in held.items() if not count]
+    while free:
+        for key in holds[free.pop()]:
+            held[key] -= 1
+            if not held[key]:
+                free.append(key)
+    return {key for key, count in held.items() if count}
 
 
 def _held_by_tracebacks(garbage: list[object], wanted: set[int]) -> set[int]:
