@@ -393,11 +393,14 @@ def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
         names.put((threading.current_thread().name, pooled))
         return schema.empty_table(), 1
 
-    start(massive_session, script=cast("Script", read), pollers=pollers, clock=clock)
+    # Held until the end: a table nothing refers to may be collected, which stops its poller
+    # before its first cycle.
+    table = start(massive_session, script=cast("Script", read), pollers=pollers, clock=clock)
     poller, pool = names.get(timeout=TIMEOUT)
     prefix = massive_session._core.thread_prefix
     assert poller == f"{prefix} poll-1"
     assert pool == f"{prefix} poll-1 rest_0"
+    massive_session.release(table)
 
 
 def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
