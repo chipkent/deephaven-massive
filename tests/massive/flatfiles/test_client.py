@@ -1148,12 +1148,12 @@ def test_the_proxy_carries_its_credentials_and_no_secret_is_logged(
             assert ACCESS_KEY not in text
 
 
-def _closed_port() -> int:
-    """Return a loopback port nothing listens on: bound by this process, then released."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port: int = probe.getsockname()[1]
-    return port
+# A loopback port that refuses connections. Port 1 lies below every operating system's range of
+# ephemeral ports, so no test that binds port 0, in this process or a parallel test worker, is
+# ever handed it, and nothing listens on it. A port bound and released by the test could be
+# taken by another worker before the connection is attempted; one kept bound without listening
+# is not refused on macOS, where the connection waits out its timeout instead.
+_REFUSED_PORT = 1
 
 
 @pytest.mark.parametrize(
@@ -1167,7 +1167,7 @@ def test_an_unreachable_proxy_is_retried_and_its_password_stays_out_of_the_error
     # botocore masks a proxy password by replacing its first occurrence in the URL, which for
     # `http://h:h@...` is the `h` of `http`; the client names the proxy without credentials.
     caplog.set_level(logging.DEBUG)
-    port = _closed_port()
+    port = _REFUSED_PORT
     trusted.setenv("HTTPS_PROXY", f"http://{user}:{password}@127.0.0.1:{port}")
     clock = FakeClock()
     client = make_client(clock=clock)
