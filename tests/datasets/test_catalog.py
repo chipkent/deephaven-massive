@@ -338,11 +338,13 @@ def test_row_times_follow_the_kind_unless_declared() -> None:
     assert STOCK_TRADES.times is RowTimes.TICK
     assert EXCHANGES.times is RowTimes.NONE
     bars = CATALOG.by_name["stocks.bars"]
-    assert bars.row_times is None
+    assert bars.row_times is RowTimes.BY_KIND
     assert bars.times is RowTimes.BAR
     assert CATALOG.by_name["indicators.sma"].times is RowTimes.BAR
     assert CATALOG.by_name["stocks.daily_open_close"].times is RowTimes.DAY
     assert change(EXCHANGES, row_times=RowTimes.TICK).times is RowTimes.TICK
+    # No dataset of the catalog resolves to the declaration default.
+    assert all(spec.times is not RowTimes.BY_KIND for spec in CATALOG.by_name.values())
 
 
 def test_a_stream_symbol_cannot_be_optional() -> None:

@@ -33,7 +33,7 @@ from deephaven_massive._datasets.history_source import (
     within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.row_times import RowTimes
+from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._massive import Transport
 
@@ -239,28 +239,35 @@ def test_unfinished_bars_are_left_out() -> None:
     assert future.empty  # March has not ended
 
 
-def test_a_bar_must_end_by_the_range_s_end_and_by_now() -> None:
-    # Ticks have no end to check.
-    assert window(STOCK_TRADES, "2025-03-03", "2025-03-04").ended_by is None
-    # Dates end with their last day: midnight after it, 01:00 New York time for indices.
+def test_a_bar_must_lie_in_the_range_and_end_by_now() -> None:
+    # Ticks have no bar window.
+    assert window(STOCK_TRADES, "2025-03-03", "2025-03-04").bars is None
+    # Dates start with their first day and end with their last: midnight after it, 01:00 New
+    # York time for indices.
     stocks = window(STOCK_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
-    assert stocks.ended_by == datetime(2025, 3, 5, tzinfo=NEW_YORK)
-    # A bar must also start no earlier than the range.
-    assert stocks.started_by == datetime(2025, 3, 3, tzinfo=NEW_YORK)
+    assert stocks.bars == BarBounds(
+        datetime(2025, 3, 3, tzinfo=NEW_YORK),
+        datetime(2025, 3, 5, tzinfo=NEW_YORK),
+        StartRule.RANGE,
+    )
     indices = window(INDEX_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
-    assert indices.ended_by == datetime(2025, 3, 5, 1, tzinfo=NEW_YORK)
+    assert cast("BarBounds", indices.bars).latest == datetime(2025, 3, 5, 1, tzinfo=NEW_YORK)
     # Datetimes end at their end; an open end, or one after now, at now.
     end = datetime(2025, 3, 5, 9, 30, tzinfo=NEW_YORK)
     exact = window(STOCK_BARS, "2025-03-03T00:00:00-05:00", end, timespan=Timespan.DAY)
-    assert exact.ended_by == end
-    assert window(STOCK_BARS, "2025-03-03", None, timespan=Timespan.DAY).ended_by == NOW
-    # Futures dates end at 17:00 Chicago on the last session's date.
+    assert cast("BarBounds", exact.bars).latest == end
+    open_end = window(STOCK_BARS, "2025-03-03", None, timespan=Timespan.DAY)
+    assert cast("BarBounds", open_end.bars).latest == NOW
+    # Futures dates end at 17:00 Chicago on the last session's date, and are kept by their
+    # label, not their start: a folded session opens before its first date.
     span = ("2025-03-03", "2025-03-05")
     for timespan in (Timespan.MINUTE, Timespan.SESSION):
         sessions = window(FUTURES_BARS, *span, timespan=timespan)
-        assert sessions.ended_by == datetime(2025, 3, 5, 17, tzinfo=CHICAGO)
-        # Kept by their label: a folded session opens before its first date.
-        assert sessions.started_by is None
+        assert sessions.bars == BarBounds(
+            datetime(2025, 3, 2, 17, tzinfo=CHICAGO),
+            datetime(2025, 3, 5, 17, tzinfo=CHICAGO),
+            StartRule.LABEL,
+        )
 
 
 def test_an_index_month_covers_its_weekend_days_for_its_start_too() -> None:

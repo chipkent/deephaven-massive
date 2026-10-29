@@ -11,7 +11,7 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   range and has ended: a request selects them by their start (`dates.bar_starts`,
   `dates.bar_sessions`), and a bar whose `TimestampEnd` lies after the range's end or after
   now, or whose `TimestampStart` lies before the range's start, is dropped once its time
-  columns are filled (`HistoryWindow.ended_by` and `started_by`).
+  columns are filled (`HistoryWindow.bars`).
 - `partition_dates` turns a window into the dates of the flat files it needs, in the asset
   class's day zone; a futures date names a trading session.
 - `rest_history_problem` says why REST cannot serve a request, if it cannot: the dataset has
@@ -58,11 +58,12 @@ from deephaven_massive._datasets.dates import (
     futures_session,
     futures_session_before,
     futures_session_end,
+    futures_session_open,
     intraday,
     publish_time,
     trades_at_weekends,
 )
-from deephaven_massive._datasets.row_times import RowTimes
+from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.timestamps import day_starts
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._types import _All
@@ -143,22 +144,16 @@ class HistoryWindow:
             aggregates' `{from}` (where the first fitting bar's period begins) and `{to}`;
             None for futures trades and quotes named by date, which are requested one
             session at a time.
-        ended_by: For bars, the latest `TimestampEnd` a kept bar may have: the earlier of
-            now and the range's end, which for dates is the last day's end
-            (`dates.day_end`: for futures, 17:00 Chicago on the last session's date). The
-            transports drop every later bar once its time columns are filled
-            (`row_times.within`). None for ticks.
-        started_by: For bars, the earliest `TimestampStart` a kept bar may have: the range's
-            start. None for ticks, and for futures named by session dates, whose bars are kept
-            by their label and may open before their first session's date (a holiday fold).
+        bars: For a dataset of bars, the window its bars must lie in once their time columns
+            are filled (`row_times.within`); the transports drop every other bar. None for
+            ticks, which have no bar window.
     """
 
     span: TimeRange | DaySpan
     times: TimeRange | None
     sessions: DaySpan | None
     requested: TimeRange | None
-    ended_by: datetime | None = None
-    started_by: datetime | None = None
+    bars: BarBounds | None = None
 
     @property
     def empty(self) -> bool:
@@ -185,7 +180,7 @@ def history_window(
     has ended by now: its start must fit (`dates.bar_starts`; for futures named by date, a bar
     of a session or longer by its session label, `Date`, under both readings of the label of
     a bar of several units, `dates.bar_sessions`, and an intraday bar by its session), and its
-    `TimestampEnd` must be no later than `HistoryWindow.ended_by`. The end is conservative, so
+    `TimestampEnd` must be no later than `HistoryWindow.bars.latest`. The end is conservative, so
     a bar whose window might reach past the range is left out: an index day bar ends at 01:00
     New York time, and a bar of several trading days allows for holidays
     (`dates.last_trading_day`).
@@ -222,7 +217,8 @@ def history_window(
     # whether Massive selects bars by their stamp or builds them from `{from}`.
     requested = instants if futures else TimeRange(keep.start, instants.end)
     last = instants.end if isinstance(span, TimeRange) else day_end(asset_class, span.last)
-    return HistoryWindow(span, keep, None, requested, min(last, moment), instants.start)
+    whole = BarBounds(instants.start, min(last, moment), StartRule.RANGE)
+    return HistoryWindow(span, keep, None, requested, whole)
 
 
 def _futures_sessions(
@@ -256,16 +252,19 @@ def _futures_sessions(
             )
         return HistoryWindow(span, None, span, None)
     requested = futures_bar_request(span)
-    latest = min(futures_session_end(span.last), now)
+    # Kept by their label: a bar may open before its first session's date.
+    whole = BarBounds(
+        futures_session_open(span.first), min(futures_session_end(span.last), now), StartRule.LABEL
+    )
     if intraday(timespan):
         ended = TimeRange(requested.start, min(requested.end, now))
         keep = bar_starts(
             AssetClass.FUTURES, ended, timespan=timespan, multiplier=request.multiplier
         )
-        return HistoryWindow(span, keep, span, requested, latest)
+        return HistoryWindow(span, keep, span, requested, whole)
     finished = DaySpan(span.first, min(span.last, futures_session(now) - _ONE_DAY))
     sessions = bar_sessions(finished, timespan=timespan, multiplier=request.multiplier)
-    return HistoryWindow(span, None, sessions, requested, latest)
+    return HistoryWindow(span, None, sessions, requested, whole)
 
 
 def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...]:

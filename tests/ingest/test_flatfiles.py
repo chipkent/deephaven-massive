@@ -35,7 +35,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.row_times import RowTimes
+from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
 from deephaven_massive._ingest import flatfiles
@@ -498,7 +498,8 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
     midnight = datetime(2025, 3, 3, 5, tzinfo=UTC)  # 00:00 in New York
     times = TimeRange(midnight, midnight + timedelta(days=1))
     day = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
-    window = HistoryWindow(day, times, None, times, midnight + timedelta(hours=hours))
+    bars = BarBounds(midnight, midnight + timedelta(hours=hours), StartRule.RANGE)
+    window = HistoryWindow(day, times, None, times, bars)
     transform = flatfiles._Transform.build(
         CATALOG,
         STOCK_BARS,

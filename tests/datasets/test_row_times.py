@@ -24,7 +24,9 @@ from deephaven_massive._datasets.row_times import (
     LIBRARY_COLUMNS,
     START,
     TIMESTAMP,
+    BarBounds,
     RowTimes,
+    StartRule,
     TimeRule,
     local_dates,
     time_column,
@@ -94,20 +96,20 @@ def iso(values: pa.Array | pa.ChunkedArray) -> list[str | None]:
 def test_only_bars_whose_window_lies_in_the_range_are_kept() -> None:
     rule = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 1)
     filled = rule.fill(bars(["2025-03-03T05:00:00", "2025-03-04T05:00:00"]), received=7)
-    latest = datetime(2025, 3, 4, 5, tzinfo=UTC)
-    assert iso(within(filled, earliest=None, latest=latest).column(START)) == [
-        "2025-03-03T05:00:00+00:00"
-    ]
-    # A start bound drops a bar that starts before it.
-    later = datetime(2025, 3, 4, 5, tzinfo=UTC)
-    assert within(filled, earliest=later, latest=latest).num_rows == 0
+    early, late = datetime(2025, 3, 3, 5, tzinfo=UTC), datetime(2025, 3, 4, 5, tzinfo=UTC)
+    by_label = BarBounds(late, late, StartRule.LABEL)
+    assert iso(within(filled, by_label).column(START)) == ["2025-03-03T05:00:00+00:00"]
+    assert within(filled, BarBounds(early, late, StartRule.RANGE)).num_rows == 1
+    # Under the range rule, a start bound drops a bar that starts before it; by label it
+    # bounds nothing.
+    assert within(filled, BarBounds(late, late, StartRule.RANGE)).num_rows == 0
     # A row whose end is unknown is kept; rows without an end column are all kept.
     unknown = filled.set_column(
         filled.schema.get_field_index(END), END, pa.nulls(2, filled.schema.field(END).type)
     )
-    assert within(unknown, earliest=None, latest=latest).num_rows == 2
+    assert within(unknown, by_label).num_rows == 2
     ticks = pa.RecordBatch.from_pydict({"Price": [1.0]})
-    assert within(ticks, earliest=None, latest=latest) is ticks
+    assert within(ticks, by_label) is ticks
 
 
 def fill(rule: TimeRule, rows: pa.RecordBatch) -> dict[str, list[object]]:

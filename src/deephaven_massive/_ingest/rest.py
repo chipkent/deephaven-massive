@@ -816,9 +816,9 @@ def _whole(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch
     Returns:
         The rows kept; every row where the window bounds no bar (ticks, `fetch()`, `poll()`).
     """
-    if window is None or window.ended_by is None:
+    if window is None or window.bars is None:
         return rows
-    return within(rows, earliest=window.started_by, latest=window.ended_by)
+    return within(rows, window.bars)
 
 
 def _keep(batch: pa.RecordBatch, window: HistoryWindow | None, *, time: str) -> pa.RecordBatch:

@@ -308,10 +308,10 @@ class DatasetSpec:
             of their own. Every REST path of the dataset must take each one (the catalog's
             `wire parameters` gate), so a request never carries a parameter its path lacks.
             Each is reserved, with its whole family, from `filters`.
-        row_times: Which of the library's time columns the rows carry (`RowTimes`); None, the
-            default, derives it (`times`): `BAR` for a `bars` dataset, `TICK` for any other
-            dataset in a kind, `NONE` otherwise. The indicators declare `BAR` and the daily
-            open-close summaries `DAY`.
+        row_times: Which of the library's time columns the rows carry (`RowTimes`);
+            `RowTimes.BY_KIND`, the default, derives it (`times`): `BAR` for a `bars` dataset,
+            `TICK` for any other dataset in a kind, `NONE` otherwise. The indicators declare
+            `BAR` and the daily open-close summaries `DAY`.
         column_notes: A sentence the library appends to a column's description for this
             dataset, by column, where the column's meaning depends on the query in a way no
             vendor text says, such as the split adjustment of a bar's prices. Empty by
@@ -343,7 +343,7 @@ class DatasetSpec:
     symbols_per_request: int | None = None
     page_size: int | None = None
     fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
-    row_times: RowTimes | None = None
+    row_times: RowTimes = RowTimes.BY_KIND
     column_notes: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -408,7 +408,7 @@ class DatasetSpec:
         values, LULD, imbalances, FMV), and `NONE` for the rest, unless `row_times` says
         otherwise.
         """
-        if self.row_times is not None:
+        if self.row_times is not RowTimes.BY_KIND:
             return self.row_times
         if self.is_bars:
             return RowTimes.BAR

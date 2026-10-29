@@ -124,6 +124,7 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.row_times import (
     DATE,
+    BarBounds,
     TimeRule,
     time_column,
     time_rule,
@@ -159,7 +160,7 @@ from deephaven_massive._types import _All
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from concurrent.futures import Future
-    from datetime import date, datetime
+    from datetime import date
 
     from deephaven.table import Table
 
@@ -302,10 +303,8 @@ class _Transform:
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
             zone (`history_source.stamp_rule`); None otherwise.
-        latest_end: For bars, the latest `TimestampEnd` a kept bar may have
-            (`HistoryWindow.ended_by`); None otherwise.
-        earliest_start: For bars, the earliest `TimestampStart` a kept bar may have
-            (`HistoryWindow.started_by`); None where the window bounds no start.
+        bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
+            None for ticks.
     """
 
     dataset: str
@@ -318,8 +317,7 @@ class _Transform:
     times: TimeRule
     time_name: str
     stamps: StampRule | None = None
-    latest_end: datetime | None = None
-    earliest_start: datetime | None = None
+    bars: BarBounds | None = None
 
     @classmethod
     def build(
@@ -401,8 +399,7 @@ class _Transform:
             times=time_rule(spec, request),
             time_name=time_name,
             stamps=stamps,
-            latest_end=window.ended_by,
-            earliest_start=window.started_by,
+            bars=window.bars,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -444,9 +441,7 @@ class _Transform:
         arrays = [self._column(batch, column) for column in self.columns]
         rows = pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
         filled = self.times.fill(rows, received=received)
-        if self.latest_end is None:
-            return filled
-        return within(filled, earliest=self.earliest_start, latest=self.latest_end)
+        return filled if self.bars is None else within(filled, self.bars)
 
     def _column(
         self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]

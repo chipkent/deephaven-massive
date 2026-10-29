@@ -1802,14 +1802,16 @@ partition dates, and the instants a REST request covers (`HistoryWindow`).
 **Bars: whole windows.** A bar, of any timespan and multiplier, is returned only when its whole
 window lies inside the range and has ended. One rule decides both, the bar's own `TimestampEnd`
 ("Time columns" below): a bar is kept only when its `TimestampStart` is no earlier than the
-range's start (`HistoryWindow.started_by`; futures named by dates are kept by their label
-instead, since a folded session opens before its date) and its `TimestampEnd` is no later than
-the earlier of now and the range's end. A range of dates ends where its last day's bar would
+range's start and its `TimestampEnd` is no later than the earlier of now and the range's end.
+The window carries these as `HistoryWindow.bars`, a `row_times.BarBounds` whose `start_rule` is
+explicit: `StartRule.RANGE` checks the start, and `StartRule.LABEL`, for futures named by dates,
+keeps bars by their session label instead, since a folded session opens before its date. Ticks
+have no bar window (`bars` is None). A range of dates ends where its last day's bar would
 (`dates.day_end`: the next midnight in the class day zone; 01:00 New York time for indices;
-17:00 Chicago on the last session's date for futures); a range of datetimes at its end
-(`HistoryWindow.ended_by`). The transports drop a later bar once its time columns are filled
-(`row_times.within`), so selection and the join key can never disagree: wherever the end is
-conservative, so is the selection. The windows:
+17:00 Chicago on the last session's date for futures); a range of datetimes at its end. The
+transports drop a later bar once its time columns are filled (`row_times.within`), so selection
+and the join key can never disagree: wherever the end is conservative, so is the selection. The
+windows:
 
 - An intraday bar (second, minute, hour) spans `multiplier` units from its `Timestamp`, on whole
   units of UTC time (whole hours in every zone the library uses).
@@ -1932,13 +1934,15 @@ compute it from `bars().history()` of the same timespan; the flat files name
 (indices), passing explicit symbols to read REST. It asks for the stamp to be reported at the
 project's issue tracker.
 
-**Time columns.** Every market-data row says when it happened, which trading day it belongs
-to, and when the library received it (`_datasets/row_times.py`). `DatasetSpec.row_times`
+**Time columns.** Every market-data row says when it happened, which trading day it belongs to,
+and when the library received it (`_datasets/row_times.py`). `DatasetSpec.row_times`
 (`RowTimes`) says which columns a dataset has: `TICK` for every non-bar dataset in a kind
 (trades, quotes, index values, FMV, LULD, imbalances), `BAR` for the bars and the indicators,
-`DAY` for the daily open-close summaries, and `NONE` for the rest (snapshots, movers,
-reference, partner, and economy data). The columns come first, in the order `Symbol`, `Date`,
-`Timestamp` or `TimestampStart`, `TimestampEnd`, except `TimestampInsert`, which is last.
+`DAY` for the daily open-close summaries, and `NONE` for the rest (snapshots, movers, reference,
+partner, and economy data). A declaration's default is the explicit member `BY_KIND`, which
+`DatasetSpec.times` resolves from the dataset's kind to one of the others. The columns come
+first, in the order `Symbol`, `Date`, `Timestamp` or `TimestampStart`, `TimestampEnd`, except
+`TimestampInsert`, which is last.
 
 - **`Timestamp`** is a tick's event time, Massive's own. A `NONE` dataset keeps a `Timestamp`
   only where it declares a time key (`futures.schedules` and `futures.market_status` declare

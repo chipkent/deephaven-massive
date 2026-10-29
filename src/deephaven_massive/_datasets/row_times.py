@@ -114,8 +114,10 @@ __all__ = [
     "LIBRARY_COLUMNS",
     "START",
     "TIMESTAMP",
+    "BarBounds",
     "RowTimes",
     "SessionDates",
+    "StartRule",
     "TimeRule",
     "local_dates",
     "time_column",
@@ -177,6 +179,10 @@ class RowTimes(StrEnum):
     NONE = "none"
     """Reference and other data: only `TimestampInsert` (and `Timestamp` where a time key is
     declared)."""
+    BY_KIND = "by-kind"
+    """A dataset declaration's default: the dataset's kind decides (`DatasetSpec.times`):
+    `BAR` for a bars dataset, `TICK` for any other dataset in a kind, `NONE` otherwise. A
+    resolved dataset never carries it."""
 
 
 def time_column(row_times: RowTimes) -> str:
@@ -415,21 +421,50 @@ def _ns(moment: datetime) -> int:
     return (moment - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
-def within(rows: _Rows, *, earliest: datetime | None, latest: datetime) -> _Rows:
+class StartRule(StrEnum):
+    """How `history()` bounds the start of the bars it keeps (`BarBounds.start_rule`)."""
+
+    RANGE = "range"
+    """A bar's `TimestampStart` must be no earlier than the range's start."""
+    LABEL = "label"
+    """Bars are kept by their session label, not their start: futures named by session dates,
+    whose bar may open before its first session's date when a holiday folds it."""
+
+
+@dataclass(frozen=True, slots=True)
+class BarBounds:
+    """The window a `history()` call keeps its bars in, judged by their filled time columns.
+
+    Built by `history_source.history_window` for a dataset of bars; frozen, so the reader
+    threads of a call may share it.
+
+    Attributes:
+        earliest: The range's start: the earliest `TimestampStart` a kept bar may have under
+            `StartRule.RANGE`.
+        latest: The latest `TimestampEnd` a kept bar may have: the earlier of now and the
+            range's end, which for dates is the last day's end (`dates.day_end`; for futures,
+            17:00 Chicago on the last session's date).
+        start_rule: Whether `earliest` bounds the bars' starts.
+    """
+
+    earliest: datetime
+    latest: datetime
+    start_rule: StartRule
+
+
+def within(rows: _Rows, bounds: BarBounds) -> _Rows:
     """Keep the bars whose filled window lies inside a range: the whole-window rule.
 
     `history()` keeps a bar only when its window has ended by the end of the range and by
     now, judged by the same `TimestampEnd` a join on the end uses, so a bar a join would not
-    yet attach is never returned; and, where the range bounds starts, only when its
-    `TimestampStart` is no earlier than the range's start, so a bar whose conservative start
-    reaches before the range (an index week stamped on its weekend) is left out. A row whose
-    start or end is unknown (a futures bar sent without its start) is kept, the column null.
+    yet attach is never returned; and, under `StartRule.RANGE`, only when its `TimestampStart`
+    is no earlier than the range's start, so a bar whose conservative start reaches before the
+    range (an index week stamped on its weekend) is left out. A row whose start or end is
+    unknown (a futures bar sent without its start) is kept, the column null.
 
     Args:
         rows: Rows with their time columns filled (`TimeRule.fill`).
-        earliest: The earliest start to keep (`HistoryWindow.started_by`), or None where the
-            window bounds no start (futures named by session dates, kept by their label).
-        latest: The latest end to keep (`HistoryWindow.ended_by`).
+        bounds: The window (`HistoryWindow.bars`).
 
     Returns:
         The rows kept, in order; every row of a batch without the bar columns.
@@ -438,10 +473,11 @@ def within(rows: _Rows, *, earliest: datetime | None, latest: datetime) -> _Rows
     if END not in names:
         return rows
     ends = rows.column(END)
-    keep = pc.fill_null(pc.less_equal(ends, pa.scalar(_ns(latest), ends.type)), fill_value=True)
-    if earliest is not None and START in names:
+    latest = pa.scalar(_ns(bounds.latest), ends.type)
+    keep = pc.fill_null(pc.less_equal(ends, latest), fill_value=True)
+    if bounds.start_rule is StartRule.RANGE and START in names:
         starts = rows.column(START)
-        late = pc.greater_equal(starts, pa.scalar(_ns(earliest), starts.type))
+        late = pc.greater_equal(starts, pa.scalar(_ns(bounds.earliest), starts.type))
         keep = pc.and_(keep, pc.fill_null(late, fill_value=True))
     return rows.filter(keep)
 
