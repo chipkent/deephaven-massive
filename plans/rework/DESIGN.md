@@ -2897,7 +2897,9 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   goes to that class's subscription: `crypto` and `fx` to `currencies`, `stocks` and `otc` to
   `stocks`, `indices` to `indices`. The session's own read of Massive's crypto ticker list
   goes to `currencies` too, its pages in one lane of their own, so it and a user's
-  `tickers(market=dm.Market.CRYPTO)` count against the same limit. Other datasets Massive
+  `tickers(market=dm.Market.CRYPTO)` count against the same limit. The futures calendar's
+  contract and schedule lookups go to `futures`, each in a lane of its own under a token
+  the calendar's close sets. Other datasets Massive
   assigns to no subscription (cross-market reference data, economy, partner data, the
   unified snapshot) go to the `other` bucket, which is never paced.
 - **Sharing.** One `RequestGovernor` ([section 19.1](#191-the-rest-client)) per (SHA-256 of the
