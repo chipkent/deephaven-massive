@@ -55,7 +55,7 @@ from deephaven_massive._datasets.dates import (
     intraday,
     publish_time,
 )
-from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, Timespan
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -95,8 +95,8 @@ _ONE_DAY: Final = timedelta(days=1)
 _SESSION_DATE: Final = "session_end_date"
 """The futures parameter that names a session; `history()` sets it for sessions named by date."""
 
-_PARTITION_ZONES: Final[Mapping[AssetClass | None, tzinfo]] = dict(
-    [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (None, NEW_YORK)]
+_PARTITION_ZONES: Final[Mapping[AssetClass | ClassFromPrefix, tzinfo]] = dict(
+    [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (ClassFromPrefix.ANY, NEW_YORK)]
 )
 """The zone whose calendar dates name a class's files and start its publication clock.
 
@@ -310,7 +310,7 @@ class StampRule(Enum):
     00:00 UTC, or the bar would cover other days than its label."""
 
 
-_UTC_DAY_RULES: Final[Mapping[AssetClass | None, StampRule]] = {
+_UTC_DAY_RULES: Final[Mapping[AssetClass | ClassFromPrefix, StampRule]] = {
     AssetClass.FOREX: StampRule.UTC_DAY,
     AssetClass.CRYPTO: StampRule.UTC_DAY_CHECKED,
 }
