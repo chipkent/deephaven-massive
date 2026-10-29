@@ -37,7 +37,7 @@ from deephaven_massive._datasets.history_source import HistoryWindow, history_wi
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
-from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit
 from deephaven_massive._namespaces.base import build_query
@@ -100,7 +100,7 @@ STOCK_TRADES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
-    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
         (R, "/v3/trades/{stockTicker}"): keys(from_request("stockTicker"), "SipTimestamp"),
         (FF, "us_stocks_sip/trades_v1"): keys("Ticker", "SipTimestamp"),
@@ -111,7 +111,7 @@ STOCK_QUOTES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/quotes/{stockTicker}",
-    flat_file_prefixes={None: "us_stocks_sip/quotes_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/quotes_v1"},
     keys={
         (R, "/v3/quotes/{stockTicker}"): keys(from_request("stockTicker"), "SipTimestamp"),
         (FF, "us_stocks_sip/quotes_v1"): keys("Ticker", "SipTimestamp"),
@@ -137,7 +137,7 @@ INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
     summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
-    flat_file_prefixes={None: "us_indices/values_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
     keys={(FF, "us_indices/values_v1"): keys("Ticker", "Timestamp")},
 )
 FUTURES_TRADES = DatasetSpec(
@@ -146,7 +146,7 @@ FUTURES_TRADES = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
-    flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_futures_{venue}/trades_v1"},
     keys={
         (R, "/futures/v1/trades/{ticker}"): keys(from_request("ticker"), "Timestamp", session=True),
         (FF, "us_futures_{venue}/trades_v1"): keys("Ticker", "Timestamp", session=True),
@@ -157,7 +157,7 @@ CRYPTO_TRADES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.CRYPTO,
     history_path="/v3/trades/{cryptoTicker}",
-    flat_file_prefixes={None: "global_crypto/trades_v1"},
+    flat_file_prefixes={NotBars.ANY: "global_crypto/trades_v1"},
     keys={
         (R, "/v3/trades/{cryptoTicker}"): keys(
             from_request("cryptoTicker"), "ParticipantTimestamp"
@@ -453,7 +453,7 @@ SYNTHETIC = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
-    flat_file_prefixes={None: SYNTHETIC_FILES},
+    flat_file_prefixes={NotBars.ANY: SYNTHETIC_FILES},
     keys={(FF, SYNTHETIC_FILES): keys("Ticker", "SipTimestamp")},
 )
 

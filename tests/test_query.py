@@ -24,7 +24,14 @@ from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, PollMode, Timespan
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    HistorySource,
+    NotBars,
+    PollMode,
+    Timespan,
+)
 from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
@@ -51,7 +58,7 @@ TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
     keys={
@@ -76,8 +83,8 @@ VALUES_SPEC = DatasetSpec(
     name="indices.values",
     summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
-    channels={None: "V"},
-    flat_file_prefixes={None: "us_indices/values_v1"},
+    channels={NotBars.ANY: "V"},
+    flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
     keys={(FF, "us_indices/values_v1"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
 )
 NEWS_SPEC = DatasetSpec(
@@ -97,7 +104,7 @@ FUTURES_SPEC = DatasetSpec(
     name="futures.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     history_path="/futures/v1/trades/{ticker}",
 )
 
@@ -888,7 +895,7 @@ FOREX_SPEC = DatasetSpec(
     name="forex.quotes",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FOREX,
-    channels={None: "C"},
+    channels={NotBars.ANY: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
 )
 

@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final, NamedTuple
 
-from deephaven_massive._datasets.catalog import filter_key, param_family
+from deephaven_massive._datasets.catalog import filter_key, param_family, timespan_key
 from deephaven_massive._datasets.dates import (
     CHICAGO,
     DAY_ZONES,
@@ -533,7 +533,7 @@ def flat_file_prefix(spec: DatasetSpec, request: Request) -> str | None:
     """
     if request.multiplier != 1:
         return None
-    return spec.flat_file_prefixes.get(request.timespan)
+    return spec.flat_file_prefixes.get(timespan_key(request.timespan))
 
 
 def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
