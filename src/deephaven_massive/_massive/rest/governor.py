@@ -58,8 +58,11 @@ requests per minute takes as long as it takes, and a `Cancel` token ends the wai
 
 A request that may start at once, with nothing queued before it, is granted without queuing:
 no waiter, no event, and no change notice (its answer gives one). Every other request waits
-on events: a wait without a deadline (behind another request, or for a slot held in flight,
-or for a probe's answer) is woken by the change that can let it start, never by a timer.
+on events: a wait without a deadline (behind another request, or for a slot held in flight)
+is woken by the change that can let it start, never by a timer. A wait behind a probe ends
+at the probe's answer, or after `PROBE_TIMEOUT` if its report was lost, when the next
+request probes instead. `admission` opens a claim before anything is granted and reports its
+permit on exit, so a caller that takes permits through it never leaves one unreported.
 
 One governor serves every session of a process that uses the same API key and REST origin,
 so their requests share the counters as Massive's do (the library's registry builds and shares
@@ -80,7 +83,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Self, cast
 
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.net.retry import (
@@ -91,13 +94,16 @@ from deephaven_massive._massive.net.retry import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
+    from types import TracebackType
 
     from deephaven_massive._massive.net.cancel import Cancel
     from deephaven_massive._massive.net.retry import Clock
 
 __all__ = [
     "BASIC_REQUESTS_PER_MINUTE",
+    "PROBE_TIMEOUT",
     "RATE_WINDOW",
+    "Admission",
     "BucketState",
     "Permit",
     "RequestGovernor",
@@ -114,6 +120,12 @@ RATE_WINDOW: Final = 61.0
 
 _BASIC_REFUSAL: Final = "exceeded the maximum requests per minute"
 """The words of Massive's 429 message that mark a subscription on the Basic tier."""
+
+PROBE_TIMEOUT: Final = 300.0
+"""Seconds a pause's probe may stay unanswered before the bucket stops waiting for it.
+
+Far longer than a page takes (a connection times out after 10 s, and each read after 30 s), so
+it ends only a probe whose report was lost, which would otherwise hold the bucket forever."""
 
 _UNTIL_WOKEN: Final = math.inf
 """The wait of a request with no deadline: only a change of its bucket wakes it."""
@@ -154,6 +166,90 @@ class Permit:
     episode: int
 
 
+class Admission:
+    """One attempt's claim on its bucket, open for a `with` block (`RequestGovernor.admission`).
+
+    The block's exit reports the permit, if one was granted and not yet reported, as an
+    attempt that ended without an answer (`RequestGovernor.done(..., answered=False)`). The
+    permit is recorded here under the governor's lock in the same step as its grant, and the
+    `with` block is entered before anything is granted, so no interrupt, at any instruction,
+    can leave a granted permit without a report: one in a `with` block of a lock aside, which
+    no Python code can make safe. A caller that reports the attempt itself (`done`,
+    `refused`, `release`) inside the block makes the exit's report do nothing.
+
+    Not thread-safe: one attempt, on one thread.
+
+    Attributes:
+        bucket: The bucket the attempt is charged to.
+        lane: The lane it waits in.
+        permit: The granted permit, or None before the grant.
+
+    Example:
+        ::
+
+            with governor.admission("stocks", lane=read_token) as admission:
+                permit = admission.acquire(read_token)
+                ...  # send the request; report it with done, refused, or release
+    """
+
+    __slots__ = ("_governor", "bucket", "lane", "permit")
+
+    def __init__(self, governor: RequestGovernor, bucket: str, lane: Hashable) -> None:
+        """Hold nothing yet.
+
+        Args:
+            governor: The governor.
+            bucket: The bucket the attempt is charged to.
+            lane: The lane it waits in (see `RequestGovernor.acquire`).
+        """
+        self._governor = governor
+        self.bucket = bucket
+        self.lane = lane
+        # The granted permit, set under the governor's lock as it is granted; None before.
+        self.permit: Permit | None = None
+
+    def __enter__(self) -> Self:
+        """Open the claim; nothing is granted yet.
+
+        Returns:
+            The admission.
+        """
+        return self
+
+    def acquire(self, cancel: Cancel) -> Permit:
+        """Wait until the attempt may start, as `RequestGovernor.acquire` describes.
+
+        Args:
+            cancel: Ends the wait when set.
+
+        Returns:
+            The permit, also kept in `permit`.
+
+        Raises:
+            WireError: As `RequestGovernor.acquire` raises it.
+        """
+        permit, failure = self._governor.admit(self, cancel)
+        if failure is not None:
+            raise WireError(failure.message, status=failure.status)
+        return cast("Permit", permit)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Report a granted permit not yet reported, as an attempt that got no answer.
+
+        Args:
+            exc_type: The exception type, if the block raised.
+            exc: The exception, if the block raised.
+            traceback: Its traceback.
+        """
+        if self.permit is not None:
+            self._governor.done(self.permit, answered=False)
+
+
 @dataclass(frozen=True, slots=True)
 class BucketState:
     """A snapshot of one bucket, for diagnostics (`RequestGovernor.snapshot`).
@@ -192,9 +288,9 @@ class BucketState:
 
 
 class _Waiter:
-    """One waiting request: its lane, the event that wakes it, and its grant once admitted."""
+    """One waiting request: its lane, and the event that wakes it."""
 
-    __slots__ = ("lane", "permit", "wake")
+    __slots__ = ("lane", "wake")
 
     def __init__(self, lane: Hashable) -> None:
         """Create the waiter.
@@ -204,9 +300,6 @@ class _Waiter:
         """
         self.lane = lane
         self.wake = threading.Event()
-        # Set, under the governor's lock, before anything else changes at the grant, so an
-        # interrupted `acquire` always knows what to hand back.
-        self.permit: Permit | None = None
 
 
 class _Bucket:
@@ -225,6 +318,7 @@ class _Bucket:
         "pace",
         "pause_until",
         "probe",
+        "probe_since",
         "probing",
         "refusals",
         "run_paused",
@@ -268,6 +362,7 @@ class _Bucket:
         # Massive answers it with anything but a 429.
         self.probing = False
         self.probe: Permit | None = None
+        self.probe_since = 0.0  # when the probe was granted (monotonic)
 
     @property
     def limit(self) -> int | None:
@@ -347,13 +442,18 @@ class _Bucket:
             head.wake.set()
 
     def expire(self, now: float) -> None:
-        """Free the slots whose window has passed.
+        """Free the slots whose window has passed, and stop waiting for an overdue probe.
+
+        A probe unanswered for `PROBE_TIMEOUT` lost its report; the next request probes in
+        its place, so no lost report can hold the bucket forever.
 
         Args:
             now: The monotonic time.
         """
         while self.slots and self.slots[0] <= now:
             self.slots.popleft()
+        if self.probe is not None and now >= self.probe_since + PROBE_TIMEOUT:
+            self.probe = None
 
     def gave_up(self, now: float) -> bool:
         """Tell whether the bucket's requests fail at once now.
@@ -377,16 +477,18 @@ class _Bucket:
         """End a run that time has ended, before anything reads or extends it.
 
         A given-up pause that has passed ends its run, so the next refusal starts a new one.
-        A run whose pause ended more than `RATE_WINDOW` ago with no refusal since was
-        abandoned (its read was cancelled, or its session closed), so a refusal hours later is
-        the first of a new run, not the last straw of an old one.
+        A run whose pause ended more than `RATE_WINDOW` ago, with no refusal since and no
+        probe still waiting for its answer, was abandoned (its read was cancelled, or its
+        session closed), so a refusal hours later is the first of a new run, not the last
+        straw of an old one; a slow probe's own refusal still belongs to its run.
 
         Args:
             now: The monotonic time.
         """
         if self.run_start is None or now < self.pause_until:
             return
-        if self.given_up or now - self.pause_until > RATE_WINDOW:
+        idle = self.probe is None and now - self.pause_until > RATE_WINDOW
+        if self.given_up or idle:
             self.end_run()
 
     def pause(self, now: float, until: float) -> None:
@@ -416,13 +518,14 @@ class _Bucket:
             now: The monotonic time; the expired slots are already freed.
 
         Returns:
-            The monotonic time it may start (`now` or earlier means at once), or `math.inf`
-            when no time alone lets it: a probe is waiting for its answer, or every slot is
-            held by a request in flight, so only a change of the bucket can.
+            The monotonic time it may start (`now` or earlier means at once): behind a probe
+            waiting for its answer, when the probe would be overdue (its answer wakes it
+            sooner); or `math.inf` when every slot is held by a request in flight, so only a
+            change of the bucket can let it start.
         """
         start = max(now, self.pause_until)
         if self.probe is not None:
-            return _UNTIL_WOKEN
+            return self.probe_since + PROBE_TIMEOUT
         limit = self.limit
         if limit is None:
             return start
@@ -433,20 +536,23 @@ class _Bucket:
             return _UNTIL_WOKEN
         return max(start, self.slots[excess])
 
-    def grant(self, name: str) -> Permit:
-        """Grant a request that may start now; the caller holds the lock.
+    def grant(self, name: str, admission: Admission, now: float) -> Permit:
+        """Grant a request that may start now, and record it; the caller holds the lock.
 
         Args:
             name: The bucket's name.
+            admission: The request's claim, which records the permit in the same step.
+            now: The monotonic time.
 
         Returns:
             The permit, in flight; the pause's probe when the bucket is probing.
         """
-        permit = Permit(name, self.episode)
+        permit = admission.permit = Permit(name, self.episode)
         self.open.add(permit)  # the grant
         self.attempts += 1
         if self.probing:
             self.probe = permit
+            self.probe_since = now
         return permit
 
     def finish(self, permit: Permit, now: float, *, hold: bool) -> bool:
@@ -595,6 +701,27 @@ class RequestGovernor:
                 bucket.wake_head()
         self._notify()
 
+    def admission(self, bucket: str, *, lane: Hashable) -> Admission:
+        """Open one attempt's claim on a bucket, for a `with` block; nothing is granted yet.
+
+        The safe way to take a permit: `Admission.acquire` inside the block takes it, and the
+        block's exit reports it if nothing else did, so a permit is never left unreported (see
+        `Admission`). The REST client takes every permit this way.
+
+        Args:
+            bucket: The bucket the attempt is charged to.
+            lane: The lane it waits in (see `acquire`).
+
+        Returns:
+            The claim.
+
+        Raises:
+            ValueError: If `bucket` is not a bucket.
+        """
+        if bucket not in self._buckets:
+            raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
+        return Admission(self, bucket, lane)
+
     def acquire(self, bucket: str, cancel: Cancel, *, lane: Hashable) -> Permit:
         """Wait until a request of `bucket` may start, and return its permit.
 
@@ -604,10 +731,9 @@ class RequestGovernor:
         attempt's end with `done`, `refused`, or `release`. A cancellation, a failure, or an
         interrupt anywhere after the grant inside this method (`KeyboardInterrupt` while the
         thread sleeps, in a listener, or while it stops listening to `cancel`) releases the
-        permit before the exception propagates. An interrupt delivered at an arbitrary
-        instruction, inside the governor's own `with` blocks or between the return and the
-        caller's `try`, is beyond what any Python lock can make safe: it can leave the permit
-        unreported.
+        permit before the exception propagates. An interrupt between this method's return and
+        the caller's `try` can still leave the permit unreported; `admission` closes that
+        window. A probe whose report is lost stops holding its bucket after `PROBE_TIMEOUT`.
 
         Args:
             bucket: The bucket the request is charged to.
@@ -626,12 +752,31 @@ class RequestGovernor:
                 refusals (the message says how long Massive has refused the bucket's
                 requests and how long they fail at once, and quotes the latest refusal).
         """
-        state = self._bucket(bucket)
-        permit, failure = self._grant_at_once(bucket, cancel)
+        admission = self.admission(bucket, lane=lane)
+        permit, failure = self.admit(admission, cancel)
         if failure is not None:
             raise WireError(failure.message, status=failure.status)
-        if permit is not None:
-            return permit
+        return cast("Permit", permit)
+
+    def admit(self, admission: Admission, cancel: Cancel) -> tuple[Permit | None, WireError | None]:
+        """Grant an attempt at once or after waiting, recording the permit on its claim.
+
+        `Admission.acquire` and `acquire` call it; it raises nothing of its own, so each
+        caller turns a failure into its `WireError`.
+
+        Args:
+            admission: The attempt's claim, for a known bucket.
+            cancel: Ends the wait when set.
+
+        Returns:
+            `(permit, None)` once granted, or `(None, error)` when the attempt must fail, as
+            `acquire` describes.
+        """
+        bucket, lane = admission.bucket, admission.lane
+        state = self._buckets[bucket]
+        permit, failure = self._grant_at_once(admission, cancel)
+        if failure is not None or permit is not None:
+            return permit, failure
         waiter = _Waiter(lane)
         stop_listening = cancel.on_set(waiter.wake.set)
         try:
@@ -639,7 +784,7 @@ class RequestGovernor:
                 with self._lock:
                     state.join(waiter)
                 self._notify()
-                permit, failure = self._wait(bucket, waiter, cancel)
+                permit, failure = self._wait(admission, waiter, cancel)
                 if failure is None:
                     self._notify()
             finally:
@@ -649,24 +794,25 @@ class RequestGovernor:
                 if left:  # it gave up its place: the bucket's waiting count changed
                     self._notify()
         except BaseException:
-            if waiter.permit is not None:  # interrupted after the grant: hand it back
-                self.release(waiter.permit)
+            if admission.permit is not None:  # interrupted after the grant: hand it back
+                self.release(admission.permit)
             raise
-        if failure is not None:
-            raise WireError(failure.message, status=failure.status)
-        return cast("Permit", permit)
+        return permit, failure
 
-    def _grant_at_once(self, bucket: str, cancel: Cancel) -> tuple[Permit | None, WireError | None]:
+    def _grant_at_once(
+        self, admission: Admission, cancel: Cancel
+    ) -> tuple[Permit | None, WireError | None]:
         """Grant a request that may start now with nothing queued before it, without waiting.
 
         Args:
-            bucket: The bucket's name, a known one.
+            admission: The request's claim, for a known bucket.
             cancel: The request's cancellation.
 
         Returns:
             `(permit, None)` for a request granted now; `(None, error)` when it must fail at
             once (cancelled, or the bucket has given up); `(None, None)` when it must queue.
         """
+        bucket = admission.bucket
         state = self._buckets[bucket]
         with self._lock:
             now = self._clock.monotonic()
@@ -678,15 +824,15 @@ class RequestGovernor:
             state.expire(now)
             if state.start_at(now) > now:
                 return None, None
-            return state.grant(bucket), None
+            return state.grant(bucket, admission, now), None
 
     def _wait(
-        self, bucket: str, waiter: _Waiter, cancel: Cancel
+        self, admission: Admission, waiter: _Waiter, cancel: Cancel
     ) -> tuple[Permit | None, WireError | None]:
         """Sleep until a queued request is admitted or must fail.
 
         Args:
-            bucket: The bucket's name, a known one.
+            admission: The request's claim, for a known bucket.
             waiter: The queued request.
             cancel: The request's cancellation.
 
@@ -695,7 +841,7 @@ class RequestGovernor:
             `acquire` describes.
         """
         while True:
-            permit, delay, failure = self._step(bucket, waiter, cancel)
+            permit, delay, failure = self._step(admission, waiter, cancel)
             if failure is not None or permit is not None:
                 return permit, failure
             self._clock.wait(waiter.wake, delay)
@@ -776,9 +922,9 @@ class RequestGovernor:
         give_up = None
         with self._lock:
             now = self._clock.monotonic()
+            state.settle(now)  # before `finish`, so a slow probe still holds its run open
             if not state.finish(permit, now, hold=True):
                 return basic
-            state.settle(now)
             state.refusals += 1
             state.last_refusal = message
             if basic:
@@ -947,12 +1093,12 @@ class RequestGovernor:
         return state
 
     def _step(
-        self, bucket: str, waiter: _Waiter, cancel: Cancel
+        self, admission: Admission, waiter: _Waiter, cancel: Cancel
     ) -> tuple[Permit | None, float, WireError | None]:
         """Admit a waiting request if it may start now, or say how long it should sleep.
 
         Args:
-            bucket: The bucket's name, a known one.
+            admission: The request's claim, for a known bucket.
             waiter: The waiting request, queued in the bucket.
             cancel: The request's cancellation.
 
@@ -962,6 +1108,7 @@ class RequestGovernor:
             sooner (`math.inf`: until woken); `(None, 0.0, error)` when the wait must fail:
             cancelled (no status) or given up (429).
         """
+        bucket = admission.bucket
         state = self._buckets[bucket]
         with self._lock:
             waiter.wake.clear()  # before reading the state, so no change is missed
@@ -975,9 +1122,9 @@ class RequestGovernor:
             start = state.start_at(now)
             if start > now:
                 return None, start - now, None
-            # Recorded on the waiter in the same step as the grant, so an interrupted
+            # Recorded on the claim in the same step as the grant, so an interrupted
             # `acquire` always knows what to hand back.
-            permit = waiter.permit = state.grant(bucket)
+            permit = state.grant(bucket, admission, now)
             state.start_head()
             return permit, 0.0, None
 

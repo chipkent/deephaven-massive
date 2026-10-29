@@ -18,7 +18,9 @@ from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.rest.governor import (
     BASIC_REQUESTS_PER_MINUTE,
+    PROBE_TIMEOUT,
     RATE_WINDOW,
+    Admission,
     BucketState,
     Permit,
     RequestGovernor,
@@ -399,7 +401,7 @@ def test_a_run_gives_up_once_its_pauses_add_up_to_more_than_ten_minutes() -> Non
     refusals: list[Permit] = []
 
     def refuse_forever() -> None:
-        while True:
+        for _ in range(100):  # bounded: a give-up that never comes fails, not hangs
             refusals.append(governor.acquire("stocks", Cancel(), lane=object()))
             _refuse(governor, refusals[-1])
 
@@ -725,7 +727,7 @@ def test_a_run_gives_up_after_ten_minutes_of_refusals_whatever_each_pause() -> N
     refusals: list[Permit] = []
 
     def refuse_forever() -> None:
-        while True:
+        for _ in range(100):  # bounded: a give-up that never comes fails, not hangs
             refusals.append(governor.acquire("stocks", Cancel(), lane=object()))
             _refuse(governor, refusals[-1], retry_after=100.0)
 
@@ -994,13 +996,13 @@ def test_a_pause_ends_with_one_probe_while_the_others_wait_for_its_answer() -> N
     clock.advance(15.0)
     probe = next(w for w in waiting if _joined(w))  # one starts, alone
     assert probe.permit is not None
-    assert clock.wait_for_sleepers(4) == [math.inf] * 4
+    assert clock.wait_for_sleepers(4) == [15.0 + PROBE_TIMEOUT, *[math.inf] * 3]
     _refuse(governor, probe.permit)  # refused: the run's second pause, 30 s
     assert clock.wait_for_sleepers(4) == [45.0, *[math.inf] * 3]
     clock.advance(30.0)
     second = next(w for w in waiting if w is not probe and _joined(w))
     assert second.permit is not None
-    assert clock.wait_for_sleepers(3) == [math.inf] * 3
+    assert clock.wait_for_sleepers(3) == [45.0 + PROBE_TIMEOUT, *[math.inf] * 2]
     governor.done(second.permit, answered=True)  # answered: the others go at once
     for each in waiting:
         each.join()
@@ -1022,12 +1024,12 @@ def test_a_probe_that_is_never_answered_lets_the_next_request_probe() -> None:
     clock.advance(15.0)
     probe = governor.acquire("stocks", Cancel(), lane=object())
     waiting = _Waiting(governor, "stocks", lane=object())
-    assert clock.wait_for_sleepers(1) == [math.inf]  # behind the probe
+    assert clock.wait_for_sleepers(1) == [15.0 + PROBE_TIMEOUT]  # behind the probe
     governor.release(probe)  # never sent: the waiting request probes instead
     waiting.join()
     assert waiting.permit is not None
     third = _Waiting(governor, "stocks", lane=object())
-    assert clock.wait_for_sleepers(1) == [math.inf]  # behind the new probe
+    assert clock.wait_for_sleepers(1) == [15.0 + PROBE_TIMEOUT]  # behind the new probe
     governor.done(waiting.permit, answered=True)
     third.join()
     assert third.permit is not None
@@ -1042,7 +1044,7 @@ def test_a_never_paced_bucket_pauses_on_a_basic_refusal_but_is_not_paced() -> No
     assert (other.limit, other.learned) == (None, False)
     assert other.paused_until is not None  # it still pauses
     governor.learn({"other"})  # a learned Basic carried over does not pace it either
-    assert _state(governor, "other").limit is None
+    assert (_state(governor, "other").limit, _state(governor, "other").learned) == (None, False)
     with pytest.raises(ValueError, match=r"buckets \['other'\] are never paced"):
         governor.declare({"other"})
     with pytest.raises(ValueError, match=r"unpaced buckets \['crypto'\] are not buckets"):
@@ -1165,3 +1167,72 @@ def test_a_request_never_jumps_a_queue_that_may_start() -> None:
     waiting.join()
     assert waiting.permit is not None
     governor.done(waiting.permit, answered=True)
+
+
+# --- Claims and lost reports ---------------------------------------------------------------------
+
+
+def test_a_claim_reports_its_permit_whatever_interrupts_after_the_grant() -> None:
+    # The window between the grant's return and the caller's `try` is gone: the claim is open
+    # before the grant, and its exit reports the permit.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    clock.advance(15.0)
+    claims: list[Admission] = []
+
+    def interrupted_just_after_the_grant() -> None:
+        with governor.admission("stocks", lane=object()) as claim:
+            claims.append(claim)
+            claim.acquire(Cancel())  # the pause's probe
+            raise KeyboardInterrupt  # lands just after the grant returns
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupted_just_after_the_grant()
+    assert claims[0].permit is not None
+    state = _state(governor)
+    assert (state.in_flight, state.waiting) == (0, 0)
+    # The probe's report came, so the next request probes in its place at once.
+    governor.done(governor.acquire("stocks", Cancel(), lane=object()), answered=True)
+    assert _state(governor).in_flight == 0
+
+
+def test_a_claim_reports_nothing_twice_and_refuses_an_unknown_bucket() -> None:
+    governor = _governor()
+    with governor.admission("stocks", lane=object()) as claim:
+        permit = claim.acquire(Cancel())
+        governor.done(permit, answered=True)  # reported in the block: the exit does nothing
+    assert _state(governor).recent == 1
+    with governor.admission("stocks", lane=object()) as unused:
+        pass  # nothing granted: nothing to report
+    assert unused.permit is None
+    with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
+        governor.admission("crypto", lane=object())
+
+
+def test_a_probe_whose_report_is_lost_stops_holding_the_bucket() -> None:
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    clock.advance(15.0)
+    governor.acquire("stocks", Cancel(), lane=object())  # the probe, never reported
+    waiting = _Waiting(governor, "stocks", lane=object())
+    assert clock.wait_for_sleepers(1) == [15.0 + PROBE_TIMEOUT]
+    clock.advance(PROBE_TIMEOUT)
+    waiting.join()  # it probes in the lost one's place
+    assert waiting.started == 15.0 + PROBE_TIMEOUT
+    assert waiting.permit is not None
+    governor.done(waiting.permit, answered=True)
+
+
+def test_a_slow_probe_refused_after_a_window_continues_its_run() -> None:
+    # The probe is still in flight more than a window after the pause ended: its 429 belongs
+    # to the run, so the run's patience is not reset and its next pause grows to 30 s.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    _refuse(governor, governor.acquire("stocks", Cancel(), lane=object()))  # paused until 15
+    clock.advance(15.0)
+    probe = governor.acquire("stocks", Cancel(), lane=object())
+    clock.advance(RATE_WINDOW + 10.0)  # answered 71 s after the pause ended
+    _refuse(governor, probe)
+    assert _state(governor).paused_until == 1_800_000_000.0 + 86.0 + 30.0

@@ -2937,14 +2937,16 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
   30, then 60 s by the refusals of the run, so a request is never sent again at once. A pause
   only grows. When it ends, one request of the bucket goes first as a probe while the others
-  wait for its answer: an answer other than 429 releases them, and a 429 pauses again. So a
+  wait for its answer: an answer other than 429 releases them, and a 429 pauses again; a
+  probe unanswered for 5 minutes (`PROBE_TIMEOUT`, its report lost) stops holding them. So a
   subscription whose 429s do not say it is Basic still sends one refused request per pause,
   never a burst. Only the first 429 to requests started after the latest pause counts toward
   the run (a burst in flight is one refusal); a 429 to an earlier request that lengthens the
   pause starts a run if none is going. The run ends with the first answer other than 429 to a
   request started after the latest pause, or once more than a window (61 s) has passed since
-  its pause ended with no refusal (the read was cancelled or the session closed), so a 429
-  hours later starts a new run. A 429 is never counted as a retry.
+  its pause ended with no refusal and no probe in flight (the read was cancelled or the
+  session closed), so a 429 hours later starts a new run while a slow probe's 429 stays in
+  its run. A 429 is never counted as a retry.
 - **Giving up.** Once a run's pauses add up to more than 10 minutes (`RATE_LIMIT_PATIENCE`,
   the time spent paused, not the time since the first refusal), the bucket gives up: the
   refused request and every request of the bucket, waiting or new, fail with status 429
@@ -3880,14 +3882,18 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   form, an HTTP date measured against the response's own `Date` header, else a whole window
   when paced, else 15, 30, then 60 s by the run's refusals; a `Retry-After` of zero counts as
   none), the burst of 429s in flight when the pause began counting once; after a pause one
-  probe request goes alone until it is answered; a run ends with an answer to a request
+  probe request goes alone until it is answered, or for at most `PROBE_TIMEOUT` (300 s);
+  a run ends with an answer to a request
   started after the latest pause, or a window after its pause ended with no refusal; a 429 is
   not a retry, and the attempt is made again once the governor allows it; once the run's
   pauses add up to more than `RATE_LIMIT_PATIENCE` (600 s), the refused request and every
   request of the bucket raise `WireError(status=429)`, quoting the latest refusal, until that
   pause has passed. A bucket named `unpaced` at construction (`other`) is never paced. A
   request that may start at once with nothing queued before it is granted without queuing,
-  and a wait without a deadline is woken only by a change of its bucket, never by a timer. A
+  and a wait without a deadline is woken only by a change of its bucket, never by a timer;
+  the system clock waits it out in half-second chunks, so Ctrl-C ends it on every operating
+  system. The client takes each permit through `RequestGovernor.admission`, a claim opened
+  before the grant whose exit reports the permit, so no interrupt can leave one unreported. A
   bucket the governor was not built with raises `ValueError`. Before the governor pauses the bucket,
   the client calls its `on_refused(bucket, error, *, basic)` hook (the library's first-429
   WARNING).
@@ -5536,7 +5542,7 @@ document already reflects them.
     one (absent, zero, or in the past) a paced bucket pauses one 61 s window and an unpaced one
     15, 30, then 60 s by the run's refusals. After a pause one probe request goes alone until
     Massive answers it, so a 429 that does not name the Basic limit costs one refused request
-    per pause, never a burst. A run gives up once its pauses add up to 10 minutes
+    per pause, never a burst. A run gives up once its pauses add up to more than 10 minutes
     (`RATE_LIMIT_PATIENCE`, not configurable), and ends by itself a window after its pause
     ends with no refusal, so an abandoned run never makes a later 429 give up at once; a stale
     refusal that lengthens the pause starts a run; pacing waits never give up. Waiting

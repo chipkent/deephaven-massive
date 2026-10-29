@@ -2639,9 +2639,22 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
     refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
     for pair in ("EUR/USD", "GBP/USD", "AUD/USD"):
         fake_rest.reply(f"/v1/conversion/{pair}", refused)
-    try:
-        with pytest.raises(dm.EntitlementError, match="upgrade"):
+    errors: list[BaseException] = []
+
+    def read() -> None:
+        try:
             fetch(m, CONVERSION, symbols=["C:EURUSD", "C:GBPUSD", "C:AUDUSD"])
+        except dm.EntitlementError as error:
+            errors.append(error)
+
+    try:
+        # On its own thread, so a call left waiting for a slot fails the test, not hangs it.
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(TIMEOUT)
+        assert not reader.is_alive(), "the calls waiting for a slot were not stopped"
+        assert len(errors) == 1
+        assert "upgrade" in str(errors[0])
         assert len(fake_rest.requests) == 1  # the others gave up their places unsent
         assert next(s for s in governor.snapshot() if s.bucket == "currencies").waiting == 0
     finally:
