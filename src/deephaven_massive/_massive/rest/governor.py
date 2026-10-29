@@ -216,8 +216,12 @@ class Patience:
 
         Returns:
             True when the read waits it out (the part not yet counted is charged), False when
-            that part would take the read past `seconds` (nothing is charged).
+            that part would take the read past `seconds` (nothing is charged). A patience
+            without limit always returns True and is never changed, so the one `UNLIMITED`
+            can serve every governor and thread.
         """
+        if self.seconds == math.inf:
+            return True
         added = max(0.0, until - max(now, self._counted_until))
         if self.spent + added > self.seconds:
             return False

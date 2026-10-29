@@ -1541,8 +1541,7 @@ class RestReader:
         `MassiveError("rate limited: ...")` with status 429: the governor's message (which
         requests, the latest refusal, when its next request (a probe) goes, the read's
         patience, the usual cause, and the remedies), then where to watch the subscriptions'
-        state. Every other
-        error is `_errors.from_wire`'s.
+        state. Every other error is `_errors.from_wire`'s.
 
         Args:
             error: The wire error.

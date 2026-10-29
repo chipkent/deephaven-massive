@@ -1252,6 +1252,7 @@ def test_a_patience_counts_each_stretch_of_pause_once() -> None:
     assert patience.charge(15.0, 20.0)
     assert patience.spent == 20.0
     assert UNLIMITED.charge(0.0, 10.0**9)
+    assert UNLIMITED.spent == 0.0  # shared by every governor and thread, so never changed
 
 
 def test_a_long_paced_read_still_waits_out_a_short_pause() -> None:
