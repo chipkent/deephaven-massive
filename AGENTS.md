@@ -41,7 +41,8 @@ uv build                                 # sdist and wheel
    CI job must pass, the required free-threaded 3.14t job too: locking must work without the GIL.
 5. **Push in batches.** Each push to a PR branch runs paid CI and review bots: push once when the
    PR opens, then once per finished batch of fixes. Never push work in progress or to see
-   whether CI passes. Merge `main` into a PR branch only for a conflict or a change you need.
+   whether CI passes. Merge `main` into a PR branch only for a conflict or a change you need, then
+   rerun the full check before the push.
 6. **Answer every review comment**, from people and bots: name the commit that fixes it and say
    how, or say why nothing changes. Never resolve a thread without a reply.
 7. **PR descriptions follow `docs/dev/pull-requests.md`; read it before writing one**
@@ -61,10 +62,12 @@ uv build                                 # sdist and wheel
     in the PR; fix the code first. For a public argument that would shadow a builtin, choose a
     descriptive name (`ticker_type`, not `type_`) and map it to the wire name.
 13. **Unit tests never reach Massive.** They use the fake servers in `tests/_fakes/` and payload
-    fixtures under `tests/data/<test owner path>/`. Only `*_integration.py` tests go live.
+    fixtures under `tests/data/<test owner path>/` (`tests/data/datasets/symbols/` for
+    `tests/datasets/test_symbols.py`). Only `*_integration.py` tests go live.
 14. **One wire package.** `src/deephaven_massive/_massive/` owns all Massive wire access (REST,
-    WebSocket, S3 flat files) and imports neither Deephaven nor the rest of the library. Code
-    outside it, tests included, uses only `deephaven_massive._massive` and its `__all__`.
+    WebSocket, S3 flat files) and imports neither Deephaven nor the rest of the library. Its own
+    tests, under `tests/massive/`, may import any `_massive` module; all other code, tests
+    included, uses only `deephaven_massive._massive` and its `__all__`.
 15. **Layers**, lowest first: wire; vocabulary (`_config`, `_enums`, `_errors`, `_types`);
     `_datasets`; `_tables`; `_ingest`; API (`__init__`, `_session`, `_query`, `_namespaces`). A
     module imports only its own layer or lower, under `TYPE_CHECKING` too; pass objects down.
@@ -74,9 +77,13 @@ uv build                                 # sdist and wheel
     through the refresh, with hand input only in `refresh/lexicon.py`, `overrides.py`, and
     `exclusions.py`, each entry with a reason; `vendor/massive/` only through `refresh --fetch`;
     `docs/datasets/` only through `render_reference.py`, committed in the same PR as its cause.
+    The procedure, including wrong vendor descriptions, is in `docs/dev/spec-refresh.md`.
 18. **Placement.** Code goes in the module whose name describes it, in the layer that owns it.
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.
-20. **No planning references outside `plans/`.** Code, comments, docstrings, test names, error
+20. **Dates are ISO strings.** Every calendar-date column, vendor dates included, stores
+    `yyyy-MM-dd` text: never a `LocalDate` or a value computed on read. Deephaven stores each
+    distinct string once, and one type joins with every other date. Instants stay `Instant`s.
+21. **No planning references outside `plans/`.** Code, comments, docstrings, test names, error
     messages, CI step names, and config never cite the planning documents, their sections,
     planned-PR names, or decision numbers. State the behavior or the reason directly.
 
@@ -107,7 +114,8 @@ These prevent deadlocks and leaks.
   thread's context, and Deephaven raises `No execution context`.
 - **Update-graph (UG) lock first, then `registry_lock`.** `registry_lock` is a leaf: while holding
   it, make no Deephaven call, network call, or blocking wait. Table operations such as
-  `where_in`, `last_by`, `Table.snapshot()`, and `deephaven.arrow.to_table` may take the UG lock.
+  `where_in`, `last_by`, `Table.snapshot()`, and `deephaven.arrow.to_table` may take the UG lock,
+  so never run one under `registry_lock`.
 - **Never block in a table listener.** It runs on a UG thread holding the UG lock: compute the
   diff, hand it to a worker, return. No table operations, I/O, or waits on library threads.
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
@@ -127,6 +135,8 @@ These prevent deadlocks and leaks.
   so test modules may import `deephaven` at module level. Never start or stop another `Server`
   in that process (a subprocess may). Read the comments on its `trylast` hook and JVM shutdown
   block before touching either. An `hs_err_pid*.log` file is a JVM crash: investigate it.
+- The JVM raises SIGSEGV on purpose: never call `faulthandler.enable()` once it runs. Any process
+  that starts a `Server` leaves through `os._exit`, as `scripts/render_reference.py` does.
 - Take the execution context, table helpers, and fakes from fixtures (`dh_exec_ctx`,
   `dh_to_pylist`, `load_fixture`, `make_csv_gz`). Drive state through the fakes and explicit
   flush or poll calls, never `time.sleep()`.

@@ -58,7 +58,7 @@ of appending to it.
 
 ## Close the issue
 
-A PR that delivers a tracked planned PR puts `Closes #<issue>` on its own line, so the owner's
+A PR that resolves an issue puts `Closes #<issue>` on its own line, so the owner's
 merge closes the issue. A PR that delivers only part of an issue says `Refs #<issue>` instead,
 and its description names what remains. A PR with no issue says "No tracking issue." Before
 asking for review, check the link with:

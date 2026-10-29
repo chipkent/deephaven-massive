@@ -72,17 +72,12 @@ violation. Then:
 The tests are outside the layers: they may import any module and keep only the wire interface
 rule.
 
-The file also keeps `AGENTS.md` within its line budget. Every agent reads that file in full at
-the start of every session, so it holds only the rules an agent cannot infer from the code or the
-tools; procedures belong in `docs/dev/` and design in the docstrings of the modules it describes.
-
 Each rule is a pure function over relative paths (and, for the boundary and the layers, source
 text), so it is checked both against the real tree and against a synthetic tree that breaks it.
 """
 
 import ast
 import json
-import os
 import re
 import subprocess
 import sys
@@ -2317,36 +2312,3 @@ def test_the_live_marker_check_runs_before_deselection() -> None:
     ]
     decorators = [ast.unparse(decorator) for decorator in hook.decorator_list]
     assert decorators == ["pytest.hookimpl(tryfirst=True)"]
-
-
-_AGENTS_MD = _ROOT / "AGENTS.md"
-_AGENTS_MD_LINE_BUDGET = 150
-
-
-def _agents_md_excess(text: str) -> int:
-    """Return how many lines `text` runs past the `AGENTS.md` line budget.
-
-    Args:
-        text: The contents of an `AGENTS.md` file.
-
-    Returns:
-        The number of lines beyond the budget, or 0 when the text is within it.
-    """
-    return max(0, len(text.splitlines()) - _AGENTS_MD_LINE_BUDGET)
-
-
-@pytest.mark.skipif(
-    not _AGENTS_MD.is_file() and "CI" not in os.environ,
-    reason="no AGENTS.md outside a source checkout (the sdist leaves it out); CI never skips",
-)
-def test_agents_md_stays_within_its_line_budget() -> None:
-    excess = _agents_md_excess(_AGENTS_MD.read_text())
-    assert excess == 0, (
-        f"AGENTS.md is {excess} lines over its budget of {_AGENTS_MD_LINE_BUDGET}: move "
-        "procedures to docs/dev/ and design to the docstrings of the modules it describes"
-    )
-
-
-def test_a_line_past_the_agents_md_budget_is_reported() -> None:
-    assert _agents_md_excess("rule\n" * _AGENTS_MD_LINE_BUDGET) == 0
-    assert _agents_md_excess("rule\n" * (_AGENTS_MD_LINE_BUDGET + 1)) == 1

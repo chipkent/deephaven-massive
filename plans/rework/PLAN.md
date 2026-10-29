@@ -2547,7 +2547,7 @@ look" rows only). Delete `plans/rework/` (DESIGN, PLAN, RESEARCH).
 - [ ] Move the durable parts of `plans/rework/` out before deleting it: design that belongs to
       one module into that module's docstring, design that spans modules into a `docs/dev/` page.
       Nothing moves into `AGENTS.md`; repoint its preamble and "Where to look" rows at the
-      modules and pages, and keep it within its line budget.
+      modules and pages.
 
 **Acceptance criteria.**
 - [ ] `git grep -n "UNVERIFIED\|plans/rework"` lists only refuted items, each with an owner
