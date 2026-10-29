@@ -776,7 +776,7 @@ def rest_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
         create = functools.partial(
             wire.RequestGovernor,
             rate_limits.BUCKETS,
-            unpaced=rate_limits.UNPACED,
+            learn_only=rate_limits.LEARN_ONLY,
             clock=clock,
             labels=rate_limits.LABELS,
         )

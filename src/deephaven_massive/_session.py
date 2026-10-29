@@ -461,10 +461,9 @@ class MassiveSession:
 
         Massive limits REST requests per subscription (5 per minute on the free Basic tier,
         none on a paid one), counted across every key and session of the account. Each row
-        shows one subscription's bucket, or `other` for the datasets Massive assigns to none:
-        its `State` (`READY`, `PACED` while requests wait for a slot, `PAUSED` after a 429,
-        `REFUSED` while requests fail because Massive refused them for longer than the library
-        waits), `RequestsPerMinute` and `LimitSource` (`DECLARED` in
+        shows one subscription's bucket, or `other` for reference data and the other datasets
+        Massive assigns to none: its `State` (`READY`, `PACED` while requests wait for a slot,
+        `PAUSED` after a 429), `RequestsPerMinute` and `LimitSource` (`DECLARED` in
         `MassiveConfig.rest_basic_subscriptions`, or `LEARNED` from Massive's refusal), the
         requests in flight, waiting, and in the last window, totals of requests and refusals,
         `PausedUntil`, and the latest refusal. Sessions of this process that use the same API
