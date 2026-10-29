@@ -4,7 +4,7 @@
 stream verb (`blink()`, `append_only()`, `ring()`, `last_by()`) that finds no live stream for
 its `(dataset, channel, symbols)` asks it to open one: the transport decides the host of the
 class and family (`RestTransport.resolve_host`, once per session), finds or creates the
-session's connection to `wss://<host>/<cluster>`, creates the stream's tables
+connection to `wss://<host>/<cluster>`, creates the stream's tables
 (`_tables/stream.py`), and adds the stream's topics to the connection. The wire itself (the
 socket, authentication, frame decoding, reconnecting with backoff) belongs to the connection's
 `_massive.WsClient`; the subscription protocol to `Subscriptions` (`_ingest/subscriptions.py`);
@@ -24,23 +24,34 @@ everything else the library decides belongs here:
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
   reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
+- **Sharing.** Sessions in one process with the same API key and equal connection settings
+  (`CONNECTION_SETTINGS`, and the same Deephaven update graph) share one `ConnectionGroup`, so
+  their streams ride the same connections: individual plans allow one connection per cluster,
+  and two sessions with connections of their own would knock each other off. A connection is
+  leased per stream, and remembers which sessions use it, so each session's `m.connections()`
+  shows it, each stream reports to its own session, and a session's close takes only its own
+  streams away. The options cap, refusals, fatal failures, and the real-time verdict are the
+  connection's, so they act on every session's streams on it.
 - **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself
   and leaves the registry. A fatal failure (a rejected key, a handshake error retrying cannot
-  fix) fails every stream on it, a stream opening at that moment included. `m.close()` closes
-  every connection and waits a bounded time for its threads.
+  fix) fails every stream on it, a stream opening at that moment included. `m.close()` removes
+  the session's streams from their connections, closes every connection no other session
+  leases, and waits a bounded time for its threads. While a connection waits for a slot
+  (`WAITING_SLOT`), each of its streams says so in its `Error`.
 
 **Threads and locks.** Each connection's subscription state is confined to its client's loop
 thread; other threads reach it only through `loop.call_soon_threadsafe` with plain data
 (`Connection.post`). The registries that map URLs to connections and streams to connections,
-each connection's leases, failure, and options-cap bookkeeping, and the session's record of
-`NO_ACK` topics are guarded by the session's `registry_lock`, which is a leaf lock here too: no
-Deephaven call, network call, or wait happens under it (creating a client loads TLS settings, so
-it happens outside). The loop thread makes no Java call: every failure goes to a flush thread,
-or, for a stream whose connection failed while it opened, to the opening caller. A stream's
-blink-table shutdown callback takes the lock only to update the registry and then posts the
+each connection's leases, sessions, failure, and options-cap bookkeeping, each session's
+registry state here, and the group's record of `NO_ACK` topics are guarded by the group's lock,
+a leaf lock like the sessions' `registry_lock` (the two are never held together): no Deephaven
+call, network call, or wait happens under it (creating a client loads TLS settings, so it
+happens outside). The loop thread makes no Java call: every failure goes to a flush thread, or,
+for a stream whose connection failed while it opened, to the opening caller. A stream's
+blink-table shutdown callback takes the locks only to update the registries and then posts the
 release of the stream's topics to its connection's loop; it never sends and never calls Java.
-The transport and its connections hold the session core weakly, so a session dropped without
-`close()` is still collected and its closer runs.
+The transport, the group, and the connections hold the session cores weakly, so a session
+dropped without `close()` is still freed and its closer runs.
 """
 
 from __future__ import annotations
@@ -50,6 +61,7 @@ import logging
 import threading
 import time
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -71,6 +83,7 @@ from deephaven_massive._massive import Transport, WireAuthError, WsState
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
+    DriftRegistry,
     StreamUpdate,
     describe_symbols,
 )
@@ -79,8 +92,11 @@ from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Hashable, Sequence
 
+    from deephaven.execution_context import ExecutionContext
+
+    from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.symbols import NormalizedSymbols
@@ -89,11 +105,13 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.liveness import StreamHandle
 
 __all__ = [
+    "CONNECTION_SETTINGS",
     "IDLE_GRACE",
     "JOIN_TIMEOUT",
     "OPTIONS_CAP",
     "ClientFactory",
     "Connection",
+    "ConnectionGroup",
     "WsConnections",
     "WsTransport",
 ]
@@ -113,6 +131,17 @@ JOIN_TIMEOUT: Final = 5.0
 
 _MESSAGE_ROW_NS: Final = 1_000_000_000
 """How often, at most, a connection's row is rewritten only to advance `LastMessageAt`."""
+
+CONNECTION_SETTINGS: Final = (
+    "api_key",
+    "ws_hosts",
+    "ack_timeout",
+    "reconnect_backoff",
+    "max_reconnect_backoff",
+    "flush_interval",
+)
+"""The `MassiveConfig` fields that shape a WebSocket connection. A connection carries one value
+of each, so only sessions whose values are all equal share connections (`ConnectionGroup`)."""
 
 
 class _Client(Sender, Protocol):
@@ -176,7 +205,7 @@ class _Stream:
         stream_id: The stream's id.
         channel: Its channel.
         plan: How its dataset reads the channel.
-        sink: The stream as the flush thread publishes to it.
+        sink: The stream as the flush thread publishes to it; it carries the stream's session.
         symbols: The canonical symbols it wants; None for `dm.ALL`.
         topics: Its topics now.
         static: True for `dm.ALL` and a symbol list, False for a reactive symbol table, whose
@@ -193,53 +222,57 @@ class _Stream:
 
 
 class Connection:
-    """The session's connection to one `wss://<host>/<cluster>`, its flush thread, and its streams.
+    """A connection to one `wss://<host>/<cluster>`, its flush thread, and its streams.
 
-    Created by `WsConnections` (outside every lock: creating the client loads TLS settings) and
-    registered under `registry_lock`; started by its creator, or after a delay when it replaces
-    a connection the server's real-time verdict moved. Its loop-thread state (the
-    `Subscriptions`, the streams, the diagnostics row) is touched only by the client's loop
-    thread, which runs the callbacks below and the work other threads `post`. `families`,
-    `leases`, `retired`, `failure`, `awaiting`, and the options-cap fields are guarded by
-    `registry_lock`. `close()` and `join()` may be called from any thread.
+    Created by a `WsConnections` for its `ConnectionGroup` (outside every lock: creating the
+    client loads TLS settings) and registered under the group's lock; started by its creator,
+    or after a delay when it replaces a connection the server's real-time verdict moved. The
+    sessions of the group share it: `users` counts each session's leases, and each stream
+    carries its own session. Its loop-thread state (the `Subscriptions`, the streams, the
+    diagnostics row) is touched only by the client's loop thread, which runs the callbacks below
+    and the work other threads `post`. `families`, `leases`, `users`, `retired`, `failure`,
+    `awaiting`, and the options-cap fields are guarded by the group's lock. `close()` and
+    `join()` may be called from any thread.
 
-    It writes its diagnostics row (and one per further family it serves) under `registry_lock`
-    and only while it is its key's current connection, so a connection that left the registry
-    never overwrites the row of the one that replaced it.
+    It writes its diagnostics row (and one per further family it serves) into the
+    `m.connections()` of each session in `users`, under the group's lock and only while it is
+    that session's current connection for the key, so a connection that left the registry
+    never overwrites the row of the one that replaced it. A session stays in `users`, also with
+    no lease left, until it closes, so it sees the connection's last state.
     """
 
     def __init__(
         self,
-        transport: WsConnections,
-        core: SessionCore,
+        group: ConnectionGroup,
         *,
+        exec_ctx: ExecutionContext,
         url: str,
         asset_class: AssetClass,
         family: ChannelFamily,
         decision: HostDecision,
-        client_factory: ClientFactory,
     ) -> None:
         """Create the connection, its client, and its flush thread; nothing starts yet.
 
         Args:
-            transport: The transport that owns it (for the registry and the verdict).
-            core: The session's core, held weakly.
+            group: The group that owns it (its settings, registry, and the verdict).
+            exec_ctx: The execution context of the session creating it, which its flush
+                thread enters; the group's sessions share one update graph.
             url: The endpoint, `wss://<host>/<cluster>`.
             asset_class: The cluster's class.
             family: The family of the stream that created it.
             decision: The host decision behind `url`.
-            client_factory: Creates the client.
         """
         self.url: Final = url
         self.asset_class: Final = asset_class
         self.decision: Final = decision
         self.path: Final = f"/{asset_class.value}"
-        self._transport = transport
-        self._core = weakref.ref(core)
-        self._lock: Final = core.registry_lock
-        # Guarded by registry_lock.
+        self.exec_ctx: Final = exec_ctx
+        self._group = group
+        self._lock: Final = group.lock
+        # Guarded by the group's lock.
         self.families: set[ChannelFamily] = {family}
         self.leases = 0
+        self.users: dict[WsConnections, int] = {}
         self.retired = False
         self.failure: MassiveError | None = None
         self.awaiting: set[int] = set()
@@ -250,13 +283,12 @@ class Connection:
         self._started = False
         self._closing = False
         self._timer: threading.Timer | None = None
-        config = core.config
         self.flusher: Final = Flusher(
-            core, f"massive-flush {decision.host}{self.path}", interval=config.flush_interval
+            exec_ctx, f"massive-flush {decision.host}{self.path}", interval=group.flush_interval
         )
         cluster = f"{asset_class.value}/"
         sources = [s for k, s in _massive.sources(Transport.WS).items() if k.startswith(cluster)]
-        self._client = client_factory(
+        self._client = group.factory(
             url,
             sources=sources,
             on_open=self._on_open,
@@ -270,11 +302,11 @@ class Connection:
         self.subscriptions: Final = Subscriptions(
             self._client,
             call_later=self._client.loop.call_later,
-            ack_timeout=config.ack_timeout,
+            ack_timeout=group.ack_timeout,
             cap=OPTIONS_CAP if asset_class is AssetClass.OPTIONS else None,
             on_refused=self._refused,
             on_step_refused=self._step_refused,
-            first_no_ack=functools.partial(transport.first_no_ack, self.path),
+            first_no_ack=functools.partial(group.first_no_ack, self.path),
             on_change=self._changed,
         )
         # Loop-confined from here on.
@@ -291,6 +323,32 @@ class Connection:
         self._next_reconnect_at: int | None = None
         self._last_error: str | None = None
         self._drift: str | None = None
+        self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
+        self._stalled = False
+
+    @property
+    def closing(self) -> bool:
+        """True once `close()` was called."""
+        with self._start_lock:
+            return self._closing
+
+    def take(self, owner: WsConnections) -> None:
+        """Add one lease for a stream of a session; the group's lock is held.
+
+        Args:
+            owner: The stream's session.
+        """
+        self.leases += 1
+        self.users[owner] = self.users.get(owner, 0) + 1
+
+    def give(self, owner: WsConnections) -> None:
+        """Return one lease of a session; the group's lock is held. The session stays a user.
+
+        Args:
+            owner: The stream's session.
+        """
+        self.leases -= 1
+        self.users[owner] -= 1
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -409,6 +467,8 @@ class Connection:
             stream: The stream.
         """
         self._streams[stream.stream_id] = stream
+        if self._stalled:
+            self._update_streams({stream.stream_id: StreamUpdate(error=self._stall_text())})
         keys = self._required.get(stream.channel, frozenset()) | stream.plan.required
         if self._required.get(stream.channel) != keys:
             self._required[stream.channel] = keys
@@ -509,7 +569,7 @@ class Connection:
     def _idle_close(self) -> None:
         """Close the connection if it has had no stream for the grace period."""
         self._idle = None
-        if self._streams or not self._transport.retire(self, idle=True):
+        if self._streams or not self._group.retire(self, idle=True):
             return
         logger.info("closing %s: no stream for %.0f s", self.url, IDLE_GRACE)
         self.close()
@@ -518,7 +578,7 @@ class Connection:
         """Move every stream to `successor` and close. Loop thread.
 
         Called when the server's real-time verdict moves the connection to another host. Under
-        `registry_lock`, the streams are routed on `successor` too (or, if it has already
+        the group's lock, the streams are routed on `successor` too (or, if it has already
         failed, they fail here); their topics reach its loop with `adopt`; a release or symbol
         change that still arrives here is forwarded. The streams stay routed on this
         connection as well, until its flush thread ends: its last flush applies the failures it
@@ -572,6 +632,9 @@ class Connection:
             self._reconnects += 1
         self._state = ConnectionState.CONNECTED
         self._next_reconnect_at = None
+        if self._stalled:
+            self._stalled = False
+            self._unstall()
         self.subscriptions.opened(generation)
 
     def _on_status(self, generation: int, status: Status) -> None:
@@ -622,6 +685,10 @@ class Connection:
         if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
             self.subscriptions.ended()
             self._next_reconnect_at = int(cast("float", detail) * 1e9)
+            if state is WsState.WAITING_SLOT and not self._stalled:
+                self._stalled = True
+                text = self._stall_text()
+                self._update_streams({s: StreamUpdate(error=text) for s in self._streams})
         elif state is WsState.FAILED:
             self.subscriptions.ended()
             self._failed(cast("WireError", detail))
@@ -634,7 +701,7 @@ class Connection:
     def _failed(self, error: WireError) -> None:
         """Fail every stream after a fatal failure, and leave the registry.
 
-        The failure is recorded under `registry_lock` together with the routed streams it
+        The failure is recorded under the group's lock together with the routed streams it
         fails, so a stream attached at that moment is either among them or sees the failure
         and fails itself (`WsConnections` does it on the opening caller's thread).
 
@@ -654,7 +721,7 @@ class Connection:
         with self._lock:  # one section: no verb leases the connection once it has failed
             self.failure = public
             routed = [sink.stream_id for sink in self.flusher.routes.sinks()]
-            self._transport.retire(self, idle=False)
+            self._group.retire(self, idle=False)
         self.flusher.fail(routed, public)
         self.flusher.stop(final=True)  # the failures above are applied before it ends
 
@@ -729,7 +796,7 @@ class Connection:
             or not decision.host.startswith("socket.")
         ):
             return False
-        return self._transport.reroute(self, status.message)
+        return self._group.reroute(self, status.message)
 
     def _record_drift(self, channel: str, drift: DriftReport) -> None:
         """Add a frame's drift to the connection's row and hand it to the flush thread.
@@ -738,13 +805,42 @@ class Connection:
             channel: The channel.
             drift: Its drift in the frame.
         """
-        core = self._core()
-        if core is not None:
-            text = core.drift.record(self.key, channel, drift)
-            if text is not None:
-                self._drift = text
-                self._write_row()
+        text = self._drift_seen.record(self.key, channel, drift)
+        if text is not None:
+            self._drift = text
+            self._write_row()
         self.flusher.drift(channel, drift)
+
+    def _stall_text(self) -> str:
+        """Return the `Error` of a stream whose connection waits for a slot.
+
+        Returns:
+            The text, naming the host and the cluster.
+        """
+        return (
+            f"waiting for a WebSocket slot on {self.decision.host}{self.path}: another "
+            "connection with this API key, perhaps from another process, holds it; the plan "
+            "allows one connection per cluster"
+        )
+
+    def _unstall(self) -> None:
+        """Clear the streams' wait for a slot, showing an options-cap warning again if any."""
+        updates: dict[int, StreamUpdate] = {}
+        for stream_id in self._streams:
+            if self._deferred_shown.get(stream_id, 0):
+                updates[stream_id] = StreamUpdate(error=self._cap_text())
+            else:
+                updates[stream_id] = StreamUpdate(clear_error=True)
+        self._update_streams(updates)
+
+    def _cap_text(self) -> str:
+        """Return the `Error` of an options stream whose contracts the cap defers.
+
+        Returns:
+            The text, with the topics wanted and deferred now.
+        """
+        deferred = len(self.subscriptions.deferred)
+        return f"over capacity: {self.subscriptions.explicit}/{OPTIONS_CAP}; {deferred} deferred"
 
     # --- loop thread: diagnostics --------------------------------------------------------------
 
@@ -757,7 +853,7 @@ class Connection:
         """Publish the admitted options contracts and show each stream's deferred count.
 
         The admitted set is published, and an opening stream's pending topics dropped, in one
-        `registry_lock` section, so a verb's cap check never sees the stream's topics in
+        section of the group's lock, so a verb's cap check never sees the stream's topics in
         neither.
 
         Args:
@@ -771,70 +867,76 @@ class Connection:
                 self.cap_pending.pop(opened, None)
         deferred = self.subscriptions.deferred
         updates: dict[int, StreamUpdate] = {}
-        wanted = self.subscriptions.explicit
         for stream in self._streams.values():
             count = len(stream.topics & deferred)
             if count == self._deferred_shown.get(stream.stream_id, 0):
                 continue
             self._deferred_shown[stream.stream_id] = count
             if count:
-                text = f"over capacity: {wanted}/{OPTIONS_CAP}; {len(deferred)} deferred"
+                text = self._cap_text()
                 logger.warning("%s stream %d: %s", stream.plan.dataset, stream.stream_id, text)
-                updates[stream.stream_id] = StreamUpdate(deferred=count, error=text)
+                update = StreamUpdate(deferred=count, error=text)
             else:
                 logger.warning(
                     "%s stream %d: no contract is deferred any more",
                     stream.plan.dataset,
                     stream.stream_id,
                 )
-                updates[stream.stream_id] = StreamUpdate(deferred=0, clear_error=True)
+                update = StreamUpdate(deferred=0, clear_error=True)
+            # While the connection waits for a slot, that wait stays the stream's `Error`.
+            updates[stream.stream_id] = StreamUpdate(deferred=count) if self._stalled else update
         if updates:
             self._update_streams(updates)
 
     def _update_streams(self, updates: dict[int, StreamUpdate]) -> None:
-        """Apply changes to streams' `m.streams()` rows, if the session still exists.
+        """Apply changes to streams' `m.streams()` rows, each in its own session.
 
         Args:
-            updates: The change of each stream, by id.
+            updates: The change of each stream, by id; every id is one of the connection's
+                streams.
         """
-        core = self._core()
-        if core is not None:
-            core.update_streams(updates)
+        by_core: dict[SessionCore, dict[int, StreamUpdate]] = {}
+        for stream_id, update in updates.items():
+            core = self._streams[stream_id].sink.core
+            by_core.setdefault(core, {})[stream_id] = update
+        for core, changes in by_core.items():
+            core.update_streams(changes)
 
     def _write_row(self) -> None:
-        """Write the connection's diagnostics rows, if it is still its keys' connection."""
-        core = self._core()
-        if core is None:
-            return
+        """Write the connection's diagnostics rows into each user session that shows it.
+
+        A session shows the row of a (class, family) only while this is its current connection
+        for the key; a session that has been freed meanwhile is skipped.
+        """
         topics, acked, pending, no_ack = self.subscriptions.counts()
         now = time.time_ns()
         self._message_row_at = now
         with self._lock:
+            users = [(owner, owner.core()) for owner in self.users]
             for family in sorted(self.families):
-                if not self._transport.owns_row(self, family):
-                    continue
-                core.diagnostics.write(
-                    ConnectionRow(
-                        transport=Transport.WS,
-                        asset_class=self.asset_class,
-                        family=family,
-                        host=self.decision.host,
-                        path=self.path,
-                        recency=self.decision.recency,
-                        evidence=self.decision.evidence,
-                        state=self._state,
-                        topics=topics,
-                        acked_topics=acked,
-                        pending_topics=pending,
-                        no_ack_topics=no_ack,
-                        reconnects=self._reconnects,
-                        last_message_at=self._last_message_at,
-                        next_reconnect_at=self._next_reconnect_at,
-                        updated_at=now,
-                        last_error=self._last_error,
-                        schema_drift=self._drift,
-                    )
+                row = ConnectionRow(
+                    transport=Transport.WS,
+                    asset_class=self.asset_class,
+                    family=family,
+                    host=self.decision.host,
+                    path=self.path,
+                    recency=self.decision.recency,
+                    evidence=self.decision.evidence,
+                    state=self._state,
+                    topics=topics,
+                    acked_topics=acked,
+                    pending_topics=pending,
+                    no_ack_topics=no_ack,
+                    reconnects=self._reconnects,
+                    last_message_at=self._last_message_at,
+                    next_reconnect_at=self._next_reconnect_at,
+                    updated_at=now,
+                    last_error=self._last_error,
+                    schema_drift=self._drift,
                 )
+                for owner, core in users:
+                    if core is not None and owner.owns_row(self, family):
+                        core.diagnostics.write(row)
 
 
 class _WsClientFactory:
@@ -962,17 +1064,297 @@ class WsTransport:
         )
 
 
+_groups_lock = threading.Lock()
+_groups: dict[Hashable, ConnectionGroup] = {}
+# The connection groups of the process, by sharing key (`ConnectionGroup.attach`). Its lock is
+# taken before a group's lock, never under it.
+
+
+class ConnectionGroup:
+    """The WebSocket connections shared by the sessions of one API key and equal settings.
+
+    Individual Massive plans allow one WebSocket connection per cluster per account, so sessions
+    of one process that use the same key share their connections instead of knocking each other
+    off. Sessions join a group only when every setting that shapes a connection is equal
+    (`CONNECTION_SETTINGS`), they run on the same Deephaven update graph (a connection's flush
+    thread enters one execution context for all its streams), and they use the same client
+    factory (tests pass their own): a connection carries one value of each, so a session never
+    silently gets another session's settings. A session whose settings differ gets a group of
+    its own; its construction warns about it (`_session.py`).
+
+    Each session's `WsConnections` attaches to its group when the session opens its first
+    stream (`attach`) and detaches when the session closes or is freed (`detach`); the group
+    leaves the process's registry with its last session. The group owns what belongs to the
+    connections rather than to a session: the connections by URL, the connection and the
+    session of each stream, the record of `NO_ACK` topics, and the server's real-time verdict
+    (`reroute`), which moves a connection with every session's streams. It holds no session
+    core. Its lock, a leaf lock (`lock`), guards all of it and each connection's leases, users,
+    failure, and options-cap bookkeeping; no Deephaven call, network call, or wait happens
+    under it, and a session's `registry_lock` is never taken with it.
+
+    Example:
+        ::
+
+            group = ConnectionGroup.attach(
+                connections, config=core.config, exec_ctx=core.exec_ctx, client_factory=None
+            )
+            group.detach(connections)  # the last session: the group leaves the registry
+    """
+
+    def __init__(
+        self,
+        key: Hashable,
+        *,
+        factory: ClientFactory,
+        ack_timeout: float,
+        flush_interval: float,
+        reconnect_backoff: float,
+        pinned: frozenset[AssetClass],
+    ) -> None:
+        """Create an empty group; `attach` creates them.
+
+        Args:
+            key: Its key in the process's registry: the sharing key of `attach`.
+            factory: Creates each connection's client.
+            ack_timeout: `MassiveConfig.ack_timeout` of its sessions.
+            flush_interval: `MassiveConfig.flush_interval` of its sessions.
+            reconnect_backoff: `MassiveConfig.reconnect_backoff` of its sessions.
+            pinned: The classes whose host its sessions pin with `MassiveConfig.ws_hosts`.
+        """
+        self.key: Final = key
+        self.lock: Final = threading.RLock()
+        self.factory: Final = factory
+        self.ack_timeout: Final = ack_timeout
+        self.flush_interval: Final = flush_interval
+        self.reconnect_backoff = reconnect_backoff
+        self._pinned = pinned
+        # Guarded by lock.
+        self.connections: dict[str, Connection] = {}
+        self.streams: dict[int, Connection] = {}
+        self.owners: dict[int, WsConnections] = {}
+        self.sessions: set[WsConnections] = set()
+        self._no_acked: set[tuple[str, str]] = set()
+
+    @classmethod
+    def attach(
+        cls,
+        owner: WsConnections,
+        *,
+        config: MassiveConfig,
+        exec_ctx: ExecutionContext,
+        client_factory: ClientFactory | None,
+    ) -> ConnectionGroup:
+        """Join a session to the group of its key and settings, creating the group if needed.
+
+        Args:
+            owner: The session's `WsConnections`.
+            config: The session's configuration.
+            exec_ctx: The session's execution context, whose update graph is part of the key.
+            client_factory: The session's client factory; None for the default `WsClient`,
+                which the key's settings describe completely.
+
+        Returns:
+            The group.
+        """
+        settings = tuple(
+            frozenset(value.items()) if isinstance(value, Mapping) else value
+            for value in (getattr(config, name) for name in CONNECTION_SETTINGS)
+        )
+        graph = str(exec_ctx.update_graph.j_update_graph.getName())
+        key = (*settings, graph, client_factory)
+        with _groups_lock:
+            group = _groups.get(key)
+            if group is None:
+                factory = client_factory or _WsClientFactory(
+                    config.api_key,
+                    backoff=config.reconnect_backoff,
+                    max_backoff=config.max_reconnect_backoff,
+                )
+                group = _groups[key] = cls(
+                    key,
+                    factory=factory,
+                    ack_timeout=config.ack_timeout,
+                    flush_interval=config.flush_interval,
+                    reconnect_backoff=config.reconnect_backoff,
+                    pinned=frozenset(config.ws_hosts),
+                )
+            with group.lock:
+                group.sessions.add(owner)
+        return group
+
+    def detach(self, owner: WsConnections) -> None:
+        """Take a closed session out of the group; the last one takes the group out of the registry.
+
+        Args:
+            owner: The session's `WsConnections`, after its `close`.
+        """
+        with _groups_lock, self.lock:
+            self.sessions.discard(owner)
+            if not self.sessions:
+                del _groups[self.key]
+
+    def first_no_ack(self, path: str, topic: str) -> bool:
+        """Record a topic's `NO_ACK`; tell whether it is the topic's first on the cluster.
+
+        Kept here, not per connection, so a topic reconnects at most once for the group, also
+        across an idle close or a verdict's move. Takes the lock briefly.
+
+        Args:
+            path: The cluster path of the connection, such as `/stocks`.
+            topic: The topic.
+
+        Returns:
+            True for the first `NO_ACK` of the topic on the cluster.
+        """
+        with self.lock:
+            first = (path, topic) not in self._no_acked
+            self._no_acked.add((path, topic))
+        return first
+
+    def retire(self, connection: Connection, *, idle: bool) -> bool:
+        """Take a connection out of the registry, so the next stream opens a new one.
+
+        Args:
+            connection: The connection, from its loop thread.
+            idle: True for the idle close, which happens only while no stream holds a lease.
+
+        Returns:
+            True when the connection was retired; False for an idle close that a stream
+            opening meanwhile has cancelled.
+        """
+        with self.lock:
+            if idle and connection.leases:
+                return False
+            if self.connections.get(connection.url) is connection:
+                del self.connections[connection.url]
+            connection.retired = True
+        return True
+
+    def reroute(self, connection: Connection, message: str) -> bool:
+        """Accept the server's real-time verdict on a connection: move it to the `delayed.` host.
+
+        Called on the connection's loop thread. Never for a host pinned by
+        `MassiveConfig.ws_hosts`, never for a connection that is closing, and once per
+        connection; the decision is recorded with the REST transport of every session on the
+        connection, so their later streams of the class and family resolve to the delayed host
+        and a verdict cannot repeat for them. The move itself runs on a short-lived thread,
+        because creating the new connection's client loads TLS settings, which the loop thread
+        must not wait for (`_move`).
+
+        Args:
+            connection: The connection the verdict arrived on.
+            message: The server's message.
+
+        Returns:
+            True when the connection is moving; False when the verdict fails the step's
+            streams instead.
+        """
+        if connection.asset_class in self._pinned:
+            return False
+        with self.lock:
+            if connection.closing or connection.retired:
+                return False
+            connection.retired = True  # one verdict per connection
+        decision = HostDecision(
+            "delayed." + connection.decision.host.removeprefix("socket."),
+            Recency.DELAYED,
+            f"server verdict: {message}",
+        )
+        logger.warning(
+            "%s refused real-time data (%s); moving its streams to %s in %.0f s",
+            connection.url,
+            message,
+            decision.host,
+            self.reconnect_backoff,
+        )
+        mover = threading.Thread(
+            target=self._move,
+            args=(connection, decision),
+            name=f"massive-move {connection.url}",
+            daemon=True,
+        )
+        mover.start()
+        return True
+
+    def _move(self, connection: Connection, decision: HostDecision) -> None:
+        """Record the verdict and move a connection's streams to the delayed host's connection.
+
+        Runs on the thread `reroute` starts. Every session on the connection records the
+        verdict. The successor is the delayed host's connection, created here unless one
+        exists; under the lock, the old connection leaves the registry, every lease moves with
+        its session, each session shows the successor's row, and the successor awaits the
+        moved streams, so a release or watchlist change that reaches it before `adopt` waits
+        there. The successor starts after `reconnect_backoff`; the old connection's loop then
+        hands the streams over.
+
+        Args:
+            connection: The connection the verdict arrived on.
+            decision: The delayed host's decision.
+        """
+        asset_class = connection.asset_class
+        with self.lock:
+            users = list(connection.users)
+        for owner in users:
+            try:
+                owner.record_verdict(asset_class, ChannelFamily.TICK, decision)
+            except Exception:
+                logger.exception("could not record the real-time verdict for %s", connection.url)
+        url = f"wss://{decision.host}{connection.path}"
+        candidate = Connection(
+            self,
+            exec_ctx=connection.exec_ctx,
+            url=url,
+            asset_class=asset_class,
+            family=ChannelFamily.TICK,
+            decision=decision,
+        )
+        successor: Connection | None = None
+        moved: list[int] = []
+        with self.lock:
+            # Not if the connection is closing (its sessions closed) or failed (its streams
+            # fail with it).
+            if not connection.closing and connection.failure is None:
+                # A stream of the class may already have opened the delayed host's connection.
+                successor = self.connections.setdefault(url, candidate)
+                successor.families.add(ChannelFamily.TICK)
+                if self.connections.get(connection.url) is connection:
+                    del self.connections[connection.url]
+                for owner in connection.users:
+                    successor.users.setdefault(owner, 0)
+                    owner.show_row(asset_class, ChannelFamily.TICK, successor)
+                for stream_id, current in list(self.streams.items()):
+                    if current is connection:
+                        owner = self.owners[stream_id]
+                        self.streams[stream_id] = successor
+                        successor.awaiting.add(stream_id)
+                        successor.take(owner)
+                        connection.give(owner)
+                        moved.append(stream_id)
+        if successor is not candidate:
+            candidate.close()
+        if successor is None:  # the connection closed or failed meanwhile
+            connection.close()
+            return
+        successor.start(delay=self.reconnect_backoff)  # does nothing if it already started
+        if not connection.post(connection.hand_over, successor):
+            # The old loop ended first: its streams were failed there and never arrive.
+            with self.lock:
+                successor.awaiting.difference_update(moved)
+            successor.post(successor.check_idle)
+
+
 class WsConnections:
-    """The session's WebSocket connections, by URL, and the streams on them.
+    """One session's side of its `ConnectionGroup`: its streams, its rows, and its close.
 
     Created once per session by `SessionClients.streams()`, which registers `close` with the
-    session and hands it to each `WsTransport` it returns. It lives as long as the session's
-    clients, so it holds the session core only weakly: the core holds it (through its
-    `SessionClients`), and its `close` is a session closer, which must not keep the core alive.
-    `open_stream` runs on the caller thread, which passes the core; the blink tables' shutdown
-    callbacks and the symbol watches call in from any thread. Its registries (connections by
-    URL, the connection of each stream, the connection that owns each diagnostics key, the
-    `NO_ACK` topics, and the channel plans) are guarded by the session's `registry_lock`.
+    session and hands it to each `WsTransport` it returns. It joins the group of the session's
+    key and settings at once (`ConnectionGroup.attach`) and leaves it in `close`. It lives as
+    long as the session's clients, so it holds the session core only weakly: the core holds it
+    (through its `SessionClients`), and its `close` is a session closer, which must not keep the
+    core alive. `open_stream` runs on the caller thread, which passes the core; the blink
+    tables' shutdown callbacks and the symbol watches call in from any thread. Its state (the
+    session's streams, the connection whose row it shows for each class and family, the
+    closed flag, and the channel plans) is guarded by the group's lock.
 
     Example:
         ::
@@ -991,7 +1373,7 @@ class WsConnections:
         record_verdict: Callable[[AssetClass, ChannelFamily, HostDecision], None],
         client_factory: ClientFactory | None = None,
     ) -> None:
-        """Create the registry; no connection is opened.
+        """Join the session's connection group; no connection is opened.
 
         Args:
             core: The session's core, held weakly.
@@ -1000,28 +1382,30 @@ class WsConnections:
             record_verdict: Replaces the cached decision of a (class, family) with the one the
                 server's real-time verdict implies; the REST transport's `record_verdict`.
             client_factory: Creates each connection's client; by default a `WsClient` with the
-                session's key and backoffs.
+                session's key and backoffs. Sessions share connections only with the same
+                factory.
         """
-        config = core.config
         self._core = weakref.ref(core)
         self._label = core.label
-        self._lock: Final = core.registry_lock
         self._resolve = resolve_host
-        self._record_verdict = record_verdict
-        self._factory = client_factory or _WsClientFactory(
-            config.api_key,
-            backoff=config.reconnect_backoff,
-            max_backoff=config.max_reconnect_backoff,
+        self.record_verdict = record_verdict
+        self.group: Final = ConnectionGroup.attach(
+            self, config=core.config, exec_ctx=core.exec_ctx, client_factory=client_factory
         )
-        self._reconnect_backoff = config.reconnect_backoff
-        self._pinned = frozenset(config.ws_hosts)
-        # Guarded by registry_lock.
-        self._connections: dict[str, Connection] = {}
-        self._streams: dict[int, Connection] = {}
+        self._lock: Final = self.group.lock
+        # Guarded by the group's lock.
+        self._mine: set[int] = set()
         self._row_owners: dict[tuple[AssetClass, ChannelFamily], Connection] = {}
-        self._no_acked: set[tuple[str, str]] = set()
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
         self._closed = False
+
+    def core(self) -> SessionCore | None:
+        """Return the session's core, or None once it has been freed.
+
+        Returns:
+            The core.
+        """
+        return self._core()
 
     # --- opening -------------------------------------------------------------------------------
 
@@ -1054,9 +1438,9 @@ class WsConnections:
             The stream's handle.
 
         Static options symbols that would put more than `OPTIONS_CAP` explicit topics on the
-        `/options` connection raise the `ValueError` of `_check_cap`, and a closed transport
-        the `MassiveError` of `_check_open`; host resolution raises the `EntitlementError` or
-        `MassiveError` of `resolve_host`.
+        `/options` connection (counting every session's topics on it) raise the `ValueError`
+        of `_check_cap`, and a closed session the `MassiveError` of `_check_open`; host
+        resolution raises the `EntitlementError` or `MassiveError` of `resolve_host`.
         """
         asset_class = cast("AssetClass", spec.asset_class)
         plan = self._plan(core, spec, channel)
@@ -1071,6 +1455,7 @@ class WsConnections:
                 plan,
                 core.catalog.dataset_schema(spec),
                 symbols,
+                core=core,
                 stream_id=stream_id,
                 host=decision.host,
                 path=connection.path,
@@ -1083,7 +1468,7 @@ class WsConnections:
         try:
             static = not isinstance(symbols, SymbolTable)
             stream = _Stream(stream_id, channel, plan, opened.sink, wanted, topics, static)
-            self._attach(core, stream)
+            self._attach(stream)
             if opened.watch is not None:
                 opened.watch.start()
         except BaseException:
@@ -1120,15 +1505,17 @@ class WsConnections:
         stream_id: int,
         topics: frozenset[str],
     ) -> tuple[Connection, bool]:
-        """Find or create the connection of a stream and lease it for the stream.
+        """Find or create the group's connection of a stream and lease it for the stream.
 
         A new connection is created outside the lock (its client loads TLS settings) and
         registered under it. The registry is read again under the lock, and as often as it
         takes: a connection found before may have been retired meanwhile, and one registered by
-        another thread meanwhile wins, the new one then closing unused.
+        another thread (of this session or another) meanwhile wins, the new one then closing
+        unused. The session becomes one of the connection's users and shows its row.
 
         Args:
-            core: The session's core.
+            core: The session's core, whose execution context a new connection's flush thread
+                enters.
             spec: The stream's dataset.
             decision: Its host decision.
             stream_id: The stream.
@@ -1138,8 +1525,9 @@ class WsConnections:
             `(connection, created)`: created is True when the caller must start it.
 
         Static topics that would cross the options cap raise the `ValueError` of `_check_cap`,
-        and a closed transport the `MassiveError` of `_check_open`.
+        and a closed session the `MassiveError` of `_check_open`.
         """
+        group = self.group
         asset_class = cast("AssetClass", spec.asset_class)
         url = f"wss://{decision.host}/{asset_class.value}"
         candidate: Connection | None = None
@@ -1147,58 +1535,52 @@ class WsConnections:
             while True:
                 with self._lock:
                     self._check_open()
-                    connection = self._connections.get(url)
+                    connection = group.connections.get(url)
                     self._check_cap(spec, connection, topics)
                     created = connection is None and candidate is not None
                     if created:
-                        connection = self._connections[url] = cast("Connection", candidate)
+                        connection = group.connections[url] = cast("Connection", candidate)
                         candidate = None
                     if connection is not None:
                         connection.families.add(spec.family)
                         self._row_owners[asset_class, spec.family] = connection
                         if asset_class is AssetClass.OPTIONS:
                             connection.cap_pending[stream_id] = topics
-                        connection.leases += 1
-                        self._streams[stream_id] = connection
+                        connection.take(self)
+                        group.streams[stream_id] = connection
+                        group.owners[stream_id] = self
+                        self._mine.add(stream_id)
                         return connection, created
                 candidate = Connection(
-                    self,
-                    core,
+                    group,
+                    exec_ctx=core.exec_ctx,
                     url=url,
                     asset_class=asset_class,
                     family=spec.family,
                     decision=decision,
-                    client_factory=self._factory,
                 )
         finally:
             if candidate is not None:  # lost the race, or refused: never registered
                 candidate.close()
 
     def _check_open(self) -> None:
-        """Refuse a stream once the transport is closed; `registry_lock` is held.
+        """Refuse a stream once the session's side is closed; the group's lock is held.
 
         Raises:
             MassiveError: If `close()` has run.
         """
-        if self._is_closed():
+        if self._closed:
             raise MassiveError(f"{self._label} is closed")
-
-    def _is_closed(self) -> bool:
-        """Tell whether `close()` has run; `registry_lock` is held.
-
-        Returns:
-            True once the transport is closed.
-        """
-        return self._closed
 
     @staticmethod
     def _check_cap(
         spec: DatasetSpec, connection: Connection | None, topics: frozenset[str]
     ) -> None:
-        """Refuse static options topics that would cross the cap; `registry_lock` is held.
+        """Refuse static options topics that would cross the cap; the group's lock is held.
 
-        In use are the topics the connection admitted and those of streams still opening. The
-        cap counts topics, one per contract and channel, so `T.X` and `Q.X` are two.
+        In use are the topics the connection admitted and those of streams still opening, of
+        every session on the connection. The cap counts topics, one per contract and channel,
+        so `T.X` and `Q.X` are two.
 
         Args:
             spec: The stream's dataset.
@@ -1220,30 +1602,30 @@ class WsConnections:
             raise ValueError(
                 f"{spec.name}: {len(new)} new option topics and {len(in_use)} in use exceed "
                 f"the {OPTIONS_CAP} topics one /options connection carries; a topic is one "
-                "contract on one channel, so each channel of a contract counts once"
+                "contract on one channel, so each channel of a contract counts once, and the "
+                "connection's topics include those of every session sharing it"
             )
 
-    def _attach(self, core: SessionCore, stream: _Stream) -> None:
+    def _attach(self, stream: _Stream) -> None:
         """Route a new stream's rows and hand the stream to its connection's loop thread.
 
         The stream goes to the connection that holds its lease now (the verdict may have moved
-        it). Routing and the check for the connection's failure happen in one `registry_lock`
-        section, the one the connection's `_failed` takes, so a connection that failed meanwhile
-        never leaves the stream running: the stream fails here, on the caller thread. A stream
-        whose lease is gone (the session closed) is left as it is.
+        it). Routing and the check for the connection's failure happen in one section of the
+        group's lock, the one the connection's `_failed` takes, so a connection that failed
+        meanwhile never leaves the stream running: the stream fails here, on the caller thread.
+        A stream whose lease is gone (the session closed) is left as it is.
 
         Args:
-            core: The session's core.
             stream: The stream, with its topics.
         """
         with self._lock:
-            connection = self._streams.get(stream.stream_id)
+            connection = self.group.streams.get(stream.stream_id)
             failure = None if connection is None else connection.failure
             if connection is not None and failure is None:
                 connection.flusher.routes.add(stream.channel, stream.sink)
                 connection.post(connection.add_stream, stream)
         if failure is not None:
-            stream.sink.fail(core, failure)
+            stream.sink.fail(failure)
 
     def _abandon(self, connection: Connection, stream_id: int) -> None:
         """Return the lease of a stream whose open failed, and let its connection go idle.
@@ -1256,11 +1638,29 @@ class WsConnections:
         """
         with self._lock:
             connection.cap_pending.pop(stream_id, None)
-            if self._streams.get(stream_id) is connection:
-                del self._streams[stream_id]
-                connection.leases -= 1
+            self._forget(stream_id, connection)
         connection.flusher.routes.remove(stream_id)
         connection.post(connection.check_idle)
+
+    def _forget(self, stream_id: int, connection: Connection | None = None) -> Connection | None:
+        """Drop a stream's lease from the group; the group's lock is held.
+
+        Args:
+            stream_id: The stream.
+            connection: Drop the lease only if it is on this connection; None for any.
+
+        Returns:
+            The connection that held the lease, or None if none (of `connection`) did.
+        """
+        group = self.group
+        current = group.streams.get(stream_id)
+        if current is None or (connection is not None and current is not connection):
+            return None
+        del group.streams[stream_id]
+        del group.owners[stream_id]
+        self._mine.discard(stream_id)
+        current.give(self)
+        return current
 
     # --- callbacks from any thread -------------------------------------------------------------
 
@@ -1268,22 +1668,21 @@ class WsConnections:
         """The blink table's `on_shutdown_callback`: unregister the stream, release its topics.
 
         Runs on whichever thread dropped the table's last reference (the reaper, an
-        update-graph thread, a gRPC thread). It does two things only: the registry updates
-        (`SessionCore.stream_shut_down`, then the stream's lease, under `registry_lock`) and one
-        `call_soon_threadsafe` to the connection's loop, which releases the topics there. A
-        closed loop (the connection ended) is logged at INFO. It never raises.
+        update-graph thread, a gRPC thread, or Deephaven's liveness-cleanup thread). It does
+        two things only: the registry updates (`SessionCore.stream_shut_down`, then the
+        stream's lease, under the group's lock) and one `call_soon_threadsafe` to the
+        connection's loop, which releases the topics there. A closed loop (the connection ended)
+        is logged at INFO. It never raises. The session is alive: the stream's record keeps it
+        in the live set until `stream_shut_down` has run, and while the stream opens the opening
+        caller holds it.
 
         Args:
             stream_id: The stream.
         """
         try:
-            core = self._core()
-            if core is not None:
-                core.stream_shut_down(stream_id)
+            cast("SessionCore", self._core()).stream_shut_down(stream_id)
             with self._lock:
-                connection = self._streams.pop(stream_id, None)
-                if connection is not None:
-                    connection.leases -= 1
+                connection = self._forget(stream_id)
             if connection is not None:
                 connection.post(connection.release_stream, stream_id)
         except Exception:
@@ -1295,8 +1694,8 @@ class WsConnections:
         """A reactive symbol table changed: post the change to the stream's connection.
 
         Runs on an update-graph thread (or the caller thread for the initial replay), with the
-        update-graph lock held: it takes `registry_lock` only to find the connection, and never
-        blocks.
+        update-graph lock held: it takes the group's lock only to find the connection, and
+        never blocks.
 
         Args:
             stream_id: The stream.
@@ -1304,191 +1703,79 @@ class WsConnections:
             removed: Canonical symbols it no longer holds.
         """
         with self._lock:
-            connection = self._streams.get(stream_id)
+            connection = self.group.streams.get(stream_id)
         if connection is not None:
             connection.post(connection.change_symbols, stream_id, added, removed)
 
-    # --- registry (connections call these) ------------------------------------------------------
+    # --- rows (connections call these) ----------------------------------------------------------
 
     def owns_row(self, connection: Connection, family: ChannelFamily) -> bool:
-        """Tell whether a connection writes the diagnostics row of its class and a family.
+        """Tell whether the session shows a connection's row for its class and a family.
 
-        Called with `registry_lock` held.
+        Called with the group's lock held.
 
         Args:
             connection: The connection.
             family: One of its families.
 
         Returns:
-            True while it is the latest connection created for the key.
+            True while it is the latest connection the session leased for the key.
         """
         return self._row_owners.get((connection.asset_class, family)) is connection
 
-    def first_no_ack(self, path: str, topic: str) -> bool:
-        """Record a topic's `NO_ACK` for the session; tell whether it is the topic's first.
-
-        Kept here, not per connection, so a topic reconnects at most once per session, also
-        across an idle close or a verdict's move. Takes `registry_lock` briefly.
-
-        Args:
-            path: The cluster path of the connection, such as `/stocks`.
-            topic: The topic.
-
-        Returns:
-            True for the first `NO_ACK` of the topic on the cluster in the session.
-        """
-        with self._lock:
-            first = (path, topic) not in self._no_acked
-            self._no_acked.add((path, topic))
-        return first
-
-    def retire(self, connection: Connection, *, idle: bool) -> bool:
-        """Take a connection out of the registry, so the next stream opens a new one.
+    def show_row(
+        self, asset_class: AssetClass, family: ChannelFamily, connection: Connection
+    ) -> None:
+        """Make a connection the one whose row the session shows for a key; lock held.
 
         Args:
-            connection: The connection, from its loop thread.
-            idle: True for the idle close, which happens only while no stream holds a lease.
-
-        Returns:
-            True when the connection was retired; False for an idle close that a stream
-            opening meanwhile has cancelled.
+            asset_class: The class.
+            family: The family.
+            connection: The connection, such as the successor of a moved one.
         """
-        core = self._core()
-        with self._lock:
-            if idle and connection.leases:
-                return False
-            if self._connections.get(connection.url) is connection:
-                del self._connections[connection.url]
-            connection.retired = True
-            if core is not None:
-                core.drift.forget(connection.key)
-        return True
-
-    def reroute(self, connection: Connection, message: str) -> bool:
-        """Accept the server's real-time verdict on a connection: move it to the `delayed.` host.
-
-        Called on the connection's loop thread. Never for a host pinned by
-        `MassiveConfig.ws_hosts`, and once per connection; the decision is recorded with the
-        REST transport, so later streams of the class and family resolve to the delayed host
-        and a verdict cannot repeat for them. The move itself runs on a short-lived thread,
-        because creating the new connection's client loads TLS settings, which the loop thread
-        must not wait for (`_move`).
-
-        Args:
-            connection: The connection the verdict arrived on.
-            message: The server's message.
-
-        Returns:
-            True when the connection is moving; False when the verdict fails the step's
-            streams instead.
-        """
-        if connection.asset_class in self._pinned:
-            return False
-        with self._lock:
-            if self._is_closed() or connection.retired:
-                return False
-            connection.retired = True  # one verdict per connection
-        decision = HostDecision(
-            "delayed." + connection.decision.host.removeprefix("socket."),
-            Recency.DELAYED,
-            f"server verdict: {message}",
-        )
-        logger.warning(
-            "%s refused real-time data (%s); moving its streams to %s in %.0f s",
-            connection.url,
-            message,
-            decision.host,
-            self._reconnect_backoff,
-        )
-        mover = threading.Thread(
-            target=self._move,
-            args=(connection, decision),
-            name=f"massive-move {connection.url}",
-            daemon=True,
-        )
-        mover.start()
-        return True
-
-    def _move(self, connection: Connection, decision: HostDecision) -> None:
-        """Record the verdict and move a connection's streams to the delayed host's connection.
-
-        Runs on the thread `reroute` starts. The successor is the delayed host's connection,
-        created here unless one exists; under `registry_lock`, the old connection leaves the
-        registry and every lease moves, and the successor awaits those streams, so a release or
-        watchlist change that reaches it before `adopt` waits there. The successor starts after
-        `reconnect_backoff`; the old connection's loop then hands the streams over.
-
-        Args:
-            connection: The connection the verdict arrived on.
-            decision: The delayed host's decision.
-        """
-        asset_class = connection.asset_class
-        try:
-            self._record_verdict(asset_class, ChannelFamily.TICK, decision)
-        except Exception:
-            logger.exception("could not record the real-time verdict for %s", connection.url)
-        core = self._core()
-        if core is None:
-            return
-        url = f"wss://{decision.host}{connection.path}"
-        candidate = Connection(
-            self,
-            core,
-            url=url,
-            asset_class=asset_class,
-            family=ChannelFamily.TICK,
-            decision=decision,
-            client_factory=self._factory,
-        )
-        successor: Connection | None = None
-        moved: list[int] = []
-        with self._lock:
-            # Not if the session closed, or the connection failed (its streams fail with it).
-            if not self._is_closed() and connection.failure is None:
-                # A stream of the class may already have opened the delayed host's connection.
-                successor = self._connections.setdefault(url, candidate)
-                successor.families.add(ChannelFamily.TICK)
-                if self._connections.get(connection.url) is connection:
-                    del self._connections[connection.url]
-                self._row_owners[asset_class, ChannelFamily.TICK] = successor
-                for stream_id, owner in list(self._streams.items()):
-                    if owner is connection:
-                        self._streams[stream_id] = successor
-                        successor.awaiting.add(stream_id)
-                        successor.leases += 1
-                        connection.leases -= 1
-                        moved.append(stream_id)
-        if successor is not candidate:
-            candidate.close()
-        if successor is None:  # the session closed or the connection failed meanwhile
-            connection.close()
-            return
-        successor.start(delay=self._reconnect_backoff)  # does nothing if it already started
-        if not connection.post(connection.hand_over, successor):
-            # The old loop ended first: its streams were failed there and never arrive.
-            with self._lock:
-                successor.awaiting.difference_update(moved)
-            successor.post(successor.check_idle)
+        self._row_owners[asset_class, family] = connection
 
     # --- closing -------------------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close every connection and wait a bounded time for its threads; idempotent.
+        """Take the session's streams off their connections, close the unused ones; idempotent.
 
-        Runs as a session closer: on the thread that closes the session, or on the reaper for
-        a session collected unclosed. Each connection's client is asked to close (which
-        interrupts a backoff wait at once) and its flush thread to stop; then each is joined for
-        at most `JOIN_TIMEOUT` seconds, with a WARNING for one that has not ended. Streams are not
-        failed: their tables go static.
+        Runs as a session closer: on the thread that closes the session, or on the reaper for a
+        session freed unclosed (which has no stream left). Under the group's lock, every lease
+        of the session is returned, and the session leaves every connection's users; a
+        connection that no other session leases is taken out of the registry. Then, outside
+        the lock, the session's streams stop being routed at once (the session has already
+        failed their tables) and their topics are released on the connections that stay; the
+        unused connections are closed (which interrupts a backoff wait at once) and each is
+        joined for at most `JOIN_TIMEOUT` seconds, with a WARNING for one that has not ended.
+        Last, the session leaves the group.
         """
+        group = self.group
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
-            connections = list(self._connections.values())
-            self._connections.clear()
-            self._streams.clear()
-        for connection in connections:
+            mine = [(s, cast("Connection", self._forget(s))) for s in sorted(self._mine)]
+            used = {*group.connections.values(), *(c for _, c in mine)}
+            closing = []
+            for connection in used:
+                if self not in connection.users:
+                    continue
+                del connection.users[self]
+                if not connection.leases:  # no other session leases it
+                    closing.append(connection)
+                    if group.connections.get(connection.url) is connection:
+                        del group.connections[connection.url]
+                    connection.retired = True
+            for stream_id, connection in mine:
+                connection.cap_pending.pop(stream_id, None)
+        for stream_id, connection in mine:
+            connection.flusher.routes.remove(stream_id)
+            if connection not in closing:
+                connection.post(connection.release_stream, stream_id)
+        for connection in closing:
             connection.close()
-        for connection in connections:
+        for connection in closing:
             if not connection.join(JOIN_TIMEOUT):
                 logger.warning(
                     "%s: the connection to %s has not ended %.0f s after close()",
@@ -1496,3 +1783,4 @@ class WsConnections:
                     connection.url,
                     JOIN_TIMEOUT,
                 )
+        group.detach(self)

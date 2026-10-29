@@ -714,8 +714,8 @@ class Socket:
         self.server.send(json.dumps([frame]))
         with self.cond:
             assert self.cond.wait_for(lambda: self.frames > before, WAIT)
-        with self.session._core.registry_lock:
-            connections = list(self.connections._connections.values())
+        with self.connections.group.lock:
+            connections = list(self.connections.group.connections.values())
         for connection in connections:
             connection.flusher.flush()
 

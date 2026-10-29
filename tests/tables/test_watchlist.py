@@ -81,9 +81,12 @@ def test_an_empty_table_reports_nothing(dh_exec_ctx: object) -> None:
     assert seen == []
 
 
-def test_a_failing_watch_is_logged(caplog: pytest.LogCaptureFixture) -> None:
-    _SymbolCounter(lambda *_: None).on_error(RuntimeError("listener broke"))
+def test_a_failing_watch_is_logged_and_handed_on(caplog: pytest.LogCaptureFixture) -> None:
+    _SymbolCounter(lambda *_: None, None).on_error(RuntimeError("listener broke"))
     assert "a symbol table's watch failed and stops following it: listener broke" in caplog.text
+    errors: list[Exception] = []
+    _SymbolCounter(lambda *_: None, errors.append).on_error(RuntimeError("again"))
+    assert [str(e) for e in errors] == ["again"]
 
 
 def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
@@ -99,6 +102,8 @@ def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
     watch_scope.release()  # the keeper still holds the view and the listener
     watchlist.add(new_table([string_col("Symbol", ["EUR/USD"])]))
     wait_for(lambda: len(seen) == 1)
+    watch.stop()  # no more reports; a second stop does nothing
+    watch.stop()
     keeper_scope.release()
 
 
@@ -123,7 +128,7 @@ class _Update:
 
 def test_the_counter_reports_set_changes_of_updates() -> None:
     seen: list[Change] = []
-    counter = _SymbolCounter(lambda added, removed: seen.append((added, removed)))
+    counter = _SymbolCounter(lambda added, removed: seen.append((added, removed)), None)
     updates = [
         _Update(added=["A", "A", "B"]),
         _Update(removed=["A"]),  # one of A's two rows remains

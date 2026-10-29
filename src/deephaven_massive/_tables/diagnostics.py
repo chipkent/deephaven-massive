@@ -9,7 +9,10 @@ Both are keyed Deephaven `input_table`s that the library writes and users read:
   table. Keyed by `StreamId`.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
-thread and released by `m.close()`. One daemon writer thread per session applies every row: the
+thread and released by `m.close()`. Users never get the tables themselves: `m.connections()` and
+`m.streams()` return a view of one, tracked like a live result (`SessionCore.diagnostics_view`),
+which keeps the session alive and current while it is held and keeps the table, with its final
+rows, after the scope is released. One daemon writer thread per session applies every row: the
 rest of the library hands it immutable row snapshots through a queue, so no caller, reaper,
 or flush thread ever waits on the update graph for bookkeeping, and nothing is written from a
 Deephaven listener callback. The writer applies whatever is queued in one batch per table,
@@ -47,7 +50,7 @@ from deephaven_massive._tables.liveness import QueueWorker, new_scope
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable
+    from collections.abc import Callable, Hashable
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
@@ -517,12 +520,19 @@ class Diagnostics:
 
     `release()` lets the writer apply the rows already queued, release the scope, and exit, and
     waits for it; `stop()` does the same without waiting and without taking any lock, for use
-    from a finalizer.
+    from a finalizer. A writer that dies on something it cannot carry on after calls `on_death`
+    first (the session fails its live tables there).
     """
 
     __slots__ = ("_connections", "_release_lock", "_released", "_scope", "_streams", "_writer")
 
-    def __init__(self, exec_ctx: ExecutionContext, name: str) -> None:
+    def __init__(
+        self,
+        exec_ctx: ExecutionContext,
+        name: str,
+        *,
+        on_death: Callable[[BaseException], None] | None = None,
+    ) -> None:
         """Create both input tables inside a new session-owned scope and start the writer.
 
         If creating a table or starting the writer fails, the scope (with any table already
@@ -531,6 +541,8 @@ class Diagnostics:
         Args:
             exec_ctx: The session's execution context, entered by the writer thread.
             name: The writer thread's name, for thread dumps.
+            on_death: Runs if the writer dies on something it cannot carry on after
+                (`QueueWorker`).
         """
         self._release_lock = threading.Lock()
         self._released = False
@@ -544,7 +556,7 @@ class Diagnostics:
                     col_defs(STREAMS), key_cols=list(STREAM_KEYS)
                 )
             self._writer: QueueWorker[_Item] = QueueWorker(
-                exec_ctx, name, handle=self._apply, on_exit=self._scope.release
+                exec_ctx, name, handle=self._apply, on_exit=self._scope.release, on_death=on_death
             )
         except BaseException:  # also KeyboardInterrupt: the scope must not leak
             self._scope.release()

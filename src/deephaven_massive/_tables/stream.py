@@ -11,11 +11,13 @@ are subscribed; this module owns everything that touches Deephaven for a stream:
 - `open_stream_tables`, which creates a stream's liveness scope and, inside it, the publisher,
   its blink table, and, for a reactive symbol table, the `SymbolWatch` that follows it. It runs
   on the caller thread, inside the session's execution context.
-- `StreamSink`, a stream as the flush thread sees it: the publisher, the symbols it receives
-  (`None` for `dm.ALL`), and its count of published rows.
+- `StreamSink`, a stream as the flush thread sees it: its session, the publisher, the symbols it
+  receives (`None` for `dm.ALL`), and its count of published rows.
 - `Flusher`, one per connection: a daemon thread that every `flush_interval` drains the
   connection's row buffers (one `queue.SimpleQueue` per channel, fed by the connection's loop
-  thread) and its control queue (failures and drift), and publishes.
+  thread) and its control queue (failures and drift), and publishes. A connection may serve
+  the streams of several sessions that share it, so the flusher holds no session: each sink
+  reports to its own.
 
 **Fan-out.** Per channel and flush, the rows (keyed by long-form column, symbols as the wire
 spells them) are converted once: one Arrow table built from the rows, raw symbols mapped to
@@ -27,21 +29,26 @@ becomes one static Deephaven table (`deephaven.arrow.to_table`); then each `dm.A
 where `filter` is a static one-column table cached per stream and rebuilt only when the stream's
 symbols change. So the Python work is O(rows) per channel and flush, independent of the number
 of streams, and the per-stream work is one Java filter and one `add`. Each flush ends with one
-`SessionCore.update_streams` call carrying every stream's published-row total.
+`SessionCore.update_streams` call per session, carrying the published-row total of each of its
+streams.
 
 **Failures.** The connection's loop thread never calls Java, so it hands every stream failure
 (a refused topic, a rejected row, a rejected key) to the flush thread's control queue; the
 flush thread fails the stream's table with `publish_failure` and records it with
 `SessionCore.fail_stream`, once per stream. Drift goes through the same queue: the flush thread
-logs it once per (dataset, transport, field) through the session's `DriftRegistry` and adds it
-to each receiving stream's `SchemaDrift` (`SessionCore.record_stream_drift`).
+logs it once per (dataset, transport, field) through each session's `DriftRegistry` and adds it
+to each receiving stream's `SchemaDrift` (`SessionCore.record_stream_drift`). A reactive
+stream's watchlist that fails queues the stream's failure on its session's reaper
+(`StreamSink.fail_later`), since the listener reports it on an update-graph thread.
 
-**Threads and locks.** The flush thread creates only static tables, enters the session's
-execution context through its own wrapper, and never holds `registry_lock` while it calls
+**Threads and locks.** The flush thread creates only static tables, enters the execution
+context of the session that created its connection through its own wrapper (sessions share a
+connection only when they share an update graph), and never holds `registry_lock` while it calls
 Deephaven. Its one lock, the flush lock, serializes flushes (the thread's own and any a test
 calls) and is never taken under another library lock; the routing table has its own leaf lock.
-The flusher holds the session core weakly, so a running flush thread never keeps a session
-alive.
+The flusher holds no session; a routed sink holds its own, which is alive anyway while its
+stream runs. A flush thread that dies on something it cannot carry on after fails every stream
+it routes before it ends.
 """
 
 from __future__ import annotations
@@ -49,7 +56,6 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, TypeVar, cast
 
@@ -74,6 +80,7 @@ from deephaven_massive._types import _All
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.stream.table_publisher import TablePublisher
     from deephaven.table import Table
 
@@ -340,23 +347,29 @@ class StreamSink:
     """One stream as its connection's flush thread publishes to it.
 
     Created by `open_stream_tables` on the caller thread and added to the connection's routing
-    table by the transport; removed when the stream's blink table has shut down. Two locks keep
-    it consistent whichever thread reaches it:
+    table by the transport; removed when the stream's blink table has shut down, or when its
+    session closes. It holds its session's core strongly: the sink belongs to a stream the
+    session's registry holds, which keeps the session alive anyway, and a flush thread shared by
+    several sessions needs to know which one each stream reports to. Two locks keep it
+    consistent whichever thread reaches it:
 
     - its leaf lock guards the symbol set, which the connection's loop replaces (`set_symbols`)
       when a reactive symbol table changes;
     - its publish lock serializes `publish` and `fail`, which call Deephaven. Usually only the
       flush thread takes it, but a stream can briefly be reached from two flush threads (when
       the server's verdict moves its connection), and is failed from the caller thread when
-      its connection failed while it was opening. The order is the flush lock (on a flush
+      its connection failed while it was opening, from the closing thread at `m.close()`, and
+      from the reaper when its watchlist failed. The order is the flush lock (on a flush
       thread), then the publish lock, then `registry_lock` (`SessionCore.fail_stream`, which
       `fail` calls); the publish lock is never taken under `registry_lock` or the update-graph
       lock.
 
-    A failed stream publishes nothing more, and is failed once.
+    A failed stream publishes nothing more, and is failed once, so a failure queued behind the
+    session's close never replaces the close.
 
     Attributes:
         stream_id: The stream's id.
+        core: The stream's session.
         plan: How the stream's dataset reads its channel.
         publisher: The stream's publisher.
     """
@@ -368,6 +381,7 @@ class StreamSink:
         "_publish_lock",
         "_symbols",
         "_version",
+        "core",
         "failed",
         "plan",
         "publisher",
@@ -379,6 +393,7 @@ class StreamSink:
         self,
         stream_id: int,
         *,
+        core: SessionCore,
         plan: ChannelPlan,
         publisher: TablePublisher,
         symbols: frozenset[str] | None,
@@ -387,12 +402,14 @@ class StreamSink:
 
         Args:
             stream_id: The stream's id.
+            core: The stream's session, which records its rows and its failure.
             plan: How the stream's dataset reads its channel.
             publisher: The stream's publisher.
             symbols: The canonical symbols the stream receives; None for `dm.ALL`, which
                 receives every row of the channel.
         """
         self.stream_id: Final = stream_id
+        self.core: Final = core
         self.plan: Final = plan
         self.publisher: Final = publisher
         self._lock = threading.Lock()
@@ -476,15 +493,15 @@ class StreamSink:
             self._filter_version = version
         return batch.where_in(cast("Table", self._filter), _SYMBOL)
 
-    def fail(self, core: SessionCore, error: MassiveError) -> bool:
+    def fail(self, error: MassiveError) -> bool:
         """Fail the stream's table and record the failure, once.
 
         The failure is recorded first (`SessionCore.fail_stream`) and the table failed after
         (`publish_failure`), so a verb that finds the table failed always finds the failure
-        recorded too, and names it. Logged at ERROR. Never call it on an update-graph thread.
+        recorded too, and names it. Logged at ERROR. Never call it on an update-graph thread
+        or under `registry_lock`; the thread needs an execution context.
 
         Args:
-            core: The session's core.
             error: The error the table fails with.
 
         Returns:
@@ -495,9 +512,29 @@ class StreamSink:
                 return False
             self.failed = True
             logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
-            core.fail_stream(self.stream_id, str(error))
+            self.core.fail_stream(self.stream_id, str(error))
             self.publisher.publish_failure(error)
             return True
+
+    def fail_later(self, error: Exception) -> None:
+        """Queue the stream's failure on its session's reaper, because its watchlist failed.
+
+        The watchlist listener reports its error on an update-graph thread, where failing a
+        table (a Deephaven call that takes the publish lock) is not allowed, so the failure is
+        only queued here; it never blocks.
+
+        Args:
+            error: What the watchlist's listener reported.
+        """
+        failure = MassiveError(
+            f"{self.plan.dataset} stream {self.stream_id}: its symbol table failed, so the "
+            f"stream can no longer follow it: {error}"
+        )
+
+        def fail() -> None:
+            self.fail(failure)
+
+        self.core.defer(fail)
 
 
 class _Routes:
@@ -621,15 +658,17 @@ class _Drift:
 class Flusher:
     """The flush thread of one connection: drains its row buffers and publishes to its streams.
 
-    Created by the connection with the session core; `start()` starts the daemon thread, which
-    flushes every `interval` seconds until `stop()`. `flush()` may also be called directly (the
-    tests do): flushes are serialized by the flush lock. The producers, the connection's loop
-    thread and the caller thread, only put plain data on queues (`rows`, `fail`, `drift`) or
-    change the routes, and never wait.
+    Created by the connection; `start()` starts the daemon thread, which flushes every
+    `interval` seconds until `stop()`. `flush()` may also be called directly (the tests do):
+    flushes are serialized by the flush lock. The producers, the connection's loop thread and
+    the caller thread, only put plain data on queues (`rows`, `fail`, `drift`) or change the
+    routes, and never wait.
 
-    The flusher holds the core weakly: when the session has been collected, a flush does
-    nothing. Each flush enters the session's execution context through a fresh wrapper. An
-    exception in a flush is logged at ERROR and the thread keeps flushing.
+    The flusher holds no session core: the sinks it routes carry their own, and it reports each
+    stream to that one. Each flush enters the execution context it was created with through a
+    fresh wrapper. An exception in a flush is logged at ERROR and the thread keeps flushing;
+    anything the thread cannot carry on after (a `KeyboardInterrupt` or `SystemExit`) first
+    fails every routed stream, so no table is left frozen without an error.
 
     Attributes:
         routes: The connection's streams by channel, and its row buffers.
@@ -637,7 +676,7 @@ class Flusher:
 
     __slots__ = (
         "_control",
-        "_core",
+        "_exec_ctx",
         "_final",
         "_flush_lock",
         "_interval",
@@ -647,15 +686,16 @@ class Flusher:
         "routes",
     )
 
-    def __init__(self, core: SessionCore, name: str, *, interval: float) -> None:
+    def __init__(self, exec_ctx: ExecutionContext, name: str, *, interval: float) -> None:
         """Create the flusher; nothing runs until `start()`.
 
         Args:
-            core: The session's core, held weakly.
+            exec_ctx: The execution context every flush enters: that of the session which
+                created the connection.
             name: The thread's name, for thread dumps.
             interval: Seconds between flushes (`MassiveConfig.flush_interval`).
         """
-        self._core = weakref.ref(core)
+        self._exec_ctx = exec_ctx
         self._interval = interval
         self.routes: Final = _Routes()
         self._control: queue.SimpleQueue[_Fail | _Drift] = queue.SimpleQueue()
@@ -729,11 +769,29 @@ class Flusher:
         self._control.put(_Drift(channel, drift))
 
     def _run(self) -> None:
-        """Flush every interval until `stop()`; a failing flush is logged and the next one runs."""
-        while not self._stop.wait(self._interval):
-            self._flush_logged()
-        if self._final.is_set():
-            self._flush_logged()
+        """Flush every interval until `stop()`; a failing flush is logged and the next one runs.
+
+        Anything else that escapes a flush ends the thread: it is logged at CRITICAL, every
+        routed stream is failed with a `MassiveError` naming the thread, and it is re-raised.
+        """
+        try:
+            while not self._stop.wait(self._interval):
+                self._flush_logged()
+            if self._final.is_set():
+                self._flush_logged()
+        except BaseException as death:
+            logger.critical("%s died; its streams fail", self._thread.name, exc_info=True)
+            error = MassiveError(
+                f"the flush thread {self._thread.name} died ({death!r}); this table no longer "
+                "updates"
+            )
+            with entered(self._exec_ctx):
+                for sink in self.routes.sinks():
+                    try:
+                        sink.fail(error)
+                    except Exception:
+                        logger.exception("%s: could not fail a stream", self._thread.name)
+            raise
 
     def _flush_logged(self) -> None:
         """Flush once, logging a failure at ERROR instead of raising it."""
@@ -746,15 +804,12 @@ class Flusher:
         """Apply the queued failures, publish every buffered row, then report the queued drift.
 
         Failures come first, so a stream that failed gets no row published after its failure
-        was reported. Runs under the flush lock, inside the session's execution context, with
+        was reported. Runs under the flush lock, inside the flusher's execution context, with
         no other library lock held: it calls Deephaven (`to_table`, `where_in`, `add`,
-        `publish_failure`) and then the core once (`update_streams`). Does nothing once the
-        session's core is gone.
+        `publish_failure`) and then each session with a stream that published once
+        (`update_streams`).
         """
-        core = self._core()
-        if core is None:
-            return
-        with self._flush_lock, entered(core.exec_ctx):
+        with self._flush_lock, entered(self._exec_ctx):
             controls = _drain(self._control)
             drained = {channel: _drain(buffer) for channel, buffer in self.routes.buffers()}
             # Routes after the rows: a stream routed meanwhile gets the rows that reached it.
@@ -763,31 +818,32 @@ class Flusher:
                 if isinstance(item, _Fail):
                     for sink in self.routes.sinks():
                         if sink.stream_id in item.stream_ids:
-                            sink.fail(core, item.error)
-            updates: dict[int, StreamUpdate] = {}
+                            sink.fail(item.error)
+            updates: dict[StreamSink, StreamUpdate] = {}
             for channel, frames in drained.items():
                 sinks = routes.get(channel, ())
                 if frames and sinks:
                     rows = [row for frame in frames for row in frame]
-                    self._publish(core, rows, sinks, updates=updates)
+                    self._publish(rows, sinks, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
-                    self._report_drift(core, routes.get(item.channel, ()), item.drift)
-            if updates:
-                core.update_streams(updates)
+                    self._report_drift(routes.get(item.channel, ()), item.drift)
+            by_core: dict[SessionCore, dict[int, StreamUpdate]] = {}
+            for sink, update in updates.items():
+                by_core.setdefault(sink.core, {})[sink.stream_id] = update
+            for core, changes in by_core.items():
+                core.update_streams(changes)
 
     def _publish(
         self,
-        core: SessionCore,
         rows: list[dict[str, object]],
         sinks: tuple[StreamSink, ...],
         *,
-        updates: dict[int, StreamUpdate],
+        updates: dict[StreamSink, StreamUpdate],
     ) -> None:
         """Convert a channel's rows once per dataset and add them to each of its streams.
 
         Args:
-            core: The session's core.
             rows: The channel's rows of this flush, in arrival order.
             sinks: The channel's streams.
             updates: Receives each stream's new published-row total.
@@ -798,28 +854,26 @@ class Flusher:
                 by_plan.setdefault(sink.plan, []).append(sink)
         for plan, readers in by_plan.items():
             try:
-                self._publish_plan(core, plan, rows, readers=readers, updates=updates)
+                self._publish_plan(plan, rows, readers=readers, updates=updates)
             except Exception as error:  # one dataset's failure never costs the others their rows
                 logger.exception("%s: could not publish a %s batch", plan.dataset, plan.channel)
                 failure = MassiveError(
                     f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
                 )
                 for sink in readers:
-                    sink.fail(core, failure)
+                    sink.fail(failure)
 
     def _publish_plan(
         self,
-        core: SessionCore,
         plan: ChannelPlan,
         rows: list[dict[str, object]],
         *,
         readers: list[StreamSink],
-        updates: dict[int, StreamUpdate],
+        updates: dict[StreamSink, StreamUpdate],
     ) -> None:
         """Convert a channel's rows for one dataset once and add them to its streams.
 
         Args:
-            core: The session's core.
             plan: The dataset's plan for the channel.
             rows: The channel's rows of this flush.
             readers: The dataset's streams on the channel.
@@ -830,27 +884,26 @@ class Flusher:
             error = MassiveError(failure.message)
             for sink in readers:
                 if sink.receives(failure.symbol):
-                    sink.fail(core, error)
+                    sink.fail(error)
         if not converted.batch.num_rows:
             return
         table = to_table(converted.batch)
         for sink in readers:
             if sink.publish(table, converted):
-                updates[sink.stream_id] = StreamUpdate(rows_published=sink.rows_published)
+                updates[sink] = StreamUpdate(rows_published=sink.rows_published)
 
     @staticmethod
-    def _report_drift(core: SessionCore, sinks: tuple[StreamSink, ...], drift: DriftReport) -> None:
-        """Log a channel's drift once per dataset and field, and add it to each stream's row.
+    def _report_drift(sinks: tuple[StreamSink, ...], drift: DriftReport) -> None:
+        """Log a channel's drift once per session, dataset, and field; add it to each stream's row.
 
         Args:
-            core: The session's core.
             sinks: The channel's streams.
             drift: The drift.
         """
-        for dataset in dict.fromkeys(sink.plan.dataset for sink in sinks):
+        for core, dataset in dict.fromkeys((sink.core, sink.plan.dataset) for sink in sinks):
             core.drift.report(dataset, Transport.WS, drift)
         for sink in sinks:
-            core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
+            sink.core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
 
 
 def _drain(source: queue.SimpleQueue[_T]) -> list[_T]:
@@ -875,9 +928,11 @@ class OpenedStream:
     """What `open_stream_tables` created for one stream.
 
     Attributes:
-        handle: The stream as the session holds it: its id, blink table, scope, host, and path.
+        handle: The stream as the session holds it: its id, blink table, scope, host, path,
+            and its fail and watch-stop hooks.
         sink: The stream as its connection's flush thread publishes to it.
-        watch: The watch of a reactive symbol table, not yet started; None otherwise.
+        watch: The watch of a reactive symbol table, not yet started; None otherwise. The
+            handle's `stop_watch` holds it, so the session's record keeps it reachable.
     """
 
     handle: StreamHandle
@@ -890,6 +945,7 @@ def open_stream_tables(
     schema: Schema,
     symbols: NormalizedSymbols,
     *,
+    core: SessionCore,
     stream_id: int,
     host: str,
     path: str,
@@ -902,15 +958,18 @@ def open_stream_tables(
     held. The publisher is named `massive.{dataset}#{stream_id}`. For a reactive symbol table,
     the `SymbolWatch` is created in the stream scope and tied to the blink table's liveness
     (`SymbolWatch.keep_alive_with`), so it follows the watchlist for as long as anything keeps
-    the stream alive; the caller starts it once the stream's topics can receive its changes.
-    If anything raises, even `KeyboardInterrupt`, the scope is released (which shuts the blink
-    table down and runs `on_shutdown`) and the exception propagates.
+    the stream alive, and the handle holds it until the session's record of the stream goes;
+    the caller starts it once the stream's topics can receive its changes. A watch that fails
+    queues the stream's failure (`StreamSink.fail_later`). If anything raises, even
+    `KeyboardInterrupt`, the scope is released (which shuts the blink table down and runs
+    `on_shutdown`) and the exception propagates.
 
     Args:
         plan: How the dataset reads the channel.
         schema: The dataset's merged schema, the blink table's columns.
         symbols: The stream's symbols: a sorted tuple of canonical symbols, `dm.ALL`, or a
             reactive table's `SymbolTable` box.
+        core: The stream's session, which its sink reports to.
         stream_id: The id the session minted for the stream.
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
@@ -929,18 +988,30 @@ def open_stream_tables(
                 on_shutdown_callback=on_shutdown,
             )
             watch = None
-            if isinstance(symbols, SymbolTable):
-                watch = SymbolWatch(plan.asset_class, symbols.table, on_symbols)
-                watch.keep_alive_with(blink)
-                received: frozenset[str] | None = frozenset()
-            elif isinstance(symbols, _All):
+            received: frozenset[str] | None
+            if isinstance(symbols, _All):
                 received = None
             else:
-                received = frozenset(symbols)
+                reactive = isinstance(symbols, SymbolTable)
+                received = frozenset() if reactive else frozenset(cast("tuple[str, ...]", symbols))
+            sink = StreamSink(
+                stream_id, core=core, plan=plan, publisher=publisher, symbols=received
+            )
+            if isinstance(symbols, SymbolTable):
+                watch = SymbolWatch(
+                    plan.asset_class, symbols.table, on_symbols, on_error=sink.fail_later
+                )
+                watch.keep_alive_with(blink)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak
         scope.release()
         raise
-    handle = StreamHandle(stream_id, blink, scope, host, path)
-    return OpenedStream(
-        handle, StreamSink(stream_id, plan=plan, publisher=publisher, symbols=received), watch
+    handle = StreamHandle(
+        stream_id,
+        blink,
+        scope,
+        host,
+        path,
+        sink.fail,
+        stop_watch=None if watch is None else watch.stop,
     )
+    return OpenedStream(handle, sink, watch)

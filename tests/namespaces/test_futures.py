@@ -905,8 +905,8 @@ def subscribed(server: FakeMassiveServer, topic: str) -> None:
 
 def flush(m: dm.MassiveSession) -> None:
     connections = cast("Any", m._core._ports)._streams
-    with m._core.registry_lock:
-        live = list(connections._connections.values())
+    with connections.group.lock:
+        live = list(connections.group.connections.values())
     for connection in live:
         connection.flusher.flush()
 

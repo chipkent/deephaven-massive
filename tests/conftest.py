@@ -19,6 +19,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import faulthandler
+import gc
 import gzip
 import importlib
 import os
@@ -319,6 +320,48 @@ def massive_session() -> Iterator[MassiveSession]:
     session: MassiveSession = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     yield session
     session.close()
+
+
+_LIBRARY_THREADS: Final = ("MassiveSession #", "massive-ws ", "massive-flush ", "massive-move ")
+"""The name prefixes of the library's threads: a session's reaper, diagnostics writer, and
+pollers, and a connection's client, flush, and verdict-move threads."""
+
+
+@pytest.fixture(autouse=True)
+def _no_session_outlives_its_test() -> Iterator[None]:
+    """Fail a test that leaves a session running or a library thread alive.
+
+    A session is in the live set exactly while it has a running stream or poll or a held
+    diagnostics view, so a test that ends with one has leaked a table, or the library has.
+    Autouse and defined first, so it runs after every other fixture's teardown (a closed
+    `massive_session` included). It collects garbage, then waits, event-driven and bounded, for
+    the library threads to end and the background work to land, and fails naming what is left.
+    """
+    yield
+    core = importlib.import_module("deephaven_massive._tables.core")
+    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    deadline = time.monotonic() + 30.0
+    pause = threading.Event()  # never set; only paces the bounded wait
+    while True:
+        gc.collect()
+        with core._live_lock:
+            live = sorted(session.label for session in core._live.values())
+        groups = len(ws._groups)
+        threads = [
+            t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
+        ]
+        if not live and not groups and not threads:
+            return
+        if time.monotonic() > deadline:
+            names = sorted(t.name for t in threads)
+            pytest.fail(
+                f"left running after the test: sessions {live}, {groups} connection groups, "
+                f"threads {names}"
+            )
+        for thread in threads:  # wait on the threads themselves, briefly each
+            thread.join(0.05)
+        if not threads:
+            pause.wait(0.05)
 
 
 @pytest.fixture(autouse=True)

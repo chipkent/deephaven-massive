@@ -294,7 +294,17 @@ def test_double_release_runs_one_shutdown(
     assert fake_streams.shutdown_calls == {1: 1}
 
 
-def test_close_releases_the_diagnostics_and_keeps_results_usable(
+def wait_for(condition: Callable[[], bool]) -> None:
+    # A bounded wait for background work (the reaper, an update-graph cycle) to land.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(int(TIMEOUT / 0.02)):
+        if condition():
+            return
+        pause.wait(0.02)
+    assert condition()
+
+
+def test_close_fails_results_and_keeps_diagnostics_views(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
     result = query(massive_session).append_only()
@@ -302,21 +312,21 @@ def test_close_releases_the_diagnostics_and_keeps_results_usable(
     massive_session.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         massive_session.streams()
-    with pytest.raises(DHError, match="LivenessStateException"):
-        streams.tail(1)
-    # Live tables went static but remain usable. (A formula operation such as where() would
-    # capture this frame's locals in the query scope and keep `result` alive, so use tail().)
-    user_scope = new_scope()
-    with user_scope.open():
-        tail = result.tail(1)
-    rows = tail.size
-    assert rows == 0
-    del tail
-    user_scope.release()
+    assert streams.snapshot().size == 1  # a view taken before the close keeps its rows
+    # The live table failed with the close, keeps its rows, and refuses new operations.
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert result.j_table.isFailed()
+    assert result.snapshot().size == 0
+    with pytest.raises(DHError, match="failed table"):
+        result.tail(1)
     # Garbage collection still releases results after close().
+    core = massive_session._core
     del result
     gc.collect()
-    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    wait_for(lambda: core.results.held() == 1)  # only the diagnostics view is left
+    del streams
+    gc.collect()
+    wait_for(lambda: core.results.held() == 0)
 
 
 def test_a_failed_build_drops_its_hold(
@@ -504,6 +514,35 @@ def test_queue_worker_logs_a_fatal_exit_before_dying(
         (logging.CRITICAL, "fatal-worker died; its queue is no longer handled")
     ]
     assert [args.exc_type for args in escaped] == [_Fatal]
+
+
+def test_queue_worker_hands_its_death_to_its_owner(
+    dh_exec_ctx: ExecutionContext,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    escaped: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", escaped.append)
+    deaths: list[BaseException] = []
+
+    def fatal(_batch: list[int]) -> None:
+        raise _Fatal
+
+    def broken(death: BaseException) -> None:
+        deaths.append(death)
+        raise RuntimeError("cannot handle it")
+
+    for name, on_death in (("told-worker", deaths.append), ("broken-worker", broken)):
+        with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.liveness"):
+            worker: QueueWorker[int] = QueueWorker(
+                dh_exec_ctx, name, handle=fatal, on_death=on_death
+            )
+            worker.put(1)
+            worker.thread.join(TIMEOUT)
+        assert not worker.thread.is_alive()
+    assert [type(death) for death in deaths] == [_Fatal, _Fatal]
+    assert "broken-worker: handling its death failed" in caplog.text
+    assert [args.exc_type for args in escaped] == [_Fatal, _Fatal]  # still re-raised
 
 
 def test_queue_worker_runs_on_exit_and_logs_batch_failures(

@@ -496,7 +496,7 @@ m.snapshots(symbols: Symbols, *, sort=None, order=None, limit=None, filters=None
 m.connections() -> Table      # live diagnostics: one row per connection and per resolved (class, family)
 m.streams() -> Table          # live diagnostics: one row per stream
 m.release(table: Table) -> None   # deterministic teardown of one result
-m.close() -> None             # closes every connection, stops every poller; live tables go static
+m.close() -> None             # stops every stream and poller now; every live table fails
 with MassiveSession() as m: ...   # __exit__ calls close(); for scripts whose results are static
 repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label names the session in logs and errors
 repr(m.stocks)  # "<MassiveSession #1 stocks>"; vendors "<MassiveSession #1 partners.benzinga>"
@@ -518,17 +518,35 @@ context from `make_user_exec_ctx(freeze_vars=[...])` holds a frozen `StandaloneQ
 instead, so construction under it raises `MassiveError` naming the requirement. The library
 never starts a JVM.
 
-A second session with the same key in one process logs a WARNING naming the first. Individual
-plans allow one WebSocket connection per cluster per account.
+Sessions in one process that use the same API key **share their WebSocket connections**
+([section 13.1](#131-invariants)). Individual plans allow one connection per cluster per
+account, so two sessions with connections of their own would knock each other off and both
+stall in `WAITING_SLOT`. Sessions share only when the settings that shape a connection are
+equal: the API key, `ws_hosts`, `ack_timeout`, `reconnect_backoff`, `max_reconnect_backoff`,
+and `flush_interval`. A connection carries one value of each, so a session whose settings
+differ never joins another session's connection, and the library never silently applies one
+session's settings to another session's streams. Such a session opens connections of its own,
+and its construction logs a WARNING naming the other session and the settings that differ,
+because on an individual plan the two then compete for the slot. A second session with equal
+settings logs nothing. Sharing is per process: a session in another process that uses the key
+still takes the slot, and each affected stream's `Error` then says so
+([section 17](#17-diagnostics)).
 
 After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, and `m.streams()`
 raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
-does garbage-collection release of results; building queries and reaching namespaces never fail;
-live results stop updating and keep their rows. A verb that passed the closed check just before
-`close()` ran also raises `MassiveError`: the stream registry is checked again under
-`registry_lock`, so a closed stream is never reused. The diagnostics tables are the exception: their
-scope is released, so a `connections()` or `streams()` table obtained before `close()` becomes
-unusable unless the caller holds it in a liveness scope of their own.
+does garbage-collection release of results; building queries and reaching namespaces never fail.
+Every live table of the session, and every table derived from one, **fails** with
+`MassiveError("MassiveSession #1 was closed; this table no longer updates")`, so a closed
+session never leaves a table that looks live but never changes. A failed table keeps its rows:
+`t.snapshot()`, `deephaven.pandas.to_pandas(t)`, and `deephaven.arrow.to_arrow(t)` still return
+them, and `t.snapshot()` is the way to keep working with the data after `close()`. A new
+operation derived from a failed table (`t.where(...)`, `t.update(...)`) raises Deephaven's
+"Can not listen to failed table". A verb that passed the closed check just before `close()` ran
+also raises `MassiveError`: the stream registry is checked again under `registry_lock`, and the
+verb checks once more after it has tracked its result, so it never returns a table whose
+failure would land a cycle later. A `connections()` or `streams()` table obtained before
+`close()` keeps working and shows the final rows, `CLOSED` included
+([section 17](#17-diagnostics)).
 
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
 listener), checked before anything else, so also on a closed session; `close()` likewise. The
@@ -536,17 +554,25 @@ closed check comes next, still before any argument is validated, so `q.ring(0)` 
 session raises `MassiveError`. Verbs create tables and take the registry lock; both are
 forbidden on the UG thread ([section 18](#18-concurrency-model)).
 
-A session that is garbage-collected without `close()` is cleaned up by a finalizer on its core
-(not run at interpreter exit). The finalizer takes no lock and makes no Deephaven call: it hands
-the registered closers (connections, pollers) to the reaper, which logs a WARNING ("MassiveSession
-#1 was garbage-collected without close(); closing its connections and pollers") and runs them,
-and stops the diagnostics writer. The reaper keeps running while results are still tracked (a
-result whose release path does not hold the core, such as a `poll()` table, can outlive its
-session) and stops once the last one has been collected and released. `close()` empties the closer list, so a closed
-session's closers never run twice. A closer must not refer to the core strongly, or the core
-could never be collected. Even so, an unclosed session's core is collected by the cyclic garbage
-collector, not promptly by reference counting: each result record's `on_released` callback (a
-`functools.partial` of the core's release method) refers back to the core.
+**How long a session lives.** The rule: a live table keeps alive everything it needs, and
+nothing else keeps anything alive. A session lives while the user holds it (`m`, a query, a
+namespace), and while it has a running stream, a running `poll()` table, or a diagnostics table
+someone holds ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). Only those hold
+the session strongly; nothing else in the library does, and no reference cycle runs through
+it, so it is freed by reference counting, even with `gc.disable()`. So
+`t = dm.MassiveSession().stocks.trades("AAPL").append_only().where("Price > 100")` keeps
+ticking for as long as `t` is in use, although the session object and the intermediate result
+were dropped at once.
+
+A session freed without `close()` is cleaned up by a finalizer on its core (not run at
+interpreter exit). By the rule above it has no live table left. The finalizer takes no lock
+and makes no Deephaven call: it hands the registered closers (connections, pollers) to the
+reaper, which logs a WARNING ("MassiveSession #1 was garbage-collected without close(); closing
+its connections and pollers") and runs them, and then queues the diagnostics writer's stop
+behind them, so the rows they write are applied. The reaper keeps running while results are
+still tracked and stops once the last one has been collected and released. `close()` empties
+the closer list, so a closed session's closers never run twice. A closer must not refer to the
+core strongly, or the core could never be freed.
 
 ### 6.1 How a live table is kept alive and released
 
@@ -608,8 +634,10 @@ return result
   released twice and never leaked, within the best-effort boundary below (see **Opening a stream**).
 - **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
   is collected. It holds the result registry and the record strongly, and through them the
-  reaper and the session core, for exactly as long as the result lives, so a result that
-  outlives every reference to its session and query is still released. The finalizer takes
+  reaper, for exactly as long as the result lives. The record's `on_released` callback holds
+  the session core only weakly, so no cycle runs from the core through its results back to
+  itself; while the record is unreleased its hold keeps the core in the live set (below), so
+  the callback always finds it. The finalizer takes
   no lock and makes no Java call: it only puts a job on the reaper queue (`queue.SimpleQueue`).
   Garbage collection can run it on any thread, including one that holds another library lock,
   so taking `registry_lock` there could deadlock. The reaper job then flips the record's
@@ -618,8 +646,18 @@ return result
 - **Reaper thread.** One daemon thread per session. It takes records off the queue, calls
   `scope.release()`, decrements the stream's held-result count, and at zero releases the stream
   scope. Each job runs inside `try`/`except Exception`; a failure is logged at ERROR and the
-  thread continues. The reaper does nothing else, except run the closers of a session collected
-  without `close()` ([section 6](#6-massivesession-and-lifecycle)).
+  thread continues. It also runs the closers of a session freed without `close()`
+  ([section 6](#6-massivesession-and-lifecycle)), the jobs the shutdown callback and a failed
+  watchlist queue (below), and the final release of a session that leaves the live set.
+- **The live set.** A module-level dictionary of session cores, under its own leaf lock (taken
+  only under `registry_lock`, never the other way round). A core is in it exactly while its
+  stream registry, its `poll()` registry, or its count of held diagnostics tables is non-empty;
+  every method that changes one of them updates the set in the same `registry_lock` section.
+  The set is what keeps a session with a running stream or poll alive after the user dropped
+  every reference to it: nothing else in the library holds a core strongly (connections,
+  flushers, pollers, and the clients hold it weakly). A core that leaves the set is handed to
+  the reaper as a job argument, so its last reference is dropped there, after the lock is
+  released, and not on an update-graph, gRPC, or liveness-cleanup thread.
 - **Opening a stream.** The session mints the stream id (a process-wide counter) and
   registers the stream's record, `OPENING`, with one hold for the opener, before it calls
   `StreamTransport.open_stream(..., stream_id=)`; so a failure or a shutdown the transport
@@ -651,12 +689,22 @@ return result
   showing its row count and a late failure, even for a released stream a derived table keeps
   alive. Its key maps to it only while it is opening or held, not failed, and not shut down,
   so no verb ever reuses a dead table.
-- **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread or a
-  gRPC thread if the UI held the last reference. It does exactly two things:
+- **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread, a
+  gRPC thread if the UI held the last reference, or Deephaven's liveness-cleanup thread when
+  the JVM collected the last derived table. It does exactly two things:
   `SessionCore.stream_shut_down(stream_id)`, which under `registry_lock` unmaps the stream's
   key and deletes its record if no hold is left, or marks it shut down so that the last hold
-  deletes it, and `loop.call_soon_threadsafe(...)` to the connection's loop so the topic
-  reference counts are decremented there. Never a send, never a Deephaven call.
+  deletes it (and queues the stop of a reactive stream's watchlist listener on the reaper), and
+  `loop.call_soon_threadsafe(...)` to the connection's loop so the topic reference counts are
+  decremented there. Never a send, never a Deephaven call, never the final release of a core.
+- **Reactive watchlists.** The stream's record holds its `SymbolWatch` strongly until the
+  stream shuts down. Deephaven keeps a table's listeners only weakly; the blink table that
+  manages the watch keeps it reachable today, but the stream's correctness does not rest on
+  how a liveness manager holds its referents, because a lost listener would silently stop the
+  stream following its watchlist. The listener's `on_error`, which runs on a UG
+  thread, queues the stream's failure on the reaper: a watchlist that fails fails its stream,
+  with a `MassiveError` naming the watchlist's error, instead of leaving a stream that no
+  longer follows its symbols.
 - **`m.release(table)`** delegates to `m._core.results.release(table)`, which looks up
   `id(table)` in the registry, verifies that the weakref resolves to
   that exact object (so a recycled id cannot match), flips the `released` flag under the lock,
@@ -665,27 +713,58 @@ return result
   releasing the result scope raised. It is
   deterministic: the table keeps ticking only while other holders (derived tables, open panels)
   exist.
-- **`m.close()`** closes every connection and poller and releases the session-owned diagnostics
-  scope. Publishers are not failed; live tables go static. Before the release, the streams
-  table flips every stream still in the registry to `State=CLOSED`, including a released
-  stream that a derived table or panel still keeps alive (a stream leaves the registry only
-  once its holds are released and its blink table has shut down), and one message is logged:
-  "session closed; N live tables are now static", at WARNING when N > 0 and at INFO when N
-  is 0.
+- **`m.close()`** stops everything the session runs and fails every live table:
+  1. On a UG thread it raises `ValueError`.
+  2. Under `registry_lock` it only collects: it sets the closed flag, takes the closers, marks
+     every stream and `poll()` record `CLOSED` with the error text below (a released stream
+     that a derived table or panel still keeps alive included), gathers the streams and polls
+     whose tables have not shut down, and wakes the verbs waiting for an open.
+  3. Outside every lock it fails each gathered table with
+     `MassiveError("MassiveSession #1 was closed; this table no longer updates")`: a stream
+     through its sink, under the stream's publish lock and once only, so a connection failure
+     queued meanwhile cannot replace `CLOSED`; a poll by stopping its poller first and then
+     failing its publisher. `SessionCore.fail_stream` never changes a `CLOSED` row's state.
+  4. It runs the closers: the session's own streams leave their connections, and every
+     connection no other session leases is closed and joined for a bounded time; the pollers
+     stop.
+  5. It writes the final rows, then releases the diagnostics scope.
+  6. It logs "session closed; N live tables failed", at WARNING when N > 0 and at INFO when N
+     is 0.
 
-Two documented behaviours that users will notice:
+  The failures shut the blink tables down on the next update cycle, whose callbacks then
+  release the records; a session whose failed tables are still held stays in the live set
+  until they are dropped, holding nothing but its registries. No `add` or `publish_failure`
+  ever runs under `registry_lock`: the publisher calls the shutdown callback inside its own
+  synchronized block, and the callback takes `registry_lock`.
+- **Library thread death.** If the reaper, the diagnostics writer, or a connection's flush
+  thread dies on an exception it does not handle (a `KeyboardInterrupt` or `SystemExit` raised
+  inside it), it fails the live tables it served before it ends, naming the thread: otherwise
+  those tables would be frozen without an error, and the session would stay in the live set
+  for ever. The WebSocket client thread reports any internal failure as `FAILED`, which fails
+  the connection's streams ([section 13.3](#133-connection-and-subscription-protocol)).
 
-1. `del t` in the console releases the result at the end of the same console command. The script
-   session reconciles its variable snapshot when the command finishes, so the wrapper is
-   collected then, not at the next command.
-2. A table open in a UI panel is exported and stays live until the panel closes, regardless of
+Three documented behaviours that users will notice:
+
+1. `del t` in the console releases a library result at the end of the same console command.
+   The script session reconciles its variable snapshot when the command finishes, so the
+   wrapper is collected then, not at the next command.
+2. A table derived in the console (`t = q.append_only().where(...)`) is held by the console's
+   query scope only weakly. After `del t` its stream keeps running until the JVM next collects
+   the derived table: usually seconds, but unbounded on an idle heap. Until then `m.streams()`
+   shows the stream `RELEASED` with `RowsPublished` still rising; then the connection closes
+   `IDLE_GRACE` after its last stream and the session cleans up. The library never calls
+   `System.gc()` to shorten the delay, because a collection pauses every query in the worker;
+   `m.close()` stops everything at once.
+3. A table open in a UI panel is exported and stays live until the panel closes, regardless of
    `del`.
 
-`poll()` results use the same record, scope, and reaper path. Releasing a `poll()` result stops
-its poller.
+`poll()` results use the same record, scope, and reaper path, and the same rule as streams: a
+poll keeps polling while its table is in use, by the result or anything derived from it.
+Releasing the result marks its row `RELEASED`; the poller stops when the poll's blink table
+shuts down, because nothing uses the table any more.
 
 There is no `stop()` on queries. Release is automatic (garbage collection) or explicit
-(`m.release`, `m.close`).
+(`m.release`); `m.close()` stops anything, whatever still holds it.
 
 ## 7. Query classes and verbs
 
@@ -1868,9 +1947,24 @@ and symbol, more where a session spans several pages, so its line says "at least
 
 ### 13.1 Invariants
 
-1. One connection per `wss://host/path` per session. A class may therefore have up to two
-   connections: one for the TICK family and one for the FMV family. (Business accounts have
-   three connection slots per cluster; individual plans have no FMV.)
+1. One connection per `wss://host/path` per API key and connection settings in a process,
+   shared by every session that has them ([section 6](#6-massivesession-and-lifecycle)). A
+   class may therefore have up to two connections: one for the TICK family and one for the
+   FMV family. (Business accounts have three connection slots per cluster; individual plans
+   have no FMV.) A shared connection is reference-counted by the streams of every session on
+   it: closing one session releases only that session's streams and never closes a connection
+   another session leases. Three consequences are by design:
+   - The options cap of [section 15](#15-options-contract-cap) is the connection's, so the
+     sessions on one `/options` connection share its 1,000 topics, and a static symbol list
+     can raise `ValueError` because of another session's streams; the message counts the
+     topics in use.
+   - A refusal or a fatal failure acts on the connection, not on a session: a refused topic
+     fails every stream that wants it, in every session, and a rejected key or a fatal
+     handshake error fails every stream on the connection, in every session.
+   - The server's real-time verdict moves the connection with every session's streams, and is
+     recorded in each such session's host decisions.
+   Diagnostics stay per session: each session's `m.connections()` shows the rows of the
+   connections its streams use, and its `m.streams()` only its own streams.
 2. The host of a (class, family) is decided before its first connection, from configuration or
    REST evidence, and cached. The single exception is the explicit-verdict rule of
    [section 13.3](#133-connection-and-subscription-protocol), which acts on a server statement,
@@ -2110,8 +2204,8 @@ Status(MAX_CONNECTIONS) after authentication
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
    -> client.subscribe(generation, [topic]): that topic alone, once
 still none after another ack_timeout, same check
-   -> topic state NO_ACK; ERROR logged; the first NO_ACK of this topic in the session calls
-      client.reconnect(), so the backoff rules apply; a later NO_ACK of the same topic only
+   -> topic state NO_ACK; ERROR logged; the first NO_ACK of this topic on the cluster's
+      connections calls client.reconnect(), so the backoff rules apply; a later NO_ACK of the same topic only
       logs at ERROR and counts in NoAckTopics. The topic stays desired; streams never fail
       on it
 watchdog fires but its topic left S or W, or its generation is no longer current
@@ -2140,7 +2234,18 @@ server that goes silent before `auth_success` is cut off by the handshake timeou
 thread and does not wait: it cancels the client's task on its loop, which interrupts a backoff
 wait, a handshake, or a receive at once, and the socket, if open, is closed with code 1000. The
 client thread is a daemon; `m.close()` joins it with a bounded timeout and logs a WARNING if it
-has not ended.
+has not ended. `m.close()` closes only the connections no other session leases; on a shared
+one it removes the session's streams (their routes at once, their topics through the loop) and
+leaves the connection to the other sessions. Removing the routes also breaks the cycle between
+Python and Java that a stream's publisher, its shutdown callback, and the connection's routes
+would otherwise form.
+
+**Waiting for a slot.** While a connection is `WAITING_SLOT`, every stream on it shows in its
+`Error`: "waiting for a WebSocket slot on <host><path>: another connection with this API key,
+perhaps from another process, holds it; the plan allows one connection per cluster". Sessions
+in one process share connections, so the other holder is another process, or a session whose
+connection settings differ. The text is cleared, and an options-cap warning shown again, once
+the connection authenticates.
 
 **Explicit-verdict rule.** When a `Status(REFUSED)` with no topic arrives on a `socket.` TICK
 connection with `realtime_verdict` set (its message contains "real-time", case-insensitive; the exact text is
@@ -2316,7 +2421,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   of canonical symbols, `ALL`, or `id(table)` for a reactive table. A second verb on the same
   query, or an equal query, reuses the stream: `m.stocks.quotes(s).last_by()` twice costs one
   publisher and two derived tables. A futures `venue` is not part of the key.
-- **Reactive symbol tables** are held strongly by the stream and managed in the stream scope.
+- **Reactive symbol tables** are held strongly by the stream and managed in the stream scope;
+  the stream's record also holds the watchlist listener strongly until the stream shuts down,
+  and a failed watchlist fails its stream ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)).
   Two Python wrappers of one Java table have different ids and do not share a stream.
 - **Library threads never create refreshing tables outside an explicit scope.** Refreshing
   tables are created only on the caller thread inside a result scope or a stream scope, and in
@@ -2393,8 +2500,10 @@ aggregate is refused, and the distinct rows are what it would keep); `REPLACE`
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
   every key ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a
   churning key set (an options chain, the day's movers) grows with the keys it has held. The
-  `poll()` docstring says so. The poller holds the session core only weakly, so a `poll()` table
-  never keeps an unclosed session alive.
+  `poll()` docstring says so. The poller holds the session core only weakly; the poll's record
+  in the session's registry keeps the session alive while the poll runs. The poller runs until
+  the poll's blink table shuts down (nothing uses the table any more), it fails, or the session
+  closes, which fails the table.
 
 ## 15. Options contract cap
 
@@ -2527,7 +2636,10 @@ whatever that request returned.
 ## 17. Diagnostics
 
 Both tables are keyed `input_table`s. They live in one session-owned `LivenessScope` that
-`m.close()` releases. They are written by one diagnostics writer thread per session, which
+`m.close()` releases. `m.connections()` and `m.streams()` each return a new view of one of
+them, built in its own result scope and tracked like any live result: while the view is held it
+keeps the session alive and current, and after `close()` it keeps showing the final rows. They
+are written by one diagnostics writer thread per session, which
 applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
 the update graph for diagnostics, and never write from UG callbacks. Each time it wakes, the
 writer takes everything queued, keeps the latest row per key, and applies it with one `add` per
@@ -2556,9 +2668,8 @@ every change until the stream leaves the registry (its holds released and its bl
 down), so a released stream still kept alive by a derived table keeps reporting
 `RowsPublished` and a late failure; its last row (`RELEASED`, or `FAILED` if the stream failed)
 stays in the table while the session is open. At `m.close()` every stream
-still in the registry is written `CLOSED` and then
-the diagnostics scope is released, so those `CLOSED` rows are readable only through a table the
-caller kept alive in a liveness scope of their own.
+still in the registry is written `CLOSED`, with the close's error text, and then
+the diagnostics scope is released; a view obtained before the close keeps showing those rows.
 
 | Column | Meaning |
 |---|---|
@@ -2577,7 +2688,12 @@ caller kept alive in a liveness scope of their own.
 
 `RELEASED` means "no library-held results; still publishing until the blink table dies"
 ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). `FAILED` can follow `RUNNING`
-or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released.
+or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released. `CLOSED`
+is final: no later failure replaces it.
+
+`Error` also carries warnings that do not fail the stream: the options cap's deferral
+([section 15](#15-options-contract-cap)) and the wait for a WebSocket slot
+([section 13.3](#133-connection-and-subscription-protocol)).
 
 `SchemaDrift` is separate from `Error` and `LastError`, so drift never overwrites a failure. The
 session's `DriftRegistry` collects it ([section 19.5](#195-runtime-drift)). Static verbs
@@ -2604,15 +2720,15 @@ without the GIL.
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
+| reaper, one per session | library | `scope.release()`; stream held-result counts; the closers of a session freed unclosed; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
-| UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
-| Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
+| UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a listener error queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
+| Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.poll_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking; the final release of a core |
 
 ### 18.2 Shared state and ownership
 
-- `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry: streams
-  by key, results by id, connections by URL, topic reference counts. It is a
+- `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry of a
+  session: streams by key, results by id, polls, diagnostics holds. It is a
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
@@ -2621,11 +2737,21 @@ without the GIL.
   - each connection's **flush lock** serializes its flushes (the flush thread's, and any a test
     calls); a flush calls Deephaven under it;
   - each stream's **publish lock** serializes `publisher.add` and `publish_failure` for the
-    stream, which two flush threads can briefly share when a connection moves, and the caller
-    thread when a stream's connection failed while it opened. Failing a stream takes
+    stream, which two flush threads can briefly share when a connection moves, the caller
+    thread when a stream's connection failed while it opened, the closing thread at
+    `m.close()`, and the reaper when a stream's watchlist failed. Failing a stream takes
     `registry_lock` under it (`SessionCore.fail_stream`).
+- The WebSocket connections shared by the sessions of one API key and settings have their own
+  lock (a `threading.RLock`, one per group of sessions), which guards the connections by URL,
+  the connection of each stream, each connection's leases and sessions, its failure, and its
+  options-cap bookkeeping. It is a leaf lock like `registry_lock`, and the two are never held
+  together.
 - The other locks are leaf locks too, each guarding one thing and making no Deephaven,
   network, or blocking call while held:
+  - the live set of session cores ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)),
+    taken only under `registry_lock`;
+  - the process's registry of shared connection groups, taken to find or create a group when
+    a session opens its first stream and to drop it when its last session leaves;
   - the REST transport's host-decision cache, which holds one future per (class, family);
     callers wait on a future outside every lock (§ 13.2);
   - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
@@ -2652,8 +2778,9 @@ without the GIL.
 - Row buffers are one `queue.SimpleQueue` per (connection, channel). The WS thread is the only
   producer; the flush thread is the only consumer.
 - The reaper queue is a `queue.SimpleQueue`. The producers are the result finalizers,
-  `m.release`, and the collection finalizer of an unclosed session (`_collect_session`);
-  `m.close` runs its closers on the calling thread and queues nothing.
+  `m.release`, the collection finalizer of an unclosed session (`_collect_session`), the
+  shutdown callbacks (a watchlist listener's stop), a failed watchlist listener, and the live
+  set (a core's final release); `m.close` runs its closers on the calling thread.
 - No code relies on the atomicity of `dict`, `set`, or `list` operations. Every shared container
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
@@ -2681,7 +2808,9 @@ while holding `registry_lock` or the UG lock, so the order has no cycle.
 
 `PYTHON_GIL=0` jobs run the full suite, including the Deephaven integration tests (the embedded
 JVM starts in `pytest_configure`). Stress tests exercise concurrent subscribe and unsubscribe
-from 16 threads against a fake server, concurrent `release()` and verb calls, and 16 threads
+from 16 threads against a fake server, concurrent `release()` and verb calls, 16 threads
+opening and releasing results of two sessions on one shared connection while one of them
+closes, and 16 threads
 paging through one `RestClient` against the fake REST server (including a 429 with
 `Retry-After` and a reset in the middle of paging). The only free-threaded target is 3.14t,
 because pyarrow, numpy, and pandas no longer publish cp313t wheels. Wheel availability on 3.14t:
@@ -4302,6 +4431,23 @@ document already reflects them.
     listed the stocks, forex, crypto, and indices unified-snapshot pages). A dataset of one
     asset class links only that class's page of a shared source; the footer keeps the fetch
     date ([section 7.4](#74-column-descriptions)).
+
+56. **Live tables keep their session running, and `close()` fails them** (2026-10-28). A live
+    table keeps alive everything it needs (its stream or poller, the connection, and the
+    session), and nothing else keeps anything alive, so an inline session's derived table keeps
+    ticking and an unused session is freed at once. `m.close()` fails every live table and
+    everything derived from it with "MassiveSession #1 was closed; this table no longer
+    updates", instead of leaving tables that look live but never change; a failed table keeps
+    its rows for `snapshot()`, `to_pandas`, and `to_arrow`. Sessions with one API key and equal
+    connection settings share their WebSocket connections, reference-counted, so a console
+    session and a long-running job no longer knock each other off the one slot an individual
+    plan allows; sessions whose settings differ never share and are warned about, because a
+    connection can carry only one value of each setting. A stream waiting for its slot says so
+    in its `Error`. The library never calls `System.gc()`: a console-derived table stops after
+    the JVM's next collection, and `m.close()` stops everything at once
+    ([section 6](#6-massivesession-and-lifecycle),
+    [section 6.1](#61-how-a-live-table-is-kept-alive-and-released),
+    [section 13.1](#131-invariants)).
 
 ## 23. Open verification items
 

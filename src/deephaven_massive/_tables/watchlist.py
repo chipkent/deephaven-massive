@@ -85,16 +85,20 @@ class SymbolWatch:
     both empty. Rows whose symbol is not valid for the class (null in the view) are ignored. The
     callback runs on the replaying caller thread or an update-graph thread, with the
     update-graph lock held: it must not block, wait on a library thread, or make a table
-    operation, and an exception it raises is logged at ERROR by the listener's error callback.
+    operation. An exception it raises, or a failure of the watched table itself, ends the
+    watch: it is logged at ERROR and handed to `on_error`, which runs on the update-graph
+    thread under the same constraints (the transport queues the stream's failure from it).
 
     `keep_alive_with(table)` ties the view and the listener to another table's liveness, so
-    they live exactly as long as that table: the transport passes the stream's blink table,
-    so a stream that a derived table keeps alive keeps following its watchlist after the
-    library has released its own results.
+    they are not destroyed while that table lives: the transport passes the stream's blink
+    table, so a stream that a derived table keeps alive keeps following its watchlist after the
+    library has released its own results. Deephaven holds a table's listeners only weakly, so
+    the owner also holds the watch itself (the stream's record does) until it calls `stop()`,
+    rather than resting the stream's correctness on how the keeper manages its referents.
 
     Thread-safety: the symbol counts are touched only by the listener, whose calls Deephaven
     serializes, so they need no lock; `start` and `keep_alive_with` run once, on the caller
-    thread.
+    thread, and `stop` once, on any thread with an execution context.
 
     Example:
         ::
@@ -108,6 +112,7 @@ class SymbolWatch:
             watchlist = input_table({"Symbol": dht.string})
             watch = SymbolWatch(AssetClass.CRYPTO, watchlist, lambda added, removed: None)
             watch.start()  # reports the current rows, then every change
+            watch.stop()  # no more reports
     """
 
     __slots__ = ("_handle", "_view")
@@ -117,6 +122,8 @@ class SymbolWatch:
         asset_class: AssetClass | None,
         table: Table,
         on_change: Callable[[frozenset[str], frozenset[str]], None],
+        *,
+        on_error: Callable[[Exception], None] | None = None,
     ) -> None:
         """Create the canonical view and the listener, without starting it.
 
@@ -128,12 +135,16 @@ class SymbolWatch:
                 symbol's prefix.
             table: The user's refreshing table with a `Symbol` column.
             on_change: Receives each change of the set of symbols; see the class documentation.
+            on_error: Receives the error that ended the watch, on the update-graph thread that
+                reported it; None to only log it.
         """
         # Without its null rows (symbols not valid for the class): `TableUpdate` hands a String
         # column over as NumPy text, in which a null reads as the text "None".
         self._view = canonical_view(asset_class, table).where(f"!isNull({_SYMBOL})")
         self._handle = TableListenerHandle(
-            self._view, _SymbolCounter(on_change), description="deephaven_massive symbol watch"
+            self._view,
+            _SymbolCounter(on_change, on_error),
+            description="deephaven_massive symbol watch",
         )
 
     def start(self) -> None:
@@ -158,6 +169,15 @@ class SymbolWatch:
         table.j_table.manage(self._handle.j_object)
         table.j_table.manage(self._view.j_table)
 
+    def stop(self) -> None:
+        """Stop reporting changes: the listener leaves the view. Idempotent.
+
+        A Deephaven call: run it on a thread with the session's execution context, outside
+        every library lock and never in a listener (the stream's shutdown queues it on the
+        reaper).
+        """
+        self._handle.stop()
+
 
 class _SymbolCounter(TableListener):
     """The listener of a `SymbolWatch`: counts the rows of each symbol and reports set changes.
@@ -166,14 +186,20 @@ class _SymbolCounter(TableListener):
     is delivered), so its counts need no lock.
     """
 
-    def __init__(self, on_change: Callable[[frozenset[str], frozenset[str]], None]) -> None:
+    def __init__(
+        self,
+        on_change: Callable[[frozenset[str], frozenset[str]], None],
+        on_error: Callable[[Exception], None] | None,
+    ) -> None:
         """Start with no symbol counted.
 
         Args:
             on_change: Receives each change of the set of symbols.
+            on_error: Receives the error that ended the watch; None to only log it.
         """
         self._counts: Counter[str] = Counter()
         self._on_change = on_change
+        self._on_error = on_error
 
     @override
     def on_update(self, update: TableUpdate, is_replay: object) -> None:
@@ -200,12 +226,16 @@ class _SymbolCounter(TableListener):
 
     @override
     def on_error(self, e: Exception) -> None:
-        """Log a failure of the listener at ERROR; the watch stops receiving updates.
+        """Log a failure of the listener at ERROR and hand it on; the watch stops receiving updates.
+
+        Runs on an update-graph thread: the owner's `on_error` must only hand the error on.
 
         Args:
             e: What Deephaven reported.
         """
         logger.error("a symbol table's watch failed and stops following it: %s", e)
+        if self._on_error is not None:
+            self._on_error(e)
 
     def _count(self, columns: Mapping[str, Iterable[object]], step: int) -> None:
         """Add `step` to the count of each valid symbol, forgetting counts that reach zero.

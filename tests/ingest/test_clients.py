@@ -12,7 +12,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import ChannelFamily, Recency
-from deephaven_massive._ingest import flatfiles, rest, ws
+from deephaven_massive._ingest import clients, flatfiles, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.core import SessionCore
 from tests._fakes.s3 import FakeS3
@@ -206,6 +206,34 @@ def test_racing_first_rest_calls_keep_one_client(
     assert transport._state.client is built[1]
     with pytest.raises(_massive.WireError, match="closed"):
         built[0].get(_massive.source(_massive.Transport.REST, "/v3/snapshot"), {}, {})
+
+
+def test_racing_first_stream_calls_keep_one_set_of_connections(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The connections are built outside the lock; a call that loses the race leaves its group.
+    built: list[ws.WsConnections] = []
+    real = ws.WsConnections
+
+    def factory(
+        core: SessionCore,
+        *,
+        resolve_host: Callable[..., HostDecision],
+        record_verdict: Callable[..., None],
+    ) -> ws.WsConnections:
+        connections = real(core, resolve_host=resolve_host, record_verdict=record_verdict)
+        built.append(connections)
+        if len(built) == 1:  # the other call installs its connections first
+            session._core.stream_transport()
+        return connections
+
+    monkeypatch.setattr(clients, "WsConnections", factory)
+    transport = session._core.stream_transport()
+    assert isinstance(transport, ws.WsTransport)
+    assert len(built) == 2
+    assert transport._connections is built[1]
+    assert built[0]._closed  # the loser closed at once
+    assert built[0] not in built[0].group.sessions
 
 
 def test_the_rest_state_does_not_keep_the_core_alive(fake_s3: FakeS3) -> None:

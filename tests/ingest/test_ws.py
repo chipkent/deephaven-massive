@@ -11,16 +11,19 @@ the flush thread itself.
 from __future__ import annotations
 
 import gc
+import importlib
 import json
 import logging
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
+from deephaven.stream.table_publisher import table_publisher
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -31,7 +34,7 @@ from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
-from deephaven_massive._tables.diagnostics import StreamUpdate
+from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -50,7 +53,9 @@ if TYPE_CHECKING:
 RowsWhen: TypeAlias = (
     "Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]"
 )
+ToPylist: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 TIMEOUT = 15.0
+_JAVA_SYSTEM = cast("Any", importlib.import_module("jpy")).get_type("java.lang.System")
 W = Transport.WS
 
 
@@ -181,13 +186,10 @@ class Harness:
         self.statuses: list[Status] = []
         self.states: list[WsState] = []
         self.opens = 0
-        self.session = dm.MassiveSession(
-            dm.MassiveConfig(
-                api_key="test-key",
-                flush_interval=flush_interval,
-                **cast("dict[str, Any]", config),
-            )
+        self.config = dm.MassiveConfig(
+            api_key="test-key", flush_interval=flush_interval, **cast("dict[str, Any]", config)
         )
+        self.session = dm.MassiveSession(self.config)
         clients: Any = self.session._core._ports
         self.connections = ws.WsConnections(
             self.session._core,
@@ -263,14 +265,31 @@ class Harness:
         with self.cond:
             assert self.cond.wait_for(lambda: predicate(self), TIMEOUT)
 
-    def query(self, spec: DatasetSpec, symbols: object) -> StreamQuery:
-        q = build_query(self.session._core, spec, symbols=cast("list[str]", symbols))
+    def join(self) -> dm.MassiveSession:
+        # A second session with the same key and settings, sharing this harness's connections.
+        session = dm.MassiveSession(self.config)
+        connections = ws.WsConnections(
+            session._core,
+            resolve_host=self.resolve,
+            record_verdict=self.record_verdict,
+            client_factory=self.factory,
+        )
+        assert connections.group is self.connections.group
+        cast("Any", session._core._ports)._streams = connections
+        session._core.on_close(connections.close)
+        return session
+
+    def query(
+        self, spec: DatasetSpec, symbols: object, session: dm.MassiveSession | None = None
+    ) -> StreamQuery:
+        core = (session or self.session)._core
+        q = build_query(core, spec, symbols=cast("list[str]", symbols))
         assert isinstance(q, StreamQuery)
         return q
 
     def connection(self, url: str = "wss://socket.test/stocks") -> ws.Connection:
-        with self.session._core.registry_lock:
-            return self.connections._connections[url]
+        with self.connections.group.lock:
+            return self.connections.group.connections[url]
 
     def send(self, *items: dict[str, object]) -> None:
         before = self.frames
@@ -278,8 +297,8 @@ class Harness:
         self.wait(lambda h: h.frames > before)
 
     def flush(self) -> None:
-        with self.session._core.registry_lock:
-            connections = list(self.connections._connections.values())
+        with self.connections.group.lock:
+            connections = list(self.connections.group.connections.values())
         for connection in connections:
             connection.flusher.flush()
 
@@ -602,9 +621,9 @@ def test_a_rejected_key_fails_every_stream(
     fake_ws_server.auth_replies.append("auth_failed")  # for the reconnect
     fake_ws_server.close(1011)
     harness.wait(lambda h: WsState.FAILED in h.states)
-    with harness.session._core.registry_lock:
+    with harness.connections.group.lock:
         assert failed.retired
-        assert harness.connections._connections == {}  # retired: the next stream opens anew
+        assert harness.connections.group.connections == {}  # retired: the next stream opens anew
     assert failed.flusher.join(TIMEOUT)  # its last flush applied the failures, unasked
     [row] = connections_of(harness, dh_to_pylist)
     assert row["State"] == "FAILED"
@@ -678,11 +697,13 @@ def test_an_opening_stream_cancels_the_idle_close(harness: Harness) -> None:
     harness.subscribed("T.AAPL")
     harness.session.release(result)
     harness.unsubscribed("T.AAPL")
-    with harness.session._core.registry_lock:
+    with harness.connections.group.lock:
         connection.leases += 1  # a stream is opening
-    retired = harness.on_loop(connection, lambda: harness.connections.retire(connection, idle=True))
+    retired = harness.on_loop(
+        connection, lambda: harness.connections.group.retire(connection, idle=True)
+    )
     assert retired is False
-    with harness.session._core.registry_lock:
+    with harness.connections.group.lock:
         connection.leases -= 1
 
 
@@ -811,7 +832,7 @@ def test_the_real_time_verdict_moves_the_connection_once(
 ) -> None:
     harness = Harness(fake_ws_server, decide=unknown_futures)
     try:
-        harness.connections._reconnect_backoff = 0.01
+        harness.connections.group.reconnect_backoff = 0.01
         fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         harness.wait(lambda h: h.opens == 2)
@@ -879,7 +900,7 @@ def test_a_failed_open_returns_its_lease(harness: Harness, monkeypatch: pytest.M
     with pytest.raises(RuntimeError, match="no tables"):
         harness.query(TRADES, ["AAPL"]).blink()
     assert harness.connection().leases == 0
-    assert harness.connections._streams == {}
+    assert harness.connections.group.streams == {}
 
 
 def test_a_watch_that_cannot_start_releases_the_stream(
@@ -912,8 +933,8 @@ def test_a_lost_race_closes_the_spare_connection(
     with ThreadPoolExecutor(2) as pool:
         results = list(pool.map(lambda s: harness.query(TRADES, [s]).blink(), ["AAPL", "MSFT"]))
     assert len(built) == 2
-    assert len(harness.connections._connections) == 1
-    spare = next(c for c in built if c not in harness.connections._connections.values())
+    assert len(harness.connections.group.connections) == 1
+    spare = next(c for c in built if c not in harness.connections.group.connections.values())
     assert spare.join(TIMEOUT)
     for result in results:
         harness.session.release(result)
@@ -966,13 +987,12 @@ def test_the_flush_thread_publishes_by_itself(
 
 def spare_connection(harness: Harness, host: str) -> ws.Connection:
     return ws.Connection(
-        harness.connections,
-        harness.session._core,
+        harness.connections.group,
+        exec_ctx=harness.session._core.exec_ctx,
         url=f"wss://{host}/stocks",
         asset_class=AssetClass.STOCKS,
         family=ChannelFamily.TICK,
         decision=REALTIME,
-        client_factory=harness.factory,
     )
 
 
@@ -997,8 +1017,8 @@ def test_changes_for_a_moved_stream_follow_it(harness: Harness) -> None:
     old = harness.connection()
     successor = spare_connection(harness, "next.test")
     successor.start()
-    with harness.session._core.registry_lock:
-        harness.connections._streams[1] = successor
+    with harness.connections.group.lock:
+        harness.connections.group.streams[1] = successor
         successor.awaiting.add(1)
     harness.on_loop(old, lambda: old.hand_over(successor))
     assert old.join(TIMEOUT)
@@ -1018,8 +1038,8 @@ def test_a_release_that_overtakes_the_adoption_waits_for_it(harness: Harness) ->
     old = harness.connection()
     successor = spare_connection(harness, "next.test")
     successor.start()
-    with harness.session._core.registry_lock:
-        harness.connections._streams[1] = successor
+    with harness.connections.group.lock:
+        harness.connections.group.streams[1] = successor
         successor.awaiting.add(1)
     successor.post(successor.release_stream, 1)
     successor.post(successor.change_symbols, 2, frozenset(), frozenset())  # not awaited: dropped
@@ -1040,7 +1060,7 @@ def test_a_hand_over_to_a_failed_successor_fails_the_streams(
     harness.subscribed("T.AAPL")
     old = harness.connection()
     successor = spare_connection(harness, "next.test")
-    with harness.session._core.registry_lock:
+    with harness.connections.group.lock:
         successor.failure = dm.MassiveError("rejected the API key")
     harness.on_loop(old, lambda: old.hand_over(successor))
     assert old.join(TIMEOUT)  # its last flush failed the stream
@@ -1064,7 +1084,7 @@ def test_stress_concurrent_verbs_and_releases(harness: Harness) -> None:
     with ThreadPoolExecutor(16) as pool:
         list(pool.map(churn, range(16)))
     core = harness.session._core
-    wait_for(lambda: not harness.connections._streams)
+    wait_for(lambda: not harness.connections.group.streams)
     connection = harness.connection()
     assert harness.on_loop(connection, lambda: connection.subscriptions.wanted) is False
     assert connection.leases == 0
@@ -1121,13 +1141,12 @@ def test_last_message_rows_are_throttled(harness: Harness, monkeypatch: pytest.M
 
 def test_an_index_value_refusal_names_the_business_host(harness: Harness) -> None:
     connection = ws.Connection(
-        harness.connections,
-        harness.session._core,
+        harness.connections.group,
+        exec_ctx=harness.session._core.exec_ctx,
         url="wss://socket.test/indices",
         asset_class=AssetClass.INDICES,
         family=ChannelFamily.TICK,
         decision=REALTIME,
-        client_factory=harness.factory,
     )
     connection._refused(("V.I:SPX",), "not authorized")
     assert connection._last_error is not None
@@ -1137,24 +1156,26 @@ def test_an_index_value_refusal_names_the_business_host(harness: Harness) -> Non
     assert connection.join(TIMEOUT)
 
 
-def test_a_connection_whose_session_is_gone_writes_nothing(
+def test_a_connection_skips_a_session_that_is_gone(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A freed session stays one of the connection's users until its closer runs on the reaper;
+    # meanwhile the connection writes it no row.
     result = harness.query(OPTIONS, ["O:SPY251219C00600000"]).blink()
     harness.subscribed("T.O:SPY251219C00600000")
     connection = harness.connection("wss://socket.test/options")
-    monkeypatch.setattr(connection, "_core", lambda: None)
     monkeypatch.setattr(harness.connections, "_core", lambda: None)
+    written: list[object] = []
+    monkeypatch.setattr(Diagnostics, "write", lambda _, row: written.append(row))
     harness.on_loop(connection, connection._write_row)
-    harness.on_loop(connection, connection._show_deferred)
     drift = _massive.DriftReport(extra=frozenset({"zz"}))
     harness.on_loop(connection, lambda: connection._record_drift("T", drift))
-    harness.on_loop(connection, lambda: connection._update_streams({1: StreamUpdate(deferred=1)}))
-    decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-    harness.connections._move(connection, decision)  # the session is gone: nothing moves
-    harness.connections._shut_down(1)
-    assert harness.on_loop(connection, lambda: harness.connections.retire(connection, idle=False))
-    assert harness.connections.reroute(connection, "real-time") is False
+    assert written == []
+    monkeypatch.undo()
+    assert harness.on_loop(
+        connection, lambda: harness.connections.group.retire(connection, idle=False)
+    )
+    assert harness.connections.group.reroute(connection, "real-time") is False  # retired
     connection.close()  # retired: the session's close no longer reaches it
     assert connection.join(TIMEOUT)
     del result
@@ -1164,7 +1185,7 @@ def test_retiring_a_replaced_connection_keeps_its_replacement(harness: Harness) 
     result = harness.query(TRADES, ["AAPL"]).blink()
     connection = harness.connection()
     spare = spare_connection(harness, "spare.test")
-    assert harness.connections.retire(spare, idle=False)
+    assert harness.connections.group.retire(spare, idle=False)
     assert harness.connection() is connection
     spare.close()
     assert spare.join(TIMEOUT)
@@ -1174,18 +1195,20 @@ def test_retiring_a_replaced_connection_keeps_its_replacement(harness: Harness) 
 def test_a_verdict_is_taken_once(fake_ws_server: FakeMassiveServer) -> None:
     harness = Harness(fake_ws_server, decide=unknown_futures)
     try:
-        harness.connections._reconnect_backoff = 0.01
+        harness.connections.group.reconnect_backoff = 0.01
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         other = harness.query(TRADES, ["AAPL"]).blink()  # a stream the move leaves alone
         connection = harness.connection("wss://socket.test/futures")
-        with harness.session._core.registry_lock:  # a fatal failure retired it meanwhile
-            del harness.connections._connections[connection.url]
-        assert harness.on_loop(connection, lambda: harness.connections.reroute(connection, "x"))
-        assert harness.connections.reroute(connection, "x") is False  # once per connection
+        with harness.connections.group.lock:  # a fatal failure retired it meanwhile
+            del harness.connections.group.connections[connection.url]
+        assert harness.on_loop(
+            connection, lambda: harness.connections.group.reroute(connection, "x")
+        )
+        assert harness.connections.group.reroute(connection, "x") is False  # once per connection
         harness.wait(lambda h: h.urls[-1] == "wss://delayed.test/futures")
-        wait_for(lambda: "wss://delayed.test/futures" in harness.connections._connections)
-        with harness.session._core.registry_lock:
-            owners = dict(harness.connections._streams)
+        wait_for(lambda: "wss://delayed.test/futures" in harness.connections.group.connections)
+        with harness.connections.group.lock:
+            owners = dict(harness.connections.group.streams)
         assert owners[1].url == "wss://delayed.test/futures"
         assert owners[2].url == "wss://socket.test/stocks"
         assert len(harness.verdicts) == 1
@@ -1204,11 +1227,13 @@ def test_a_verdict_that_cannot_be_recorded_still_moves(
         raise RuntimeError("no REST transport")
 
     try:
-        harness.connections._reconnect_backoff = 0.01
-        harness.connections._record_verdict = broken
+        harness.connections.group.reconnect_backoff = 0.01
+        harness.connections.record_verdict = broken
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         connection = harness.connection("wss://socket.test/futures")
-        assert harness.on_loop(connection, lambda: harness.connections.reroute(connection, "x"))
+        assert harness.on_loop(
+            connection, lambda: harness.connections.group.reroute(connection, "x")
+        )
         harness.wait(lambda h: h.urls[-1] == "wss://delayed.test/futures")
         assert "could not record the real-time verdict" in caplog.text
         harness.session.release(result)
@@ -1286,7 +1311,7 @@ def test_contracts_of_opening_streams_count_against_the_cap(
     monkeypatch.setattr(ws, "OPTIONS_CAP", 2)
     first = harness.query(OPTIONS, ["O:SPY251219C00600000"]).blink()
     connection = harness.connection("wss://socket.test/options")
-    with harness.session._core.registry_lock:
+    with harness.connections.group.lock:
         connection.cap_pending[99] = frozenset({"T.O:SPY251219C00610000"})  # still opening
         with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
             ws.WsConnections._check_cap(OPTIONS, connection, frozenset({"T.O:SPY251219C00620000"}))
@@ -1324,9 +1349,16 @@ def test_a_verdict_while_closing_moves_nothing(
     try:
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         connection = harness.connection("wss://socket.test/futures")
-        closed = iter([False, True])  # open when the verdict arrives, closed by the move
-        monkeypatch.setattr(harness.connections, "_is_closed", lambda: next(closed))
-        assert harness.on_loop(connection, lambda: harness.connections.reroute(connection, "x"))
+        closed = iter([False, True])  # open when the verdict arrives, closing by the move
+        real = cast("Callable[[ws.Connection], bool]", vars(ws.Connection)["closing"].fget)
+
+        def closing(self: ws.Connection) -> bool:
+            return next(closed) if self is connection else real(self)
+
+        monkeypatch.setattr(ws.Connection, "closing", property(closing))
+        assert harness.on_loop(
+            connection, lambda: harness.connections.group.reroute(connection, "x")
+        )
         assert connection.join(TIMEOUT)  # the move closed it instead of handing it over
         assert len(harness.urls) == 2  # the successor was built, then closed unused
         del result
@@ -1343,12 +1375,12 @@ def test_a_verdict_joins_an_open_delayed_connection(fake_ws_server: FakeMassiveS
     )
     harness = Harness(fake_ws_server, decide=lambda *_: next(decisions))
     try:
-        harness.connections._reconnect_backoff = 0.01
+        harness.connections.group.reconnect_backoff = 0.01
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         delayed = harness.query(QUOTES_FUTURES, ["ESZ5"]).blink()
         moved = harness.connection("wss://socket.test/futures")
         existing = harness.connection("wss://delayed.test/futures")
-        assert harness.on_loop(moved, lambda: harness.connections.reroute(moved, "real-time"))
+        assert harness.on_loop(moved, lambda: harness.connections.group.reroute(moved, "real-time"))
         wait_for(lambda: existing.leases == 2)
         assert harness.connection("wss://delayed.test/futures") is existing
         harness.session.release(result)
@@ -1368,7 +1400,7 @@ def test_a_retired_connection_is_never_leased(
     first = harness.query(TRADES, ["AAPL"]).blink()
     harness.subscribed("T.AAPL")
     old = harness.connection()
-    harness.connections.retire(old, idle=False)
+    harness.connections.group.retire(old, idle=False)
     real = ws.WsConnections._check_cap
     looks: list[ws.Connection | None] = []
 
@@ -1516,7 +1548,7 @@ def test_static_contracts_take_the_room_before_a_watchlists(
 def test_a_move_awaits_its_streams_until_the_hand_over(fake_ws_server: FakeMassiveServer) -> None:
     harness = Harness(fake_ws_server, decide=unknown_futures)
     try:
-        harness.connections._reconnect_backoff = 0.01
+        harness.connections.group.reconnect_backoff = 0.01
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         harness.subscribed("T.ESZ5")
         old = harness.connection("wss://socket.test/futures")
@@ -1529,9 +1561,9 @@ def test_a_move_awaits_its_streams_until_the_hand_over(fake_ws_server: FakeMassi
         assert old.post(hold)  # the old loop is busy: the hand-over waits behind it
         assert held.wait(TIMEOUT)
         decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-        harness.connections._move(old, decision)
+        harness.connections.group._move(old, decision)
         successor = harness.connection("wss://delayed.test/futures")
-        with harness.session._core.registry_lock:
+        with harness.connections.group.lock:
             assert successor.awaiting == {1}
         release.set()
         wait_for(lambda: not successor.awaiting)  # adopted
@@ -1546,42 +1578,45 @@ def test_a_failed_connection_is_not_moved(fake_ws_server: FakeMassiveServer) -> 
     try:
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         old = harness.connection("wss://socket.test/futures")
-        with harness.session._core.registry_lock:
+        with harness.connections.group.lock:
             old.failure = dm.MassiveError("rejected the API key")
         decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-        harness.connections._move(old, decision)
+        harness.connections.group._move(old, decision)
         assert old.join(TIMEOUT)  # closed, not handed over
-        assert "wss://delayed.test/futures" not in harness.connections._connections
+        assert "wss://delayed.test/futures" not in harness.connections.group.connections
         del result
     finally:
         harness.close()
 
 
 def test_a_move_whose_old_loop_ended_releases_the_successor(
-    fake_ws_server: FakeMassiveServer,
+    fake_ws_server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(fake_ws_server, decide=unknown_futures)
     try:
-        harness.connections._reconnect_backoff = 0.01
+        harness.connections.group.reconnect_backoff = 0.01
         result = harness.query(FUTURES, ["ESZ5"]).blink()
         harness.subscribed("T.ESZ5")
         old = harness.connection("wss://socket.test/futures")
         old.close()
         assert old.join(TIMEOUT)  # its loop ended: the hand-over cannot be posted
+        # The move started before the close: it still sees the connection open.
+        real = cast("Callable[[ws.Connection], bool]", vars(ws.Connection)["closing"].fget)
+        monkeypatch.setattr(ws.Connection, "closing", property(lambda c: c is not old and real(c)))
         decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-        harness.connections._move(old, decision)
+        harness.connections.group._move(old, decision)
         successor = harness.connection("wss://delayed.test/futures")
         harness.on_loop(successor, lambda: None)
-        with harness.session._core.registry_lock:
+        with harness.connections.group.lock:
             assert successor.awaiting == set()
         harness.on_loop(successor, lambda: successor.release_stream(1))  # dropped, not kept
         assert harness.on_loop(successor, lambda: dict(successor._early)) == {}
         # A call kept for an awaited stream is forgotten once the stream is no longer awaited.
-        with harness.session._core.registry_lock:
+        with harness.connections.group.lock:
             successor.awaiting.add(99)
         harness.on_loop(successor, lambda: successor.release_stream(99))
         assert harness.on_loop(successor, lambda: sorted(successor._early)) == [99]
-        with harness.session._core.registry_lock:
+        with harness.connections.group.lock:
             successor.awaiting.discard(99)
         harness.on_loop(successor, successor.check_idle)
         assert harness.on_loop(successor, lambda: dict(successor._early)) == {}
@@ -1615,7 +1650,241 @@ def test_a_hand_over_applies_what_the_old_flusher_queued(
     del refused
 
 
-def test_a_topic_reconnects_once_per_session(harness: Harness) -> None:
-    assert harness.connections.first_no_ack("/stocks", "T.AAPL")
-    assert not harness.connections.first_no_ack("/stocks", "T.AAPL")
-    assert harness.connections.first_no_ack("/options", "T.AAPL")
+def test_a_topic_reconnects_once_per_cluster(harness: Harness) -> None:
+    assert harness.connections.group.first_no_ack("/stocks", "T.AAPL")
+    assert not harness.connections.group.first_no_ack("/stocks", "T.AAPL")
+    assert harness.connections.group.first_no_ack("/options", "T.AAPL")
+
+
+# --- Sessions sharing connections, and how long a stream runs ----------------------------------
+
+
+def jvm_collect() -> None:
+    # A full collection on both sides: Python's cycles, then the JVM's heap.
+    gc.collect()
+    for _ in range(3):
+        _JAVA_SYSTEM.gc()
+
+
+def rows_of(session: dm.MassiveSession, to_pylist: ToPylist) -> list[dict[str, Any]]:
+    assert session._core.diagnostics.barrier().wait(TIMEOUT)
+    return sorted(to_pylist(session.streams()), key=lambda r: r["StreamId"])
+
+
+def test_sessions_with_one_key_share_one_connection(
+    harness: Harness,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    rows_when: RowsWhen,
+) -> None:
+    other = harness.join()
+    mine = harness.query(TRADES, ["AAPL"]).append_only()
+    theirs = harness.query(TRADES, ["AAPL"], other).append_only()
+    harness.subscribed("T.AAPL")
+    assert harness.urls == ["wss://socket.test/stocks"]  # one connection for both sessions
+    connection = harness.connection()
+    with harness.connections.group.lock:
+        assert connection.leases == 2
+        assert set(connection.users.values()) == {1}
+    harness.send(trade("AAPL"))
+    harness.flush()
+    rows_when(mine, lambda rows: len(rows) == 1)
+    rows_when(theirs, lambda rows: len(rows) == 1)
+    # Diagnostics stay per session: each shows its own stream and the shared connection.
+    assert [r["StreamId"] for r in rows_of(harness.session, dh_to_pylist)] == [1]
+    assert [r["StreamId"] for r in rows_of(other, dh_to_pylist)] == [2]
+    for session in (harness.session, other):
+        assert session._core.diagnostics.barrier().wait(TIMEOUT)
+        (row,) = [r for r in dh_to_pylist(session.connections()) if r["Transport"] == "WS"]
+        assert row["Host"] == "socket.test"
+    # Closing one session fails its tables and leaves the connection to the other.
+    other.close()
+    wait_for(lambda: bool(theirs.j_table.isFailed()))
+    assert not connection.closing
+    with harness.connections.group.lock:
+        assert connection.leases == 1
+    harness.send(trade("AAPL", 2.0))
+    harness.flush()
+    rows_when(mine, lambda rows: len(rows) == 2)
+    assert not any(json.loads(f)["action"] == "unsubscribe" for f in fake_ws_server.frames())
+    harness.session.release(mine)  # the last stream on the topic: now it goes
+    harness.unsubscribed("T.AAPL")
+
+
+def test_closing_the_last_session_on_a_connection_closes_it(harness: Harness) -> None:
+    other = harness.join()
+    stocks = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    forex = harness.query(FOREX, ["C:EURUSD"], other).blink()
+    harness.subscribed("C.EUR-USD")
+    stocks_connection = harness.connection()
+    forex_connection = harness.connection("wss://socket.test/forex")
+    other.close()  # it never used the stocks connection, and alone used the forex one
+    assert forex_connection.join(TIMEOUT)
+    assert not stocks_connection.closing
+    with harness.connections.group.lock:
+        assert "wss://socket.test/forex" not in harness.connections.group.connections
+    harness.session.release(stocks)
+    del forex
+
+
+def test_only_sessions_with_equal_settings_share_connections() -> None:
+    def group_of(session: dm.MassiveSession) -> ws.ConnectionGroup:
+        transport = cast("ws.WsTransport", session._core.stream_transport())
+        return transport._connections.group
+
+    first = dm.MassiveSession(dm.MassiveConfig(api_key="group-key"))
+    second = dm.MassiveSession(dm.MassiveConfig(api_key="group-key"))
+    apart = dm.MassiveSession(dm.MassiveConfig(api_key="group-key", reconnect_backoff=45.0))
+    other_key = dm.MassiveSession(dm.MassiveConfig(api_key="another-key"))
+    try:
+        shared = group_of(first)
+        assert group_of(second) is shared
+        assert group_of(apart) is not shared  # never another session's settings
+        assert group_of(other_key) is not shared
+        assert shared.reconnect_backoff == 30.0
+        assert group_of(apart).reconnect_backoff == 45.0
+        first.close()
+        assert ws._groups.get(shared.key) is shared  # the group stays with its last session
+    finally:
+        for session in (first, second, apart, other_key):
+            session.close()
+    assert shared.key not in ws._groups
+
+
+def test_a_stream_waiting_for_a_slot_says_so(
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Another connection with the key (another process, here the fake's reply) holds the slot.
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    harness = Harness(fake_ws_server, backoff=1.0)
+    try:
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000"]
+        watchlist.add(new_table([string_col("Symbol", contracts)]))
+        capped = harness.query(OPTIONS, watchlist).blink()
+        harness.subscribed("T.O:SPY251219C00600000")
+        cap = "over capacity: 2/1; 1 deferred"
+        wait_for(lambda: streams_of(harness, dh_to_pylist)[0]["Error"] == cap)
+        fake_ws_server.auth_replies.append("max_connections")
+        fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
+        harness.wait(lambda h: WsState.WAITING_SLOT in h.states)
+        stall = (
+            "waiting for a WebSocket slot on socket.test/options: another connection with this "
+            "API key, perhaps from another process, holds it; the plan allows one connection "
+            "per cluster"
+        )
+        wait_for(lambda: streams_of(harness, dh_to_pylist)[0]["Error"] == stall)
+        every = harness.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
+        wait_for(lambda: [r["Error"] for r in streams_of(harness, dh_to_pylist)] == [stall] * 2)
+        harness.wait(lambda h: h.opens == 2)  # the slot is free again
+        wait_for(lambda: [r["Error"] for r in streams_of(harness, dh_to_pylist)] == [cap, None])
+        del capped, every
+    finally:
+        harness.close()
+
+
+def test_an_inline_sessions_derived_table_keeps_running(
+    fake_ws_server: FakeMassiveServer, dh_exec_ctx: object, rows_when: RowsWhen
+) -> None:
+    # `dm.MassiveSession().stocks.trades("AAPL").append_only().where(...)`: the session and the
+    # library's result are dropped at once, but the derived table uses the stream, so the
+    # stream, its connection, and its session keep running through every collection.
+    harness = Harness(fake_ws_server)
+    core = weakref.ref(harness.session._core)
+    scope = new_scope()  # the user's own scope, released below
+    with scope.open():
+        derived = [harness.query(TRADES, ["AAPL"]).append_only().where("Price > 0")]
+    harness.subscribed("T.AAPL")
+    connection = harness.connection()
+    del harness.session, harness.connections
+    jvm_collect()
+    assert core() is not None
+    harness.send(trade("AAPL"))
+    connection.flusher.flush()
+    rows_when(derived[0], lambda rows: len(rows) == 1)
+    # Releasing the derived table stops the stream, frees the session, and closes the
+    # connection that nothing else uses.
+    derived.clear()
+    scope.release()
+    assert connection.join(TIMEOUT)
+    wait_for(lambda: core() is None)
+    assert WsState.CLOSED in harness.states
+
+
+def test_a_watchlist_edit_after_a_jvm_collection_still_resubscribes(harness: Harness) -> None:
+    # Deephaven holds a table's listeners only weakly: the stream must hold its own.
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    result = harness.query(TRADES, watchlist).append_only()
+    harness.subscribed("T.AAPL")
+    jvm_collect()
+    watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+    harness.subscribed("T.MSFT")
+    harness.session.release(result)
+
+
+def test_a_failed_watchlist_fails_its_stream(harness: Harness, dh_to_pylist: ToPylist) -> None:
+    scope = new_scope()
+    with scope.open():
+        watchlist, publisher = table_publisher("watchlist", {"Symbol": dtypes.string})
+    result = harness.query(TRADES, watchlist).append_only()
+    publisher.publish_failure(RuntimeError("the watchlist broke"))
+    wait_for(lambda: streams_of(harness, dh_to_pylist)[0]["State"] == "FAILED")
+    (row,) = streams_of(harness, dh_to_pylist)
+    assert row["Error"].startswith("test.trades stream 1: its symbol table failed")
+    wait_for(lambda: bool(result.j_table.isFailed()))
+    scope.release()
+
+
+def test_stress_two_sessions_open_and_release_while_one_closes(harness: Harness) -> None:
+    other = harness.join()
+    symbols = ["AAPL", "MSFT", "IBM", "GOOG"]
+    started = threading.Barrier(17)
+    closed_errors: list[str] = []
+
+    def work(index: int) -> None:
+        session = harness.session if index % 2 else other
+        started.wait(TIMEOUT)
+        for round_ in range(20):
+            try:
+                result = harness.query(TRADES, [symbols[(index + round_) % 4]], session).blink()
+            except dm.MassiveError as error:
+                assert session is other
+                closed_errors.append(str(error))
+                return
+            session.release(result)
+
+    with ThreadPoolExecutor(16) as pool:
+        futures = [pool.submit(work, index) for index in range(16)]
+        started.wait(TIMEOUT)
+        other.close()
+        for future in futures:
+            future.result(TIMEOUT)
+    # A verb that races the close finds the session closed, or its stream failed by the close.
+    name = other._core.label
+    assert all(f"{name} is closed" in t or f"{name} was closed" in t for t in closed_errors)
+    core = harness.session._core
+    drained = threading.Event()
+    core.defer(drained.set)
+    assert drained.wait(TIMEOUT)
+    wait_for(lambda: not harness.connections.group.streams)
+    with harness.connections.group.lock:
+        assert all(c.leases == 0 for c in harness.connections.group.connections.values())
+
+
+def test_closing_a_session_closes_a_retired_connection_it_alone_leases(harness: Harness) -> None:
+    # A connection out of the registry (a fatal failure retired it) still carries the session's
+    # stream until the stream shuts down; the session's close closes it too.
+    result = harness.query(TRADES, ["AAPL"]).blink()
+    harness.subscribed("T.AAPL")
+    connection = harness.connection()
+    assert harness.on_loop(
+        connection, lambda: harness.connections.group.retire(connection, idle=False)
+    )
+    harness.close()
+    assert connection.join(TIMEOUT)
+    del result

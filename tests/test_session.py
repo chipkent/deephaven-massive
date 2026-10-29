@@ -13,10 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table, time_table
 from deephaven.column import string_col
+from deephaven.dherror import DHError
 from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
 
@@ -69,6 +71,22 @@ def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> Str
     q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
     assert isinstance(q, StreamQuery)
     return q
+
+
+def one_row(session: dm.MassiveSession) -> Table:
+    # One row of SPEC for a fake stream's publisher: an AAPL symbol, every other column null.
+    schema = session._core.catalog.dataset_schema(SPEC).arrow_schema()
+    return dh_arrow.to_table(pa.Table.from_pylist([{"Symbol": "AAPL"}], schema=schema))
+
+
+def wait_until(condition: Callable[[], bool]) -> None:
+    # A bounded wait for an update-graph cycle to apply a change.
+    pause = threading.Event()  # never set; only paces the loop
+    for _ in range(int(TIMEOUT / 0.02)):
+        if condition():
+            return
+        pause.wait(0.02)
+    assert condition()
 
 
 def label(session: dm.MassiveSession) -> str:
@@ -180,26 +198,35 @@ def test_construction_on_the_update_graph_thread_fails() -> None:
     assert "update-graph thread" in str(errors[0])
 
 
-def test_a_second_session_with_the_same_key_warns(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_same_key_session_warns_only_when_it_cannot_share(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Equal connection settings share the connections, so only differing settings warn.
     config = dm.MassiveConfig(api_key="shared-key")
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         first = dm.MassiveSession(config)
-        second = dm.MassiveSession(config)
-        second.close()
+        sharing = dm.MassiveSession(config)
         other = dm.MassiveSession(dm.MassiveConfig(api_key="other-key"))
+        assert caplog.records == []
+        sharing.close()
+        apart = dm.MassiveSession(
+            dm.MassiveConfig(api_key="shared-key", flush_interval=0.5, ack_timeout=9.0)
+        )
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
     assert warnings == [
         (
-            f"{label(second)} uses the same API key as {label(first)}; individual plans allow "
-            "one WebSocket connection per cluster per account, so the sessions will compete for "
-            "connection slots"
+            f"{label(apart)} uses the same API key as {label(first)} with different connection "
+            "settings (ack_timeout, flush_interval), so the two cannot share WebSocket "
+            "connections; on an individual plan, which allows one connection per cluster, they "
+            "compete for it"
         )
     ]
     caplog.clear()
     first.close()
+    apart.close()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
-        third = dm.MassiveSession(config)  # the others are closed
-    assert "same API key" not in caplog.text
+        third = dm.MassiveSession(dm.MassiveConfig(api_key="shared-key", flush_interval=0.5))
+    assert "same API key" not in caplog.text  # the others are closed
     third.close()
     other.close()
 
@@ -330,44 +357,49 @@ def test_close_marks_streams_closed_and_warns_once(
     massive_session.release(released)
     assert [r["State"] for r in stream_rows()] == ["RUNNING", "RELEASED"]
     assert fake_streams.shutdown[2].wait(TIMEOUT)  # the released stream left the registry
-    keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
-    streams = massive_session.streams()
-    keeper.manage(streams)
+    streams = massive_session.streams()  # a view keeps the final rows after close()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
         massive_session.close()
         massive_session.close()
-    assert caplog.messages == ["session closed; 1 live tables are now static"]
+    assert caplog.messages == ["session closed; 1 live tables failed"]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
-    assert [r["State"] for r in rows] == ["CLOSED", "RELEASED"]
-    keeper.release()
+    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
+    assert fake_streams.failed == {1: closed}
     massive_session.release(live)  # release() keeps working after close()
 
 
-def test_close_marks_a_released_but_held_stream_closed(
+def test_close_fails_derived_tables_and_marks_their_stream_closed(
+    *,
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     # A derived table keeps a released stream's blink table alive, so the stream is still in
-    # the registry when the session closes, and its row becomes CLOSED.
+    # the registry when the session closes: its row becomes CLOSED, and the derived table
+    # fails with the close, keeping its rows for a snapshot.
     result = stream_query(massive_session).append_only()
     user_scope = new_scope()
     with user_scope.open():
-        derived = result.tail(1)
+        derived = result.tail(5)
+    fake_streams.publishers[1].add(one_row(massive_session))
+    wait_until(lambda: derived.size == 1)
     massive_session.release(result)
     assert [(r["State"], r["HeldResults"]) for r in stream_rows()] == [("RELEASED", 0)]
-    keeper = new_scope()  # keeps the diagnostics table readable after close() releases it
     streams = massive_session.streams()
-    keeper.manage(streams)
     massive_session.close()
     rows = dh_arrow.to_arrow(streams).to_pylist()
-    assert [(r["State"], r["HeldResults"]) for r in rows] == [("CLOSED", 0)]
-    assert derived.is_refreshing
-    assert not fake_streams.shutdown[1].is_set()
-    keeper.release()
+    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    assert [(r["State"], r["HeldResults"], r["Error"]) for r in rows] == [("CLOSED", 0, closed)]
+    assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
+    wait_until(lambda: bool(derived.j_table.isFailed()))
+    assert derived.snapshot().size == 1  # the failed table keeps its rows
+    assert len(dh_to_pylist(derived)) == 1
+    with pytest.raises(DHError, match="failed table"):
+        derived.where("true")
     user_scope.release()
-    assert fake_streams.shutdown[1].wait(TIMEOUT)
 
 
 def test_close_with_no_live_tables_logs_info(
@@ -376,7 +408,7 @@ def test_close_with_no_live_tables_logs_info(
     with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.core"):
         massive_session.close()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, "session closed; 0 live tables are now static")
+        (logging.INFO, "session closed; 0 live tables failed")
     ]
 
 

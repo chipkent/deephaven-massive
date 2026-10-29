@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pytest
@@ -21,6 +21,7 @@ from deephaven import dtypes, input_table
 from deephaven.arrow import to_table
 from deephaven.stream import blink_to_append_only
 
+import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -41,9 +42,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import TypeAlias
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
-    import deephaven_massive as dm
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._tables.core import SessionCore
 
@@ -204,6 +205,7 @@ def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink
         plan,
         core.catalog.dataset_schema(TRADES),
         symbols,
+        core=core,
         stream_id=1,
         host="socket.test",
         path="/stocks",
@@ -255,8 +257,8 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     batch = to_table(converted.batch)
     sink, _ = make_sink(core, ALL)
     assert sink.publish(batch, converted) == 1
-    assert sink.fail(core, MassiveError("refused"))
-    assert not sink.fail(core, MassiveError("again"))
+    assert sink.fail(MassiveError("refused"))
+    assert not sink.fail(MassiveError("again"))
     assert sink.publish(batch, converted) == 0
     assert sink.rows_published == 1
 
@@ -267,7 +269,7 @@ def test_open_stream_tables_releases_its_scope_on_failure(
     # The watch fails after the publisher exists: releasing the scope shuts the blink table down.
     shut_down = threading.Event()
 
-    def broken(*_: object) -> object:
+    def broken(*_: object, **__: object) -> object:
         raise RuntimeError("no watch")
 
     monkeypatch.setattr(stream, "SymbolWatch", broken)
@@ -278,6 +280,7 @@ def test_open_stream_tables_releases_its_scope_on_failure(
             ChannelPlan.build(core.catalog, TRADES, "T"),
             core.catalog.dataset_schema(TRADES),
             SymbolTable(watchlist),
+            core=core,
             stream_id=1,
             host="socket.test",
             path="/stocks",
@@ -293,12 +296,22 @@ def test_a_reactive_stream_starts_with_no_symbols(massive_session: dm.MassiveSes
     assert not sink.receives("AAPL")
 
 
+def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
+    massive_session: dm.MassiveSession, drain: Callable[[], None]
+) -> None:
+    # The listener reports on an update-graph thread, so the failure is only queued there.
+    sink, _ = make_sink(massive_session._core, ALL)
+    sink.fail_later(RuntimeError("the watchlist broke"))
+    drain()
+    assert sink.failed
+
+
 # --- Flusher -----------------------------------------------------------------------------------
 
 
 @pytest.fixture
 def flusher(massive_session: dm.MassiveSession) -> Iterator[Flusher]:
-    f = Flusher(massive_session._core, "test-flush", interval=3600.0)
+    f = Flusher(massive_session._core.exec_ctx, "test-flush", interval=3600.0)
     yield f
     f.stop()
 
@@ -390,7 +403,7 @@ def test_a_failure_is_recorded_before_the_table_fails(
     order: list[str] = []
     monkeypatch.setattr(core, "fail_stream", lambda *_: order.append("recorded"))
     monkeypatch.setattr(sink.publisher, "publish_failure", lambda _: order.append("failed"))
-    sink.fail(core, MassiveError("refused"))
+    sink.fail(MassiveError("refused"))
     assert order == ["recorded", "failed"]
 
 
@@ -436,18 +449,74 @@ def test_routes_forget_a_stream_once(flusher: Flusher, massive_session: dm.Massi
     assert flusher.routes.sinks() == ()
 
 
-def test_a_flusher_whose_session_is_gone_does_nothing(
-    flusher: Flusher, monkeypatch: pytest.MonkeyPatch
+def test_one_flusher_reports_each_stream_to_its_own_session(
+    massive_session: dm.MassiveSession, flusher: Flusher, stream_rows: Callable[[], Any]
 ) -> None:
-    monkeypatch.setattr(flusher, "_core", lambda: None)
-    flusher.flush()
+    # A connection shared by two sessions: each stream's rows and drift reach its own session.
+    other = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+    try:
+        mine, _ = make_sink(massive_session._core, ALL)
+        theirs, _ = make_sink(other._core, ALL)
+        flusher.routes.add("T", mine)
+        flusher.routes.add("T", theirs)
+        flusher.rows("T", [trade("AAPL")])
+        flusher.flush()
+        assert (mine.rows_published, theirs.rows_published) == (1, 1)
+        assert (mine.core, theirs.core) == (massive_session._core, other._core)
+    finally:
+        other.close()
+
+
+class _Fatal(BaseException):
+    # Like KeyboardInterrupt: a flush that raises it ends the thread.
+    pass
+
+
+class _DyingFlusher(Flusher):
+    __slots__ = ()
+
+    def __init__(self, exec_ctx: ExecutionContext) -> None:
+        super().__init__(exec_ctx, "dying-flush", interval=0.001)
+
+    @override
+    def flush(self) -> None:
+        raise _Fatal
+
+
+class _Stubborn:
+    # A routed stream whose failure raises.
+    stream_id = 2
+
+    def fail(self, error: MassiveError) -> bool:
+        raise RuntimeError(f"cannot fail: {error}")
+
+
+def test_a_dying_flush_thread_fails_its_streams(
+    massive_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    escaped: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", escaped.append)  # the death still escapes
+    core = massive_session._core
+    healthy, _ = make_sink(core, ALL)
+    f = _DyingFlusher(core.exec_ctx)
+    f.routes.add("T", cast("StreamSink", _Stubborn()))
+    f.routes.add("T", healthy)
+    with caplog.at_level(logging.ERROR):
+        f.start()
+        assert f.join(TIMEOUT)
+    assert healthy.failed  # a stream that cannot be failed does not spare the others
+    assert "dying-flush died; its streams fail" in caplog.text
+    assert "dying-flush: could not fail a stream" in caplog.text
+    assert [args.exc_type for args in escaped] == [_Fatal]
 
 
 class _BrokenFlusher(Flusher):
     __slots__ = ("flushes",)
 
     def __init__(self, core: SessionCore) -> None:
-        super().__init__(core, "test-flush", interval=0.001)
+        super().__init__(core.exec_ctx, "test-flush", interval=0.001)
         self.flushes = threading.Semaphore(0)
 
     @override
@@ -469,7 +538,7 @@ def test_the_flush_thread_logs_a_failing_flush_and_carries_on(
 
 
 def test_an_unstarted_flusher_joins_at_once(massive_session: dm.MassiveSession) -> None:
-    assert Flusher(massive_session._core, "never", interval=1.0).join(0.0)
+    assert Flusher(massive_session._core.exec_ctx, "never", interval=1.0).join(0.0)
 
 
 # --- Benchmark (records, never gates) ----------------------------------------------------------
