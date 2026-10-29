@@ -2938,8 +2938,7 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
   30, then 60 s by the refusals of the run, so a request is never sent again at once. A pause
   only grows. When it ends, one request of the bucket goes first as a probe while the others
-  wait for its answer: an answer other than 429 releases them, and a 429 pauses again; a
-  probe unanswered for 5 minutes (`PROBE_TIMEOUT`, its report lost) stops holding them. So a
+  wait for its answer: an answer other than 429 releases them, and a 429 pauses again. So a
   subscription whose 429s do not say it is Basic still sends one refused request per pause,
   never a burst. Only the first 429 to requests started after the latest pause counts toward
   the run (a burst in flight is one refusal); a 429 to an earlier request that lengthens the
@@ -3888,8 +3887,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   form, an HTTP date measured against the response's own `Date` header, else a whole window
   when paced, else 15, 30, then 60 s by the run's refusals; a `Retry-After` of zero counts as
   none), the burst of 429s in flight when the pause began counting once; after a pause one
-  probe request goes alone until it is answered, or for at most `PROBE_TIMEOUT` (300 s);
-  a run ends with an answer to a request
+  probe request goes alone until it is answered; a run ends with an answer to a request
   started after the latest pause, or a window after its pause ended with no refusal; a 429 is
   not a retry, and the attempt is made again once the governor allows it; the bucket never
   gives up, and a call whose `give_up_at` (its read's start plus the read's patience) comes
@@ -3899,8 +3897,10 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   request that may start at once with nothing queued before it is granted without queuing,
   and a wait without a deadline is woken only by a change of its bucket, never by a timer;
   the system clock waits it out in half-second chunks, so Ctrl-C ends it on every operating
-  system. The client takes each permit through `RequestGovernor.admission`, a claim opened
-  before the grant whose exit reports the permit, so no interrupt can leave one unreported. A
+  system. Every permit is taken through `RequestGovernor.admission`, a claim opened before the
+  grant whose exit reports the permit, so no interrupt leaves one unreported, short of one
+  inside a lock wait or a second one during the claim's exit, which no Python code can make
+  safe. A
   bucket the governor was not built with raises `ValueError`. Before the governor pauses the bucket,
   the client calls its `on_refused(bucket, error, *, basic)` hook (the library's first-429
   WARNING).
