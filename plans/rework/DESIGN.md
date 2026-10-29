@@ -3789,12 +3789,14 @@ call mutates an argument (the parameters are copied before they are encoded).
 
 ```python
 RestClient(api_key, *, base_url, max_concurrency, governor, on_refused=None)
-client.get(rest_path, path_params, query_params, *, bucket, cancel=None) -> Page   # one request
-client.pages(rest_path, path_params, query_params, *, bucket, cancel=None, limit=None)
-    -> Iterator[Page]                                                # follows next_url
-RequestGovernor(buckets, *, clock=SYSTEM_CLOCK, labels=None)
-    # declare, learn, acquire(bucket, cancel, *, lane), done, release, refused, snapshot,
-    # next_change, estimate, idle, subscribe, unsubscribe
+client.get(rest_path, path_params, query_params, *, bucket, cancel=None,
+           give_up_at=math.inf) -> Page                              # one request
+client.pages(rest_path, path_params, query_params, *, bucket, cancel=None,
+             give_up_at=math.inf, limit=None) -> Iterator[Page]      # follows next_url
+RequestGovernor(buckets, *, learn_only=(), clock=SYSTEM_CLOCK, labels={})
+    # declare, admission(bucket, *, lane, give_up_at=math.inf) -> Admission, done, release,
+    # refused, snapshot, next_change, estimate, idle, subscribe, unsubscribe
+Admission.acquire(cancel) -> Permit   # inside `with governor.admission(...)`; exit reports it
 Cancel(*parents)                                  # a threading.Event set once, following parents
 Page(status: str, request_id: str | None, rows: list[dict], body: dict | list,
      drift: DriftReport)          # drift.statuses only; repr omits rows and body
@@ -3873,12 +3875,14 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   that repeats the target just fetched raises `WireError` rather than paging forever.
 - **The governor.** Every attempt, every page included, first takes a permit of its `bucket`
   from the `RequestGovernor` (`rest/governor.py`), in its lane (the caller's `cancel` token,
-  or the call itself when it has none), and reports how it ended, exactly once, in a
-  `finally`: answered, not answered (a failure on the wire), never sent (released: a
-  `ConnectTimeoutError` or a `ProxyError` anywhere in the error's chain, so a connection that
-  could not be made or a proxy or tunnel that failed), or refused with HTTP 429; the governor ignores any report after the first. A slot
-  is released on cancellation, failure, and interrupts at wait points; an asynchronous
-  interrupt delivered inside a `with` block of a lock is beyond what Python can make safe. The refusal hook runs before the governor hears of a 429, and the
+  or the call itself when it has none), through a claim (`with governor.admission(...)`,
+  then `Admission.acquire`), and reports how it ended, exactly once: answered, never sent
+  (released: a `ConnectTimeoutError` or a `ProxyError` anywhere in the error's chain, so a
+  connection that could not be made or a proxy or tunnel that failed), or refused with HTTP
+  429; anything else, an exception on the wire or an interrupt included, is reported as not
+  answered by the claim's exit. The governor ignores any report after the first. A slot is
+  released on cancellation, failure, and interrupts at wait points; an interrupt inside a
+  lock wait, or a second one during the claim's exit, is beyond what Python can make safe. The refusal hook runs before the governor hears of a 429, and the
   governor hears of it even when the hook raises. The governor's rules are those of
   [section 13.4](#134-rest): per bucket, lanes in turn and first in, first out within a lane; a
   paced bucket (declared, or learned from a 429 whose message names the per-minute maximum)

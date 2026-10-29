@@ -353,7 +353,7 @@ class RestClient:
             cancel: Ends every wait of the request when set (the request then raises
                 `WireError`); None when only `close()` should.
             give_up_at: The monotonic time, on the governor's clock, past which the request
-                does not wait for a pause (`RequestGovernor.acquire`); `math.inf`, the
+                does not wait for a pause (`RequestGovernor.admission`); `math.inf`, the
                 default, waits however long.
 
         Returns:
