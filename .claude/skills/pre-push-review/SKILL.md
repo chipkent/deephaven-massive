@@ -37,7 +37,9 @@ property. For each changed file ask:
   Deephaven. Is any failure swallowed, logged without failing the table that needs it, or retried
   forever?
 - **Contract.** Does every public signature, default, column and error match `DESIGN.md`
-  exactly? A change to one updates `DESIGN.md` first.
+  exactly? A change to one updates `DESIGN.md` first. Does the new behavior match how the API
+  already treats the same concept elsewhere (ranges, dates, missing data, errors)? An
+  inconsistency with a sibling call is a finding even when `DESIGN.md` is silent.
 - **Concurrency** (any code that runs off the caller's thread, and any change to a `with ...lock:`
   block). Write down what now runs under each lock the diff touches: a constructor that reads
   files or settings counts as blocking work. The Deephaven invariants in
@@ -56,9 +58,18 @@ property. For each changed file ask:
   in the layer and package that own the concept? Should the module be split, merged or renamed?
   Do the tests mirror the new location? Fix a misplaced item by moving it in the same PR, not by
   noting it.
+- **Names.** Every new or renamed function, argument, column, environment variable, and pytest
+  marker says what it is or does (`AGENTS.md` rule 18). After any rename, `git grep` the old
+  name across code, docs, and `DESIGN.md`, and check the PR description and its linked issues'
+  bodies; fix every hit.
 - **Duplicates and private imports.** For every new helper, `git grep -n` for the concept (the
   format it parses, the rule it applies), not only for its name. An import of another module's
   private name (`from x import _helper`) is a sign the new code sits in the wrong module.
+- **Simplicity.** Assume a simpler design exists until you have looked for one. Look for a
+  workaround layer where a fix at the source would do, a second mechanism beside one that
+  already exists, an option or setting nobody asked for, a hybrid that keeps the problems of
+  both approaches, and a guard test or check that is brittle or only pins configuration text
+  instead of testing behavior. Fix the root cause where it lives, or report it.
 - **Explicit choices.** A parameter whose `None` selects a mode or a behavior (`convention=None`
   meaning "the default convention") should take an explicit enum member as its default instead.
   `None` means only a value that is genuinely absent.
@@ -96,8 +107,10 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the
   missing section instead of "None", review labels or first-person narration, no issue line.
 - **An open question in the description is a finding** ("should this return X?", "happy to
   switch"). Answer it from `AGENTS.md`, `DESIGN.md` and the code, and record the choice and its
-  reason under Decisions; if only the owner can decide, stop and ask before the push. Never
-  answer one by overturning an `AGENTS.md` rule, such as dates being ISO strings.
+  reason under Decisions; if only the owner can decide, or you are unsure whether you may
+  decide (section 1 of the `writing-to-the-owner` skill), stop and ask before the push, using
+  that skill. Never answer one by overturning an `AGENTS.md` rule, such as dates being ISO
+  strings.
 - Fix the description with `gh pr edit <n> --body-file <file>` in the same batch as the push.
 
 ## 4. Check the conversation
@@ -115,11 +128,21 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$
 
 A thread with a single comment, or whose last comment is a bot's, still needs an answer, resolved
 or not. `gh` posts under the owner's account, so a last comment with the owner's login may be
-your reply or a new question from the owner: open it and check. Draft the replies now and post
-them right after the push, naming the commit.
+your reply or a new question from the owner: open it and check. Draft the replies now; section 6
+posts them.
 
 ## 5. Fix, then push once
 
 Fix every finding, rerun `./scripts/check.sh` (full), and push once. Put anything you
 deliberately left alone, with its reason, in the PR description so the reviewer does not
 rediscover it.
+
+## 6. After the push: post the replies and prove they landed
+
+1. Post each drafted reply in its thread, naming the commit (short SHA) that fixes it.
+2. `git fetch`, then check that each named commit is on the remote branch and fixes what its
+   reply claims: `git branch -r --contains <sha>` and `git show <sha>`. A merge of `main`
+   fixes nothing.
+3. When CI and the review bots have finished on the pushed commit, rerun the thread query from
+   section 4: every thread's last comment is your reply. Answer any new one the same way. Only
+   then report the PR as addressed or ready.

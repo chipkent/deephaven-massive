@@ -28,6 +28,9 @@ How it works, never in its place.
      change and every rule it adds or changes;
    - why it matters, with a concrete example a user would hit;
    - what the reader should check or decide before merging.
+     A decision the owner must make before merging also goes, in full, into your report to
+     whoever launched you; the description is not a way to ask. Record the answer under
+     Decisions once given.
 
    No file names, internal function names, review labels, or decision numbers.
 2. **Why**: the problem, with one concrete example (a call, and what went wrong).
