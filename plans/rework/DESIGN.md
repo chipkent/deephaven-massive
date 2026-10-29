@@ -5240,7 +5240,7 @@ document already reflects them.
     ([section 12](#12-timestamp-units-and-day-boundaries), [section 13.4](#134-rest), [section
     19.4](#194-generated-schemas)).
 
-56. **Canonical symbols only, converters for the rest** (2026-10-28). Every symbol a dataset
+58. **Canonical symbols only, converters for the rest** (2026-10-28). Every symbol a dataset
     takes and every `Symbol` column is Massive's exact REST ticker, case kept (`KIMpL`); the
     old normalization (upper-casing, `EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX` on input) is
     gone, and a non-canonical symbol raises `ValueError` naming the canonical form. Conversion
@@ -5267,7 +5267,7 @@ document already reflects them.
     is kept by its text; a failed symbol table fails the result; an unreadable WebSocket
     spelling fails every stream of the channel.
 
-57. **Live tables keep their session running, and `close()` fails them** (2026-10-28). A live
+59. **Live tables keep their session running, and `close()` fails them** (2026-10-28). A live
     table keeps alive everything it needs (its stream or poller, the connection, and the
     session), and nothing else keeps anything alive, so an inline session's derived table keeps
     ticking and an unused session is freed at once. `m.close()` fails every live table and

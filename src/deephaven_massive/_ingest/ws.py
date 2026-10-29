@@ -1630,12 +1630,13 @@ class ConnectionGroup:
         """
         key = (connection.asset_class, ChannelFamily.TICK)
         for owner in owners:
-            with owner.group.lock:
-                owner.verdicts_recorded.add(key)
             try:
                 owner.record_verdict(*key, decision)
-            except Exception:
+            except Exception:  # the session's next stream of the class records it again
                 logger.exception("could not record the real-time verdict for %s", connection.url)
+                continue
+            with owner.group.lock:
+                owner.verdicts_recorded.add(key)
 
 
 class WsConnections:
@@ -1780,8 +1781,14 @@ class WsConnections:
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
         decision = self._decide(asset_class, spec.family)
-        connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
+        connection, created, decision = self._lease(
+            core, spec, decision, stream_id=stream_id, topics=topics
+        )
         try:
+            with self._lock:
+                verdict = self.group.verdicts.get((asset_class, spec.family))
+            if verdict is decision:  # the group's verdict decided the host
+                self._take_verdict(asset_class, spec.family, verdict)
             if asset_class is AssetClass.FUTURES and wanted:
                 self.futures_calendar().watch(wanted)
             if created:
@@ -1821,8 +1828,9 @@ class WsConnections:
 
         A real-time verdict any session of the group received settles the host for all of
         them, without a request: the session records it with its REST transport the first
-        time (`record_verdict`), so its later decisions agree. Otherwise the session's own
-        decision stands (`resolve_host`, which may make one REST request).
+        time it leases a connection by it (`_take_verdict`), so its later decisions agree.
+        Otherwise the session's own decision stands (`resolve_host`, which may make one REST
+        request).
 
         Args:
             asset_class: The class.
@@ -1831,17 +1839,33 @@ class WsConnections:
         Returns:
             The host decision.
         """
-        key = (asset_class, family)
         with self._lock:
-            verdict = self.group.verdicts.get(key)
-            first = verdict is not None and key not in self.verdicts_recorded
-            if first:
-                self.verdicts_recorded.add(key)
+            verdict = self.group.verdicts.get((asset_class, family))
         if verdict is None:
             return self._resolve(asset_class, family)
-        if first:
-            self.record_verdict(asset_class, family, verdict)
         return verdict
+
+    def _take_verdict(
+        self, asset_class: AssetClass, family: ChannelFamily, verdict: HostDecision
+    ) -> None:
+        """Record a group's verdict with the session's REST transport, the first time only.
+
+        It counts as recorded only once `record_verdict` has returned, so one that raised is
+        tried again by the next stream of the class.
+
+        Args:
+            asset_class: The class.
+            family: The channel family.
+            verdict: The group's verdict.
+        """
+        key = (asset_class, family)
+        with self._lock:
+            done = key in self.verdicts_recorded
+        if done:
+            return
+        self.record_verdict(asset_class, family, verdict)
+        with self._lock:
+            self.verdicts_recorded.add(key)
 
     def _plan(self, core: SessionCore, spec: DatasetSpec, channel: str) -> ChannelPlan:
         """Return the cached plan of a (dataset, channel), building it on first use.
@@ -1872,14 +1896,17 @@ class WsConnections:
         *,
         stream_id: int,
         topics: frozenset[str],
-    ) -> tuple[Connection, bool]:
+    ) -> tuple[Connection, bool, HostDecision]:
         """Find or create the group's connection of a stream and lease it for the stream.
 
         A new connection is created outside the lock (its client loads TLS settings) and
         registered under it. The registry is read again under the lock, and as often as it
         takes: a connection found before may have been retired meanwhile, and one registered by
         another thread (of this session or another) meanwhile wins, the new one then closing
-        unused. The session becomes one of the connection's users and shows its row.
+        unused. The group's verdicts are read again there too: a verdict that arrived after
+        the host was decided replaces the decision, so the stream never leases the connection
+        the verdict moved away from. The session becomes one of the connection's users and
+        shows its row.
 
         Args:
             core: The session's core, whose execution context a new connection's flush thread
@@ -1890,7 +1917,9 @@ class WsConnections:
             topics: Its static topics, for the options cap.
 
         Returns:
-            `(connection, created)`: created is True when the caller must start it.
+            `(connection, created, decision)`: created is True when the caller must start it,
+            and the decision is the one the connection serves (the group's verdict, if one
+            arrived meanwhile).
 
         Static topics that would cross the options cap raise the `ValueError` of `_check_cap`,
         and a closed session the `MassiveError` of `_check_open`.
@@ -1899,10 +1928,16 @@ class WsConnections:
         asset_class = cast("AssetClass", spec.asset_class)
         url = f"wss://{decision.host}/{asset_class.value}"
         candidate: Connection | None = None
+        stale: Connection | None = None
         try:
             while True:
                 with self._lock:
                     self._check_open()
+                    verdict = group.verdicts.get((asset_class, spec.family))
+                    if verdict is not None and verdict is not decision:
+                        decision = verdict
+                        url = f"wss://{decision.host}/{asset_class.value}"
+                        stale, candidate = candidate, None  # built for the old host
                     connection = group.connections.get(url)
                     self._check_cap(spec, connection, topics)
                     created = connection is None and candidate is not None
@@ -1918,7 +1953,10 @@ class WsConnections:
                         group.streams[stream_id] = connection
                         group.owners[stream_id] = self
                         self._mine.add(stream_id)
-                        return connection, created
+                        break
+                if stale is not None:
+                    stale.close()
+                    stale = None
                 futures = asset_class is AssetClass.FUTURES
                 candidate = Connection(
                     group,
@@ -1930,8 +1968,10 @@ class WsConnections:
                     sessions=self.futures_calendar() if futures else None,
                 )
         finally:
-            if candidate is not None:  # lost the race, or refused: never registered
-                candidate.close()
+            for unused in (candidate, stale):  # lost the race, refused, or outdated
+                if unused is not None:
+                    unused.close()
+        return connection, created, decision
 
     def _check_open(self) -> None:
         """Refuse a stream once the session's side is closed; the group's lock is held.

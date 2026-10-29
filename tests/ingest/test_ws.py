@@ -1191,6 +1191,42 @@ def test_a_verdict_settles_the_host_for_every_session_of_the_group(
     del theirs, again
 
 
+def test_a_verdict_that_arrives_while_a_host_is_decided_wins(
+    make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The verdict lands after the session decided the real-time host but before it leased a
+    # connection: the lease reads the group's verdicts again and takes the delayed host. A
+    # verdict whose recording fails is recorded again by the next stream.
+    groups: list[ws.ConnectionGroup] = []
+
+    def decide_as_the_verdict_lands(*_: object) -> HostDecision:
+        groups[0].verdicts[AssetClass.FUTURES, ChannelFamily.TICK] = DELAYED
+        return unknown_futures()
+
+    custom_session = make_ws_session(decide=decide_as_the_verdict_lands)
+    groups.append(custom_session.connections.group)
+    record = custom_session.connections.record_verdict
+    failures = [RuntimeError("the REST transport is closing")]
+
+    def flaky(asset_class: AssetClass, family: ChannelFamily, decision: HostDecision) -> None:
+        if failures:
+            raise failures.pop()
+        record(asset_class, family, decision)
+
+    monkeypatch.setattr(custom_session.connections, "record_verdict", flaky)
+    with pytest.raises(RuntimeError, match="closing"):
+        custom_session.query(FUTURES, ["ESZ5"]).blink()
+    assert custom_session.connections.verdicts_recorded == set()  # not recorded: retried
+    with groups[0].lock:
+        assert groups[0].streams == {}  # the failed open returned its lease
+    first = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    assert custom_session.urls == ["wss://delayed.test/futures"]
+    assert custom_session.verdicts == [(AssetClass.FUTURES, ChannelFamily.TICK, DELAYED)]
+    monkeypatch.undo()
+    custom_session.session.release(first)
+    groups.clear()
+
+
 def test_a_session_that_joins_during_a_move_records_the_verdict(
     make_ws_session: Callable[..., WsSession],
 ) -> None:
