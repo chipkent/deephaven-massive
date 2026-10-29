@@ -1409,12 +1409,13 @@ class RestReader:
         zone_class = day_class(spec, map(symbol_class, own))
         stamps = _with_remedy(stamp_rule(spec, request, asset_class=zone_class), remedy)
         times = time_rule(spec, request, asset_class=zone_class)
+        bucket = _request_bucket(spec, template, call)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
                 call.path_params,
                 call.query,
-                bucket=call_bucket(spec, template, call),
+                bucket=bucket,
                 cancel=stop,
                 patience=patience,
                 limit=limit,
@@ -2217,23 +2218,52 @@ def call_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
 
     Returns:
         The bucket's name, such as `"stocks"`, `"currencies"`, or `"other"`.
-
-    Logs the choice at DEBUG, with the dataset, the path template, and the symbol.
     """
-    if _REFERENCE_PATH.match(template):
-        bucket, reason = OTHER, "a reference endpoint"
-    else:
-        classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
-        bucket, reason = bucket_of(subscription_of(day_class(spec, classes))), "its data's class"
+    return _charge(spec, template, call)[0]
+
+
+def _request_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
+    """Return the bucket a request about to be made is charged to, logging it and why.
+
+    Called once per request, so the log has one line for each; the planning that announces a
+    read's buckets beforehand uses `call_bucket`, which logs nothing.
+
+    Args:
+        spec: The dataset.
+        template: The request's path template.
+        call: The planned request.
+
+    Returns:
+        The bucket's name (`call_bucket`).
+    """
+    bucket, reason = _charge(spec, template, call)
     logger.debug(
-        "%s %s (symbol %s) is charged to the %s bucket: %s",
+        "%s %s (symbols: %s) is charged to the %s bucket: %s",
         spec.name,
         template,
-        call.symbol,
+        ", ".join(_own_symbols(spec, call.symbol, call.query)) or "none",
         bucket,
         reason,
     )
     return bucket
+
+
+def _charge(spec: DatasetSpec, template: str, call: Call) -> tuple[str, str]:
+    """Return the bucket a planned request is charged to (`call_bucket`) and why.
+
+    Args:
+        spec: The dataset.
+        template: The request's path template.
+        call: The planned request.
+
+    Returns:
+        The bucket's name and the reason, `"a reference endpoint"` or `"its data's class"`,
+        which `_request_bucket` logs once per request.
+    """
+    if _REFERENCE_PATH.match(template):
+        return OTHER, "a reference endpoint"
+    classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
+    return bucket_of(subscription_of(day_class(spec, classes))), "its data's class"
 
 
 def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) -> list[str]:

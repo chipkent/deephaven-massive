@@ -391,9 +391,9 @@ def test_a_request_whose_patience_ends_before_the_pause_fails_at_once() -> None:
         "Massive is refusing stocks requests with HTTP 429 (latest refusal: HTTP 429: slow "
         "down). Its next request, a probe, goes at 2027-01-15T08:10:01+00:00 "
         f"({local} local time), but this read waits out at most 600 s of pauses and has "
-        "waited 0 s. The usual cause is another program or process using the same Massive "
-        "account, whose limit they share. To go on: retry after that time; stop the other "
-        "program; or, if this subscription is on the Basic tier, declare it Basic "
+        "spent 0 s of its patience. The usual cause is another program or process using the "
+        "same Massive account, whose limit they share. To go on: retry after that time; stop "
+        "the other program; or, if this subscription is on the Basic tier, declare it Basic "
         "(rest_basic_subscriptions) so its requests are paced, or upgrade it"
     )
     assert clock.waits == []  # it failed without waiting
@@ -1253,6 +1253,15 @@ def test_a_patience_counts_each_stretch_of_pause_once() -> None:
     assert patience.spent == 20.0
     assert UNLIMITED.charge(0.0, 10.0**9)
     assert UNLIMITED.spent == 0.0  # shared by every governor and thread, so never changed
+
+
+@pytest.mark.parametrize("name", ["seconds", "spent"])
+def test_a_patience_is_read_only_so_the_shared_unlimited_one_never_changes(name: str) -> None:
+    with pytest.raises(AttributeError, match="has no setter"):
+        setattr(UNLIMITED, name, 1.0)
+    with pytest.raises(AttributeError, match="has no deleter"):
+        delattr(UNLIMITED, name)
+    assert (UNLIMITED.seconds, UNLIMITED.spent) == (math.inf, 0.0)
 
 
 def test_a_long_paced_read_still_waits_out_a_short_pause() -> None:

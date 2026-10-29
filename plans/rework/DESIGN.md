@@ -5702,27 +5702,40 @@ document already reflects them.
     problem. Secrets are never logged. Every change logs what it decides (the rules in the
     `_debug_log` docstring). The bug report asks for the log and `m.streams()`, and adds no
     warning about what a log contains ([section 17.1](#171-the-log)).
-62. **Each read gives up on its own; `other` learns; learned Basic lives with its governor**
-    (2026-10-29, the owner's decisions after an adversarial review of decision 60). The
-    bucket never gives up: it keeps pausing and probing, and each read has a patience, the
-    most time it waits out pauses (slot waits never count): 10 minutes, or 90 s when its
-    thread holds the update graph's lock (a console command), with no setting, so one session
-    giving up no longer fails another's requests, a stream's host decision included. The
-    give-up error names the subscription, when its next request, a probe, goes (in UTC and in
-    local time), the patience and what the read spent, the usual cause (another program or
-    process using the same account), and the remedies (retry after that time, stop the other
-    program, and for a subscription declare it Basic or upgrade it). Massive's knowledge base
-    says reference and cross-asset endpoints are counted in a bucket of their own, so every
-    reference endpoint (`/v3/reference/...`, `/vX/reference/...`, `/v2/reference/news`) goes to
-    `other`, whatever its dataset's class or filters: options contracts and IPOs, reference
-    reads filtered by market, and the session's crypto ticker list. Charging every reference
-    endpoint there, the class-specific ones included, is the coordinator's decision,
-    2026-10-29, consistent with the owner's approval of a separate reference bucket; the owner
-    may object, and item 66's live check is to confirm it. `other` learns Basic from a 429
-    that names the per-minute limit, as a subscription does; declaring it still raises. What a governor learned is forgotten with the governor, once
-    the last session of its key has gone and it holds no slot or pause, rather than kept for
-    the life of the process: relearning costs one refused request and one WARNING. The `REFUSED`
-    state of `m.rate_limits()` goes, since no bucket gives up
+62. **Each read gives up on its own; reference data has its own bucket; learned Basic lives
+    with its governor** (2026-10-29, revising decision 60 after an adversarial review; the
+    owner decided most of it, the coordinator three details, each named below).
+    *The owner decided:*
+    - Each read gives up on its own, with no setting: after about 10 minutes, or about 90 s
+      when its thread holds the update graph's lock (a console command), with a clearer
+      error. The bucket never gives up: it keeps pausing and probing, so one session giving
+      up no longer fails another's requests, a stream's host decision included. The give-up
+      error names the subscription, when its next request, a probe, goes (in UTC and in local
+      time), the patience and how much of it the read spent, the usual cause (another program
+      or process using the same account), and the remedies (retry after that time, stop the
+      other program, and for a subscription declare it Basic or upgrade it).
+    - `other` learns Basic from a 429 that names the per-minute limit, as a subscription
+      does; declaring it still raises.
+    - Massive's knowledge-base article "What is the request limit for Massive's RESTful
+      APIs?", which says reference and cross-asset endpoints are counted in a bucket of their
+      own, is to be vendored.
+    - Reference reads filtered by market and the session's crypto ticker list are charged to
+      `other`, not to the class they filter by.
+    - What a governor learned is forgotten with the governor, once the last session of its
+      key has gone and it holds no slot or pause, rather than kept for the life of the
+      process: relearning costs one refused request and one WARNING. The `REFUSED` state of
+      `m.rate_limits()` goes, since no bucket gives up.
+
+    *The coordinator decided (the owner may object):*
+    - Every other reference endpoint (`/v3/reference/...`, `/vX/reference/...`,
+      `/v2/reference/news`) is charged to `other` too, whatever its dataset's class, options
+      contracts and IPOs included: consistent with the owner's approval of a separate
+      reference bucket. Item 66's live check is to confirm it.
+    - A read's patience counts only time spent waiting out pauses, each stretch once; slot
+      waits never count: the coordinator's reading of the owner's approval to give up after
+      about 10 minutes paused.
+    - A read that joins a lookup another read started bounds its own wait with its own
+      patience and keeps sharing the lookup (once console commands can read, issue #206).
     ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
 
 ## 23. Open verification items

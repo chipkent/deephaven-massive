@@ -1472,9 +1472,9 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     given_up = (
         r"^rate limited: Massive is refusing stocks requests with HTTP 429 \(latest refusal: "
         r".*r7.*\)\. Its next request, a probe, goes at 2027-01-15T08:11:40\+00:00 "
-        r"\(.* local time\), but this read waits out at most 600 s of pauses and has waited "
-        r"0 s\. The usual cause is another program or process using the same Massive account, "
-        r"whose limit they share\. "
+        r"\(.* local time\), but this read waits out at most 600 s of pauses and has spent "
+        r"0 s of its patience\. The usual cause is another program or process using the same "
+        r"Massive account, whose limit they share\. "
         r"To go on: retry after that time; stop the other program; or, if this subscription is "
         r"on the Basic tier, declare it Basic \(rest_basic_subscriptions\) so its requests are "
         r"paced, or upgrade it\. m\.rate_limits\(\) shows each subscription's state$"
@@ -2707,24 +2707,28 @@ def test_a_reference_request_is_charged_to_other_whatever_market_it_filters(
     ids=["options contracts", "IPOs", "news"],
 )
 def test_every_reference_endpoint_is_charged_to_other_whatever_its_dataset_class(
-    spec: DatasetSpec, template: str, caplog: pytest.LogCaptureFixture
+    spec: DatasetSpec, template: str
 ) -> None:
     # A dataset of one class (options contracts, IPOs) still reads a reference endpoint,
-    # which Massive counts in the reference bucket; the log says why.
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
-        assert rest.call_bucket(spec, template, rest.Call({}, {}, "AAPL")) == "other"
-    assert caplog.messages == [
-        f"{spec.name} {template} (symbol AAPL) is charged to the other bucket: a reference endpoint"
-    ]
+    # which Massive counts in the reference bucket.
+    assert rest.call_bucket(spec, template, rest.Call({}, {}, "AAPL")) == "other"
 
 
-def test_a_request_of_a_class_logs_the_bucket_it_is_charged_to(
-    caplog: pytest.LogCaptureFixture,
+def test_each_request_logs_its_bucket_and_why_once(
+    *, session: dm.MassiveSession, snapshots: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
+    snapshots.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    snapshots.reply(NEWS_PATH, Reply(envelope([])))
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
-        assert rest.call_bucket(DIVIDENDS, DIVIDENDS_PATH, rest.Call({}, {}, "AAPL")) == "stocks"
-    charged = "is charged to the stocks bucket: its data's class"
-    assert caplog.messages == [f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbol AAPL) {charged}"]
+        fetch(session, DIVIDENDS, symbols=["AAPL"])
+        fetch(session, NEWS)
+    charged = [message for message in caplog.messages if " is charged to the " in message]
+    stocks = "is charged to the stocks bucket: its data's class"
+    other = "is charged to the other bucket: a reference endpoint"
+    assert charged == [
+        f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbols: AAPL) {stocks}",
+        f"{NEWS.name} {NEWS_PATH} (symbols: none) {other}",
+    ]
 
 
 def test_a_session_charges_reads_and_host_decisions_to_their_buckets(

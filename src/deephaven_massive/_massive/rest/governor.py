@@ -179,9 +179,8 @@ class Patience:
     The governor reads and charges it only under its own lock, so a read's patience must be
     used with one governor.
 
-    Attributes:
-        seconds: The most pause time the read waits out; `math.inf` for no limit.
-        spent: The pause time charged so far.
+    Its `seconds` and `spent` are read-only; only `charge` changes it, and never a patience
+    without limit, so the one `UNLIMITED` serves every governor and thread.
 
     Example:
         ::
@@ -191,7 +190,7 @@ class Patience:
                 permit = admission.acquire(read)
     """
 
-    __slots__ = ("_counted_until", "seconds", "spent")
+    __slots__ = ("_counted_until", "_seconds", "_spent")
 
     def __init__(self, seconds: float) -> None:
         """Start with nothing charged.
@@ -199,11 +198,21 @@ class Patience:
         Args:
             seconds: The most pause time the read waits out, in seconds; `math.inf` for none.
         """
-        self.seconds = seconds
-        self.spent = 0.0
+        self._seconds = seconds
+        self._spent = 0.0
         # The end of the pause time already charged (monotonic): a pause several requests of
         # the read wait out together is charged once.
         self._counted_until = -math.inf
+
+    @property
+    def seconds(self) -> float:
+        """The most pause time the read waits out, in seconds; `math.inf` for no limit."""
+        return self._seconds
+
+    @property
+    def spent(self) -> float:
+        """The pause time charged so far, in seconds."""
+        return self._spent
 
     def charge(self, now: float, until: float) -> bool:
         """Charge a wait for a pause ending at `until`, if the patience covers it.
@@ -217,21 +226,21 @@ class Patience:
         Returns:
             True when the read waits it out (the part not yet counted is charged), False when
             that part would take the read past `seconds` (nothing is charged). A patience
-            without limit always returns True and is never changed, so the one `UNLIMITED`
-            can serve every governor and thread.
+            without limit returns True and charges nothing, as `UNLIMITED` needs.
         """
-        if self.seconds == math.inf:
+        if self._seconds == math.inf:
             return True
         added = max(0.0, until - max(now, self._counted_until))
-        if self.spent + added > self.seconds:
+        if self._spent + added > self._seconds:
             return False
-        self.spent += added
+        self._spent += added
         self._counted_until = max(self._counted_until, until)
         return True
 
 
 UNLIMITED: Final = Patience(math.inf)
-"""The patience of a request that waits out any pause; the default of `admission`."""
+"""The patience of a request that waits out any pause; the default of `admission`. It is
+read-only, so every governor and thread can share it."""
 
 
 class Admission:
@@ -1145,9 +1154,10 @@ class RequestGovernor:
             f"{state.last_refusal}). Its next request, a probe, goes at "
             f"{goes.isoformat(timespec='seconds')} "
             f"({goes.astimezone().isoformat(timespec='seconds')} local time), but this read "
-            f"waits out at most {patience.seconds:.0f} s of pauses and has waited "
-            f"{patience.spent:.0f} s. The usual cause is another program or process using the "
-            f"same Massive account, whose limit they share. To go on: {remedies}"
+            f"waits out at most {patience.seconds:.0f} s of pauses and has spent "
+            f"{patience.spent:.0f} s of its patience. The usual cause is another program or "
+            f"process using the same Massive account, whose limit they share. To go on: "
+            f"{remedies}"
         )
 
     def _notify(self) -> None:

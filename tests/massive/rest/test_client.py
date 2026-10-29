@@ -569,7 +569,9 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
         "/v3/trades/AAPL on 127.0.0.1 (request_id r): quota). Its next request, a probe, goes at "
         "2027-01-15T08:10:01+00:00 ("
     )
-    assert "waits out at most 600 s of pauses and has waited 0 s" in str(caught.value)
+    assert "waits out at most 600 s of pauses and has spent 0 s of its patience" in str(
+        caught.value
+    )
     assert caught.value.status == 429
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
     # Another call with the same patience fails at once, without being sent.
