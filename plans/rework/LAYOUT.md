@@ -69,8 +69,9 @@ These are review rules, applied by the pre-push review and by reviewers, not by 
    `helpers`, `util`, `manager`, `misc`).
 3. **One rule, one body.** A rule or helper written twice is a defect: move it to the module that
    owns the concept and call it from both places.
-4. **An exception is defined in the module that raises it.** One raised by several modules goes
-   to the layer's errors module: `_errors.py`, or `_massive/net/errors.py` for the wire clients.
+4. **An exception is defined in the module that raises it.** One raised by several modules, or
+   one a module in a lower layer must name, goes to the layer's errors module: `_errors.py`, or
+   `_massive/net/errors.py` for the wire clients.
 5. **Size is a smell, not a rule.** A module above about 1,000 lines, or one whose first line
    lists more than two subjects, needs a split or a sentence in its docstring saying why it is
    one subject.
@@ -87,7 +88,7 @@ __init__.py                    public names, lazy; the front door
 # vocabulary (rank 1)
 _config.py                     MassiveConfig, HostMap, environment readers; require_positive_* (see Out of scope)
 _enums.py                      public enums, Recency, ChannelFamily, _require_enum, subscription_of (#143)
-_errors.py                     MassiveError hierarchy, from_wire, RowDataError, UnsupportedParameterError (raised in ingest, caught by poll() in tables)
+_errors.py                     MassiveError hierarchy, from_wire, RowDataError, UnsupportedParameterError (named by both ingest and tables)
 _types.py                      Symbols, ALL, DateLike, FilterValue, span literals, override
 _log_limits.py        NEW      rate-limited log records: log_once, BoundedWarnings (← _errors)
 # datasets (rank 2): no I/O, threads or Deephaven calls
@@ -159,6 +160,7 @@ _massive/
   net/http.py                  CA bundle, TLS context, proxy
   net/retry.py                 retry waits, Clock, never-retried failures
   net/cancel.py       #143     the Cancel token
+  net/origins.py      #143     URL origins: Origin, origin_of
   net/redaction.py    #158     redaction of keys and secrets
   spec/__init__.py             source, sources, provenance and their cache
   spec/generated_schemas.py NEW parsing of the generated spec/*.json files (← spec/__init__)
@@ -167,7 +169,7 @@ _massive/
   spec/convert.py              JSON value conversion per WireType
   rest/client.py               RestClient: pool, retries, paging
   rest/batch.py                page rows to an Arrow batch
-  rest/query.py                request targets, origin_of
+  rest/query.py                request targets
   rest/response.py             strict page decoding, http_error, RequestTarget (renamed from Request)
   rest/governor.py    #143     RequestGovernor
   ws/client.py                 WsClient: one endpoint's thread and loop
@@ -201,7 +203,7 @@ Each open PR fixes only what it itself creates.
 |---|---|---|
 | #138 | Define `UnlistedPairError` in `_ingest/rest.py`, the only module that raises it; `canonicalize_symbols` in `_tables/symbols.py`. | done |
 | #142 | Name the schedule module `_ingest/futures_calendar.py`, with `FuturesCalendar` and `ScheduledSession`. | done |
-| #143 | Drop `rate_limits._origin`, a copy of `_massive/rest/query.origin_of`; export `origin_of` from `_massive`, classified as a vocabulary name in `tests/test_layout.py`. | open |
+| #143 | Keep one URL-origin rule: `rate_limits._origin`, a copy of `origin_of`, is gone; `origin_of` lives in `_massive/net/origins.py` and is exported from `_massive` as a vocabulary name. | done |
 
 #151, #158 and #159 create nothing misplaced and need no change.
 
@@ -231,7 +233,7 @@ Every cleanup PR is a `refactor:` with no change in behavior, and every one:
 | B6 | `refactor: split the REST transport, and move poll() to the tables layer` | Request planning goes to `rest_requests.py` (pure, testable without a fake server); row conversion, the error-row rule and the history keep go to `rest_rows.py`; `hosts.py` becomes `host_decision.py` and takes the host-decision cache, moved verbatim from `RestState` into `HostDecisionCache`; `_ingest/poll.py` moves to `_tables/poll.py`; `RowDataError` and `UnsupportedParameterError` move to `_errors.py`: `rest.py` raises them and the poller, now in the tables layer, lists them among the errors that fail a table, so neither can live in the ingest layer. If `rest.py` is still above about 1,000 lines, its docstring gains the one-subject sentence. Lifts the feature pause on `_ingest/rest.py`. | B3, B5, and every open PR (all edit `rest.py`) | `tests/ingest/test_rest.py` → `test_rest.py`, `test_rest_requests.py`, `test_rest_rows.py`; `tests/ingest/test_hosts.py` and `test_hosts_integration.py` → `test_host_decision.py` and `test_host_decision_integration.py` (plus the cache tests from `test_rest.py`); `tests/data/ingest/hosts/` → `tests/data/ingest/host_decision/`; `tests/ingest/test_poll.py` → `tests/tables/test_poll.py`; `RowDataError` and `UnsupportedParameterError` tests → `tests/test_errors.py` |
 | B7 | `refactor: split a WebSocket connection from the session's registry of them` | `Connection` and its client factories leave `_ingest/ws.py` for `ws_connection.py`; `ws.py` keeps `WsConnections` and `WsTransport`. If either is still above about 1,000 lines, its docstring gains the one-subject sentence. | #138, #142, #151, #158 (`ws.py`) | `tests/ingest/test_ws.py` → `test_ws.py` and `test_ws_connection.py`; fixtures under `tests/data/ingest/ws/` follow their owner test. `test_ws_integration.py` stays: it tests the transport end to end. |
 | B8 | `refactor: name the namespaces' query building, and choose query classes in _query` | `query_class` and `bar_query_class` move to `_query.py`, beside the classes they choose; the rest of `_namespaces/base.py` becomes `query_building.py`, with one `list_query` and one `ticker_key` replacing the copies in `stocks.py`, `partners.py` and `crypto.py`, and `optional_text` replacing `reference._text`. If `_query.py` is now above about 1,000 lines, its docstring gains the one-subject sentence. Lifts the feature pause on `_query.py`. | #138, #142, #143, #151, #158 (`_query.py`, `_namespaces/`) | `tests/namespaces/test_base.py` → `test_query_building.py`; query-class tests → `tests/test_query.py`; in `tests/test_session.py:515` (`test_every_namespace_module_feeds_the_catalog`), the module left out of `NAMESPACE_MODULES` becomes `query_building` instead of `base` |
-| B9 | `refactor: move the rate-limited log helpers out of the errors module` | `log_once` and `BoundedWarnings` move to the new vocabulary module `_log_limits.py`. `DESIGN.md` § 4.3 already places it in the vocabulary layer; B9 adds it to the § 4.1 tree, to the vocabulary list in the "Layers" section of `AGENTS.md`, and to the vocabulary layer in `tests/test_layout.py`. | every open PR: all of them import `log_once` or edit `_errors.py` | `log_once` and `BoundedWarnings` tests from `tests/test_errors.py` → `tests/test_log_limits.py` |
+| B9 | `refactor: move the rate-limited log helpers out of the errors module` | `log_once` and `BoundedWarnings` move to the new vocabulary module `_log_limits.py`. `DESIGN.md` § 4.3 already places it in the vocabulary layer; B9 adds it to the § 4.1 tree, wherever `AGENTS.md` lists the vocabulary modules, and to the vocabulary layer in `tests/test_layout.py`. | every open PR: all of them import `log_once` or edit `_errors.py` | `log_once` and `BoundedWarnings` tests from `tests/test_errors.py` → `tests/test_log_limits.py` |
 | B10 | `refactor: split m.stocks into its three namespaces` | `_namespaces/stocks.py` splits into `stocks.py`, `stock_financials.py` and `stock_filings.py`. `partners.py` stays whole, and its docstring gains the one-subject sentence (see Module size). | B8, #142 (`stocks.py`) | `tests/namespaces/test_stocks.py` and `test_stocks_integration.py` split three ways; fixtures under `tests/data/namespaces/stocks/` follow their owner test |
 | B11 | `refactor: move symbols' transport spellings to wire_symbols` | The reading and writing of a symbol's transport spellings (`canonical_from_wire`, `wire_spellings`, `ws_symbol`, `WireSymbols`, `ReadSymbols`, `unknown_symbol_message`) leave `_datasets/symbols.py` for `_datasets/wire_symbols.py`; the private helpers they share with the converters become public names in `symbols.py`, and `option_roots` stays there. Its callers are the transport files (`_ingest/rest.py`, `flatfiles.py`, `subscriptions.py`, `ws.py`, `_tables/stream.py`). Adds the one-subject sentence to the docstrings of `symbols.py`, `_ingest/flatfiles.py` and `_tables/stream.py` if they are still above about 1,000 lines. | #138, #151, B6 and B7 (the transport files; through B6, every open PR) | transport-spelling tests from `tests/datasets/test_symbols.py` → `test_wire_symbols.py` |
 
@@ -273,4 +275,4 @@ it is one subject, from the PR named.
 | `_datasets/catalog.py` | about 1,360 (#142), less after B4 | the dataset specs and their catalog | B4, if still above |
 | `_tables/stream.py` | about 1,070 (#142) | one stream's path from publisher to fan-out | B11 |
 | `_ingest/flatfiles.py` | about 1,070 (#142) | one transport, from read plan to table | B11 |
-| `_ingest/rest.py`, `_ingest/ws.py`, `_tables/session_core.py`, `_query.py`, `_namespaces/stocks.py` | below or near 1,000 after their split | | B6, B7, B5, B8, B10, if still above |
+| `_ingest/rest.py`, `_ingest/ws.py`, `_tables/session_core.py`, `_query.py`, `_namespaces/stocks.py` | expected near or below about 1,000 after their split, to be measured then | | B6, B7, B5, B8, B10, if still above |

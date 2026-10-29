@@ -219,15 +219,15 @@ names this document fixes with an underscore: `_All`, `_require_enum`, and the n
 
 **One subject per module.** A module is named for its content and holds one subject, named in
 the first line of its docstring. New code goes in the module whose first line already names its
-subject; if none does, it gets a new module named for that subject, never a widened summary
-("…, and X") on a neighbor. Module names are subject nouns, never pattern words such as `base`,
+subject; if none does, it gets a new module named for that subject, never a widened summary ("…,
+and X") on a neighbor. Module names are subject nouns, never pattern words such as `base`,
 `core`, `common`, `helpers` or `util`. A rule or helper has one body, in the module that owns
 its concept. An exception is defined in the module that raises it, or in the layer's errors
-module when several modules raise it: `_errors.py`, or `_massive/net/errors.py` for the wire
-clients. A module above about 1,000 lines, or one whose first line lists more than two
-subjects, is split or says in its docstring why it is one subject. Review enforces these rules,
-not a test: checks of placement over source text would be brittle and costly to keep for little
-protection.
+module when several modules raise it, or when a module in a lower layer must name it:
+`_errors.py`, or `_massive/net/errors.py` for the wire clients. A module above about 1,000
+lines, or one whose first line lists more than two subjects, is split or says in its docstring
+why it is one subject. Review enforces these rules, not a test: checks of placement over source
+text would be brittle and costly to keep for little protection.
 
 ```
 src/deephaven_massive/
