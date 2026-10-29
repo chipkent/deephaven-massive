@@ -21,15 +21,17 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
-from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import HostDecision, Request
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
+    ClassFromPrefix,
     Direction,
     HistorySource,
     Order,
@@ -37,6 +39,7 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
+from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._massive import RestPath, Transport
@@ -44,6 +47,7 @@ from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
 from deephaven_massive._tables.diagnostics import Diagnostics
+from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -101,6 +105,7 @@ SMA_CRYPTO = "/v1/indicators/sma/{cryptoTicker}"
 SMA = DatasetSpec(
     summary="A dataset for the tests.",
     name="indicators.sma",
+    row_times=RowTimes.BAR,
     fetch_path=SMA_STOCK,
     fetch_paths_by_class={AssetClass.CRYPTO: SMA_CRYPTO},
     time_axis=("timestamp.gte", "timestamp.lt"),
@@ -173,13 +178,14 @@ FUTURES_TRADES = DatasetSpec(
     summary="A dataset for the tests.",
     name="futures.trades",
     asset_class=AssetClass.FUTURES,
+    row_times=RowTimes.TICK,
     history_path=FUTURES_TRADES_PATH,
     time_axis=("timestamp.gte", "timestamp.lt"),
     keys={
         (R, FUTURES_TRADES_PATH): SourceKeys(
             KeySpec("ticker", from_request=True),
             KeySpec("Timestamp"),
-            session=KeySpec("SessionEndDate"),
+            date=KeySpec("SessionEndDate"),
         )
     },
 )
@@ -195,7 +201,7 @@ FUTURES_BARS = DatasetSpec(
         (R, FUTURES_AGGS_PATH): SourceKeys(
             KeySpec("ticker", from_request=True),
             KeySpec("WindowStart"),
-            session=KeySpec("SessionEndDate"),
+            date=KeySpec("SessionEndDate"),
         )
     },
 )
@@ -348,6 +354,9 @@ def session(
 
 
 def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+    # An indicator is computed over bars of a timespan, which its factory always sets.
+    if spec is SMA:
+        kwargs.setdefault("timespan", Timespan.MINUTE)
     return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
 
 
@@ -357,11 +366,18 @@ def fetch(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> list[dic
     return rows(q.fetch())
 
 
-def rows(table: Table) -> list[dict[str, Any]]:
-    # Instants become epoch nanoseconds, so assertions keep every digit.
+def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit. Every row carries the
+    # instant its page arrived, last; it is checked here and, unless asked for, left out, so
+    # an assertion compares only what Massive sent.
     data = dh_arrow.to_arrow(table)
+    assert data.column_names[-1] == "TimestampInsert"
+    assert data.column("TimestampInsert").null_count == 0
     columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
     out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    if not arrival:
+        for row in out:
+            del row["TimestampInsert"]
     return out
 
 
@@ -405,8 +421,8 @@ def test_fetch_sends_the_typed_parameters_axis_filters_and_page_size(
     assert first["frequency.gte"] == ["4"]
     assert first["limit"] == ["1000"]  # the page size, never the row cap
     assert [(r["Symbol"], r["CashAmount"], r["ExDividendDate"]) for r in out] == [
-        ("AAPL", 0.25, date(2025, 2, 10)),
-        ("AAPL", 0.25, date(2025, 2, 10)),
+        ("AAPL", 0.25, "2025-02-10"),
+        ("AAPL", 0.25, "2025-02-10"),
     ]
 
 
@@ -522,9 +538,9 @@ def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> Non
     # An instant given by the caller is sent as given, even on an inclusive or exclusive
     # bound that a date would move by one unit.
     given = {"timestamp.gte": instant, "timestamp.lte": instant, "timestamp.gt": instant}
-    assert rest._filter_days(path, given, None) == given
+    assert rest._filter_days(path, given, ClassFromPrefix.ANY) == given
     dividends = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, None) == {
+    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, ClassFromPrefix.ANY) == {
         "ex_dividend_date.gte": day
     }
 
@@ -591,9 +607,267 @@ def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
         "closingTrades": [],
     }
     fake_rest.reply("/v1/open-close/crypto/BTC/USD/2025-03-03", Reply(body))
+    serve_pairs(fake_rest)
     out = fetch(session, CRYPTO_OPEN_CLOSE, symbols=["X:BTCUSD"], params={"date": date(2025, 3, 3)})
-    assert [path for path, _ in sent(fake_rest)] == ["/v1/open-close/crypto/BTC/USD/2025-03-03"]
+    assert [path for path, _ in sent(fake_rest)] == [
+        TICKERS_PATH,  # the pair's split comes from Massive's listed crypto tickers,
+        TICKERS_PATH,  # and its delisted ones
+        "/v1/open-close/crypto/BTC/USD/2025-03-03",
+    ]
     assert [(r["Symbol"], r["Open"]) for r in out] == [("X:BTCUSD", 90000.5)]
+
+
+def _ticker(symbol: str, base: str, quote: str) -> dict[str, object]:
+    # One row of /v3/reference/tickers for a crypto pair.
+    return {
+        "ticker": symbol,
+        "market": "crypto",
+        "base_currency_symbol": base,
+        "currency_symbol": quote,
+    }
+
+
+TICKERS_PATH = "/v3/reference/tickers"
+PAIRS = {
+    "X:BTCUSD": ("BTC", "USD"),
+    "X:ETHUSD": ("ETH", "USD"),
+    "X:SOLUSD": ("SOL", "USD"),
+    "X:XRPUSD": ("XRP", "USD"),
+}
+"""The crypto pairs these tests use, as Massive's crypto ticker list splits them."""
+
+
+def serve_pairs(server: FakeRestServer) -> None:
+    # Massive's crypto ticker list, which a `{from}/{to}` path reads once per session.
+    # It is read as two lists: the listed pairs, then the delisted ones (none here).
+    rows = [_ticker(symbol, base, quote) for symbol, (base, quote) in PAIRS.items()]
+    server.reply(TICKERS_PATH, Reply(envelope(rows)), Reply(envelope([])))
+
+
+def sent_data(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET but the read of the crypto ticker list.
+    return [(path, query) for path, query in sent(server) if path != TICKERS_PATH]
+
+
+def split_pair(symbol: str) -> tuple[str, str]:
+    # The split of a crypto pair, as `RestReader.crypto_pair` reads it from the list.
+    return PAIRS[symbol]
+
+
+LIST_QUERY = {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of listed crypto tickers."""
+DELISTED_QUERY = {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of delisted crypto tickers."""
+
+
+def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # X:DOTUSD ends in USD and in TUSD: Massive's list says where it splits, never a guess.
+    # The whole list is read once, every page, and serves every later pair of the session.
+    second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
+    first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
+    fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?cursor=two",
+        Reply(envelope([_ticker("X:SHIBUSD", "SHIB", "USD"), _ticker("X:ETHWBTC", "ETH", "WBTC")])),
+    )
+    body = {"symbol": "DOT-USD", "isUTC": True, "day": "2025-03-03T00:00:00Z", "open": 4.5}
+    fake_rest.reply("/v1/open-close/crypto/DOT/USD/2025-03-03", Reply(body), Reply(body))
+    for _ in range(2):
+        out = fetch(
+            session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
+        )
+        assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
+    # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
+    assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", {"cursor": ["two"]}),
+        ("/v3/reference/tickers", DELISTED_QUERY),
+        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),
+        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),  # the list is kept
+    ]
+
+
+def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A past date of a delisted pair still needs its split; a ticker in both lists keeps the
+    # listed pair's currencies.
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
+        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD")])),
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000",
+        Reply(envelope([_ticker("X:FTTUSD", "FTT", "USD"), _ticker("X:BTCUSD", "BT", "CUSD")])),
+    )
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    assert reader.crypto_pair("X:FTTUSD") == ("FTT", "USD")
+    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", DELISTED_QUERY),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([], "Massive's reference data does not list it"),
+        (
+            [_ticker("X:DOTUSD", "DOT", "USDT")],
+            "Massive's reference data gives the currencies 'DOT' and 'USDT', which do not",
+        ),
+        (
+            # Another ticker's row comes first and its currencies join to X:DOTUSD as well.
+            [_ticker("X:OTHER", "DOT", "USD"), _ticker("X:DOTUSD", "DO", "TUSD")],
+            None,
+        ),
+        ([{"market": "crypto", "base_currency_symbol": "DOT"}], "Massive's reference data does"),
+    ],
+)
+def test_a_crypto_pair_lookup_never_guesses(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    rows: list[dict[str, object]],
+    message: str | None,
+) -> None:
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)), Reply(envelope([])))
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    if message is None:  # the row of the ticker itself decides
+        assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
+        return
+    with pytest.raises(rest.UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
+        reader.crypto_pair("X:DOTUSD")
+
+
+def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_retried(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(
+        "/v3/reference/tickers",
+        Reply({"status": "ERROR"}, status=403),
+        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+        Reply(envelope([])),
+    )
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    with pytest.raises(
+        dm.EntitlementError,
+        match=r"^'X:DOTUSD' cannot be split into its two currencies: reading Massive's crypto",
+    ) as raised:
+        reader.crypto_pair("X:DOTUSD")
+    assert raised.value.status == 403
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the failure was not kept
+    assert len(sent(fake_rest)) == 3  # the failed read, then both lists
+
+
+def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    claimed: list[Future[Any]] = []
+
+    def pages(*_: object, **__: object) -> Iterator[Any]:
+        future, created = reader.state.crypto_future()  # what a waiter would get meanwhile
+        assert not created
+        claimed.append(future)
+        raise RuntimeError("the reader broke")
+
+    monkeypatch.setattr(reader.state.client, "pages", pages)
+    with pytest.raises(RuntimeError, match="the reader broke"):  # the reader's own error
+        reader.crypto_pair("X:DOTUSD")
+    (future,) = claimed
+    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError"):
+        future.result()  # the waiters get a MassiveError
+    assert reader.state.crypto_future()[1]  # and the failure is forgotten
+
+
+class _WatchedFuture(Future[rest.CryptoTickers]):
+    # A future that says when a caller starts waiting on it.
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = threading.Event()
+
+    @override
+    def result(self, timeout: float | None = None) -> rest.CryptoTickers:
+        self.waiting.set()
+        return super().result(timeout)
+
+
+def _wait_for_pair(
+    reader: rest.RestReader, future: _WatchedFuture
+) -> tuple[list[object], threading.Thread]:
+    # Call crypto_pair on another thread while `future` is the list being read: the thread
+    # waits on it, and puts what the call returned or raised in the list once it completes.
+    reader.state._crypto = future  # the read another thread has claimed
+    results: list[object] = []
+
+    def wait() -> None:
+        try:
+            results.append(reader.crypto_pair("X:DOTUSD"))
+        except dm.MassiveError as error:
+            results.append(error)
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    assert future.waiting.wait(30)
+    return results, waiter
+
+
+@pytest.mark.parametrize("outcome", ["fails", "succeeds"])
+def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
+    *, session: dm.MassiveSession, outcome: str
+) -> None:
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    future = _WatchedFuture()
+    results, waiter = _wait_for_pair(reader, future)
+    if outcome == "fails":
+        future.set_exception(dm.EntitlementError("refused", status=403))
+    else:
+        future.set_result({"X:DOTUSD": ("DOT", "USD")})
+    waiter.join(30)
+    (result,) = results
+    if outcome == "fails":
+        assert isinstance(result, dm.EntitlementError)
+        assert str(result).endswith("reading Massive's crypto tickers failed: refused")
+    else:
+        assert result == ("DOT", "USD")
+
+
+def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Static symbols are planned at the call; a symbol table's are planned each cycle, and
+    # since every later cycle would read the same list, the table fails at its first cycle.
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([])), Reply(envelope([])))
+    params = {"date": date(2025, 3, 3)}
+    static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+    assert isinstance(static, Query)
+    with pytest.raises(rest.UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+        static.poll(60)
+    watch = new_table([string_col("Symbol", ["X:DOTUSD"])])
+    q = query(session, CRYPTO_OPEN_CLOSE, symbols=watch, params=params)
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    failed = threading.Event()
+    for _ in range(3000):
+        if table.j_table.isFailed():
+            failed.set()
+            break
+        failed.wait(0.01)
+    assert failed.is_set()
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", DELISTED_QUERY),
+    ]
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
@@ -696,9 +970,10 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         "/v1/last/crypto/BTC/USD",
         Reply({"status": "success", "request_id": "r1", "symbol": "BTC-USD", "last": last}),
     )
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
-        out = fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD"])
-    assert sorted(path for path, _ in sent(fake_rest)) == [
+        out = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
+    assert sorted(path for path, _ in sent_data(fake_rest)) == [
         "/v1/last/crypto/BTC/USD",
         "/v1/last/crypto/ETH/USD",
     ]
@@ -716,9 +991,9 @@ def test_fan_out_threads_are_named_after_the_session_and_the_call(
     for pair in ("BTC/USD", "ETH/USD"):
         body = {"status": "success", "request_id": "r", "symbol": pair, "last": last}
         fake_rest.reply(f"/v1/last/crypto/{pair}", Reply(body))
-
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.DEBUG, "deephaven_massive"):
-        fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD"])
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
     workers = {str(r.threadName) for r in caplog.records if r.threadName != "MainThread"}
 
     # The call's id is the first of the test, and each worker's number follows the prefix.
@@ -738,13 +1013,15 @@ def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
     )
     path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
     with pytest.raises(ValueError, match="only forex and crypto symbols are currency pairs"):
-        rest.plan_calls(spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",))
+        rest.plan_calls(spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",), split=split_pair)
 
 
 def test_a_per_symbol_path_needs_explicit_symbols() -> None:
     path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
     with pytest.raises(ValueError, match="needs explicit symbols"):
-        rest.plan_calls(CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL)
+        rest.plan_calls(
+            CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL, split=split_pair
+        )
 
 
 def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
@@ -756,22 +1033,24 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
         keys={(R, "/v2/reference/news"): SourceKeys()},
     )
     path = cast("RestPath", _massive.source(R, "/v2/reference/news"))
-    calls = rest.plan_calls(news, path, Request(), symbols=("AAPL", "MSFT"))
+    calls = rest.plan_calls(news, path, Request(), symbols=("AAPL", "MSFT"), split=split_pair)
     assert [(c.symbol, dict(c.query)) for c in calls] == [
         ("AAPL", {"ticker": "AAPL"}),
         ("MSFT", {"ticker": "MSFT"}),
     ]
-    assert rest.plan_calls(news, path, Request(), symbols=()) == []
+    assert rest.plan_calls(news, path, Request(), symbols=(), split=split_pair) == []
     # A path that takes no symbols ignores them: one request.
     movers = cast("RestPath", _massive.source(R, MOVERS_PATH))
     request = Request(params=(("direction", Direction.LOSERS),))
-    (call,) = rest.plan_calls(MOVERS, movers, request, symbols=("AAPL", "MSFT"))
+    (call,) = rest.plan_calls(MOVERS, movers, request, symbols=("AAPL", "MSFT"), split=split_pair)
     assert (call.symbol, dict(call.path_params), dict(call.query)) == (
         None,
         {"direction": Direction.LOSERS},
         {},
     )
-    assert [c.symbol for c in rest.plan_calls(news, path, Request(), symbols=None)] == [None]
+    assert [
+        c.symbol for c in rest.plan_calls(news, path, Request(), symbols=None, split=split_pair)
+    ] == [None]
 
 
 def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None:
@@ -785,7 +1064,7 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     )
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A", "B"))
+    calls = rest.plan_calls(spec, path, Request(), symbols=("A", "B"), split=split_pair)
     assert [dict(c.query) for c in calls] == [{"ticker.any_of": ("A",)}, {"ticker.any_of": ("B",)}]
 
 
@@ -798,7 +1077,7 @@ def test_a_symbol_filled_into_a_query_parameter() -> None:
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A",))
+    calls = rest.plan_calls(spec, path, Request(), symbols=("A",), split=split_pair)
     assert [(c.symbol, dict(c.path_params), dict(c.query)) for c in calls] == [
         ("A", {}, {"ticker": "A"})
     ]
@@ -809,11 +1088,13 @@ def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
 ) -> None:
     fake_rest.reply(
         "/v1/indicators/sma/AAPL",
-        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 185.0}]})),
+        # 2024-01-03 00:00 New York time: a stock's day value carries its day's start.
+        Reply(envelope({"values": [{"timestamp": 1704258000000, "value": 185.0}]})),
     )
     fake_rest.reply(
         "/v1/indicators/sma/X%3ABTCUSD",
-        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 97000.0}]})),
+        # 2024-01-03 00:00 UTC: a crypto pair's day is the UTC day.
+        Reply(envelope({"values": [{"timestamp": 1704240000000, "value": 97000.0}]})),
     )
     out = fetch(
         session,
@@ -869,7 +1150,7 @@ def test_a_per_symbol_detail_path_serves_named_symbols(
 
 
 def test_row_symbols_are_canonical(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     body = {
         "status": "success",
@@ -884,20 +1165,46 @@ def test_row_symbols_are_canonical(
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
+    assert "RawSymbol" not in out[0]
     assert sent(fake_rest)[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
-    with caplog.at_level(logging.WARNING, LOGGER):
-        odd = fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
-    assert odd[0]["Symbol"] == "not a pair"
-    assert "not a valid symbol of its class" in caplog.text
+    # A spelling the library cannot read fails the request by default, naming it.
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the library "
+        r"cannot read as Massive's ticker\. Set MASSIVE_UNKNOWN_SYMBOLS=warn",
+    ):
+        fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
+
+
+def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_under_warn(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    monkeypatch.setattr(
+        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger(symbols.__name__), limit=5)
+    )
+    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
+    fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
+    )
+    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, symbols.__name__):
+        (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
+    assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
+    assert "forex.conversion: Massive sent the symbol '?'" in caplog.text
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([])))
-    watch = new_table([string_col("Symbol", ["SPX", "I:NDX", "not a symbol!"])])
+    watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
     assert sent(fake_rest)[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
+    with pytest.raises(ValueError, match=r"^a symbol table holds 'SPX' .*use 'I:SPX'"):
+        fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
 
 
 # --- Rows ----------------------------------------------------------------------------------------
@@ -981,8 +1288,9 @@ def test_drift_of_a_per_symbol_request_names_the_symbol(
         "last": {**last, "new": "x"},
     }
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(body))
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING):
-        fetch(session, CRYPTO_LAST, symbols=["BTC-USD"])
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert (
         "crypto.last: REST field 'new' is not in the schema; it is dropped (schema drift) "
         f'at GET {CRYPTO_LAST_PATH}; symbol X:BTCUSD; first value "x"'
@@ -1073,8 +1381,9 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"oops", status=500))
+    serve_pairs(fake_rest)
     with pytest.raises(dm.MassiveError, match="HTTP 500"):
-        fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD", "SOL-USD"])
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD", "X:SOLUSD"])
 
 
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
@@ -1134,9 +1443,10 @@ def test_bars_fill_the_range_segments_in_milliseconds(
         adjusted=False,
     )
     assert sent(fake_rest) == [(path, {"adjusted": ["false"], "sort": ["asc"]})]
-    assert [(r["Symbol"], r["Timestamp"], r["Close"]) for r in out] == [
-        ("AAPL", midnight * 10**6, 2.0)
-    ]
+    # The bar is March 3 in New York: from its midnight to the next.
+    assert [
+        (r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out
+    ] == [("AAPL", "2025-03-03", midnight * 10**6, (midnight + 86_400_000) * 10**6, 2.0)]
 
 
 def test_all_daily_bars_read_one_grouped_day_at_a_time(
@@ -1193,7 +1503,10 @@ def test_futures_bars_by_date_request_whole_sessions(
     assert q["window_start.lt"] == [str(epoch_ns(datetime(2025, 3, 4, 18, tzinfo=CHICAGO)))]
     assert q["resolution"] == ["5min"]
     assert q["sort"] == ["window_start.asc"]  # oldest first, as flat files return rows
-    assert [r["SessionEndDate"] for r in out] == [date(2025, 3, 4)]
+    # The row keeps its session as `Date`, and ends five minutes after its start.
+    assert [(r["Date"], r["TimestampEnd"] - r["TimestampStart"]) for r in out] == [
+        ("2025-03-04", 5 * 60 * NS)
+    ]
 
 
 def futures_trade(moment: datetime, session: str, ticker: str = "ESH5") -> dict[str, object]:
@@ -1234,6 +1547,24 @@ def test_futures_trades_by_date_read_each_session_by_its_date(
     assert [r["Timestamp"] for r in out] == [sunday["timestamp"], tuesday["timestamp"]]
 
 
+def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Each session is its own request series, so a 404 on a later session after rows of an
+    # earlier one is that session's: it has no data, and the call goes on.
+    trade = futures_trade(datetime(2025, 1, 21, 10, tzinfo=CHICAGO), "2025-01-21")
+    fake_rest.reply(session_target("ESH5", "2025-01-21"), Reply(envelope([trade])))
+    fake_rest.reply(session_target("ESH5", "2025-01-22"), Reply(status=404))
+    fake_rest.reply(session_target("ESH5", "2025-01-23"), Reply(status=404))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = history(
+            session, FUTURES_TRADES, start="2025-01-21", end="2025-01-23", symbols=["ESH5"]
+        )
+    assert [r["Timestamp"] for r in out] == [trade["timestamp"]]
+    for day in ("2025-01-22", "2025-01-23"):
+        assert caplog.text.count(f"ESH5 has no data for the session {day} (HTTP 404") == 1
+
+
 def test_futures_sessions_skip_weekends_and_come_in_date_order(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1258,11 +1589,11 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
     asked = sorted(q["session_end_date"][0] for _, q in sent(fake_rest))
     assert asked == ["2024-03-28"] * 2 + ["2024-03-29"] * 2 + ["2024-04-01"] * 2
     # Sessions in date order, and the symbols of one session in symbol order.
-    assert [(r["Symbol"], r["SessionEndDate"]) for r in out] == [
-        ("ESH5", date(2024, 3, 28)),
-        ("NQH5", date(2024, 3, 28)),
-        ("ESH5", date(2024, 4, 1)),
-        ("NQH5", date(2024, 4, 1)),
+    assert [(r["Symbol"], r["Date"]) for r in out] == [
+        ("ESH5", "2024-03-28"),
+        ("NQH5", "2024-03-28"),
+        ("ESH5", "2024-04-01"),
+        ("NQH5", "2024-04-01"),
     ]
     assert (
         "futures.trades history: at least 6 requests, one per session and symbol, more where a "
@@ -1329,24 +1660,31 @@ def window_of(*, times: TimeRange | None = None, sessions: DaySpan | None = None
 def test_keep_bounds_times_and_sessions_where_the_rows_carry_them() -> None:
     late = epoch_ns(datetime(2025, 3, 4, 20, tzinfo=CHICAGO))
     times = pa.RecordBatch.from_pydict({"Timestamp": pa.array([late], pa.timestamp("ns", "UTC"))})
-    days = pa.RecordBatch.from_pydict({"SessionEndDate": pa.array([date(2025, 3, 3)], pa.date32())})
+    days = pa.RecordBatch.from_pydict({"Date": pa.array(["2025-03-03"], pa.string())})
     other = pa.RecordBatch.from_pydict({"Other": pa.array([1])})
     sessions = window_of(sessions=DaySpan(date(2025, 3, 4), date(2025, 3, 4)))
     before_late = window_of(
         times=TimeRange(datetime(2025, 3, 4, tzinfo=UTC), datetime(2025, 3, 5, 1, tzinfo=UTC))
     )
-    assert rest._keep(times, sessions).num_rows == 1  # sessions bound only SessionEndDate
-    assert rest._keep(times, before_late).num_rows == 0  # 02:00 UTC on 03-05 is past the end
-    assert rest._keep(days, sessions).num_rows == 0
-    assert rest._keep(days, before_late).num_rows == 1  # no Timestamp to bound
-    assert rest._keep(other, sessions).num_rows == 1
-    assert rest._keep(times, None).num_rows == 1
+    keep = functools.partial(rest._keep, time="Timestamp")
+    assert keep(times, sessions).num_rows == 1  # sessions bound only Date
+    assert keep(times, before_late).num_rows == 0  # 02:00 UTC on 03-05 is past the end
+    assert keep(days, sessions).num_rows == 0
+    assert keep(days, before_late).num_rows == 1  # no Timestamp to bound
+    assert keep(other, sessions).num_rows == 1
+    assert keep(times, None).num_rows == 1
     upper = window_of(sessions=DaySpan(date(2025, 3, 1), date(2025, 3, 2)))
-    assert rest._keep(days, upper).num_rows == 0  # after the last session
+    assert keep(days, upper).num_rows == 0  # after the last session
     lower = window_of(
         times=TimeRange(datetime(2025, 3, 5, 3, tzinfo=UTC), datetime(2025, 3, 6, tzinfo=UTC))
     )
-    assert rest._keep(times, lower).num_rows == 0  # before the first instant
+    assert keep(times, lower).num_rows == 0
+    # A bar's time is its start: the same bounds apply to `TimestampStart`.
+    starts = times.rename_columns(["TimestampStart"])
+    assert rest._keep(starts, before_late, time="TimestampStart").num_rows == 0
+    assert (
+        rest._keep(starts, before_late, time="Timestamp").num_rows == 1
+    )  # before the first instant
 
 
 @pytest.mark.parametrize(
@@ -1393,13 +1731,17 @@ def test_a_caller_direction_folded_into_sort_is_not_overridden() -> None:
         params=(("order", Order.DESC), ("sort", "window_start")),
     )
     order = rest._ascending(FUTURES_BARS, rest_path, mine)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order)
+    (call,) = rest.plan_calls(
+        FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order, split=split_pair
+    )
     assert call.query["sort"] == "window_start.desc"
     assert "order" not in call.query
     # Without a caller direction, the ascending one is sent.
     plain = Request(symbols=("ESZ5",), timespan=Timespan.MINUTE)
     order = rest._ascending(FUTURES_BARS, rest_path, plain)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order)
+    (call,) = rest.plan_calls(
+        FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order, split=split_pair
+    )
     assert call.query["sort"] == "window_start.asc"
 
 
@@ -1443,7 +1785,8 @@ def axis_spec(lower: str, upper: str, path: str = TRADES_PATH) -> DatasetSpec:
 
 def axis(spec: DatasetSpec, start: object, end: object) -> dict[str, object]:
     path = cast("RestPath", _massive.source(R, cast("str", spec.history_path)))
-    return rest._axis_query(spec, path, dates=(cast("Any", start), cast("Any", end)))
+    dates = (cast("Any", start), cast("Any", end))
+    return rest._axis_query(spec, path, dates=dates, asset_class=spec.asset_class)
 
 
 def test_date_axes_are_whole_days_and_shift_for_exclusive_ends() -> None:
@@ -1462,7 +1805,9 @@ def test_timestamp_axes_take_midnights_in_the_day_zone() -> None:
     assert out["timestamp.gte"] == datetime(2025, 3, 3, 5, tzinfo=UTC)
     # A dataset without an asset class bounds its days in New York.
     path = cast("RestPath", _massive.source(R, SMA_STOCK))
-    unclassed = rest._axis_query(SMA, path, dates=(date(2025, 7, 1), None))
+    unclassed = rest._axis_query(
+        SMA, path, dates=(date(2025, 7, 1), None), asset_class=SMA.asset_class
+    )
     assert unclassed == {"timestamp.gte": datetime(2025, 7, 1, 4, tzinfo=UTC)}
     assert out["timestamp.lt"] == datetime(2025, 3, 4, 5, tzinfo=UTC)
 
@@ -1512,7 +1857,10 @@ def test_an_axis_the_path_lacks_or_of_another_kind() -> None:
     assert axis(spec, date(2025, 3, 3), date(2025, 3, 4)) == {"ticker.gte": "2025-03-03"}
     assert (
         rest._axis_query(
-            MOVERS, cast("RestPath", _massive.source(R, MOVERS_PATH)), dates=(None, None)
+            MOVERS,
+            cast("RestPath", _massive.source(R, MOVERS_PATH)),
+            dates=(None, None),
+            asset_class=MOVERS.asset_class,
         )
         == {}
     )
@@ -1663,9 +2011,10 @@ def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
-            assert fetch(session, CRYPTO_LAST, symbols=["ETH-USD"]) == []
+            assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
             assert fetch(session, INDEX_VALUES, symbols=["I:VIX"]) == []
     assert caplog.text.count("X:ETHUSD has no data") == 1
     assert caplog.text.count("for I:VIX: Not entitled; the row is dropped") == 1
@@ -1683,9 +2032,11 @@ def test_a_read_fans_out_on_the_callers_pool(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
-    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols)
+    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
     with ThreadPoolExecutor(2) as pool:
-        table, requests = reader.read(CRYPTO_LAST, path, calls, limit=None, executor=pool)
+        table, requests = reader.read(
+            CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool
+        )
         assert not pool._shutdown  # the caller's pool stays open
     assert (table.num_rows, requests) == (2, 2)
 
@@ -1734,7 +2085,9 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
-    calls = rest.plan_calls(CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols)
+    calls = rest.plan_calls(
+        CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols, split=split_pair
+    )
     # The other symbols are answered at once with HTTP 404 (no rows), so the one worker could
     # run through every queued call before the read wakes up to cancel them. Each call after
     # the failed one is held at the server until the last two calls are done, which only the
@@ -1763,15 +2116,16 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
         return future
 
     monkeypatch.setattr(pool, "submit", recorded)
+    request = Request(symbols=symbols)
     with pool, pytest.raises(dm.AuthenticationError):
-        reader.read(CRYPTO_LAST, path, calls, limit=None, executor=pool)
+        reader.read(CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool)
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(sent(fake_rest)) <= 2
 
 
 def test_an_empty_symbol_tuple_plans_no_request() -> None:
     path = cast("RestPath", _massive.source(R, INDEX_SNAPSHOT_PATH))
-    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=()) == []
+    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=(), split=split_pair) == []
     assert rest.fetch_paths(SMA, ()) == [(SMA_STOCK, ())]
 
 
@@ -1786,7 +2140,9 @@ def test_futures_date_bounds_are_whole_sessions() -> None:
         keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
     rest_path = cast("RestPath", _massive.source(R, path))
-    out = rest._axis_query(spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)))
+    out = rest._axis_query(
+        spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)), asset_class=spec.asset_class
+    )
     # The session ending 2025-03-04 opens at 17:00 Chicago time on the 3rd.
     assert out == {
         "timestamp.gte": datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
@@ -1849,8 +2205,9 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
         "/v1/last/crypto/BTC/USD",
         Reply({"status": "success", "request_id": "r", "last": refused}),
     )
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
-        (row,) = fetch(session, CRYPTO_LAST, symbols=["BTC-USD"])
+        (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert row["Symbol"] == "X:BTCUSD"
     assert "Massive answered NOT_ENTITLED for X:BTCUSD: Not entitled" in caplog.text
 
@@ -1933,7 +2290,12 @@ def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
         adjusted=False,
     )
     assert [p for p, _ in sent(fake_rest)] == [path]
-    assert [r["Timestamp"] for r in out] == [stamps[1] * 10**6, stamps[2] * 10**6]
+    # Each week runs from its Monday's midnight to the Saturday's after its Friday, whatever
+    # day it was stamped on, and spans several dates, so it has no `Date`.
+    assert [(r["TimestampStart"], r["TimestampEnd"], r["Date"]) for r in out] == [
+        (ny_ms(date(2025, 3, 10)) * 10**6, ny_ms(date(2025, 3, 15)) * 10**6, None),
+        (ny_ms(date(2025, 3, 17)) * 10**6, ny_ms(date(2025, 3, 22)) * 10**6, None),
+    ]
 
 
 def test_an_open_end_leaves_out_the_unfinished_month(
@@ -1954,7 +2316,11 @@ def test_an_open_end_leaves_out_the_unfinished_month(
         adjusted=False,
     )
     assert [p for p, _ in sent(fake_rest)] == [path]
-    assert [r["Timestamp"] for r in out] == [stamps[0] * 10**6, stamps[1] * 10**6]
+    # Each month ends at midnight after its last weekday: Wednesday 04-30 and Friday 05-30.
+    assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (stamps[0] * 10**6, ny_ms(date(2025, 5, 1)) * 10**6),
+        (stamps[1] * 10**6, ny_ms(date(2025, 5, 31)) * 10**6),
+    ]
 
 
 @pytest.mark.parametrize("source", [HistorySource.REST, HistorySource.AUTO])
@@ -2002,7 +2368,7 @@ def test_a_long_grouped_daily_download_is_announced(
 def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Any stamp of a forex 1-day bar moves to 00:00 UTC of its day, unchecked.
+    # The range's 00:00 UTC stays and the day's last millisecond moves to 00:00 UTC.
     march_3, march_4 = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 4))
     path = f"/v2/aggs/ticker/C:EURUSD/range/1/day/{march_3}/{utc_ms(date(2025, 3, 5)) - 1}"
     bars = [{"t": march_3, "c": 1.0}, {"t": march_4 + 86_400_000 - 1, "c": 2.0}]
@@ -2016,14 +2382,18 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         timespan=Timespan.DAY,
         adjusted=True,
     )
-    assert [(r["Timestamp"], r["Close"]) for r in out] == [
-        (march_3 * 10**6, 1.0),
-        (march_4 * 10**6, 2.0),
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        ("2025-03-03", march_3 * 10**6, march_4 * 10**6, 1.0),
+        ("2025-03-04", march_4 * 10**6, (march_4 + 86_400_000) * 10**6, 2.0),
     ]
-    # The grouped day of every pair, stamped anywhere in its day.
+    # The grouped day of every pair, stamped at its last millisecond.
     grouped = FOREX_GROUPED_PATH.format(date="2025-03-03")
-    new_york = ny_ms(date(2025, 3, 3))
-    fake_rest.reply(grouped, Reply(envelope([{"T": "C:EURUSD", "t": new_york, "c": 3.0}])))
+    last_ms, new_york = march_4 - 1, ny_ms(date(2025, 3, 3))
+    fake_rest.reply(
+        grouped,
+        Reply(envelope([{"T": "C:EURUSD", "t": last_ms, "c": 3.0}])),
+        Reply(envelope([{"T": "C:EURUSD", "t": new_york, "c": 3.0}])),
+    )
     every = history(
         session,
         FOREX_BARS,
@@ -2033,7 +2403,25 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         timespan=Timespan.DAY,
         adjusted=True,
     )
-    assert [(r["Symbol"], r["Timestamp"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
+    assert [(r["Symbol"], r["TimestampStart"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
+    # A stamp at midnight New York time is another day cut: it fails loudly. The flat files
+    # hold only as-traded bars, so the way out for adjusted bars says to pass adjusted=False.
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^forex\.bars: a 1-day bar from /v2/aggs/grouped/locale/global/market/fx/\{date\} "
+        r"is stamped 2025-03-03T05:00:00\+00:00, which .*; read the 1-day flat files with "
+        r"source=dm\.HistorySource\.FLAT_FILES and adjusted=False \(as-traded prices; the files "
+        r"hold no adjusted bars\) if S3 credentials are configured, and report",
+    ):
+        history(
+            session,
+            FOREX_BARS,
+            start="2025-03-03",
+            end="2025-03-03",
+            symbols=dm.ALL,
+            timespan=Timespan.DAY,
+            adjusted=True,
+        )
 
 
 def test_a_history_by_instants_is_not_announced_however_many_symbols(
@@ -2074,23 +2462,55 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
     with pytest.raises(
         dm.MassiveError,
         match=r"^crypto\.bars: a bar from /v2/aggs/ticker/\{cryptoTicker\}/range/.* is stamped "
-        r"2025-03-03T05:00:00\+00:00, which is not a UTC day boundary.*source=dm\.HistorySource"
-        r"\.FLAT_FILES",
+        r"2025-03-03T05:00:00\+00:00, which is not a stamp Massive is known to use for such a "
+        r"bar \(00:00:00\.000 in UTC\).*; request 1-day bars; no other source serves these, "
+        r"and report",
     ):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     # A week bar at 00:00 UTC Monday is kept as stamped.
     monday, after = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 10))
     week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{monday}/{after - 1}".replace(":", "%3A")
-    fake_rest.reply(week, Reply(envelope([{"t": monday, "c": 2.0}])))
+    sunday = monday - 86_400_000
+    fake_rest.reply(
+        week,
+        Reply(envelope([{"t": monday, "c": 2.0}])),
+        Reply(envelope([{"t": sunday, "c": 2.0}])),
+    )
     out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
-    assert [(r["Timestamp"], r["Close"]) for r in out] == [(monday * 10**6, 2.0)]
+    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        (monday * 10**6, after * 10**6, 2.0)
+    ]
+    # A week bar stamped on the Sunday before would be placed in the week before: it fails.
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"is stamped 2025-03-02T00:00:00\+00:00, which is not a stamp Massive is known to "
+        r"use for such a bar \(00:00:00\.000 in UTC, on a Monday\)",
+    ):
+        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+    # A month bar must be stamped on its 1st.
+    first, april = utc_ms(date(2025, 3, 1)), utc_ms(date(2025, 4, 1))
+    month = f"/v2/aggs/ticker/X:BTCUSD/range/1/month/{first}/{april - 1}".replace(":", "%3A")
+    second = first + 86_400_000
+    fake_rest.reply(
+        month,
+        Reply(envelope([{"t": first, "c": 3.0}])),
+        Reply(envelope([{"t": second, "c": 3.0}])),
+    )
+    out = crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
+    # A crypto month is the whole calendar month, weekends included.
+    assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        (first * 10**6, april * 10**6, 3.0)
+    ]
+    with pytest.raises(dm.MassiveError, match=r"is stamped 2025-03-02T00:00:00.*on the 1st of"):
+        crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
 
 
-def test_forex_grouped_daily_keeps_its_weekend_days(
+def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Forex trades from Sunday evening UTC, so its grouped days include the weekend.
-    for day in ("2025-03-07", "2025-03-08", "2025-03-09"):
+    # Forex trades from Sunday evening to Friday evening UTC: its Sunday is a grouped day, its
+    # Saturday holds no trading and is not requested.
+    for day in ("2025-03-07", "2025-03-09"):
         fake_rest.reply(FOREX_GROUPED_PATH.format(date=day), Reply(envelope([])))
     history(
         session,
@@ -2103,6 +2523,250 @@ def test_forex_grouped_daily_keeps_its_weekend_days(
     )
     assert sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest)) == [
         "2025-03-07",
-        "2025-03-08",
         "2025-03-09",
     ]
+
+
+# --- Time columns, adjustment, and missing data ------------------------------------------------
+
+
+def test_every_row_of_a_page_shares_the_instant_the_page_arrived(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    start = epoch_ns(datetime(2025, 3, 3, 15, tzinfo=UTC))
+    page1 = [{"sip_timestamp": start + n, "price": 1.0} for n in range(2)]
+    page2 = [{"sip_timestamp": start + n, "price": 2.0} for n in range(2, 5)]
+    target = "/v3/trades/AAPL?cursor=next"
+    fake_rest.reply(target, Reply(envelope(page2)))
+    fake_rest.reply(
+        TRADES_PATH.format(stockTicker="AAPL"),
+        Reply(envelope(page1, next_url=f"{fake_rest.url}{target}")),
+    )
+    q = query(session, TRADES, symbols=["AAPL"])
+    assert isinstance(q, HistoryQuery)
+    out = rows(q.history("2025-03-03", "2025-03-03", source=HistorySource.REST), arrival=True)
+    first = {row["TimestampInsert"] for row in out if row["Price"] == 1.0}
+    second = {row["TimestampInsert"] for row in out if row["Price"] == 2.0}
+    assert len(first) == len(second) == 1
+    assert first.pop() < second.pop()  # the second page arrived later
+
+
+def test_a_tick_dataset_dates_each_row_in_its_day_zone(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    string_objects: Callable[[Table, str], int],
+) -> None:
+    # 03:00 UTC on March 4 is still March 3 in New York.
+    late = epoch_ns(datetime(2025, 3, 4, 3, tzinfo=UTC))
+    snapshot = {"ticker": "I:SPX", "value": 1.0, "last_updated": late}
+    other = {"ticker": "I:NDX", "value": 2.0, "last_updated": late}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot, other])))
+    q = query(session, INDEX_VALUES, symbols=["I:NDX", "I:SPX"])
+    assert isinstance(q, Query)
+    table = q.fetch()
+    row = rows(table)[0]
+    assert (row["Symbol"], row["Date"], row["Timestamp"]) == ("I:SPX", "2025-03-03", late)
+    assert string_objects(table, "Date") == 1  # the two rows share one stored string
+
+
+def test_a_symbol_with_no_data_returns_no_rows(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Massive answers HTTP 404 for a symbol it has nothing for: no rows, one WARNING.
+    fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = history(
+            session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["MSFT", "ZZZZ"]
+        )
+    assert out == []
+    assert caplog.text.count("ZZZZ has no data (HTTP 404 from /v3/trades/{stockTicker})") == 1
+
+
+def test_a_404_after_the_first_page_means_the_data_was_cut_short(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    start = epoch_ns(datetime(2025, 3, 3, 15, tzinfo=UTC))
+    gone = "/v3/trades/AAPL?cursor=gone"
+    fake_rest.reply(gone, Reply(b'{"status":"NOT_FOUND"}', status=404))
+    fake_rest.reply(
+        TRADES_PATH.format(stockTicker="AAPL"),
+        Reply(envelope([{"sip_timestamp": start}], next_url=f"{fake_rest.url}{gone}")),
+    )
+    with pytest.raises(dm.MassiveError, match="AAPL's data was cut short") as info:
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+    assert str(info.value).startswith(
+        "stocks.trades: AAPL's data was cut short: Massive answered HTTP 404 for page 2 of "
+        "/v3/trades/{stockTicker} after 1 page had arrived; retry the call"
+    )
+    assert info.value.status == 404
+
+
+def daily_bars(m: dm.MassiveSession, *, adjusted: bool) -> list[dict[str, Any]]:
+    return history(
+        m,
+        BARS,
+        start=date(2025, 3, 3),
+        end=date(2025, 3, 4),
+        symbols=["AAPL"],
+        timespan=Timespan.DAY,
+        adjusted=adjusted,
+    )
+
+
+def daily_path() -> str:
+    midnight = int(datetime(2025, 3, 3, 5, tzinfo=UTC).timestamp()) * 1000
+    return f"/v2/aggs/ticker/AAPL/range/1/day/{midnight}/{midnight + 2 * 86_400_000 - 1}"
+
+
+def test_every_page_of_bars_must_echo_the_requested_adjustment(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    midnight = int(datetime(2025, 3, 3, 5, tzinfo=UTC).timestamp()) * 1000
+    path = daily_path()
+    second = f"{path}?cursor=two"
+    # The first call's first page echoes the basis asked for and its next_url page another:
+    # the call fails. The second call's pages both echo the basis it asked for.
+    first = [{"t": midnight, "c": 1.0}]
+    later = [{"t": midnight + 86_400_000, "c": 2.0}]
+    fake_rest.reply(
+        path,
+        Reply(envelope(first, adjusted=True, next_url=f"{fake_rest.url}{second}")),
+        Reply(envelope(first, adjusted=False, next_url=f"{fake_rest.url}{second}")),
+    )
+    fake_rest.reply(second, Reply(envelope(later, adjusted=False)))
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^stocks\.bars: Massive answered /v2/aggs/ticker/\{stocksTicker\}/range/.* with "
+        r"adjusted=False although adjusted=True was requested, so the call would mix "
+        r"split-adjusted and as-traded prices; retry it$",
+    ):
+        daily_bars(session, adjusted=True)
+    assert [r["Close"] for r in daily_bars(session, adjusted=False)] == [1.0, 2.0]
+
+
+def test_a_page_without_its_adjusted_echo_warns_once_per_path(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    midnight = int(datetime(2025, 3, 3, 5, tzinfo=UTC).timestamp()) * 1000
+    fake_rest.reply(daily_path(), Reply(envelope([{"t": midnight, "c": 1.0}])))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        for _ in range(2):
+            assert [r["Close"] for r in daily_bars(session, adjusted=True)] == [1.0]
+    assert caplog.text.count("answered without its adjusted echo") == 1
+    assert "(adjusted=True requested) cannot be checked" in caplog.text
+
+
+def test_only_bars_with_an_explicit_adjustment_are_checked(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An indicator echoes nothing, and forex bars send no `adjusted`: neither is checked.
+    fake_rest.reply(
+        "/v1/indicators/sma/AAPL",
+        Reply(envelope({"values": [{"timestamp": 1741010400000, "value": 1.0}]}, adjusted=False)),
+    )
+    midnight = int(datetime(2025, 3, 3, tzinfo=UTC).timestamp()) * 1000
+    fake_rest.reply(
+        f"/v2/aggs/ticker/C%3AEURUSD/range/1/day/{midnight}/{midnight + 86_400_000 - 1}",
+        Reply(envelope([{"t": midnight, "c": 1.0}], adjusted=True)),
+    )
+    with caplog.at_level(logging.WARNING, LOGGER):
+        assert len(fetch(session, SMA, symbols=["AAPL"], adjusted=True)) == 1
+        forex = history(
+            session,
+            FOREX_BARS,
+            start="2025-03-03",
+            end="2025-03-03",
+            symbols=["C:EURUSD"],
+            timespan=Timespan.DAY,
+        )
+    assert [r["Close"] for r in forex] == [1.0]
+    assert "adjusted echo" not in caplog.text
+
+
+def test_an_indicator_takes_the_day_zone_of_its_symbols_class(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # 02:00 UTC on March 4 is March 3 in New York and March 4 in UTC.
+    stamp = int(datetime(2025, 3, 4, 2, tzinfo=UTC).timestamp()) * 1000
+    value = envelope({"values": [{"timestamp": stamp, "value": 1.0}]})
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(value))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(value))
+    out = fetch(session, SMA, symbols=["AAPL", "X:BTCUSD"], timespan=Timespan.HOUR)
+    assert sorted(
+        (r["Symbol"], r["Date"], r["TimestampEnd"] - r["TimestampStart"]) for r in out
+    ) == [
+        ("AAPL", "2025-03-03", 3600 * NS),
+        ("X:BTCUSD", "2025-03-04", 3600 * NS),
+    ]
+
+
+def test_futures_bars_of_two_sessions_named_by_dates_fit_both_readings_of_their_label(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Monday 03-25 to Friday 03-29, 2024. Whether a two-session bar is labelled with its first
+    # or its last session is not documented, so only the labels that fit the week either way
+    # are requested and kept: Tuesday to Thursday. A bar must also end by the range's end,
+    # 17:00 Chicago on Friday, with its sessions counted with the holiday allowance.
+    def bar(label: str, opens: datetime) -> dict[str, object]:
+        return {"ticker": "ESM4", "session_end_date": label, "window_start": epoch_ns(opens)}
+
+    labels = {"2024-03-25": 22, "2024-03-26": 25, "2024-03-28": 27, "2024-03-29": 28}
+    bars = [bar(label, datetime(2024, 3, day, 17, tzinfo=CHICAGO)) for label, day in labels.items()]
+    fake_rest.reply("/futures/v1/aggs/ESM4", Reply(envelope(bars)))
+    out = history(
+        session,
+        FUTURES_BARS,
+        start="2024-03-25",
+        end="2024-03-29",
+        symbols=["ESM4"],
+        timespan=Timespan.SESSION,
+        multiplier=2,
+    )
+    assert sent(fake_rest)[0][1]["resolution"] == ["2session"]
+    # The label is not the bar's day: a bar of two sessions has no `Date`. The bar opening
+    # Monday evening may end as late as Friday's close, so it is kept; the one opening
+    # Wednesday evening may end on Tuesday 04-02 (Good Friday folds), after the range.
+    assert [(r["Date"], r["TimestampEnd"]) for r in out] == [
+        (None, epoch_ns(datetime(2024, 3, 29, 17, tzinfo=CHICAGO))),
+    ]
+
+
+def test_a_futures_session_bar_ends_when_its_session_is_over(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    opens = datetime(2024, 3, 27, 17, tzinfo=CHICAGO)
+    row = {"ticker": "ESM4", "session_end_date": "2024-03-28", "window_start": epoch_ns(opens)}
+    fake_rest.reply("/futures/v1/aggs/ESM4", Reply(envelope([row])))
+    (bar,) = history(
+        session,
+        FUTURES_BARS,
+        start="2024-03-28",
+        end="2024-03-28",
+        symbols=["ESM4"],
+        timespan=Timespan.SESSION,
+    )
+    assert (bar["Date"], bar["TimestampStart"], bar["TimestampEnd"]) == (
+        "2024-03-28",
+        epoch_ns(opens),
+        epoch_ns(datetime(2024, 3, 28, 17, tzinfo=CHICAGO)),
+    )
+
+
+def test_fetch_rows_reads_every_page_raw(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    target = "/futures/v1/schedules?cursor=two"
+    fake_rest.reply(target, Reply(envelope([{"product_code": "ES", "extra": 2}])))
+    fake_rest.reply(
+        "/futures/v1/schedules",
+        Reply(envelope([{"product_code": "GC"}], next_url=f"{fake_rest.url}{target}")),
+    )
+    transport = session._core.rest_transport()
+    out = transport.fetch_rows("/futures/v1/schedules", {"product_code.any_of": ("ES", "GC")})
+    assert out == [{"product_code": "GC"}, {"product_code": "ES", "extra": 2}]
+    assert sent(fake_rest)[0][1]["product_code.any_of"] == ["ES,GC"]
+    # A failed request raises its public error.
+    fake_rest.reply("/futures/v1/schedules?product_code=ZZ", Reply(b"{}", status=403))
+    with pytest.raises(dm.EntitlementError):
+        transport.fetch_rows("/futures/v1/schedules", {"product_code": "ZZ"})

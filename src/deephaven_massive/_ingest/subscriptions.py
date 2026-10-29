@@ -23,7 +23,7 @@ from deephaven_massive._datasets.symbols import ws_symbol
 from deephaven_massive._massive import StatusKind
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven_massive._enums import AssetClass
     from deephaven_massive._massive import Status
@@ -79,7 +79,13 @@ def channel_of(topic: str) -> str:
     return topic.partition(".")[0]
 
 
-def stream_topics(asset_class: AssetClass, channel: str, symbols: Iterable[str]) -> frozenset[str]:
+def stream_topics(
+    asset_class: AssetClass,
+    channel: str,
+    symbols: Iterable[str],
+    *,
+    pairs: Mapping[str, tuple[str, str]],
+) -> frozenset[str]:
     """Return the topics of canonical symbols on a channel, in the wire's spelling.
 
     Args:
@@ -87,11 +93,15 @@ def stream_topics(asset_class: AssetClass, channel: str, symbols: Iterable[str])
             (`ws_symbol`: `C:EURUSD` is `EUR-USD`, `X:BTCUSD` is `BTC-USD`).
         channel: The channel, such as `"T"`.
         symbols: Canonical symbols.
+        pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list;
+            empty for a class other than crypto.
 
     Returns:
         The topics, such as `{"T.AAPL", "T.MSFT"}`.
+
+    A crypto symbol not in `pairs` raises the `KeyError` of `ws_symbol`.
     """
-    return frozenset(f"{channel}.{ws_symbol(asset_class, symbol)}" for symbol in symbols)
+    return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
 
 
 class Sender(Protocol):
@@ -328,17 +338,28 @@ class Subscriptions:
     # --- the reconcile loop --------------------------------------------------------------------
 
     def reconcile(self) -> None:
-        """Apply the cap, then send the next step if a generation is open and none is in flight.
+        """Apply the cap, send the next step if a generation is open and none is in flight.
 
         The cap is applied even with no generation open, so `admitted` always counts the
-        topics the streams have asked for.
+        topics the streams have asked for. `on_change` is called every time, also while a
+        step is in flight, so the connection's row shows each partial acknowledgement,
+        refusal, and `NO_ACK` as it happens rather than when the whole step resolves.
         """
         self._defer()
-        if self.generation is None or self._pending:
-            return
+        if self.generation is not None and not self._pending:
+            self._send_step(self.generation)
+        self._on_change()
+
+    def _send_step(self, generation: int) -> None:
+        """Send one step: subscribe what W adds to the sent topics, unsubscribe what it drops.
+
+        Called by `reconcile` with no step in flight.
+
+        Args:
+            generation: The open generation.
+        """
         wire = self._wire()
         adds, removes = wire - self._sent, self._sent - wire
-        generation = self.generation
         if (adds or removes) and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "generation %d: subscribe %s, unsubscribe %s (desired %d, acknowledged %d, "
@@ -365,7 +386,6 @@ class Subscriptions:
             self._noack -= removes
             for topic in removes:
                 self._cancel(topic)
-        self._on_change()
 
     def status(self, status: Status) -> None:
         """Apply one status object of the current generation, then reconcile.

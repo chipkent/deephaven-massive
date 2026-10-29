@@ -89,6 +89,7 @@ class Loop:
     timers: FakeTimers
     refused: list[tuple[tuple[str, ...], str]]
     verdicts: list[Status]
+    changes: list[tuple[int, int, int, int]]
 
 
 class NoAcked:
@@ -110,6 +111,7 @@ def make_loop(
     sender, timers = FakeSender(), FakeTimers()
     refused: list[tuple[tuple[str, ...], str]] = []
     verdicts: list[Status] = []
+    changes: list[tuple[int, int, int, int]] = []
 
     def step_refused(status: Status) -> bool:
         verdicts.append(status)
@@ -123,9 +125,9 @@ def make_loop(
         on_refused=lambda topics, message: refused.append((topics, message)),
         on_step_refused=step_refused,
         first_no_ack=no_acked.first,
-        on_change=lambda: None,
+        on_change=lambda: changes.append(subs.counts()),
     )
-    return Loop(subs, sender, timers, refused, verdicts)
+    return Loop(subs, sender, timers, refused, verdicts, changes)
 
 
 def ack(*topics: str) -> Status:
@@ -527,7 +529,7 @@ def test_topic_helpers() -> None:
     assert is_wildcard("T.*")
     assert not is_wildcard("T.AAPL")
     assert channel_of("C.EUR-USD") == "C"
-    assert stream_topics(AssetClass.FOREX, "C", ["C:EURUSD"]) == {"C.EUR-USD"}
+    assert stream_topics(AssetClass.FOREX, "C", ["C:EURUSD"], pairs={}) == {"C.EUR-USD"}
 
 
 def test_each_step_and_the_acknowledged_topics_are_logged(
@@ -552,3 +554,26 @@ def test_each_step_and_the_acknowledged_topics_are_logged(
             "deferred by the options cap 0)"
         ),
     ]
+
+
+def test_every_resolution_is_reported_while_the_step_is_in_flight() -> None:
+    # The connection's row follows each acknowledgement, refusal, and NO_ACK of a step as it
+    # happens, not only once the whole step has resolved.
+    loop = make_loop()
+    loop.subs.add(["T.A", "T.B", "T.C"])
+    loop.subs.opened(1)
+    assert loop.changes[-1] == (3, 0, 3, 0)  # (topics, acked, pending, no_ack)
+    loop.subs.status(ack("T.A"))
+    assert loop.changes[-1] == (3, 1, 2, 0)
+    loop.subs.status(refusal("T.B"))
+    assert loop.changes[-1] == (2, 1, 1, 0)
+    loop.timers.fire()  # T.C is re-sent alone
+    loop.timers.fire()  # and reaches NO_ACK
+    assert loop.changes[-1] == (2, 1, 0, 1)
+
+
+def test_a_change_with_no_generation_open_is_reported() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.AAPL"])
+    loop.subs.reconcile()
+    assert loop.changes == [(1, 0, 0, 0)]

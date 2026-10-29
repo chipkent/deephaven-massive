@@ -4,15 +4,19 @@ Each stream is a bare `table_publisher` blink table created in its own stream sc
 the real transport creates one, without any network. The fake records every stream it opens and
 every `on_shutdown_callback` Deephaven runs, so tests can observe exactly when a stream is torn
 down. Like the real transport, the callback first tells the session
-(`SessionCore.stream_shut_down`), which drops the stream's registry record. Imported lazily by
+(`SessionCore.stream_shut_down`), which drops the stream's registry record, and the handle's
+`fail` records the failure and then fails the table, once, as `StreamSink.fail` does. Imported
+lazily by
 the `fake_streams` fixture in `tests/conftest.py`, after the embedded JVM has started.
 """
 
 from __future__ import annotations
 
+import functools
 import threading
+import types
 import weakref
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deephaven.stream.table_publisher import TablePublisher, table_publisher
 
@@ -20,8 +24,11 @@ from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import StreamHandle, new_scope
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._errors import MassiveError
     from deephaven_massive._tables.core import SessionCore
 
 
@@ -38,6 +45,7 @@ class FakeStreamTransport:
         self.publishers: dict[int, TablePublisher] = {}
         self.shutdown: dict[int, threading.Event] = {}
         self.shutdown_calls: dict[int, int] = {}
+        self.failed: dict[int, str] = {}
         self._lock = threading.Lock()
 
     def _on_shutdown(self, stream_id: int) -> None:
@@ -47,6 +55,17 @@ class FakeStreamTransport:
         with self._lock:
             self.shutdown_calls[stream_id] = self.shutdown_calls.get(stream_id, 0) + 1
         self.shutdown[stream_id].set()
+
+    def _fail(self, stream_id: int, error: MassiveError) -> bool:
+        with self._lock:
+            if stream_id in self.failed:
+                return False
+            self.failed[stream_id] = str(error)
+        core = self._core()
+        assert core is not None  # a stream's record keeps its session alive
+        core.fail_stream(stream_id, str(error))
+        self.publishers[stream_id].publish_failure(error)
+        return True
 
     def open_stream(
         self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
@@ -66,4 +85,21 @@ class FakeStreamTransport:
         with self._lock:
             self.opened.append((spec.name, channel))
             self.publishers[stream_id] = publisher
-        return StreamHandle(stream_id, blink, scope, "socket.test", "/stocks")
+        fail = functools.partial(self._fail, stream_id)
+        return StreamHandle(stream_id, blink, scope, "socket.test", "/stocks", fail)
+
+
+def transport_of(open_stream: Callable[..., StreamHandle]) -> Callable[[], Any]:
+    """Return a `SessionCore.stream_transport` hook whose transport opens with `open_stream`.
+
+    A test that needs its own open patches the hook with this rather than with a local class:
+    a class is a reference cycle, so a local one whose method closes over the session would
+    keep the session alive until the cyclic collector ran.
+
+    Args:
+        open_stream: The transport's `open_stream`.
+
+    Returns:
+        The hook: each call returns a transport with that `open_stream`.
+    """
+    return lambda: types.SimpleNamespace(open_stream=open_stream)

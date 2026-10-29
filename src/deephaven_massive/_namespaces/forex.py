@@ -7,10 +7,11 @@ nothing touches the network until a verb is called on the query. This module own
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
 
-A currency pair may be written in any of Massive's spellings: `EUR/USD`, `EUR-USD` (the
-WebSocket form), `EURUSD`, or `C:EURUSD` (the REST ticker). Every factory normalizes it with
-`_datasets/symbols.py`, so the `Symbol` column and the query always hold the canonical
-`C:EURUSD`, and the transports convert back to the WebSocket form for topics. The last-quote
+A currency pair is Massive's REST ticker, `C:EURUSD`: every factory takes only that form
+(`check_symbol` in `_datasets/symbols.py`; `dm.canonical_symbol_forex` converts `EUR/USD`), the
+`Symbol` column always holds it, and the transports write the WebSocket form (`EUR-USD`) for
+topics and read every spelling Massive sends back (`EUR/USD` in frames, `X:EUR-USD` in the
+quotes flat-file sample). The last-quote
 endpoint takes a pair as two path segments (`/v1/last_quote/currencies/EUR/USD`); its spec
 declares the symbol as filled from the request, so the row's `Symbol` is the whole pair.
 """
@@ -95,7 +96,9 @@ _GROUPED: Final = "/v2/aggs/grouped/locale/global/market/fx/{date}"
 _MINUTE_FILES: Final = "global_forex/minute_aggs_v1"
 _DAY_FILES: Final = "global_forex/day_aggs_v1"
 _BAR_KEYS: Final = SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("WindowStart"))
-_STREAM_BAR_KEYS: Final = SourceKeys(symbol=KeySpec("Pair"), time=KeySpec("WindowStart"))
+_STREAM_BAR_KEYS: Final = SourceKeys(
+    symbol=KeySpec("Pair"), time=KeySpec("WindowStart"), end=KeySpec("EndTimestamp")
+)
 
 BARS: Final = DatasetSpec(
     name="forex.bars",
@@ -230,7 +233,7 @@ class _Forex(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            eur = m.forex.quotes(["EUR/USD", "C:GBPUSD"]).last_by()
+            eur = m.forex.quotes(["C:EURUSD", "C:GBPUSD"]).last_by()
     """
 
     __slots__ = ()
@@ -241,21 +244,22 @@ class _Forex(Namespace):
 
         Massive's forex quotes are a consolidated feed of bank and venue prices. The stream
         verbs read the `C` WebSocket channel; `history()` reads the REST quote history
-        (`/v3/quotes/{C:…}`) or the `global_forex/quotes_v1` flat files, and `fetch()` reads
-        the last quote of each pair (`/v1/last_quote/currencies/{from}/{to}`, one request per
-        pair), every one in the same columns. There is no `limit`: `history()` pages
-        internally and returns every row of its range. `dm.ALL` streams every pair (the
-        `C.*` topic) and is accepted by `history()` over flat files; `fetch()` with `dm.ALL`
-        raises `ValueError` naming `m.forex.snapshots(dm.ALL)`.
+        (`/v3/quotes/{C:…}`) or the `global_forex/quotes_v1` flat files, and `fetch()` reads the
+        last quote of each pair (`/v1/last_quote/currencies/{from}/{to}`, one request per pair),
+        every one in the same columns. There is no `limit`: `history()` pages internally and
+        returns every row of its range. `dm.ALL` streams every pair (the `C.*` topic) and is
+        accepted by `history()` over flat files; `fetch()` with `dm.ALL` raises `ValueError`
+        naming `m.forex.snapshots(dm.ALL)`. Each row also carries its time, `Timestamp`, its
+        trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and
+        `TimestampInsert`, when the library received it.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#quotes.
 
         Args:
-            symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column (a live watchlist), or `dm.ALL`. Each pair may be written
-                `EUR/USD`, `EUR-USD`, `EURUSD`, or `C:EURUSD`; the `Symbol` column holds
-                `C:EURUSD`.
+            symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with a
+                `Symbol` column (a live watchlist), or `dm.ALL`. Each pair is Massive's ticker, such
+                as `C:EURUSD` (`dm.canonical_symbol_forex` converts `EUR/USD`).
 
         Returns:
             A query; nothing is requested or subscribed until one of its verbs is called.
@@ -267,7 +271,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                q = m.forex.quotes("EUR/USD")
+                q = m.forex.quotes("C:EURUSD")
                 live = q.last_by()
                 day = q.history("2026-10-20", "2026-10-20")
         """
@@ -307,35 +311,47 @@ class _Forex(Namespace):
     ) -> HistoryQuery:
         """Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
-        The timespan decides the transports, and so the query's class. One-second and
-        one-minute bars (`multiplier=1`) stream from the `CAS` and `CA` WebSocket channels
-        and have `history()`; one-day bars (`multiplier=1`) have `history()` and `fetch()`,
-        the previous UTC day's bar from `/v2/aggs/ticker/{t}/prev`; every other
-        timespan and multiplier is `history()` only. `history()` reads the REST aggregate
-        range (`/v2/aggs/ticker/{t}/range/…`) or the `global_forex/minute_aggs_v1` and
-        `global_forex/day_aggs_v1` flat files. Currency pairs have no corporate actions, so
-        there is no `adjusted` argument: no request sends one, and the flat files serve every
-        bar timespan they hold. There is no `limit`: `history()` pages internally. `dm.ALL`
-        streams every pair (the `CA.*` or `CAS.*` topic), and `history()` accepts it for
-        one-day bars, through the grouped daily endpoint
-        (`/v2/aggs/grouped/locale/global/market/fx/{date}`, one request per day) or the day
-        files, and for one-minute bars through the minute files; `fetch()` with `dm.ALL`
-        raises `ValueError`.
+        Each row is one bar: its window, from `TimestampStart` to the exclusive `TimestampEnd`,
+        its trading day `Date` (ISO `yyyy-MM-dd` text, the UTC day), and `TimestampInsert`,
+        when the library received it. `TimestampEnd` is the first instant at which the bar is
+        complete, so join on it (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to
+        attach only closed bars; an intraday bar ends its length after its start, and a bar of
+        a day or longer at 00:00 UTC after its window's last day. `Date` is null for a bar that
+        spans more than one UTC date.
 
-        A one-day bar is the UTC day and is stamped at 00:00 UTC on every source: the range
-        already is, and the grouped daily, `/prev`, and the day files (stamped 23:59:59.999
-        UTC) are moved to the start of their day. `history()` returns only the bars whose
-        whole window lies inside the range and has ended, so the current day's bar never
-        appears. Forex trades from Sunday evening UTC, so its weeks run Monday to
-        Sunday and its months, quarters, and years are whole calendar periods.
+        The timespan decides the transports, and so the query's class. One-second and one-minute
+        bars (`multiplier=1`) stream from the `CAS` and `CA` WebSocket channels and have
+        `history()`; one-day bars (`multiplier=1`) have `history()` and `fetch()`, the previous
+        UTC day's bar from `/v2/aggs/ticker/{t}/prev`; every other timespan and multiplier is
+        `history()` only. `history()` reads the REST aggregate range
+        (`/v2/aggs/ticker/{t}/range/…`) or the `global_forex/minute_aggs_v1` and
+        `global_forex/day_aggs_v1` flat files. Currency pairs have no corporate actions, so
+        their bars are never adjusted and there is no `adjusted` argument: no request sends one,
+        and the flat files serve every bar timespan they hold. There is no `limit`: `history()`
+        pages internally. `dm.ALL` streams every pair (the `CA.*` or `CAS.*` topic), and
+        `history()` accepts it for one-day bars, through the grouped daily endpoint
+        (`/v2/aggs/grouped/locale/global/market/fx/{date}`, one request per day) or the day
+        files, and for one-minute bars through the minute files; `fetch()` with `dm.ALL` raises
+        `ValueError`.
+
+        A one-day bar is the UTC day and starts at 00:00 UTC on every source: the range already
+        is, and the grouped daily, `/prev`, and the day files (stamped 23:59:59.999 UTC) are
+        moved to the start of their day. The interbank forex day rolls at 17:00 New York time,
+        so Massive's UTC day is not the dealers' day. A bar of several days or longer must be
+        stamped 00:00 UTC, a week on its Monday and a month, quarter, or year on its 1st. Any
+        other stamp fails the call with `MassiveError` naming the source, since the bar may
+        cover other days than its label. `history()` returns only the bars whose whole window
+        lies inside the range and has ended, so the current day's bar never appears. Forex
+        trades from Sunday evening UTC, so its weeks run Monday to Sunday and its months,
+        quarters, and years are whole calendar periods.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#bars.
 
         Args:
             symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column, or `dm.ALL`. Each pair may be written `EUR/USD`,
-                `EUR-USD`, `EURUSD`, or `C:EURUSD`; the `Symbol` column holds `C:EURUSD`.
+                a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
+                (`dm.canonical_symbol_forex` converts `EUR/USD`).
             timespan: The unit of one bar's window. `dm.Timespan.SESSION` is futures only.
                 Defaults to one minute.
             multiplier: The number of `timespan` units in one bar's window, a positive
@@ -355,8 +371,8 @@ class _Forex(Namespace):
         Example:
             ::
 
-                live = m.forex.bars("EUR/USD").append_only()
-                hourly = m.forex.bars(["EUR/USD"], dm.Timespan.HOUR).history(
+                live = m.forex.bars("C:EURUSD").append_only()
+                hourly = m.forex.bars(["C:EURUSD"], dm.Timespan.HOUR).history(
                     "2026-10-01", "2026-10-23"
                 )
                 yesterday = m.forex.bars("C:EURUSD", dm.Timespan.DAY).fetch()
@@ -374,16 +390,18 @@ class _Forex(Namespace):
         """Massive's fair market value of each currency pair, streamed as it updates.
 
         The `FMV` channel of Massive's Business feed (`business.massive.com/forex`): a
-        proprietary real-time price estimate. It is stream only: no `history()` or
-        `fetch()`, and no `limit`. `dm.ALL` streams every pair (the `FMV.*` topic).
+        proprietary real-time price estimate. It is stream only: no `history()` or `fetch()`,
+        and no `limit`. `dm.ALL` streams every pair (the `FMV.*` topic). Each row also carries
+        its time, `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of
+        `Timestamp`), and `TimestampInsert`, when the library received it.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#fmv.
 
         Args:
             symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column, or `dm.ALL`. Each pair may be written `EUR/USD`,
-                `EUR-USD`, `EURUSD`, or `C:EURUSD`; the `Symbol` column holds `C:EURUSD`.
+                a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
+                (`dm.canonical_symbol_forex` converts `EUR/USD`).
 
         Returns:
             A query; nothing is subscribed until one of its verbs is called.
@@ -395,7 +413,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                fair = m.forex.fmv(["EUR/USD", "USD/JPY"]).last_by()
+                fair = m.forex.fmv(["C:EURUSD", "C:USDJPY"]).last_by()
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
@@ -415,8 +433,8 @@ class _Forex(Namespace):
         Args:
             symbols: The currency pairs, sent as the `tickers` parameter: one pair, a sequence
                 of pairs, a Deephaven table with a `Symbol` column (re-read every poll
-                cycle), or `dm.ALL`. Each pair may be written `EUR/USD`, `EUR-USD`, `EURUSD`,
-                or `C:EURUSD`; the `Symbol` column holds `C:EURUSD`.
+                cycle), or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
+                (`dm.canonical_symbol_forex` converts `EUR/USD`).
 
         Returns:
             A query; nothing is requested until `fetch()` or `poll()` is called.
@@ -428,7 +446,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                board = m.forex.snapshots(["EUR/USD", "GBP/USD"]).poll(5)
+                board = m.forex.snapshots(["C:EURUSD", "C:GBPUSD"]).poll(5)
                 market = m.forex.snapshots(dm.ALL).fetch()
         """
         return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))

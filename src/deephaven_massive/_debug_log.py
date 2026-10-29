@@ -50,9 +50,10 @@ the issue text, must be enough for an agent to reproduce and fix the bug:
 - No log call is passed the API key, the S3 secret, a header, or the authentication frame. A
   wire client cleans what it receives of its own secret (`_massive/net/redaction.py`) before
   anything reads it, so text built from a server's answer is safe to log.
-- Log calls use `%` arguments. Every new thread or pool is named `massive #<session> <role>`
-  (`SessionCore.thread_prefix`). Nothing is logged while `registry_lock` or another leaf lock is
-  held.
+- Log calls use `%` arguments. Every new thread or pool is named after its owner:
+  `massive #<session> <role>` for a session's (`SessionCore.thread_prefix`), and
+  `massive group #<group> <role>` for a connection group's (`ConnectionGroup.label`). Nothing is
+  logged while `registry_lock` or another leaf lock is held.
 
 Tools check what they can: ruff's `G` and `LOG` rules; the logging rules of
 `tests/test_layout.py` (no secret name in a logging call, every `threading.Thread` named and

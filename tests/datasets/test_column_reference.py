@@ -9,6 +9,7 @@ them on a copy of the directory and on synthetic namespaces that break them.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import os
 import re
@@ -457,6 +458,14 @@ def test_render_gives_one_page_per_namespace_in_catalog_order() -> None:
     assert render(Catalog(()), _PROVENANCE) == {}
 
 
+CATALOG_INSERT = next(
+    c.description
+    for c in _CATALOG.dataset_schema(_STOCK_TRADES).columns
+    if c.name == "TimestampInsert"
+)
+"""Every dataset's arrival-time description, the same on every page."""
+
+
 def test_the_rendered_stocks_page() -> None:
     page = render(_CATALOG, _PROVENANCE)["stocks.md"]
     schema = {c.name: c for c in _CATALOG.dataset_schema(_STOCK_TRADES).columns}
@@ -464,6 +473,8 @@ def test_the_rendered_stocks_page() -> None:
     stamp = schema["Timestamp"].description.replace("|", "\\|")
     received = schema["Received"].description
     assert received == "Always null for `stocks.trades`; supplied by `crypto.trades`."
+    day = schema["Date"].description
+    insert = schema["TimestampInsert"].description
     every = "REST, flat files, WebSocket"
     head = (
         "| Column | Deephaven type | Description | Supplied by | REST field | Flat-file field "
@@ -479,6 +490,11 @@ def test_the_rendered_stocks_page() -> None:
 
 {_GUIDE}
 
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), \
+`m.stocks.trades` also have a `RawSymbol` String column, which holds Massive's spelling of a \
+symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every \
+other row. The tables below show the default session, without it.
+
 <a id="trades"></a>
 
 ## `m.stocks.trades`
@@ -488,9 +504,11 @@ Trades of stocks, tick by tick.
 {head}
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | {symbol} | {every} | `ticker`, request | `ticker` | `sym` |
+| `Date` | String | {day} | {every} |  |  |  |
 | `Timestamp` | Instant | {stamp} | {every} | `t` | `sip_timestamp` | `t` |
 {price}
 | `Received` | Instant | {received} |  |  |  |  |
+| `TimestampInsert` | Instant | {insert} | {every} |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -506,6 +524,7 @@ Financial ratios.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `PriceEarnings` | double | Price \\| earnings. | REST | `pe` |
+| `TimestampInsert` | Instant | {insert} | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -519,11 +538,34 @@ Massive's documentation of this dataset:
     assert page == expected
 
 
+def test_the_raw_symbol_note_names_the_datasets_that_read_their_symbol_from_rows() -> None:
+    second = dataclasses.replace(_STOCK_TRADES, name="stocks.more_trades")
+    catalog = Catalog(
+        (_STOCK_TRADES, second, _RATIOS),
+        source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
+    )
+    page = render(catalog, _PROVENANCE)["stocks.md"]
+    assert "`MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.stocks.trades` and `m.stocks.more_trades` also" in (
+        page
+    )
+    assert page.count("`RawSymbol` String column") == 1
+    # A page whose datasets take their symbols only from requests, or have none, has no note.
+    alone = Catalog(
+        (_RATIOS,),
+        source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
+    )
+    assert "RawSymbol" not in render(alone, _PROVENANCE)["stocks.md"]
+
+
 def test_the_rendered_crypto_page() -> None:
     page = render(_CATALOG, _PROVENANCE)["crypto.md"]
     # One wire-field column for the one transport the dataset reads, and its own URLs only.
     assert "| Column | Deephaven type | Description | Supplied by | WebSocket field |\n" in page
-    received = "| `Received` | Instant | When Massive received it. | WebSocket | `r` |\n"
+    insert = CATALOG_INSERT
+    received = (
+        "| `Received` | Instant | When Massive received it. | WebSocket | `r` |\n"
+        f"| `TimestampInsert` | Instant | {insert} | WebSocket |  |\n"
+    )
     links = "\nMassive's documentation of this dataset:\n\n- <https://docs.example/ws/crypto.md>\n"
     assert page.endswith(f"{received}{links}\n---\n\n{_FOOTER}\n")
 
@@ -531,7 +573,9 @@ def test_the_rendered_crypto_page() -> None:
 def test_a_dataset_whose_sources_have_no_urls_has_no_url_list() -> None:
     bare = Provenance(fetched=dt.date(2026, 10, 27), urls={})
     page = render(_CATALOG, bare)["crypto.md"]
-    assert page.endswith(f"| WebSocket | `r` |\n\n---\n\n{_FOOTER}\n")
+    assert page.endswith(
+        f"| `TimestampInsert` | Instant | {CATALOG_INSERT} | WebSocket |  |\n\n---\n\n{_FOOTER}\n"
+    )
     assert "documentation of this dataset" not in page
 
 

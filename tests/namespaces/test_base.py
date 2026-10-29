@@ -24,11 +24,15 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive import _enums, _query, _types
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
+    ADJUSTED_PRICE,
+    ADJUSTED_VOLUME,
     Namespace,
+    adjustment_notes,
     bar_query_class,
     build_query,
     list_params,
@@ -72,7 +76,7 @@ FUTURES_BARS = DatasetSpec(
     flat_file_prefixes={Timespan.SESSION: SESSION_FILES},
     keys={
         (FF, SESSION_FILES): SourceKeys(
-            KeySpec("Ticker"), KeySpec("WindowStart"), session=KeySpec("SessionEndDate")
+            KeySpec("Ticker"), KeySpec("WindowStart"), date=KeySpec("SessionEndDate")
         )
     },
 )
@@ -185,15 +189,17 @@ def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     massive_session: dm.MassiveSession,
 ) -> None:
     # Indicators, reference data, and the unified snapshot span asset classes.
-    q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "i:spx", "aapl", "C:EURUSD"])
+    q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "I:SPX", "AAPL", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
+    with pytest.raises(ValueError, match=r"'i:spx' is an index ticker \(prefix I:\)"):
+        build(massive_session, INDICATOR, symbols=["i:spx"])
 
 
 def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) -> None:
     q = build(
         massive_session,
         DIVIDENDS,
-        symbols=["msft", "AAPL"],
+        symbols=["MSFT", "AAPL"],
         start="2025-01-01",
         end="2025-06-30",
         params={"sort": "ex_dividend_date", "limit": None, "tickers": ["B", "A"]},
@@ -227,9 +233,13 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         asset_class=AssetClass.FOREX,
         channels={None: "C"},
     )
-    assert build(massive_session, fx, symbols="EUR/USD")._request.symbols == ("C:EURUSD",)
+    assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
+    with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
+        build(massive_session, fx, symbols="EUR/USD")
     # A dataset without an asset class reads the class from each prefix; none is a stock.
-    assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("AAPL",)
+    assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        build(massive_session, INDICATOR, symbols="aapl")
 
 
 def test_all_where_the_dataset_cannot_serve_it(massive_session: dm.MassiveSession) -> None:
@@ -869,3 +879,68 @@ def test_optional_text() -> None:
     assert optional_text("search", "apple") == "apple"
     with pytest.raises(TypeError, match=r"^search must be a str, not int$"):
         optional_text("search", 5)
+
+
+# --- The library's time columns and the adjustment notes, on every declared dataset -----------
+
+
+@pytest.mark.parametrize("spec", list(CATALOG.by_name.values()), ids=lambda spec: spec.name)
+def test_every_dataset_ends_with_when_its_rows_arrived(spec: DatasetSpec) -> None:
+    schema = CATALOG.dataset_schema(spec)
+    last = schema.columns[-1]
+    assert (last.name, last.type.value) == ("TimestampInsert", "Instant")
+    # Every transport of the dataset fills it.
+    assert set(last.supplied_by) == {transport for transport, _ in spec.sources}
+
+
+@pytest.mark.parametrize("spec", list(CATALOG.by_name.values()), ids=lambda spec: spec.name)
+def test_tick_bar_and_daily_rows_carry_their_trading_day_as_text(spec: DatasetSpec) -> None:
+    types = {c.name: c.type.value for c in CATALOG.dataset_schema(spec).columns}
+    times = spec.times
+    if times is RowTimes.NONE:
+        assert {"TimestampStart", "TimestampEnd"}.isdisjoint(types)
+        return
+    assert types["Date"] == "String"
+    window = {"TimestampStart", "TimestampEnd"}
+    if times is RowTimes.TICK:
+        assert types["Timestamp"] == "Instant"
+        assert window.isdisjoint(types)
+    else:
+        assert "Timestamp" not in types
+        assert all(types[name] == "Instant" for name in window)
+
+
+def test_the_row_times_of_the_datasets() -> None:
+    def named(times: RowTimes) -> set[str]:
+        return {name for name, spec in CATALOG.by_name.items() if spec.times is times}
+
+    # The indicators are one value per bar, and the daily open-close summaries one day each.
+    assert {"indicators.sma", "indicators.ema", "indicators.rsi", "indicators.macd"} <= named(
+        RowTimes.BAR
+    )
+    assert named(RowTimes.DAY) == {
+        "stocks.daily_open_close",
+        "options.daily_open_close",
+        "indices.daily_open_close",
+        "crypto.daily_open_close",
+    }
+    assert "stocks.snapshots" in named(RowTimes.NONE)
+    assert {"stocks.trades", "futures.quotes", "indices.values"} <= named(RowTimes.TICK)
+
+
+def test_adjustment_notes_name_the_price_and_volume_columns() -> None:
+    notes = adjustment_notes(("Close",), ("Volume",))
+    assert notes == {"Close": ADJUSTED_PRICE, "Volume": ADJUSTED_VOLUME}
+    assert "never adjusts for cash dividends" in ADJUSTED_PRICE
+    # Only stocks and options have an adjustment choice; their bars and open-close carry it.
+    noted = sorted(name for name, spec in CATALOG.by_name.items() if spec.column_notes)
+    assert noted == [
+        "options.bars",
+        "options.daily_open_close",
+        "stocks.bars",
+        "stocks.daily_open_close",
+    ]
+    for name in noted:
+        spec = CATALOG.by_name[name]
+        columns = set(CATALOG.dataset_schema(spec).column_names)
+        assert set(spec.column_notes) <= columns, name

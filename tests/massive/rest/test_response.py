@@ -340,3 +340,20 @@ def test_an_error_keeps_a_numeric_request_id_as_text() -> None:
     assert error.request_id == "7"
     nested = http_error(500, b'{"request_id": {"id": 7}, "message": "m"}', _REQUEST)
     assert nested.request_id is None
+
+
+@pytest.mark.parametrize(
+    ("body", "echoed"),
+    [
+        ({"status": "OK", "adjusted": True, "results": []}, True),
+        ({"status": "OK", "adjusted": False, "results": []}, False),
+        ({"status": "OK", "results": []}, None),  # a path that echoes nothing
+        ({"status": "OK", "adjusted": "true", "results": []}, None),  # not a JSON boolean
+        ([{"x": 1}], None),  # a bare list has no envelope
+    ],
+)
+def test_the_adjusted_echo_is_a_json_boolean_of_the_envelope(
+    body: object, echoed: bool | None
+) -> None:
+    rest_path = _BODY if isinstance(body, list) else _RESULTS
+    assert _decode(body, rest_path).adjusted is echoed

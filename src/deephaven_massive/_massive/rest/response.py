@@ -146,6 +146,24 @@ class Page:
     body: dict[str, object] | list[object] = field(repr=False)
     drift: DriftReport = field(default_factory=DriftReport)
 
+    @property
+    def adjusted(self) -> bool | None:
+        """Whether Massive says this page's prices are adjusted for splits: its `adjusted` echo.
+
+        The aggregates (the range, grouped daily, and `/prev`) answer every request with the
+        envelope field `adjusted`, "whether or not this response was adjusted for splits", so a
+        caller can check that every page of a download is on the basis it asked for. Paths
+        that document no such field (the indicators, the daily open-close) give None.
+
+        Returns:
+            The envelope's `adjusted` when it is a JSON boolean; None when the body is not an
+            object or has no boolean `adjusted`.
+        """
+        if not isinstance(self.body, dict):
+            return None
+        echoed = self.body.get("adjusted")
+        return echoed if isinstance(echoed, bool) else None
+
 
 _BODY_EXCERPT = 2000
 """How many characters of a failed response's body the client's DEBUG line quotes."""

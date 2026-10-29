@@ -8,13 +8,16 @@ field-descriptions (#91).
 In review: layer-rules (#98).
 **Companion:** [`DESIGN.md`](DESIGN.md) is the specification; this file is the schedule. When
 they disagree, `DESIGN.md` wins and this file gets a `docs:` fix.
+The package layout cleanup has its own schedule, [`LAYOUT.md`](LAYOUT.md).
 
 ## Purpose and lifetime of this file
 
 This file turns the approved rework into planned PRs that a fresh-context agent can execute
 with nothing but `DESIGN.md`, this file, `AGENTS.md`, and the code. It is **temporary by
-design**: finish-rework moves the durable parts (standards, invariants, workflow) into
-`README.md` and `AGENTS.md`, and plan-retirement deletes `plans/rework/`. Nothing in this file
+design**: plan-retirement moves its durable parts out and deletes `plans/rework/`. Design that
+belongs to one module goes into that module's docstring, design that spans modules goes into a
+`docs/dev/` page, and `AGENTS.md` only repoints its preamble and "Where to look" rows: it never
+takes the content itself, so it stays short enough to read in full. Nothing in this file
 is a long-term reference, so do not link to it from docstrings or from `README.md`.
 
 Citations of the form "Appendix B" through "Appendix I" refer to
@@ -30,8 +33,8 @@ records are now requirements of the library's own clients (DESIGN § 19).
 - Each planned PR links its issue; the parent tracking issue is #37. Live progress is tracked in
   the issues' checklists, not by ticking boxes in this file.
 - A planned PR is **done** when the owner merges its PR. The PR description carries
-  `Closes #<issue>` (AGENTS.md hard rule 14), so the merge closes the issue and links it to the
-  merged PR. Agents never merge.
+  `Closes #<issue>` (the issue-link rule in `docs/dev/pull-requests.md`), so the merge closes
+  the issue and links it to the merged PR. Agents never merge.
 - Each planned PR has a short kebab-case name that says what it delivers (`rest-transport`,
   `rest-client`). Commit bodies and PR descriptions refer to a planned PR by that name and its
   issue number, never by PR title, so a retitled PR does not break traceability.
@@ -2536,11 +2539,16 @@ MASSIVE_API_KEY=… uv run pytest -m integration 2>&1 | tee live-checks.log   # 
 
 **Depends on.** finish-rework, live-integration-suite. **Parallel with.** release-workflow.
 
-**Files.** Modify `README.md`, the docstrings that carry UNVERIFIED notes, `AGENTS.md` (pointed
-at the code and README). Delete `plans/rework/` (DESIGN, PLAN, RESEARCH).
+**Files.** Modify `README.md`, the docstrings that carry UNVERIFIED notes, the module docstrings
+and `docs/dev/` pages that take the durable design, and `AGENTS.md` (its preamble and "Where to
+look" rows only). Delete `plans/rework/` (DESIGN, PLAN, RESEARCH).
 
 **Tasks.**
 - [ ] Retire each note, citing live-integration-suite's evidence; a refuted note goes to the owner.
+- [ ] Move the durable parts of `plans/rework/` out before deleting it: design that belongs to
+      one module into that module's docstring, design that spans modules into a `docs/dev/` page.
+      Nothing moves into `AGENTS.md`; repoint its preamble and "Where to look" rows at the
+      modules and pages.
 
 **Acceptance criteria.**
 - [ ] `git grep -n "UNVERIFIED\|plans/rework"` lists only refuted items, each with an owner

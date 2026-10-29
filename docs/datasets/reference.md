@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.reference.tickers`, `m.reference.ticker_details`, `m.reference.related_companies`, and `m.snapshots` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+
 <a id="tickers"></a>
 
 ## `m.reference.tickers`
@@ -28,6 +30,7 @@ Every ticker Massive supports, across asset classes, with its listing details.
 | `PrimaryExchange` | String | The ISO code of the primary listing exchange for this asset. | REST | `primary_exchange` |
 | `ShareClassFigi` | String | The share Class OpenFIGI number for this ticker. Find more information here (https://www.openfigi.com/about/figi) | REST | `share_class_figi` |
 | `Type` | String | The type of the asset. Find the types that we support via our Ticker Types API (https://massive.com/docs/rest/stocks/tickers/ticker-types). | REST | `type` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -59,7 +62,7 @@ One ticker's company and listing details: address, branding, shares, and more.
 | `DelistedUtc` | Instant | The last date that the asset was traded. | REST | `delisted_utc` |
 | `Description` | String | A description of the company and what they do/offer. | REST | `description` |
 | `HomepageUrl` | String | The URL of the company's website homepage. | REST | `homepage_url` |
-| `ListDate` | LocalDate | The date the security currently trading under this ticker was first publicly listed, in the format YYYY-MM-DD. If a corporate action replaces the security behind the ticker, such as American Depositary Shares being exchanged for ordinary shares under the same symbol, this is the new security's listing date. A move to a different exchange does not change it. Use the date parameter to get the value as of an earlier date. | REST | `list_date` |
+| `ListDate` | String | The date the security currently trading under this ticker was first publicly listed, in the format YYYY-MM-DD. If a corporate action replaces the security behind the ticker, such as American Depositary Shares being exchanged for ordinary shares under the same symbol, this is the new security's listing date. A move to a different exchange does not change it. Use the date parameter to get the value as of an earlier date. | REST | `list_date` |
 | `Locale` | String | The locale of the asset. | REST | `locale` |
 | `Market` | String | The market type of the asset. | REST | `market` |
 | `MarketCap` | double | The most recent close price of the ticker multiplied by weighted outstanding shares. | REST | `market_cap` |
@@ -76,6 +79,7 @@ One ticker's company and listing details: address, branding, shares, and more.
 | `TotalEmployees` | double | The approximate number of employees for the company. | REST | `total_employees` |
 | `Type` | String | The type of the asset. Find the types that we support via our Ticker Types API (https://massive.com/docs/rest/stocks/tickers/ticker-types). | REST | `type` |
 | `WeightedSharesOutstanding` | double | The shares outstanding calculated assuming all shares of other share classes are converted to this share class. | REST | `weighted_shares_outstanding` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -96,6 +100,7 @@ The ticker type codes Massive uses, such as `CS` for common stock, with their na
 | `Code` | String | A code used by Massive to refer to this ticker type. | REST | `code` |
 | `Description` | String | A short description of this ticker type. | REST | `description` |
 | `Locale` | String | An identifier for a geographical location. | REST | `locale` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -111,9 +116,10 @@ The timeline of a ticker's events, such as ticker changes, one row per event.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `id` parameter. | REST | request |
-| `Date` | LocalDate | The date the event took place | REST | `date` |
+| `Date` | String | The date the event took place | REST | `date` |
 | `Type` | String | The type of historical event for the asset | REST | `type` |
 | `TickerChangeTicker` | String | A ticker symbol. From the `ticker_change` object: Details about a ticker change. | REST | `ticker_change.ticker` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -128,7 +134,8 @@ The companies Massive relates to a ticker, from news and returns data, one row e
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "A ticker related to the requested ticker." | REST | `ticker` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST: the request's `ticker` parameter. | REST | request |
+| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST: the request's `ticker` parameter. | REST | request |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -157,6 +164,7 @@ News articles about tickers, with their publishers and sentiment insights.
 | `PublisherName` | String | The publisher's name. From the `publisher` object: Details the source of the news article, including the publisher's name, logo, and homepage URLs. This information helps users identify and access the original source of news content. | REST | `publisher.name` |
 | `Tickers` | String | The ticker symbols associated with the article. | REST | `tickers` |
 | `Title` | String | The title of the news article. | REST | `title` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -180,6 +188,7 @@ The exchanges, trade reporting facilities, and SIPs Massive knows, with their co
 | `ParticipantId` | String | The ID used by SIP's to represent this exchange. | REST | `participant_id` |
 | `Type` | String | Represents the type of exchange. | REST | `type` |
 | `Url` | String | A link to this exchange's website, if one exists. | REST | `url` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -214,6 +223,7 @@ The trade and quote condition codes, with what each means and how it updates bar
 | `UpdateRulesMarketCenterUpdatesHighLow` | boolean | Whether or not trades with this condition update the high/low. From the `update_rules` object: A list of aggregation rules. From the `update_rules.market_center` object: Describes aggregation rules on a per-market-center basis. | REST | `update_rules.market_center.updates_high_low` |
 | `UpdateRulesMarketCenterUpdatesOpenClose` | boolean | Whether or not trades with this condition update the open/close. From the `update_rules` object: A list of aggregation rules. From the `update_rules.market_center` object: Describes aggregation rules on a per-market-center basis. | REST | `update_rules.market_center.updates_open_close` |
 | `UpdateRulesMarketCenterUpdatesVolume` | boolean | Whether or not trades with this condition update the volume. From the `update_rules` object: A list of aggregation rules. From the `update_rules.market_center` object: Describes aggregation rules on a per-market-center basis. | REST | `update_rules.market_center.updates_volume` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -248,6 +258,7 @@ Whether the markets are open now, by exchange, currency market, and index group.
 | `IndicesGroupsSocieteGenerale` | String | The status of Societe Generale indices trading hours. From the `indicesGroups` object: Contains the status of various index groups (e.g., MSCI, FTSE Russell). | REST | `indicesGroups.societe_generale` |
 | `Market` | String | The status of the market as a whole. | REST | `market` |
 | `ServerTime` | Instant | The current time of the server, returned as a date-time in RFC3339 format. | REST | `serverTime` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -266,11 +277,12 @@ The upcoming market holidays and early closes, one row per exchange and day.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Close` | Instant | The market close time on the holiday (if it's not closed). | REST | `close` |
-| `Date` | LocalDate | The date of the holiday. | REST | `date` |
+| `Date` | String | The date of the holiday. | REST | `date` |
 | `Exchange` | String | Which market the record is for. | REST | `exchange` |
 | `Name` | String | The name of the holiday. | REST | `name` |
 | `Open` | Instant | The market open time on the holiday (if it's not closed). | REST | `open` |
 | `Status` | String | The status of the market on the holiday. | REST | `status` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -294,7 +306,7 @@ Called as `m.snapshots`, a method of the session itself rather than of `m.refere
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). | REST | `break_even_price` |
 | `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. | REST | `details.contract_type` |
 | `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. | REST | `details.exercise_style` |
-| `DetailsExpirationDate` | LocalDate | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. | REST | `details.expiration_date` |
+| `DetailsExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. | REST | `details.expiration_date` |
 | `DetailsSharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. | REST | `details.shares_per_contract` |
 | `DetailsStrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. | REST | `details.strike_price` |
 | `Error` | String | The error while looking for this ticker. | REST | `error` |
@@ -362,6 +374,7 @@ Called as `m.snapshots`, a method of the session itself rather than of `m.refere
 | `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. | REST | `underlying_asset.timeframe` |
 | `UnderlyingAssetValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. | REST | `underlying_asset.value` |
 | `Value` | double | Value of Index. | REST | `value` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 

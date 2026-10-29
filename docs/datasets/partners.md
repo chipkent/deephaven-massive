@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.partners.benzinga.analyst_insights`, `m.partners.benzinga.ratings`, `m.partners.benzinga.bulls_bears_say`, `m.partners.benzinga.guidance`, `m.partners.benzinga.earnings`, `m.partners.etf_global.analytics`, `m.partners.etf_global.constituents`, `m.partners.etf_global.fund_flows`, `m.partners.etf_global.profiles`, `m.partners.etf_global.taxonomies`, and `m.partners.tmx.corporate_events` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+
 <a id="benzinga-analysts"></a>
 
 ## `m.partners.benzinga.analysts`
@@ -23,6 +25,7 @@ Benzinga's profiles of sell-side analysts, with each analyst's firm and track re
 | `SmartScore` | double | A weighted average of the total_ratings_percentile, overall_avg_return_percentile, and overall_success_rate. | REST | `smart_score` |
 | `TotalRatings` | double | The total number of ratings issued by the analyst included in the performance calculation. | REST | `total_ratings` |
 | `TotalRatingsPercentile` | double | The analyst's percentile rank based on the total number of ratings issued, relative to other analysts. | REST | `total_ratings_percentile` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -41,13 +44,14 @@ Benzinga analyst insights on US stocks: a rating, a price target, and the reason
 | `BenzingaId` | String | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
 | `BenzingaRatingId` | String | The identifier used by Benzinga for the rating record. | REST | `benzinga_rating_id` |
 | `CompanyName` | String | The name of the company being rated. | REST | `company_name` |
-| `Date` | LocalDate | The calendar date (formatted as YYYY-MM-DD) when the rating was issued. | REST | `date` |
+| `Date` | String | The calendar date (formatted as YYYY-MM-DD) when the rating was issued. | REST | `date` |
 | `Firm` | String | The name of the research firm or investment bank issuing the rating. | REST | `firm` |
 | `Insight` | String | Narrative commentary or reasoning provided by the analyst or firm to explain the rating or price target. | REST | `insight` |
 | `LastUpdated` | Instant | The timestamp (formatted as an ISO 8601 timestamp) when the rating was last updated in the system. | REST | `last_updated` |
 | `PriceTarget` | double | The current price target set by the analyst. | REST | `price_target` |
 | `Rating` | String | The current rating set by the analyst. | REST | `rating` |
 | `RatingAction` | String | The description of the change in rating from the firm's last rating. Possible values include: downgrades, maintains, reinstates, reiterates, upgrades, assumes, initiates_coverage_on, terminates_coverage_on, removes, suspends, firm_dissolved. | REST | `rating_action` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -71,7 +75,7 @@ Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 | `BenzingaNewsUrl` | String | A link to the Benzinga articles page for this ticker | REST | `benzinga_news_url` |
 | `CompanyName` | String | The name of the company being rated. | REST | `company_name` |
 | `Currency` | String | The ISO 4217 currency code in which the price target is denominated. | REST | `currency` |
-| `Date` | LocalDate | The calendar date (formatted as YYYY-MM-DD) when the rating was issued. | REST | `date` |
+| `Date` | String | The calendar date (formatted as YYYY-MM-DD) when the rating was issued. | REST | `date` |
 | `Firm` | String | The name of the research firm or investment bank issuing the rating. | REST | `firm` |
 | `Importance` | long | A subjective indicator of the importance of the earnings event, on a scale from 0 (lowest) to 5 (highest). | REST | `importance` |
 | `LastUpdated` | Instant | The timestamp (formatted as an ISO 8601 timestamp) when the rating was last updated in the system. | REST | `last_updated` |
@@ -85,6 +89,7 @@ Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 | `Rating` | String | The current rating set by the analyst. | REST | `rating` |
 | `RatingAction` | String | The description of the change in rating from the firm's last rating. Possible values include: downgrades, maintains, reinstates, reiterates, upgrades, assumes, initiates_coverage_on, terminates_coverage_on, removes, suspends, firm_dissolved. | REST | `rating_action` |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS UTC) when the rating was issued. | REST | `time` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -112,6 +117,7 @@ The consensus of analyst ratings and price targets for each US stock, from Benzi
 | `StrongBuyRatings` | long | The count of 'Strong Buy' ratings from contributing analysts. | REST | `strong_buy_ratings` |
 | `StrongSellRatings` | long | The count of 'Strong Sell' ratings from contributing analysts. | REST | `strong_sell_ratings` |
 | `Ticker` | String | The requested ticker. | REST | `ticker` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -130,6 +136,7 @@ Benzinga's bull case and bear case summaries for US stocks.
 | `BenzingaId` | String | The unique identifier used by Benzinga for this bull/bear case record. | REST | `benzinga_id` |
 | `BullCase` | String | A concise summary of the bullish investment thesis, highlighting positive aspects, growth opportunities, and reasons why the stock could appreciate in value. | REST | `bull_case` |
 | `LastUpdated` | Instant | The timestamp (formatted as an ISO 8601 timestamp) when the bull/bear case was last updated in the system. | REST | `last_updated` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -147,7 +154,7 @@ Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 | `BenzingaId` | String | A unique identifier assigned by Benzinga to the guidance record. | REST | `benzinga_id` |
 | `CompanyName` | String | The name of the company issuing guidance. | REST | `company_name` |
 | `Currency` | String | The ISO 4217 code representing the currency in which the company issued its guidance figures. | REST | `currency` |
-| `Date` | LocalDate | The calendar date (formatted as YYYY-MM-DD) when the guidance was issued. | REST | `date` |
+| `Date` | String | The calendar date (formatted as YYYY-MM-DD) when the guidance was issued. | REST | `date` |
 | `EpsMethod` | String | The methodology of the EPS figure. Possible values are gaap (standardized financials under Generally Accepted Accounting Principles), ffo (Funds From Operations, a non-GAAP metric commonly used to assess the operating performance of REITs), and adj (adjusted, non-GAAP). | REST | `eps_method` |
 | `EstimatedEpsGuidance` | double | The analyst consensus EPS estimate at the time the company issued its guidance. This can sit above, below, or in line with the company's issued range. | REST | `estimated_eps_guidance` |
 | `EstimatedRevenueGuidance` | double | The analyst consensus revenue estimate at the time the company issued its guidance. This can sit above, below, or in line with the company's issued range. | REST | `estimated_revenue_guidance` |
@@ -168,6 +175,7 @@ Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 | `ReleaseType` | String | Indicates whether the guidance was issued as part of a scheduled earnings release ('official') or as an unscheduled update ('preliminary'). | REST | `release_type` |
 | `RevenueMethod` | String | The methodology of the revenue figure. Possible values are gaap (standardized financials under Generally Accepted Accounting Principles) and adj (adjusted, non-GAAP). | REST | `revenue_method` |
 | `Time` | String | The time of day the guidance was announced, in HH:mm:ss format. | REST | `time` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -187,7 +195,7 @@ Earnings announcements of US companies from Benzinga, with estimates and surpris
 | `BenzingaId` | String | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
 | `CompanyName` | String | The name of the company releasing earnings. | REST | `company_name` |
 | `Currency` | String | The ISO 4217 currency code indicating the denomination in which the figures are reported. | REST | `currency` |
-| `Date` | LocalDate | The calendar date (formatted as YYYY-MM-DD) when the earnings are scheduled or were reported. | REST | `date` |
+| `Date` | String | The calendar date (formatted as YYYY-MM-DD) when the earnings are scheduled or were reported. | REST | `date` |
 | `DateStatus` | String | Indicates whether the date of the earnings report has been confirmed. Possible values include: projected, confirmed. | REST | `date_status` |
 | `EpsMethod` | String | The methodology of the EPS figure. Possible values are gaap (standardized financials under Generally Accepted Accounting Principles), ffo (Funds From Operations, a non-GAAP metric commonly used to assess the operating performance of REITs), and adj (adjusted, non-GAAP). | REST | `eps_method` |
 | `EpsSurprise` | double | The difference between the actual and estimated EPS. | REST | `eps_surprise` |
@@ -205,6 +213,7 @@ Earnings announcements of US companies from Benzinga, with estimates and surpris
 | `RevenueSurprise` | double | The difference between the actual and estimated revenue. | REST | `revenue_surprise` |
 | `RevenueSurprisePercent` | double | The revenue surprise relative to the estimate, as a decimal fraction (0.126 = 12.6%), calculated as revenue_surprise divided by the absolute value of estimated_revenue. Positive is a beat and negative a miss. | REST | `revenue_surprise_percent` |
 | `Time` | String | The time (formatted as 24-hour HH:MM:SS EST) when the earnings are scheduled or were reported. | REST | `time` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -222,6 +231,7 @@ The research firms behind Benzinga's analyst ratings.
 | `Currency` | String | Primary currency used by the financial firm, with some entries having null values. | REST | `currency` |
 | `LastUpdated` | Instant | Timestamp indicating when the firm's information was last modified or verified in the database. | REST | `last_updated` |
 | `Name` | String | The name of a research firm or investment bank which issues ratings. | REST | `name` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -247,6 +257,7 @@ Benzinga news articles, with headline, teaser, body, and the tickers each one na
 | `Tickers` | String | A list of stock or crypto tickers mentioned in the article. | REST | `tickers` |
 | `Title` | String | The headline of the news article. | REST | `title` |
 | `Url` | String | The direct link to the source of the news article. | REST | `url` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -261,8 +272,8 @@ ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
-| `EffectiveDate` | LocalDate | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
-| `ProcessedDate` | LocalDate | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
+| `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
+| `ProcessedDate` | String | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `QuantCompositeBehavioral` | double | Behavioral analysis score measuring investor psychology and market behavior patterns. | REST | `quant_composite_behavioral` |
 | `QuantCompositeFundamental` | double | Overall fundamental analysis score combining P/E, P/CF, P/B, and dividend yield metrics. | REST | `quant_composite_fundamental` |
 | `QuantCompositeGlobal` | double | Overall global theme score combining sector and country analysis for macro investment views. | REST | `quant_composite_global` |
@@ -294,6 +305,7 @@ ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 | `RiskStructure` | double | A component score evaluating risks related to the ETF's structural design and mechanics. | REST | `risk_structure` |
 | `RiskTotalScore` | double | ETF Global's proprietary Red Diamond overall risk assessment score for the ETF. | REST | `risk_total_score` |
 | `RiskVolatility` | double | A component score measuring the volatility risk of the ETF's price movements. | REST | `risk_volatility` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -314,17 +326,18 @@ The holdings of US-listed ETFs from ETF Global, one row per fund, date, and hold
 | `ConstituentTicker` | String | The stock ticker symbol of the individual security held within the ETF. | REST | `constituent_ticker` |
 | `CountryOfExchange` | String | The country where the exchange that lists this constituent security is located. | REST | `country_of_exchange` |
 | `CurrencyTraded` | String | The local currency in which this constituent security is denominated and traded. | REST | `currency_traded` |
-| `EffectiveDate` | LocalDate | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
+| `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `Exchange` | String | The name of the stock exchange where this constituent security is primarily traded. | REST | `exchange` |
 | `Figi` | String | The Financial Instrument Global Identifier, an open standard for uniquely identifying financial instruments. | REST | `figi` |
 | `Isin` | String | The International Securities Identification Number, a global standard for identifying securities. | REST | `isin` |
 | `MarketValue` | double | The total market value of this constituent position held by the ETF. | REST | `market_value` |
-| `ProcessedDate` | LocalDate | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
+| `ProcessedDate` | String | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `SecurityType` | String | The specific classification of security type using ETF Global's taxonomy, such as Common Equity, Domestic, Global, etc. | REST | `security_type` |
 | `Sedol` | String | The Stock Exchange Daily Official List code, primarily used for securities trading in the UK. | REST | `sedol` |
 | `SharesHeld` | double | The number of shares of this constituent security that the ETF currently owns. | REST | `shares_held` |
 | `UsCode` | String | A unique identifier code for the constituent security in US markets. | REST | `us_code` |
 | `Weight` | double | The constituent's weight in the ETF's portfolio, as a decimal fraction (0.0789 = 7.89%). Short positions are negative. For most funds the weights sum to about 1; leveraged and inverse funds vary. A few constituents have no weight, so a sum can fall short. | REST | `weight` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -339,11 +352,12 @@ Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF on exchanges." | REST | `composite_ticker` |
-| `EffectiveDate` | LocalDate | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
+| `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `FundFlow` | double | The net daily capital flow into or out of the ETF through the creation and redemption process, where positive values indicate inflows and negative values indicate outflows. | REST | `fund_flow` |
 | `Nav` | double | The net asset value per share, representing the per-share value of the ETF's underlying holdings. | REST | `nav` |
-| `ProcessedDate` | LocalDate | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
+| `ProcessedDate` | String | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `SharesOutstanding` | double | The total number of ETF shares currently issued and outstanding in the market. | REST | `shares_outstanding` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -376,13 +390,13 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `DiscountPremium` | double | Discount or premium to net asset value. | REST | `discount_premium` |
 | `DistributionFrequency` | String | How frequently the ETF makes distributions. | REST | `distribution_frequency` |
 | `Distributor` | String | The distributor of the ETF. | REST | `distributor` |
-| `EffectiveDate` | LocalDate | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
+| `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `FeeWaivers` | double | Any fee waivers applied to the ETF. | REST | `fee_waivers` |
 | `FiscalYearEnd` | String | The fiscal year end date for the ETF. | REST | `fiscal_year_end` |
 | `Focus` | String | The specific investment focus or exposure that the ETF provides, such as sector, geography, or investment style. | REST | `focus` |
 | `FuturesCommissionMerchant` | String | The futures commission merchant, if applicable. | REST | `futures_commission_merchant` |
 | `GeographicExposure` | String | Geographic exposure breakdown of the ETF. | REST | `geographic_exposure` |
-| `InceptionDate` | LocalDate | The date when this ETF was first launched and became available for trading. | REST | `inception_date` |
+| `InceptionDate` | String | The date when this ETF was first launched and became available for trading. | REST | `inception_date` |
 | `IndustryExposure` | String | Industry exposure breakdown of the ETF. | REST | `industry_exposure` |
 | `IndustryGroupExposure` | String | Industry group exposure breakdown of the ETF. | REST | `industry_group_exposure` |
 | `Issuer` | String | The financial institution or fund company that created and sponsors this ETF. | REST | `issuer` |
@@ -400,7 +414,7 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `OtherExpenses` | double | Other expenses charged by the ETF. | REST | `other_expenses` |
 | `PortfolioManager` | String | The portfolio manager of the ETF. | REST | `portfolio_manager` |
 | `PrimaryBenchmark` | String | The main index or benchmark that this ETF is designed to track or replicate. | REST | `primary_benchmark` |
-| `ProcessedDate` | LocalDate | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
+| `ProcessedDate` | String | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `ProductType` | String | Indicates whether the product is an Exchange-Traded Note ('etn') or an Exchange-Traded Fund ('etf'). | REST | `product_type` |
 | `PutCallRatio` | double | Put/call ratio for options on the ETF. | REST | `put_call_ratio` |
 | `PutVolume` | double | Put options volume. | REST | `put_volume` |
@@ -413,6 +427,7 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `TotalExpenses` | double | The total annual expense ratio of the ETF, including all fees and costs passed on to investors. | REST | `total_expenses` |
 | `TransferAgent` | String | The transfer agent for the ETF. | REST | `transfer_agent` |
 | `Trustee` | String | The trustee of the ETF. | REST | `trustee` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -434,14 +449,14 @@ ETF Global's classification of US-listed ETFs by strategy, structure, and exposu
 | `Description` | String | The official name and description of the ETF product. | REST | `description` |
 | `DevelopmentClass` | String | The economic development classification of the markets the ETF invests in, such as developed, emerging, or frontier markets. | REST | `development_class` |
 | `Duration` | String | The duration characteristics for fixed income ETFs. | REST | `duration` |
-| `EffectiveDate` | LocalDate | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
+| `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `Esg` | String | Environmental, Social, and Governance characteristics. | REST | `esg` |
 | `ExposureMechanism` | String | The mechanism used to achieve exposure. | REST | `exposure_mechanism` |
 | `Factor` | String | Factor exposure characteristics of the ETF. | REST | `factor` |
 | `Focus` | String | The specific investment focus or exposure that the ETF provides, such as sector, geography, or investment style. | REST | `focus` |
 | `HedgeReset` | String | The frequency of hedge reset, if applicable. | REST | `hedge_reset` |
 | `HoldingsDisclosureFrequency` | String | How frequently holdings are disclosed. | REST | `holdings_disclosure_frequency` |
-| `InceptionDate` | LocalDate | The date when this ETF was first launched and became available for trading. | REST | `inception_date` |
+| `InceptionDate` | String | The date when this ETF was first launched and became available for trading. | REST | `inception_date` |
 | `Isin` | String | The International Securities Identification Number, a global standard code for uniquely identifying this ETF worldwide. | REST | `isin` |
 | `Issuer` | String | The financial institution or fund company that created and sponsors this ETF. | REST | `issuer` |
 | `LeverageReset` | String | The frequency of leverage reset, if applicable. | REST | `leverage_reset` |
@@ -452,7 +467,7 @@ ETF Global's classification of US-listed ETFs by strategy, structure, and exposu
 | `Maturity` | String | The maturity profile for fixed income ETFs. | REST | `maturity` |
 | `Objective` | String | The primary investment objective of the ETF. | REST | `objective` |
 | `PrimaryBenchmark` | String | The main index or benchmark that this ETF is designed to track or replicate. | REST | `primary_benchmark` |
-| `ProcessedDate` | LocalDate | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
+| `ProcessedDate` | String | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `ProductType` | String | Indicates whether the product is an Exchange-Traded Note ('etn') or an Exchange-Traded Fund ('etf'). | REST | `product_type` |
 | `RebalanceFrequency` | String | How frequently the ETF rebalances its holdings. | REST | `rebalance_frequency` |
 | `ReconstitutionFrequency` | String | How frequently the index is reconstituted. | REST | `reconstitution_frequency` |
@@ -465,6 +480,7 @@ ETF Global's classification of US-listed ETFs by strategy, structure, and exposu
 | `TaxClassification` | String | The tax structure of the ETF, determining whether investors receive 1099 or K1 tax forms (RIC, Partnership, or UIT). | REST | `tax_classification` |
 | `UsCode` | String | A unique identifier code that identifies this ETF in US markets. | REST | `us_code` |
 | `WeightingMethodology` | String | The methodology used to weight holdings. | REST | `weighting_methodology` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -480,7 +496,7 @@ Corporate events from TMX: earnings dates, dividends, conferences, and more.
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The company's stock symbol." | REST | `ticker` |
 | `CompanyName` | String | Full name of the company. | REST | `company_name` |
-| `Date` | LocalDate | Scheduled date of the corporate event, formatted as YYYY-MM-DD. | REST | `date` |
+| `Date` | String | Scheduled date of the corporate event, formatted as YYYY-MM-DD. | REST | `date` |
 | `Isin` | String | Standard international identifier for the company's common stock. | REST | `isin` |
 | `Name` | String | Name or title of the event. | REST | `name` |
 | `Status` | String | The current status of the event. Possible values include: approved, canceled, confirmed, historical, pending_approval, postponed, and unconfirmed. | REST | `status` |
@@ -489,6 +505,7 @@ Corporate events from TMX: earnings dates, dividends, conferences, and more.
 | `TradingVenue` | String | MIC (Market Identifier Code) of the exchange where the company's stock is listed. | REST | `trading_venue` |
 | `Type` | String | The normalized type of corporate event. Possible values include: analyst_day, business_update, capital_markets_day, conference, dividend, earnings_announcement_date, earnings_conference_call, earnings_results_announcement, forum, interim_statement, other_interim_announcement, production_update, research_and_development_day, seminar, shareholder_meeting, sales_update, stock_split, summit, service_level_update, tradeshow, company_travel, and workshop. | REST | `type` |
 | `Url` | String | URL linking to the primary public source of the event announcement, if available. | REST | `url` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -511,7 +528,7 @@ Daily European consumer spending per merchant, from Fable Data's transaction pan
 | `MerchantTicker` | String | Stock ticker associated with the merchant (~250 US public companies mapped). Uses Bloomberg tickers and they are point in time. | REST | `merchant_ticker` |
 | `Name` | String | The merchant or entity name for this aggregate (lowercase). When type is 'merchant', this value can be used as the lookup_name in the merchant-hierarchy endpoint to retrieve full corporate hierarchy details. | REST | `name` |
 | `ParentName` | String | Merchant's parent business name (Title Case). Useful for aggregating transactions across subsidiary brands. Also available in the merchant-hierarchy endpoint for full corporate structure. | REST | `parent_name` |
-| `PublishedDate` | LocalDate | The date when this data version was published. For original data, this is approximately 7 days after transaction_date. | REST | `published_date` |
+| `PublishedDate` | String | The date when this data version was published. For original data, this is approximately 7 days after transaction_date. | REST | `published_date` |
 | `SpendInDistinctAccountKeyCount` | long | The count of distinct account keys (unique consumer accounts) with inbound transactions. | REST | `spend_in_distinct_account_key_count` |
 | `SpendInSpend` | double | The total inbound transaction amount (refunds, returns, credits) in the specified currency for this aggregation. Values are positive, representing money flowing back into consumer accounts. | REST | `spend_in_spend` |
 | `SpendInTransactionCount` | long | The count of inbound transactions (refunds, returns). | REST | `spend_in_transaction_count` |
@@ -522,11 +539,12 @@ Daily European consumer spending per merchant, from Fable Data's transaction pan
 | `TotalSpend` | double | Sum of spend_out_spend and spend_in_spend. Typically negative (net outflow). A positive value indicates refunds exceeded new spending for this aggregation. | REST | `total_spend` |
 | `TotalTransactions` | long | The total count of all transactions (outbound + inbound). | REST | `total_transactions` |
 | `TransactionCurrency` | String | ISO currency code for the transaction (base card/account currency). Always EUR or GBP in this dataset. All spend amounts are denominated in this currency. | REST | `transaction_currency` |
-| `TransactionDate` | LocalDate | The calendar date when the consumer transactions occurred. | REST | `transaction_date` |
+| `TransactionDate` | String | The calendar date when the consumer transactions occurred. | REST | `transaction_date` |
 | `TwentyEightDayRollingCategoryAccounts` | long | The count of unique consumer accounts active for a given country, consumer type, and that transacted in this merchant category (MCC Group) over the prior 28 days. Used for longer-term normalization calculations. | REST | `twenty_eight_day_rolling_category_accounts` |
 | `TwentyEightDayRollingTotalAccounts` | long | The count of unique consumer accounts active for a given country and consumer type that had any transaction activity (across all categories) over the prior 28 days. Provides a longer-term baseline for total panel size. | REST | `twenty_eight_day_rolling_total_accounts` |
 | `Type` | String | The type of aggregation. Can be 'merchant' or 'payment_processor'. | REST | `type` |
 | `UserCountry` | String | Country of consumer's residence (ISO codes). Available countries: UK, DE, FR, ES, IT, AT. Values outside these are mapped to 'unknown'. | REST | `user_country` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -540,8 +558,8 @@ Fable Data's map from merchants to parent companies, tickers, and industries.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `ActiveFrom` | LocalDate | Date this merchant hierarchy mapping became applicable. A value of 0001-01-01 indicates no known start date. Use with active_to to match against transaction_date from the merchant-aggregates endpoint to perform point-in-time queries. | REST | `active_from` |
-| `ActiveTo` | LocalDate | Date after which this merchant hierarchy mapping is no longer applicable due to a corporate action. A value of 9999-12-31 indicates the mapping is currently active. | REST | `active_to` |
+| `ActiveFrom` | String | Date this merchant hierarchy mapping became applicable. A value of 0001-01-01 indicates no known start date. Use with active_to to match against transaction_date from the merchant-aggregates endpoint to perform point-in-time queries. | REST | `active_from` |
+| `ActiveTo` | String | Date after which this merchant hierarchy mapping is no longer applicable due to a corporate action. A value of 9999-12-31 indicates the mapping is currently active. | REST | `active_to` |
 | `Category` | String | Merchant category assigned by the data provider (Title Case, e.g., 'Groceries', 'General Merchandise', 'Travel'). Values are managed by the data provider and may expand over time. | REST | `category` |
 | `GrandparentName` | String | Merchant's grandparent business name (Title Case). | REST | `grandparent_name` |
 | `GrandparentTicker` | String | Stock ticker of the merchant's grandparent company. Uses Bloomberg standard. | REST | `grandparent_ticker` |
@@ -557,6 +575,7 @@ Fable Data's map from merchants to parent companies, tickers, and industries.
 | `Sector` | String | Sector classification based on GICS/BICS/ICB standards. | REST | `sector` |
 | `SubIndustry` | String | Sub-industry classification based on GICS/BICS/ICB standards. | REST | `sub_industry` |
 | `Ticker` | String | Stock ticker associated with the merchant (~250 US public companies mapped). Uses Bloomberg standard. | REST | `ticker` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 

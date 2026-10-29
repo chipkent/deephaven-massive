@@ -58,11 +58,7 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.symbols import (
-    SymbolTable,
-    symbol_canonicalizer,
-    symbol_class,
-)
+from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import (
     HistorySource,
     PollMode,
@@ -72,7 +68,7 @@ from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.core import ON_UPDATE_GRAPH, on_update_graph
 from deephaven_massive._tables.liveness import entered
-from deephaven_massive._tables.watchlist import canonical_view
+from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
@@ -151,31 +147,31 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
 def _read_symbol_table(
     core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
 ) -> tuple[str, ...]:
-    """Read a reactive symbol table once, for a static result (`fetch()` or `history()`).
+    """Read a symbol table once, refusing a row that is not Massive's exact ticker.
 
-    The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
-    it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
-    session's execution context, with no library lock held. Each row is canonicalized as the
-    stream verbs do (`symbol_canonicalizer` in `_datasets/symbols.py`): a row that is not a
-    valid symbol of the class is ignored and logged once at WARNING.
+    The table is read as one consistent snapshot (`read_symbols` in `_tables/watchlist.py`),
+    on the caller thread, inside the session's execution context, with no library lock held.
+    Every live verb calls it before it starts, so a bad row fails the call; a static verb
+    (`fetch()`, `history()`) uses the symbols it returns.
 
     Args:
         core: The session core, for its execution context.
-        spec: The dataset, whose asset class canonicalizes the symbols.
-        symbols: The boxed reactive table.
+        spec: The dataset, whose asset class the rows must follow.
+        symbols: The boxed table, static or refreshing.
 
     Returns:
-        The table's valid symbols, canonical, sorted, and de-duplicated.
+        The table's symbols, sorted and de-duplicated; null rows are ignored.
 
     Raises:
-        ValueError: If the table holds no valid symbol, as an empty symbol list does.
+        ValueError: If the table holds no symbol, as an empty symbol list does.
+
+    A row that is not canonical raises the `ValueError` of `read_symbols`, which names
+    `dm.canonicalize_symbols`.
     """
-    canonical_symbol = symbol_canonicalizer(spec.asset_class)
     with entered(core.exec_ctx):
-        raw = {canonical_symbol(row[0]) for row in symbols.table.iter_tuple(cols="Symbol")}
-    found = tuple(sorted(symbol for symbol in raw if symbol is not None))
+        found = read_symbols(spec, symbols.table)
     if not found:
-        raise ValueError(f"{spec.name}: the symbol table holds no valid symbols")
+        raise ValueError(f"{spec.name}: the symbol table holds no symbols")
     return found
 
 
@@ -231,7 +227,8 @@ class QueryBase:
         Returns:
             A static table with one row per column, in result column order:
             `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
-            `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
+            `int`, `double`, `boolean`, `String`, `Instant`, or `int[]`; every calendar date,
+            such as `Date`, is ISO `yyyy-MM-dd` text, a `String`);
             `Description` (String), what the column holds, empty when Massive gives no
             description; and `SuppliedBy` (String), the transports whose sources fill the
             column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
@@ -250,7 +247,7 @@ class QueryBase:
         """
         if on_update_graph(self._core.exec_ctx):
             raise ValueError(ON_UPDATE_GRAPH)
-        schema = self._core.catalog.dataset_schema(self._spec)
+        schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             return column_table(schema)
 
@@ -278,7 +275,7 @@ class QueryBase:
             Its copy that carries the dataset's column and table descriptions.
         """
         spec = self._spec
-        schema = self._core.catalog.dataset_schema(spec)
+        schema = self._core.dataset_schema(spec)
         with entered(self._core.exec_ctx):
             return describe(table, spec, schema)
 
@@ -328,10 +325,10 @@ class QueryBase:
         )
 
     def _static_request(self) -> Request:
-        """Return the request with a reactive symbol table read once, for a static verb.
+        """Return the request with a symbol table read once, for a static verb.
 
         Returns:
-            The request; for a reactive table, with its valid symbols (`_read_symbol_table`).
+            The request; for a symbol table, with its symbols (`_read_symbol_table`).
         """
         request = self._request
         if isinstance(request.symbols, SymbolTable):
@@ -361,13 +358,16 @@ class Query(QueryBase):
         The requests run on the calling thread, or for an endpoint that takes one symbol per
         request on up to `max_concurrency` threads. `limit`, when the dataset was built with
         one, caps the total number of rows; the page size is internal. Columns are the
-        dataset's schema. A reactive symbol table is read once, when the verb is called. HTTP
-        401 raises `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
-        `MassiveError`; a symbol the endpoint answers with HTTP 404 is left out with a WARNING.
+        dataset's schema, ending with `TimestampInsert`, when the row's page arrived. A
+        reactive symbol table is read once, when the verb is called. HTTP 401 raises
+        `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
+        `MassiveError`; a symbol with no data (HTTP 404 on its first request) returns no rows,
+        with a WARNING, while HTTP 404 on a later page of its pages raises `MassiveError`,
+        since its data was cut short.
 
         Before any request it raises `ValueError` if a path the call reads does not take a
         parameter or filter the query set (an explicit `adjusted` on a path without it), or a
-        reactive symbol table holds no valid symbol. A failed request raises
+        symbol table holds no symbol or a row that is not canonical. A failed request raises
         `AuthenticationError` on HTTP 401, `EntitlementError` on HTTP 403, and `MassiveError`
         for a rate limit that outlived the retries, a row that breaks the dataset's schema, or
         any other failure.
@@ -397,8 +397,15 @@ class Query(QueryBase):
         """Return a live table that re-runs `fetch()` every `interval`.
 
         A reactive `Table` passed as `symbols` is re-read once per cycle on the poller thread.
+        Every non-null row must be Massive's exact ticker: a bad row present at the call raises
+        `ValueError`, and one added later fails the table, naming `dm.canonicalize_symbols`.
         Fan-out endpoints issue one request per symbol per cycle, at most `max_concurrency` at a
-        time. Releasing the table (`m.release`, garbage collection) stops its poller. A
+        time. The poller runs while the table, or a table derived from it, is in use; releasing
+        the table (`m.release`, garbage collection) stops it once nothing derived from it is
+        left, and `m.close()` stops it at once. A table derived in the console stays in use
+        until the JVM next collects it, and until then the poll keeps making its requests,
+        which on the Basic tier come out of the five a minute every session of the key shares.
+        A
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
         non-positive `interval` raises `ValueError`.
 
@@ -422,6 +429,9 @@ class Query(QueryBase):
                 `APPEND` for news and filings (not the filing taxonomies, insider activity, or
                 insider holdings), `UPSERT` for IPOs, and `REPLACE` otherwise.
 
+        Every row's `TimestampInsert` is when its page arrived, so in a keyed table it is the
+        time of the latest cycle that returned the row; it is never part of a row's identity.
+
         Returns:
             A live table: keyed for `REPLACE` and `UPSERT`, append-only for `APPEND`. A
             `REPLACE` table removes keys absent from the latest cycle, but its hidden state
@@ -442,6 +452,9 @@ class Query(QueryBase):
         self._core.require_verb_thread()
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
+        if isinstance(self._request.symbols, SymbolTable):
+            with entered(self._core.exec_ctx):
+                read_symbols(self._spec, self._request.symbols.table)
         return self._core.rest_transport().poll(
             self._spec, self._request, interval=period, mode=chosen
         )
@@ -465,6 +478,13 @@ class StreamQuery(QueryBase):
     connection raise `ValueError` at once; those of a reactive symbol table are deferred
     instead (`Deferred` in `m.streams()`).
 
+    A refreshing `Table` passed as symbols is reactive: the stream subscribes and unsubscribes
+    as its rows change. A static (non-refreshing) `Table` is a fixed symbol list instead, read
+    once when the verb is called, as `fetch()` and `history()` read one: the stream is the one
+    an equal symbol list opens. A row that is not Massive's exact ticker raises `ValueError`
+    in either kind; a static table with no symbol raises `ValueError` too, while an empty
+    refreshing table opens its stream and subscribes as rows arrive.
+
     Built by a dataset method, such as `m.stocks.luld(...)`; immutable and reusable.
 
     Example:
@@ -485,25 +505,54 @@ class StreamQuery(QueryBase):
         """
         return self._spec.channels[self._request.timespan]
 
-    def _stream(self, shape: Callable[[Table], Table]) -> Table:
+    def _stream_request(self) -> Request:
+        """Return the request the stream is opened for, with a static symbol table read once.
+
+        A static table cannot be listened to, so it is read now, like `fetch()` reads one
+        (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
+        stays reactive. A static table with no symbol, or with a row that is not canonical,
+        raises the `ValueError` of `_read_symbol_table`.
+
+        Returns:
+            The request.
+        """
+        request = self._request
+        symbols = request.symbols
+        if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
+            return replace(request, symbols=_read_symbol_table(self._core, self._spec, symbols))
+        return request
+
+    def _stream(self, shape: Callable[[Table], Table], request: Request) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.
 
         The result is the shape, described last (`describe`): an append-only or ring table
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
+        A reactive symbol table is read first, so a row that is not Massive's exact ticker
+        fails the call before any stream starts. A crypto pair takes its split from Massive's
+        crypto ticker list when the stream starts (read once per session); a failed read, or a
+        pair the list does not hold, raises `MassiveError` before any topic is subscribed.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
                 `blink()`, whose described copy is then a new table of its own.
+            request: The request from `_stream_request`.
 
         Returns:
             The tracked live result.
+
+        A bad row of a symbol table raises the `ValueError` of `read_symbols` in
+        `_tables/watchlist.py`.
         """
         spec = self._spec
-        schema = self._core.catalog.dataset_schema(spec)
+        symbols = request.symbols  # a static table is already read: never read it twice
+        if isinstance(symbols, SymbolTable):
+            with entered(self._core.exec_ctx):
+                read_symbols(spec, symbols.table)
+        schema = self._core.dataset_schema(spec)
         return self._core.stream_result(
             spec,
-            self._request,
+            request,
             channel=self._channel,
             build=lambda blink: describe(shape(blink), spec, schema),
         )
@@ -514,6 +563,9 @@ class StreamQuery(QueryBase):
         Each call returns a new table, a described copy of the stream's blink table, with its
         own liveness scope, so two `blink()` results are released independently.
 
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
+
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
@@ -521,12 +573,15 @@ class StreamQuery(QueryBase):
             A live blink table in the dataset's schema.
         """
         self._core.require_verb_thread()
-        return self._stream(lambda blink: blink)
+        return self._stream(lambda blink: blink, self._stream_request())
 
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
 
         Memory grows with the stream; use `ring()` to bound it.
+
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -535,13 +590,16 @@ class StreamQuery(QueryBase):
             A live append-only table in the dataset's schema.
         """
         self._core.require_verb_thread()
-        return self._stream(blink_to_append_only)
+        return self._stream(blink_to_append_only, self._stream_request())
 
     def ring(self, capacity: int) -> Table:
         """Return the most recent `capacity` rows received.
 
         A `capacity` that is not an `int` raises `TypeError`, and one outside 1 to 2**31 - 1
         raises `ValueError` (`require_positive_int`).
+
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -554,7 +612,7 @@ class StreamQuery(QueryBase):
         """
         self._core.require_verb_thread()
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
-        return self._stream(lambda blink: ring_table(blink, rows))
+        return self._stream(lambda blink: ring_table(blink, rows), self._stream_request())
 
     def last_by(self, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
@@ -564,12 +622,16 @@ class StreamQuery(QueryBase):
         removed and re-added shows its last row until it ticks again. With keys that span
         symbols (`by="Exchange"`), rows are filtered before the aggregation, so each group's
         row is the latest from a symbol that was watched when it arrived; a group keeps that
-        row after the symbol is removed, until a watched symbol ticks in the group. The table
-        may hold any accepted spelling (`EUR/USD` for `C:EURUSD`): it is matched through
-        `canonical_view` in `_tables/watchlist.py`. `last_by()` never seeds
+        row after the symbol is removed, until a watched symbol ticks in the group. Every row
+        of the table must hold Massive's exact ticker (`C:EURUSD`, not `EUR/USD`); a later row
+        that does not fails the result (convert such a table with `dm.canonicalize_symbols`
+        first). `last_by()` never seeds
         from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.
+
+        A static symbol table is read once, now (see the class); one that holds no symbol, or a
+        row that is not Massive's exact ticker, raises `ValueError`.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
@@ -584,23 +646,19 @@ class StreamQuery(QueryBase):
         """
         self._core.require_verb_thread()
         keys = self._last_by_keys(by)
-        symbols = self._request.symbols
+        request = self._stream_request()
+        symbols = request.symbols
         if not isinstance(symbols, SymbolTable):
-            return self._stream(lambda blink: blink.last_by(list(keys)))
+            return self._stream(lambda blink: blink.last_by(list(keys)), request)
         watch = symbols.table
-        asset_class = self._spec.asset_class
         if "Symbol" in keys:
             # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
             return self._stream(
-                lambda blink: blink.last_by(list(keys)).where_in(
-                    canonical_view(asset_class, watch), "Symbol"
-                )
+                lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"), request
             )
         # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
         return self._stream(
-            lambda blink: blink.where_in(canonical_view(asset_class, watch), "Symbol").last_by(
-                list(keys)
-            )
+            lambda blink: blink.where_in(watch, "Symbol").last_by(list(keys)), request
         )
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:
@@ -631,7 +689,7 @@ class StreamQuery(QueryBase):
         repeated = sorted({str(key) for key in keys if keys.count(key) > 1})
         if repeated:
             raise ValueError(f"by names {repeated} more than once")
-        columns = self._core.catalog.dataset_schema(self._spec).column_names
+        columns = self._core.dataset_schema(self._spec).column_names
         unknown = [key for key in keys if key not in columns]
         if unknown:
             raise ValueError(
@@ -669,26 +727,51 @@ class HistoryQuery(QueryBase):
         - **Dates** (`"2025-03-03"` or a `date`) are whole days, inclusive at both ends:
           `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in
           the asset class's day zone: New York for stocks, options, and indices, UTC for forex
-          and crypto. For futures a date names the trading session whose `SessionEndDate` it
-          is, which opens at 17:00 Chicago time the evening before (earlier after a holiday).
+          and crypto. For futures a date names the trading session whose `Date`
+          (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
+          (earlier after a holiday).
         - **Aware datetimes** are exact instants, half-open: rows with `start <= Timestamp <
-          end`. Equal instants give an empty table.
+          end` (for bars, `TimestampStart`). Equal instants give an empty table.
 
-        `end=None`, the default, reads through now. A bar is returned only when its whole
-        window lies inside the range and has ended: an intraday or 1-day bar its own interval;
-        for stocks, options, indices, and futures, a week Monday to Friday and a month,
-        quarter, or year its calendar period less its leading and trailing weekend days; for
-        forex and crypto, which trade at weekends, whole calendar weeks (Monday to Sunday),
-        months, quarters, and years; a bar of several units all of them; and a futures bar
-        named by session dates its sessions. So the current day's, week's, or month's bar is
-        never returned, and `history("2025-03-05", "2025-03-20")` of monthly bars is empty.
-        Datetime bounds keep only whole calendar days of 1-day bars: Monday 09:30 to Friday
-        16:00 New York time returns Tuesday to Thursday, so pass dates for daily bars. Futures
-        bars of a session or longer with `multiplier` above 1 cannot be named by dates (their
-        session label is not verified) and raise `ValueError`; pass datetimes. There is no
-        holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
-        week. Forex and crypto 1-day bars are stamped at 00:00 UTC of their day whatever the
-        source. There is no `limit`: the library pages internally.
+        `end=None`, the default, reads through now. A bar is returned only when its whole window
+        lies inside the range and has ended: its `TimestampStart` lies in the range, and its
+        `TimestampEnd` is no later than now or than the range's end (for dates, the end of the
+        last day: the next midnight, 01:00 New York time for indices, 17:00 Chicago time on the
+        last session's date for futures). Its window is an intraday or 1-day bar's own interval;
+        for stocks, options, and futures, a week Monday to Friday and a month, quarter, or year
+        its calendar period less its leading and trailing weekend days; for indices, which can
+        update around the clock, the same periods as whole calendar periods, weekends included
+        at both ends; for forex and crypto, which trade at weekends, whole calendar weeks
+        (Monday to Sunday), months, quarters, and years; a bar of several units all of them,
+        where several days or sessions end as late as holidays could push them (one weekday
+        more, and one more for every five further days); and a futures bar named by session
+        dates its sessions. So the current day's, week's, or month's bar is never returned, and
+        `history("2025-03-05", "2025-03-20")` of monthly bars is empty. Datetime bounds keep
+        only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
+        returns Tuesday to Thursday, so pass dates for daily bars. A futures bar of several
+        sessions, weeks, or months named by dates is kept only when it fits the range whether
+        Massive labels it with its first or its last session, which is not documented. There is
+        no holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
+        week. There is no `limit`: the library pages internally.
+
+        Every row says when it happened, its trading day, and when it arrived: a tick its
+        `Timestamp`; a bar its window, `TimestampStart` and the exclusive `TimestampEnd`
+        (join on the end, `aj(..., on=["Symbol", "Timestamp>=TimestampEnd"])`, so no bar is
+        attached before it closed); its `Date`, ISO `yyyy-MM-dd` text, null for a bar that
+        spans more than one date; and `TimestampInsert`, when its page or file block arrived
+        (the download time). A bar of a day or longer starts at 00:00 of its window's first
+        day in the class day zone (New York for stocks, options, and indices; UTC for forex
+        and crypto), whatever the source, and ends at 00:00 after its last day (an hour later
+        for indices, whose day is not verified); a futures bar keeps Massive's window start and
+        ends at 17:00 Chicago time on its session date, or for a bar of several sessions, a week,
+        or longer at the latest end its label allows, since Massive does not document whether
+        it labels such a bar with its first or its last session.
+
+        One call never mixes split bases: with `adjusted=True`, the default of the stock and
+        option bars, it reads REST only and checks every page's `adjusted` echo; flat files
+        are as traded, so they serve only `adjusted=False`. Massive adjusts for splits only,
+        never for cash dividends. A table that joins adjusted history to live bars, which are
+        as traded, jumps at the next split's execution date: build it again after a split.
 
         Flat files (S3) can serve a request when S3 credentials are configured, the dataset
         has files for it (bars: only 1-minute and 1-day bars, and 1-session bars for futures,
@@ -697,15 +780,16 @@ class HistoryQuery(QueryBase):
         the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. A crypto bar of a day or longer whose stamp is off
-        the UTC day cut fails loudly, whichever source serves it, so the source never changes
-        which days a bar covers; `source=` picks a source explicitly. A reactive symbol table
-        is read once, when the verb is called, and every source receives the same sorted
-        canonical symbols; rows that are not valid symbols of the class are ignored with a
-        WARNING. Flat-file reads skip a missing weekend file silently and a missing weekday
-        file (a holiday) with a WARNING. Futures trades and quotes named by session dates are
-        read over REST one request series per weekday session and symbol; a long
-        one-request-per-day download logs its request count first, at INFO.
+        `dm.ALL`); otherwise it uses REST. A bar of a day or longer stamped at a time of day,
+        or on a day, Massive is not known to use for its class fails loudly, whichever source
+        serves it, so the source never changes which day a bar is labelled with; `source=`
+        picks a source explicitly. A reactive symbol table is read once, when the verb is
+        called, and every source receives the same sorted canonical symbols; a row that is not
+        Massive's exact ticker raises `ValueError`. Flat-file reads skip a missing
+        weekend file silently and a missing weekday file (a holiday) with a WARNING. Futures
+        trades and quotes named by session dates are read over REST one request series per
+        weekday session and symbol; a long one-request-per-day download logs its request count
+        first, at INFO.
 
         Side effects: network requests on the calling thread, and for flat files a pool of up
         to `max_concurrency` reader threads that end before the call returns. It blocks until
@@ -729,28 +813,30 @@ class HistoryQuery(QueryBase):
         Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
         `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
         unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
-        `end` is None); a reactive symbol table without a valid symbol; futures trades or
-        quotes named by session dates on a query that also filters `session_end_date` in any
-        form; futures bars of a session or longer with `multiplier` above 1 named by dates; a
-        source that cannot serve the request (`REST` without REST history or with `dm.ALL` and
-        no grouped-daily endpoint; `FLAT_FILES` when a flat-file condition above fails; `AUTO`
-        when neither can, with every violated condition listed); or a call on a Deephaven
-        update-graph thread. `MassiveError` when a request fails (`EntitlementError` on HTTP
-        403, which for futures flat files names the venue and the `venue=` parameter;
-        `AuthenticationError` when S3 rejects the flat-file credentials); when the flat file of
-        the last requested day is missing within a day after its publication time ("... is not
-        yet published (flat files land ~11:00 ET next day), or was a market holiday"; after
-        that the day is skipped with a WARNING, as a holiday); when a futures range named by
-        instants ends on a holiday and the next session's file, which holds the holiday's
-        hours, is not published yet or does not exist within 7 days; when a crypto bar of a
-        day or longer is stamped off the UTC day cut (a 1-day bar elsewhere than its day's first
-        or last millisecond, a longer one elsewhere than 00:00 UTC); or once the session is
-        closed.
+        `end` is None); a symbol table without a symbol, or with a row that is not canonical;
+        futures trades or quotes named by session dates on a query that also filters
+        `session_end_date` in any form; a source that cannot serve the request (`REST` without
+        REST history or with `dm.ALL` and no grouped-daily endpoint; `FLAT_FILES` when a
+        flat-file condition above fails; `AUTO` when neither can, with every violated condition
+        listed); or a call on a Deephaven update-graph thread. `MassiveError` when a request
+        fails (`EntitlementError` on HTTP 403, which for futures flat files names the venue and
+        the `venue=` parameter; `AuthenticationError` when S3 rejects the flat-file
+        credentials); when a page of adjusted bars echoes another basis than the request; when a
+        symbol's later page answers HTTP 404, its data cut short (a symbol with no data at all
+        simply returns no rows); when the flat file of the last requested day is missing within
+        a day after its publication time ("... is not yet published (flat files land ~11:00 ET
+        next day), or was a market holiday"; after that the day is skipped with a WARNING, as a
+        holiday); when a futures range named by instants ends on a holiday and the next
+        session's file, which holds the holiday's hours, is not published yet or does not exist
+        within 7 days; when a bar of a day or longer is stamped at a time of day, or on a day,
+        Massive is not known to use for its class (a crypto 1-day bar at midnight New York time,
+        or a crypto week bar on a Sunday), naming the dataset, the source, and what to do
+        instead; or once the session is closed.
 
         Example:
             ::
 
-                q = m.crypto.trades("BTC-USD")
+                q = m.crypto.trades("X:BTCUSD")
                 day = q.history("2026-01-02", "2026-01-02")  # all of that UTC day
                 hour = q.history(
                     datetime(2026, 1, 2, 14, tzinfo=UTC), datetime(2026, 1, 2, 15, tzinfo=UTC)
@@ -825,7 +911,7 @@ class HistoryQuery(QueryBase):
             A static table with every column of the dataset and no row, described as a
             result is (`_described`).
         """
-        schema = self._core.catalog.dataset_schema(self._spec)
+        schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             table = dh_arrow.to_table(schema.arrow_schema().empty_table())
         return self._described(table)
@@ -898,8 +984,10 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 class HistoryLatestQuery(HistoryQuery):
     """Daily bars: `history()` plus `fetch()` of the previous completed session's bar.
 
-    Built by a dataset method, such as `m.stocks.bars(...)` with a one-day timespan; immutable
-    and reusable.
+    The `bars()` of stocks, options, indices, forex, and crypto return this class for 1-day
+    bars with `multiplier=1`. A query is built by the namespace method, holds no state of its
+    own beyond its arguments, and may be used from any thread but a Deephaven update-graph
+    thread.
 
     Example:
         ::
@@ -915,7 +1003,14 @@ class HistoryLatestQuery(HistoryQuery):
         """Return one row per symbol: the bar of the previous completed session.
 
         Massive documents the endpoint as "the prior session's open, high, low, close, and
-        volume". A failed request raises `MassiveError` (`EntitlementError` on HTTP 403).
+        volume". The bar's `TimestampStart` is 00:00 of its day in the class day zone (New
+        York for stocks, options, and indices; UTC for forex and crypto), whatever time Massive
+        stamps it at, its `TimestampEnd` 00:00 of the next day (01:00 New York time for
+        indices), and its `Date` that day. A stamp at a time of day Massive is not known to use
+        for the class raises `MassiveError`, naming the dataset and `/prev`. Stock and option
+        bars are split-adjusted unless the query says `adjusted=False`, and a page whose
+        `adjusted` echo differs from the request raises `MassiveError`. A failed request raises
+        `MassiveError` (`EntitlementError` on HTTP 403).
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.
 
