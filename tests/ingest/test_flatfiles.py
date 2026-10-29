@@ -63,6 +63,7 @@ class FakeS3(Protocol):
     closed_bodies: list[str]
     request_id: str
     before_answer: Callable[[str], object] | None
+    before_drop: Callable[[str], object] | None
 
     def put(self, key: str, data: bytes) -> None: ...
     def put_csv(
@@ -1422,6 +1423,17 @@ def test_a_dropped_connection_is_a_massive_error(
         q.history("2025-03-03", "2025-03-03")
 
 
+def hold_each_drop(fake_s3: FakeS3) -> threading.Event:
+    # Holds each dropped read's failure until the returned event is set, and clears the event
+    # at every request, so a test can make each dropped read build a table first. Arrow reads
+    # a file ahead on a thread of its own and can report the drop before the reader has turned
+    # a single block into a table.
+    built = threading.Event()
+    fake_s3.before_answer = lambda _: built.clear()
+    fake_s3.before_drop = lambda _: built.wait(TIMEOUT)
+    return built
+
+
 def test_a_dropped_connection_is_read_again_from_the_start(
     *,
     session: dm.MassiveSession,
@@ -1434,9 +1446,11 @@ def test_a_dropped_connection_is_read_again_from_the_start(
     many_blocks(TRADES_0303)
     converted: list[int] = []
     convert = dh_arrow.to_table
+    built = hold_each_drop(fake_s3)
 
     def counted(data: pa.Table) -> Table:
         converted.append(data.num_rows)
+        built.set()  # the read under way has built a table, so it may now fail
         return convert(data)
 
     monkeypatch.setattr(flatfiles, "to_table", counted)
@@ -1570,11 +1584,13 @@ def test_a_dropped_reads_tables_are_freed_before_the_wait(
     fake_s3.drop(TRADES_0303, times=1, at=len(fake_s3.data(TRADES_0303)) // 2)
     partial: list[weakref.ref[Table]] = []
     convert = flatfiles._convert
+    built = hold_each_drop(fake_s3)
 
     def recorded(batches: list[pa.RecordBatch], transform: flatfiles._Transform) -> Table:
         table = convert(batches, transform)
         if len(fake_s3.keys()) == 1:  # the read that drops
             partial.append(weakref.ref(table))
+            built.set()  # it has built a table, so it may now fail
         return table
 
     alive: list[int] = []
