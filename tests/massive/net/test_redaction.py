@@ -1,12 +1,13 @@
-"""Tests for `net.secrets`, and the planted-secret test of every wire client.
+"""Tests for `net.redaction`, and the planted-secret test of every wire client.
 
 The planted-secret test gives the REST, WebSocket, and flat-file clients distinctive secrets,
 turns on DEBUG for every logger (the library's, urllib3's, websockets', botocore's), drives
 each client through the failures most likely to quote a secret back (a 401, a 429, an error
 body, a non-JSON body, and a row that echo the key, an `auth_failed` reply, a status, and a data
-row that echo it, and S3 errors), and then searches every captured record, formatted with its
-traceback, and every error's text, `repr`, and traceback for the secrets. Neither may appear.
-The S3 access key id is not a secret: botocore's DEBUG log of the signed request names it.
+row that echo it, and S3 errors), each also with the key spelled by JSON escapes, and then
+searches every captured record, formatted with its traceback, and every error's text, `repr`,
+and traceback for the secrets. Neither may appear. The S3 access key id is an identifier, not a
+secret, so the test does not look for it.
 """
 
 from __future__ import annotations
@@ -20,7 +21,12 @@ import pytest
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
-from deephaven_massive._massive.net.secrets import REDACTED, redact, redact_bytes
+from deephaven_massive._massive.net.redaction import (
+    REDACTED,
+    clean_received,
+    redact,
+    redact_value,
+)
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
 from deephaven_massive._massive.spec.types import (
@@ -48,6 +54,9 @@ if TYPE_CHECKING:
 PLANTED_KEY = "PLANTED-api-key-7f3c9e51"
 PLANTED_S3 = "PLANTED-s3-secret-a4d2b806"
 PLANTED = (PLANTED_KEY, PLANTED_S3)
+# The key with its first character spelled as a JSON escape: no byte search finds it, but it
+# decodes to the key itself.
+ESCAPED_KEY = "\\u0050" + PLANTED_KEY[1:]
 
 _TRADES = RestPath(
     key="/v3/trades/{stockTicker}",
@@ -57,7 +66,7 @@ _TRADES = RestPath(
 _FILE = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 
 
-# --- redact and redact_bytes -------------------------------------------------------------------
+# --- redact, redact_value, and clean_received ----------------------------------------------------
 
 
 def test_redact_replaces_every_occurrence_of_each_secret() -> None:
@@ -76,12 +85,47 @@ def test_redact_returns_text_without_a_secret_unchanged() -> None:
     assert redact(text, PLANTED_KEY) is text
 
 
-def test_redact_bytes_replaces_each_secret_and_leaves_clean_bytes_uncopied() -> None:
+def test_clean_received_replaces_each_secret_and_leaves_clean_data_uncopied() -> None:
     data = f'{{"message":"{PLANTED_KEY}","other":"{PLANTED_S3}"}}'.encode()
-    cleaned = redact_bytes(data, PLANTED_KEY, PLANTED_S3, None, "")
+    cleaned = clean_received(data, PLANTED_KEY, PLANTED_S3, None, "")
     assert cleaned == b'{"message":"***","other":"***"}'
     clean = b'{"status":"OK"}'
-    assert redact_bytes(clean, PLANTED_KEY) is clean
+    assert clean_received(clean, PLANTED_KEY) is clean
+    assert clean_received(clean) is clean  # no secret to look for
+    text = '[{"ev":"status","message":"fine"}]'
+    assert clean_received(text, PLANTED_KEY) is text
+
+
+@pytest.mark.parametrize("kind", [bytes, str])
+def test_clean_received_finds_a_secret_spelled_by_json_escapes(kind: type) -> None:
+    raw = f'{{"error":"bad key {ESCAPED_KEY}","k\\u0065y":["{ESCAPED_KEY}",1]}}'
+    data = raw.encode() if kind is bytes else raw
+    cleaned = clean_received(data, PLANTED_KEY)
+    assert type(cleaned) is kind
+    assert json.loads(cleaned) == {"error": "bad key ***", "key": ["***", 1]}
+
+
+def test_clean_received_leaves_escapes_without_a_secret_alone() -> None:
+    data = b'{"text":"a \\"quoted\\" word","n":1}'
+    assert clean_received(data, PLANTED_KEY) is data
+
+
+def test_clean_received_leaves_text_that_is_not_json_alone() -> None:
+    data = b"<html>a \\u0050 page</html>"
+    assert clean_received(data, PLANTED_KEY) is data
+
+
+def test_a_secret_with_a_quote_is_found_in_its_json_escaped_form() -> None:
+    odd_key = 'key"with\\odd'
+    encoded = json.dumps({"echo": odd_key}).encode()
+    assert json.loads(clean_received(encoded, odd_key)) == {"echo": REDACTED}
+
+
+def test_redact_value_rebuilds_only_what_holds_a_secret() -> None:
+    clean = {"a": [1, "x"], "b": None}
+    assert redact_value(clean, PLANTED_KEY) is clean
+    dirty = {PLANTED_KEY: [PLANTED_KEY, 2], "c": {"d": PLANTED_KEY}}
+    assert redact_value(dirty, PLANTED_KEY) == {"***": ["***", 2], "c": {"d": "***"}}
 
 
 # --- the planted-secret test --------------------------------------------------------------------
@@ -112,6 +156,11 @@ def every_logger_at_debug(caplog: pytest.LogCaptureFixture) -> pytest.LogCapture
     return caplog
 
 
+def _escaped_envelope(status: str, key: str, words: str) -> bytes:
+    # An envelope whose message spells the key with a JSON escape, as raw bytes.
+    return f'{{"status":"{status}","request_id":"x","{key}":"{words}{ESCAPED_KEY}"}}'.encode()
+
+
 @pytest.fixture
 def rest(fake_rest: FakeRestServer) -> Iterator[RestClient]:
     client = RestClient(PLANTED_KEY, base_url=fake_rest.url, max_concurrency=2, clock=FakeClock())
@@ -128,8 +177,23 @@ def rest(fake_rest: FakeRestServer) -> Iterator[RestClient]:
         Reply(f"not json, but the key: {PLANTED_KEY}".encode()),
         Reply(envelope(status="NOT_AUTHORIZED", message=f"{PLANTED_KEY} lacks this plan")),
         Reply(f"slow down, {PLANTED_KEY}".encode(), status=429),
+        Reply(_escaped_envelope("ERROR", "message", "Unknown API Key: "), status=401),
+        Reply(_escaped_envelope("ERROR", "error", "bad request for key "), status=400),
+        Reply(_escaped_envelope("NOT_AUTHORIZED", "message", "no plan for ")),
+        Reply(_escaped_envelope("ERROR", "error", "slow down, "), status=429),
     ],
-    ids=["401", "400 envelope", "502 page", "200 not json", "NOT_AUTHORIZED", "429"],
+    ids=[
+        "401",
+        "400 envelope",
+        "502 page",
+        "200 not json",
+        "NOT_AUTHORIZED",
+        "429",
+        "401 escaped",
+        "400 escaped",
+        "NOT_AUTHORIZED escaped",
+        "429 escaped",
+    ],
 )
 def test_the_rest_client_never_shows_the_api_key(
     *,
@@ -146,19 +210,30 @@ def test_the_rest_client_never_shows_the_api_key(
     _assert_no_secret(every_logger_at_debug, info.value)
 
 
+@pytest.mark.parametrize("spelled", [PLANTED_KEY, ESCAPED_KEY], ids=["plain", "escaped"])
 def test_a_page_whose_rows_echo_the_api_key_is_cleaned_before_it_is_decoded(
-    rest: RestClient, fake_rest: FakeRestServer, every_logger_at_debug: pytest.LogCaptureFixture
+    *,
+    rest: RestClient,
+    fake_rest: FakeRestServer,
+    every_logger_at_debug: pytest.LogCaptureFixture,
+    spelled: str,
 ) -> None:
-    fake_rest.reply("/v3/trades/AAPL", Reply(envelope([{"note": f"key {PLANTED_KEY}"}])))
+    body = f'{{"status":"OK","request_id":"x","results":[{{"note":"key {spelled}"}}]}}'
+    fake_rest.reply("/v3/trades/AAPL", Reply(body.encode()))
     page = rest.get(_TRADES, {"stockTicker": "AAPL"}, {})
     assert page.rows == [{"note": f"key {REDACTED}"}]
     _assert_no_secret(every_logger_at_debug)
 
 
+@pytest.mark.parametrize("spelled", [PLANTED_KEY, ESCAPED_KEY], ids=["plain", "escaped"])
 def test_the_websocket_client_never_shows_the_api_key(
-    fake_ws_server: FakeMassiveServer, every_logger_at_debug: pytest.LogCaptureFixture
+    *,
+    fake_ws_server: FakeMassiveServer,
+    every_logger_at_debug: pytest.LogCaptureFixture,
+    spelled: str,
 ) -> None:
-    fake_ws_server.auth_replies.append(("auth_failed", f"no such key: {PLANTED_KEY}"))
+    reply = f'[{{"ev":"status","status":"auth_failed","message":"no such key: {spelled}"}}]'
+    fake_ws_server.auth_replies.append(reply.encode())
     states: list[tuple[WsState, object]] = []
     client = WsClient(
         fake_ws_server.url(),
@@ -183,8 +258,12 @@ def test_the_websocket_client_never_shows_the_api_key(
     assert state is WsState.FAILED
 
 
+@pytest.mark.parametrize("spelled", [PLANTED_KEY, ESCAPED_KEY], ids=["plain", "escaped"])
 def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
-    fake_ws_server: FakeMassiveServer, every_logger_at_debug: pytest.LogCaptureFixture
+    *,
+    fake_ws_server: FakeMassiveServer,
+    every_logger_at_debug: pytest.LogCaptureFixture,
+    spelled: str,
 ) -> None:
     received: list[Status] = []
     rows: list[dict[str, object]] = []
@@ -225,14 +304,14 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
     client.start()
     try:
         fake_ws_server.wait_for(lambda server: len(server.connections) == 1)
-        frame = [
-            {"ev": "status", "status": "error", "message": f"refused for {PLANTED_KEY}"},
-            {"ev": "T", "sym": PLANTED_KEY},
+        frame = (
+            f'[{{"ev":"status","status":"error","message":"refused for {spelled}"}},'
+            f'{{"ev":"T","sym":"{spelled}"}},'
             # A rejected row, whose whole text is logged and kept, with a drifted field.
-            {"ev": "T", "sym": "AAPL", "p": "bad", "echo": PLANTED_KEY},
-        ]
+            f'{{"ev":"T","sym":"AAPL","p":"bad","echo":"{spelled}"}}]'
+        )
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)
-        fake_ws_server.send(json.dumps(frame))
+        fake_ws_server.send(frame)
         fake_ws_server.wait_for(lambda _server: bool(received) and bool(rows))
     finally:
         client.close()

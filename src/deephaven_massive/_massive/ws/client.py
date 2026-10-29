@@ -48,8 +48,8 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.net.http import ssl_context
+from deephaven_massive._massive.net.redaction import clean_received
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
-from deephaven_massive._massive.net.secrets import redact, redact_bytes
 from deephaven_massive._massive.ws.backoff import Backoff
 from deephaven_massive._massive.ws.protocol import (
     FrameDecoder,
@@ -230,7 +230,7 @@ class WsClient:
                 such as `"wss://socket.massive.com/stocks"`.
             api_key: The Massive API key. It is sent only in the authentication frame and
                 never logged; a frame that echoes it has it replaced with `***`
-                (`net.secrets`) before it is decoded, so nothing built from it can quote it.
+                (`net.redaction`) before it is decoded, so nothing built from it can quote it.
             sources: The WebSocket sources of the endpoint's cluster (keys `"<cluster>/<ev>"`),
                 against which every frame is decoded.
             on_open: Called with each new generation's number; see the class documentation.
@@ -651,9 +651,7 @@ class WsClient:
             The frame itself when it does not hold the key, otherwise a copy with `***` in
             its place.
         """
-        if isinstance(frame, bytes):
-            return redact_bytes(frame, self._api_key)
-        return redact(frame, self._api_key)
+        return clean_received(frame, self._api_key)
 
     @staticmethod
     async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str | None]) -> None:
