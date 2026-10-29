@@ -7,15 +7,18 @@ clients do the waiting, through a `Clock`, so tests replace time with a fake and
 - **Transient failures** (HTTP 500, 502, 503, 504, and connection failures) wait 0.5, 1, then
   2 seconds, each lengthened by up to 20 % of random jitter, so clients that failed together
   do not retry together.
-- **Rate limits** (HTTP 429) wait what the response's `Retry-After` header asks, in either of
-  its forms (a number of seconds or an HTTP date). Without a usable header they wait 15, 30,
-  then 60 seconds. A request to wait longer than `MAX_RETRY_AFTER` (60 s) is not honoured:
-  the client gives up at once rather than stall a caller for minutes.
+- **Rate limits** (HTTP 429) are not retries: the REST client's `RequestGovernor` pauses the
+  refused subscription's requests and resumes them, until a run's pauses add up to
+  `RATE_LIMIT_PATIENCE` (10 minutes), and they never count against `MAX_RETRIES`.
+  This module gives the pause of a subscription whose requests are not paced
+  (`rate_limit_wait`): what the response's `Retry-After` header asks, in either of its forms
+  (a number of seconds or an HTTP date), and without a usable header 15, 30, then 60 seconds
+  by the number of refusals in the run.
 - **TLS certificate failures** are never retried: the certificate will not change between
-  attempts. `is_tls_failure` recognises one however deeply a library wrapped it.
+  attempts. `net.errors.is_tls_failure` recognises one however deeply a library wrapped it.
 - **Proxy credential refusals** (a proxy answering a tunnel request with HTTP 407) are never
   retried either: the same credentials would be refused again, and a corporate proxy may lock
-  the account after a few refusals. `is_proxy_auth_failure` recognises one.
+  the account after a few refusals. `net.errors.is_proxy_auth_failure` recognises one.
 
 Everything else (401, 403, 404, a body that is not JSON) is not retryable, and the clients
 fail at once. The functions here are pure and keep no state, so they are safe from any
@@ -25,7 +28,7 @@ thread. This module imports only the standard library.
 from __future__ import annotations
 
 import logging
-import ssl
+import math
 import time
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -33,20 +36,17 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Iterator
 
 __all__ = [
     "JITTER",
     "MAX_RETRIES",
-    "MAX_RETRY_AFTER",
+    "RATE_LIMIT_PATIENCE",
     "RATE_LIMIT_WAITS",
     "SYSTEM_CLOCK",
     "TRANSIENT_STATUSES",
     "TRANSIENT_WAITS",
     "Clock",
     "SystemClock",
-    "is_proxy_auth_failure",
-    "is_tls_failure",
     "rate_limit_wait",
     "retry_after_seconds",
     "transient_wait",
@@ -67,10 +67,15 @@ JITTER = 0.2
 """The most a transient wait is lengthened, as a fraction of its base wait."""
 
 RATE_LIMIT_WAITS = (15.0, 30.0, 60.0)
-"""The wait in seconds before each retry of a 429 that carries no usable `Retry-After`."""
+"""The pause in seconds after the first, the second, and every later 429 of a run that carries
+no usable `Retry-After`, for a subscription whose requests are not paced."""
 
-MAX_RETRY_AFTER = 60.0
-"""The longest `Retry-After` wait in seconds a client honours; a longer one fails at once."""
+RATE_LIMIT_PATIENCE = 600.0
+"""How long, in seconds of pauses in one run of 429s, requests keep pausing and resuming.
+
+A pause that brings the run's pauses past this (a long `Retry-After`, or refusals that go on)
+is not waited for: the request fails with status 429 instead.
+"""
 
 
 class Clock(Protocol):
@@ -91,10 +96,11 @@ class Clock(Protocol):
         ...
 
     def wait(self, event: threading.Event, seconds: float) -> bool:
-        """Block the calling thread for `seconds` (a positive number), or until `event` is set.
+        """Block the calling thread for `seconds`, or until `event` is set.
 
-        Returns True when `event` is set (the wait was interrupted), False when the time ran
-        out.
+        `seconds` is a positive number, or `math.inf` to wait until `event` is set however
+        long that takes. Returns True when `event` is set (the wait was interrupted), False
+        when the time ran out.
         """
         ...
 
@@ -126,12 +132,13 @@ class SystemClock:
 
         Args:
             event: Ends the wait early when set, such as a client's closed event.
-            seconds: The longest the wait lasts.
+            seconds: The longest the wait lasts; `math.inf` waits for `event` alone, since
+                `threading.Event.wait` refuses an infinite timeout.
 
         Returns:
             True if `event` was set, False if the time ran out.
         """
-        return event.wait(seconds)
+        return event.wait(None if math.isinf(seconds) else seconds)
 
 
 SYSTEM_CLOCK = SystemClock()
@@ -183,86 +190,18 @@ def retry_after_seconds(value: str | None, now: float) -> float | None:
     return max(0.0, when.timestamp() - now)
 
 
-def rate_limit_wait(retry: int, retry_after: float | None) -> float:
-    """Return the wait before a retry of an HTTP 429.
-
-    The caller compares a `Retry-After` wait with `MAX_RETRY_AFTER` first and gives up when it
-    is longer; this function only chooses between the header and the fallback schedule.
+def rate_limit_wait(refusal: int, retry_after: float | None) -> float:
+    """Return the pause after an HTTP 429 of a subscription whose requests are not paced.
 
     Args:
-        retry: Which retry this is, from 0 (the first) to `MAX_RETRIES - 1`; any other
-            value raises `IndexError`.
+        refusal: Which refusal of the run this is, counted from 1. Every refusal after the
+            third pauses as long as the third.
         retry_after: The wait the response's `Retry-After` asked for, from
             `retry_after_seconds`, or `None` when it gave none.
 
     Returns:
-        `retry_after` when given, otherwise 15, 30, or 60 seconds by `retry`.
+        `retry_after` when given, otherwise 15, 30, or 60 seconds by `refusal`.
     """
     if retry_after is not None:
         return retry_after
-    return RATE_LIMIT_WAITS[retry]
-
-
-def is_tls_failure(error: BaseException) -> bool:
-    """Return whether `error` is, or wraps, a failed TLS certificate verification.
-
-    HTTP libraries wrap `ssl.SSLCertVerificationError` in their own exceptions, as an argument
-    (urllib3's `SSLError`) or as the cause or context of a later one, so the search follows all
-    three.
-
-    Args:
-        error: The exception a request raised.
-
-    Returns:
-        True when an `ssl.SSLCertVerificationError` is found among `error`, its arguments, its
-        `__cause__`, and its `__context__`, recursively.
-    """
-    return any(isinstance(item, ssl.SSLCertVerificationError) for item in _linked(error))
-
-
-_PROXY_AUTH_REFUSED = "Tunnel connection failed: 407 "
-"""How `http.client` words a tunnel request the proxy answered with HTTP 407."""
-
-
-def is_proxy_auth_failure(error: BaseException) -> bool:
-    """Return whether `error` is, or wraps, a proxy's refusal of the client's credentials.
-
-    An HTTPS request through a proxy first asks it for a tunnel (`CONNECT`). A proxy that
-    rejects the credentials answers HTTP 407, which `http.client` raises as
-    `OSError("Tunnel connection failed: 407 <reason>")`, its only report of the status (every
-    supported Python words it so); urllib3 wraps that in its `ProxyError` and botocore in its
-    `ProxyConnectionError`.
-
-    Args:
-        error: The exception a request raised.
-
-    Returns:
-        True when an `OSError` whose message starts `Tunnel connection failed: 407 ` is found
-        among `error`, its arguments, its `__cause__`, and its `__context__`, recursively.
-    """
-    return any(
-        isinstance(item, OSError) and str(item).startswith(_PROXY_AUTH_REFUSED)
-        for item in _linked(error)
-    )
-
-
-def _linked(error: BaseException) -> Iterator[BaseException]:
-    """Yield `error` and every exception linked to it, each once.
-
-    Args:
-        error: The exception to start from.
-
-    Yields:
-        `error`, then the exceptions among its arguments, its `__cause__`, and its
-        `__context__`, recursively; a cycle ends the search.
-    """
-    seen: set[int] = set()
-    pending = [error]
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        yield current
-        linked = (current.__cause__, current.__context__, *current.args)
-        pending.extend(item for item in linked if isinstance(item, BaseException))
+    return RATE_LIMIT_WAITS[min(refusal, len(RATE_LIMIT_WAITS)) - 1]

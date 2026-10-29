@@ -63,7 +63,8 @@ class Reply:
     Attributes:
         body: The body: `bytes` as is, anything else encoded as JSON.
         status: The HTTP status.
-        headers: Extra response headers, such as `{"Retry-After": "5"}`.
+        headers: Extra response headers, such as `{"Retry-After": "5"}`. A `Date` header
+            replaces the server's own, which states the real time.
         reset: Close the connection without any response (a connection reset).
         gzip: Compress the body and send `Content-Encoding: gzip`.
     """
@@ -294,7 +295,11 @@ class FakeRestServer:
                     self.close_connection = True
                     return
                 data = reply.payload()
-                self.send_response(reply.status)
+                if "Date" in reply.headers:  # the scripted date replaces the real one
+                    self.send_response_only(reply.status)
+                    self.send_header("Server", self.version_string())
+                else:
+                    self.send_response(reply.status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 if reply.gzip:

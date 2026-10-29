@@ -25,8 +25,8 @@ running Deephaven JVM: use them inside a Deephaven worker, or after starting
 
 Public API:
     - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,
-      `connections()`, `streams()`, `release(table)`, `close()`, and use as a context
-      manager.
+      `connections()`, `streams()`, `rate_limits()`, `release(table)`, `close()`, and use as
+      a context manager.
     - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
     - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions.
     - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
@@ -45,7 +45,8 @@ Public API:
     - The enums (all `StrEnum`s; a value is Massive's wire string where the enum reaches the
       wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`,
       `Direction`, `ContractType`, `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`,
-      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError`, `UnknownSymbols`.
+      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError`, `UnknownSymbols`; and
+      `Subscription`, Massive's five subscriptions.
       Parameters take only enum members; convert text with, for example,
       `Timespan("minute")`.
 
@@ -95,6 +96,7 @@ __all__ = [
     "PollMode",
     "SeriesType",
     "Sip",
+    "Subscription",
     "SymbolConvention",
     "TickerType",
     "Timeframe",
@@ -137,6 +139,7 @@ _EXPORTS: dict[str, str] = {
     "PollMode": "deephaven_massive._enums",
     "SeriesType": "deephaven_massive._enums",
     "Sip": "deephaven_massive._enums",
+    "Subscription": "deephaven_massive._enums",
     "TickerType": "deephaven_massive._enums",
     "Timeframe": "deephaven_massive._enums",
     "Timespan": "deephaven_massive._enums",
@@ -188,6 +191,7 @@ if TYPE_CHECKING:
         PollMode,
         SeriesType,
         Sip,
+        Subscription,
         SymbolConvention,
         TickerType,
         Timeframe,

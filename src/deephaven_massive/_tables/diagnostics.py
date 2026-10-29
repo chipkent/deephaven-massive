@@ -1,12 +1,19 @@
-"""The live diagnostics tables behind `m.connections()` and `m.streams()`.
+"""The live diagnostics tables behind `m.connections()`, `m.streams()`, and `m.rate_limits()`.
 
-Both are keyed Deephaven `input_table`s that the library writes and users read:
+All three are keyed Deephaven `input_table`s that the library writes and users read:
 
 - **connections**: one row per WebSocket connection, plus one `Transport=REST` row per resolved
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
 - **streams**: one row per stream (a live subscription with its own publisher) and per `poll()`
   table. Keyed by `StreamId`.
+- **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
+  for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
+  the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
+  snapshot through its pull (`RateLimitPull`) whenever it was told the state changed
+  (`rate_limits_changed`), and a row can never be overtaken by an older one. The writer also
+  pulls again when the state changes with time alone (a pause ends, a slot frees): it waits on
+  its queue no longer than until the moment the pull names.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. Users never get the tables themselves: `m.connections()` and
@@ -34,9 +41,10 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, fields, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 import pyarrow as pa
 from deephaven import arrow as dh_arrow
@@ -50,7 +58,7 @@ from deephaven_massive._tables.liveness import QueueWorker, new_scope
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable
+    from collections.abc import Callable, Hashable, Sequence
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
@@ -62,6 +70,8 @@ if TYPE_CHECKING:
 __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
+    "RATE_LIMITS",
+    "RATE_LIMIT_KEYS",
     "SCHEMA_DRIFT_SHOWN",
     "STREAMS",
     "STREAM_KEYS",
@@ -69,6 +79,10 @@ __all__ = [
     "ConnectionState",
     "Diagnostics",
     "DriftRegistry",
+    "LimitSource",
+    "RateLimitPull",
+    "RateLimitRow",
+    "RateLimitState",
     "StreamRow",
     "StreamState",
     "StreamUpdate",
@@ -114,6 +128,34 @@ class StreamState(StrEnum):
 
 _STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
 """The states whose `Error` names why the stream stopped, which no later update replaces."""
+
+
+class RateLimitState(StrEnum):
+    """The `State` of a row of `m.rate_limits()`: what a new request of the bucket meets now.
+
+    `READY`: it starts at once. `PACED`: it waits behind the requests already queued for a slot
+    of the bucket's per-minute limit. `PAUSED`: it waits for the pause Massive's latest 429
+    asked for. `REFUSED`: Massive has refused the bucket for longer than the library waits, so
+    it fails at once with status 429 until `PausedUntil`.
+    """
+
+    READY = "READY"
+    PACED = "PACED"
+    PAUSED = "PAUSED"
+    REFUSED = "REFUSED"
+
+
+class LimitSource(StrEnum):
+    """Why a bucket of `m.rate_limits()` is paced: the `LimitSource` column.
+
+    `DECLARED`: a session that shares the bucket names the subscription in
+    `MassiveConfig.rest_basic_subscriptions`. `LEARNED`: Massive refused one of its requests
+    for exceeding the maximum requests per minute, the mark of the Basic tier.
+    """
+
+    DECLARED = "DECLARED"
+    LEARNED = "LEARNED"
+
 
 _S, _I, _L, _T = ColumnType.STRING, ColumnType.INT, ColumnType.LONG, ColumnType.INSTANT
 
@@ -176,6 +218,31 @@ STREAMS: Final = Schema(
 
 STREAM_KEYS: Final = ("StreamId",)
 """The key column of `m.streams()`."""
+
+RATE_LIMITS: Final = Schema(
+    "rate_limits",
+    tuple(
+        Column(name, column_type)
+        for name, column_type in (
+            ("Bucket", _S),
+            ("State", _S),
+            ("RequestsPerMinute", _I),
+            ("LimitSource", _S),
+            ("InFlight", _I),
+            ("Waiting", _I),
+            ("RecentRequests", _I),
+            ("Attempts", _L),
+            ("Refusals", _L),
+            ("PausedUntil", _T),
+            ("LastRefusal", _S),
+            ("UpdatedAt", _T),
+        )
+    ),
+)
+"""The columns of `m.rate_limits()`."""
+
+RATE_LIMIT_KEYS: Final = ("Bucket",)
+"""The key column of `m.rate_limits()`."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -350,14 +417,53 @@ class StreamUpdate:
         return None if self.clear_error else self.error
 
 
-def as_row(row: ConnectionRow | StreamRow) -> dict[str, object]:
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RateLimitRow:
+    """One row of `m.rate_limits()`. Timestamps are epoch nanoseconds; None is null.
+
+    Every session that shares a governor (the same API key and REST base URL) shows the same
+    rows, since Massive counts the requests of all of them together.
+
+    Attributes:
+        bucket: The bucket: a `dm.Subscription` value, or `other` for the datasets Massive
+            assigns to no subscription, which are never paced.
+        state: What a new request meets now.
+        requests_per_minute: The pace, 5 for a Basic subscription; null while unpaced.
+        limit_source: Why it is paced; null while unpaced.
+        in_flight: Requests sent and not yet answered.
+        waiting: Requests waiting for a slot or for the end of a pause.
+        recent_requests: Requests in flight or answered within the last 61 seconds: the
+            slots a paced bucket counts against its limit.
+        attempts: Attempts started since the governor was created; every retry and refused
+            attempt counts, so one request may count several times.
+        refusals: HTTP 429 responses since the governor was created.
+        paused_until: When the current pause ends; null without one.
+        last_refusal: The latest 429's message, with its HTTP status, path, and request id.
+        updated_at: When the row was written.
+    """
+
+    bucket: str
+    state: RateLimitState
+    requests_per_minute: int | None = None
+    limit_source: LimitSource | None = None
+    in_flight: int = 0
+    waiting: int = 0
+    recent_requests: int = 0
+    attempts: int = 0
+    refusals: int = 0
+    paused_until: int | None = None
+    last_refusal: str | None = None
+    updated_at: int
+
+
+def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     """Return a row keyed by column name: each field's name in PascalCase.
 
     Args:
-        row: A connection or stream row.
+        row: A connection, stream, or rate-limit row.
 
     Returns:
-        A `{column: value}` mapping for `CONNECTIONS` or `STREAMS`.
+        A `{column: value}` mapping for `CONNECTIONS`, `STREAMS`, or `RATE_LIMITS`.
     """
     return {pascal_case(f.name): getattr(row, f.name) for f in fields(row)}
 
@@ -528,11 +634,17 @@ class DriftRegistry:
             self._owners.pop(owner, None)
 
 
-_Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event"
+RateLimitPull: TypeAlias = "Callable[[], tuple[Sequence[RateLimitRow], float | None]]"
+"""Returns the `m.rate_limits()` rows and the seconds until they change with time alone."""
+
+_RATE_LIMITS_CHANGED: Final = object()
+"""The queue item that asks the writer to pull fresh `m.rate_limits()` rows."""
+
+_Item: TypeAlias = "ConnectionRow | StreamRow | threading.Event | object"
 
 
 class Diagnostics:
-    """The session's two diagnostics tables and the single thread that writes them.
+    """The session's three diagnostics tables and the single thread that writes them.
 
     Created by `SessionCore` on the caller thread, inside the session's execution context, so
     the tables live in a session-owned liveness scope. A daemon writer (`QueueWorker`) takes
@@ -542,7 +654,9 @@ class Diagnostics:
     waits on the update graph for diagnostics. `write` only enqueues and is safe from any
     thread, including one that holds the session's `registry_lock`: its internal lock is a leaf
     held only around a non-blocking `put`. A row that does not fit its schema is logged at ERROR
-    and skipped; the rest of its batch is applied.
+    and skipped; the rest of its batch is applied. The rate-limit rows are pulled rather than
+    queued: `watch_rate_limits` names their pull, and `rate_limits_changed` (safe from any
+    thread, never blocking) asks the writer to pull them again, at most once per batch.
 
     `release()` lets the writer apply the rows already queued, release the scope, and exit, and
     waits for it unless told not to (a caller that holds the update graph's lock must not: the
@@ -551,7 +665,18 @@ class Diagnostics:
     cannot carry on after calls `on_death` first (the session fails its live tables there).
     """
 
-    __slots__ = ("_connections", "_release_lock", "_released", "_scope", "_streams", "_writer")
+    __slots__ = (
+        "_connections",
+        "_rate_due",
+        "_rate_limits",
+        "_rate_pending",
+        "_rate_pull",
+        "_release_lock",
+        "_released",
+        "_scope",
+        "_streams",
+        "_writer",
+    )
 
     def __init__(
         self,
@@ -560,7 +685,7 @@ class Diagnostics:
         *,
         on_death: Callable[[BaseException], None] | None = None,
     ) -> None:
-        """Create both input tables inside a new session-owned scope and start the writer.
+        """Create the three input tables inside a new session-owned scope and start the writer.
 
         If creating a table or starting the writer fails, the scope (with any table already
         created in it) is released and the exception propagates.
@@ -573,6 +698,12 @@ class Diagnostics:
         """
         self._release_lock = threading.Lock()
         self._released = False
+        # Set once by `watch_rate_limits`; read by the writer. Guarded by `_release_lock`.
+        self._rate_pull: RateLimitPull | None = None
+        self._rate_pending = False
+        # When the rate-limit rows next change with time alone (`time.monotonic()`), or None;
+        # read and written only by the writer thread.
+        self._rate_due: float | None = None
         self._scope = new_scope()
         try:
             with self._scope.open():
@@ -582,8 +713,17 @@ class Diagnostics:
                 self._streams: InputTable = input_table(
                     col_defs(STREAMS), key_cols=list(STREAM_KEYS)
                 )
+                self._rate_limits: InputTable = input_table(
+                    col_defs(RATE_LIMITS), key_cols=list(RATE_LIMIT_KEYS)
+                )
             self._writer: QueueWorker[_Item] = QueueWorker(
-                exec_ctx, name, handle=self._apply, on_exit=self._scope.release, on_death=on_death
+                exec_ctx,
+                name,
+                handle=self._apply,
+                on_exit=self._scope.release,
+                timeout=self._rate_wait,
+                on_timeout=self._rate_due_now,
+                on_death=on_death,
             )
         except BaseException:  # also KeyboardInterrupt: the scope must not leak
             self._scope.release()
@@ -598,6 +738,11 @@ class Diagnostics:
     def streams(self) -> InputTable:
         """The table behind `m.streams()`."""
         return self._streams
+
+    @property
+    def rate_limits(self) -> InputTable:
+        """The table behind `m.rate_limits()`."""
+        return self._rate_limits
 
     @property
     def thread(self) -> threading.Thread:
@@ -615,6 +760,38 @@ class Diagnostics:
         with self._release_lock:
             if not self._released:
                 self._writer.put(row)
+
+    def watch_rate_limits(self, pull: RateLimitPull) -> None:
+        """Name how the `m.rate_limits()` rows are read, and read them once.
+
+        Args:
+            pull: Returns the current row of every bucket and the seconds until they change
+                with time alone (None when they do not). The writer calls it, on its own
+                thread and without any lock of this object, and pulls again at that moment if
+                nothing woke it sooner (its queue wait times out then); it must not block or
+                call Deephaven.
+
+        Raises:
+            RuntimeError: If a pull is already set.
+        """
+        with self._release_lock:
+            if self._rate_pull is not None:
+                raise RuntimeError("the rate-limit rows already have a pull")
+            self._rate_pull = pull
+        self.rate_limits_changed()
+
+    def rate_limits_changed(self) -> None:
+        """Ask the writer to pull the rate-limit rows again; never blocks.
+
+        Safe from any thread, including one holding a leaf lock: it only queues a marker, at
+        most one until the writer takes it. Does nothing before `watch_rate_limits` or after
+        `release()`.
+        """
+        with self._release_lock:
+            if self._released or self._rate_pending or self._rate_pull is None:
+                return
+            self._rate_pending = True
+            self._writer.put(_RATE_LIMITS_CHANGED)
 
     def barrier(self) -> threading.Event:
         """Return an event that is set once every row queued before this call is applied.
@@ -640,8 +817,10 @@ class Diagnostics:
     def stop(self) -> None:
         """Ask the writer to apply the queued rows, release the tables, and exit; no wait.
 
-        Takes no lock, so the session's finalizer can call it from garbage collection.
+        Takes no lock, so the session's finalizer can call it from garbage collection. Later
+        rows and rate-limit notices are not queued, as after `release()`.
         """
+        self._released = True  # one attribute store; `write` and the rest read it under a lock
         self._writer.stop()
 
     def release(self, *, wait: bool = True) -> None:
@@ -666,35 +845,78 @@ class Diagnostics:
     def _apply(self, items: list[_Item]) -> None:
         """Apply one batch: the latest row per key, one `add` per table, then the barriers.
 
+        The rate-limit rows are pulled when a marker is in the batch, or when their
+        time-driven change has come, so a queue that never goes quiet cannot hold them back.
+
         Args:
-            items: Rows and barrier events, in queue order.
+            items: Rows, barrier events, and rate-limit markers, in queue order.
         """
         streams: dict[int, StreamRow] = {}
         connections: dict[tuple[str, str, str], ConnectionRow] = {}
         barriers: list[threading.Event] = []
+        # The rows' time-driven change is due: a queue too busy for the timed wait to expire
+        # must not starve that pull.
+        due = self._rate_due
+        pull = due is not None and time.monotonic() >= due
         for item in items:
             if isinstance(item, threading.Event):
                 barriers.append(item)
             elif isinstance(item, StreamRow):
                 streams[item.stream_id] = item
-            else:
+            elif isinstance(item, ConnectionRow):
                 connections[item.transport, item.asset_class, item.family] = item
+            else:
+                pull = True
         try:
             for table, schema, rows in (
-                (self._streams, STREAMS, list(streams.values())),
-                (self._connections, CONNECTIONS, list(connections.values())),
+                (self._streams, STREAMS, lambda: list(streams.values())),
+                (self._connections, CONNECTIONS, lambda: list(connections.values())),
+                (self._rate_limits, RATE_LIMITS, self._pull_rate_limits if pull else list),
             ):
-                try:  # one table's failure never costs the other its rows
-                    self._add(table, schema, rows)
+                try:  # one table's failure never costs the others their rows
+                    self._add(table, schema, rows())
                 except Exception:
                     logger.exception("diagnostics: failed to update the %s table", schema.name)
         finally:
             for barrier in barriers:
                 barrier.set()
 
+    def _pull_rate_limits(self) -> list[RateLimitRow]:
+        """Take the pending marker, pull the rate-limit rows, and note when they next change.
+
+        Runs on the writer thread, the only one that touches `_rate_due`.
+
+        Returns:
+            The pull's rows. A marker is queued only once the pull is set, and the pull is
+            never unset.
+        """
+        with self._release_lock:
+            self._rate_pending = False
+            pull = cast("RateLimitPull", self._rate_pull)
+        rows, change = pull()
+        self._rate_due = None if change is None else time.monotonic() + change
+        return list(rows)
+
+    def _rate_wait(self) -> float | None:
+        """Return how long the writer may wait for an item: until the rows next change.
+
+        Returns:
+            Seconds until the rate-limit rows change with time alone, or None to wait for an
+            item however long.
+        """
+        due = self._rate_due
+        return None if due is None else due - time.monotonic()
+
+    def _rate_due_now(self) -> None:
+        """Pull the rate-limit rows again: their time-driven change has come."""
+        self._rate_due = None
+        self._apply([_RATE_LIMITS_CHANGED])
+
     @staticmethod
     def _add(
-        table: InputTable, schema: Schema, rows: list[ConnectionRow] | list[StreamRow]
+        table: InputTable,
+        schema: Schema,
+        rows: list[ConnectionRow] | list[StreamRow] | list[RateLimitRow],
     ) -> None:
         """Add rows to a table with one conversion and one `add`, skipping rows that do not fit.
 

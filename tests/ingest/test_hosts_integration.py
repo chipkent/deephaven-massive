@@ -116,7 +116,10 @@ def test_which_timeframe_fields_the_futures_snapshot_carries(
     decision; absent ones confirm the library's fallback (`socket.`, recency unknown).
     """
     rows = live_rest.get(
-        source(Transport.REST, "/futures/v1/snapshot"), {}, {"product_code": "ES", "limit": 3}
+        source(Transport.REST, "/futures/v1/snapshot"),
+        {},
+        {"product_code": "ES", "limit": 3},
+        bucket="futures",
     ).rows
     for row in rows:
         evidence(f"futures snapshot {row.get('ticker')}: {_timeframe_fields(row) or 'none'}")

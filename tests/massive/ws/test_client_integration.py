@@ -371,6 +371,7 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
         source(Transport.REST, "/v3/reference/tickers"),
         {},
         {"market": "crypto", "active": True, "limit": 1000},
+        bucket="other",
     ).rows
     topics = sorted(
         {
@@ -415,6 +416,7 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
         source(Transport.REST, "/v3/reference/options/contracts"),
         {},
         {"underlying_ticker": "SPY", "expiration_date.gte": far, "limit": 1000},
+        bucket="options",
     ).rows
     tickers = [str(row["ticker"]) for row in contracts][:501]
     topics = [f"T.{t}" for t in tickers] + [f"Q.{t}" for t in tickers]

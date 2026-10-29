@@ -77,7 +77,7 @@ def test_key_of_the_ticker_event_type(
     `type` with `Type` filled confirms the library; `event_type` means `Type` is null and the
     library must read that key.
     """
-    rows = live_rest.get(source(Transport.REST, _EVENTS), {"id": _RENAMED}, {}).rows
+    rows = live_rest.get(source(Transport.REST, _EVENTS), {"id": _RENAMED}, {}, bucket="other").rows
     for row in rows:
         evidence(f"raw event keys {sorted(row)}: {row}")
     library = table_rows(live_session.reference.ticker_events(_RENAMED).fetch())
@@ -165,6 +165,7 @@ def test_stock_ticker_spellings_outside_the_documented_forms(
             source(Transport.REST, _TICKERS),
             {},
             {"market": "stocks", "type": ticker_type, "limit": 1000},
+            bucket="other",
         ).rows
         seen += len(rows)
         tickers = sorted({str(row.get("ticker")) for row in rows})
@@ -173,7 +174,9 @@ def test_stock_ticker_spellings_outside_the_documented_forms(
         evidence(f"    outside the root-and-suffix forms: {odd}")
     for path in _PARTNER_PAGES:
         try:
-            rows = live_rest.get(source(Transport.REST, path), {}, {"limit": 100}).rows
+            rows = live_rest.get(
+                source(Transport.REST, path), {}, {"limit": 100}, bucket="other"
+            ).rows
         except WireEntitlementError as error:
             evidence(f"{path}: not entitled: needs the partner's $99/month add-on ({error})")
             continue

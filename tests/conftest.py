@@ -29,13 +29,12 @@ import threading
 import time
 import types
 import weakref
-from collections import Counter, deque
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias, cast
-from urllib.parse import unquote
+from typing import TYPE_CHECKING, Any, Final, TypeAlias, cast
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -62,7 +61,9 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive import MassiveConfig, MassiveSession
-    from deephaven_massive._massive import RestPath
+    from deephaven_massive._enums import Subscription
+    from deephaven_massive._ingest.rate_limits import GovernorRegistry
+    from tests._fakes.clock import FakeClock
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
@@ -492,6 +493,9 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
 
     A session is in the live set exactly while it has a running stream or poll or a held
     diagnostics view, so a test that ends with one has leaked a table, or the library has. A
+    test whose call already failed is not checked: its traceback holds its locals. A
+    session that ends without releasing its lease on the shared REST rate governor fails it
+    too: the test's registry (`rest_clock`) must hold no more leases than when it began. A
     session the test created that is still alive at the end, in the live set or not, is held
     by something that should have let it go. Only what the test itself started counts, so one
     leak fails its own test and not every test after it.
@@ -509,6 +513,8 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     """
     before = _running()
     yield
+    if request.node.stash.get(_CALL_FAILED, False):
+        return  # its traceback holds the test's locals; the failure is already reported
     # Every other fixture is torn down, but pytest keeps their values in the item until its
     # teardown ends; drop them, as pytest is about to, so a closed session can be freed.
     funcargs: dict[str, object] | None = getattr(request.node, "funcargs", None)
@@ -530,10 +536,13 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
                 cyclic |= _collect_cycles(before)
                 next_collect = time.monotonic() + 1.0
             sessions, alive, groups, threads = _new(before)
-            if not sessions and not alive and not groups and not threads:
+            if not (sessions or alive or groups or threads or _new_leases(request.node)):
                 break
             if time.monotonic() > deadline:
-                pytest.fail(f"left running after the test: {_left(before)}")
+                pytest.fail(
+                    f"left running after the test: {_left(before)}, "
+                    f"{_new_leases(request.node)} rate governor leases"
+                )
             if jvm_held and not jvm_collected and time.monotonic() > started + 1.0:
                 # A formula a test ran (`t.update("...")`) copies its frame's locals into the
                 # query scope through jpy, and a session, a result, or a table derived from it
@@ -554,6 +563,20 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
 
 
 _Running: TypeAlias = "tuple[set[str], set[str], set[object], set[threading.Thread]]"
+
+
+def _new_leases(node: pytest.Item) -> int:
+    """Count the rate governor leases a test's sessions took and never released.
+
+    Args:
+        node: The test, whose stash holds its registry and its leases when it began
+            (`rest_clock`).
+
+    Returns:
+        The leases held now beyond those held when the test began; 0 without a registry.
+    """
+    stashed = node.stash.get(_LEASES, None)
+    return 0 if stashed is None else stashed[0].leases() - stashed[1]
 
 
 def _new(before: _Running) -> _Running:
@@ -772,6 +795,45 @@ def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core, "_stream_numbers", itertools.count(1))
 
 
+@pytest.fixture(autouse=True)
+def rest_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    """Give each test a registry of REST rate governors of its own, on a fake clock.
+
+    Sessions share one governor per API key through a process-wide registry, so without this
+    one test's pauses, learned limits, and held slots would carry over into the next. Every
+    governor of the test, and so every session's REST client, waits on the returned clock:
+    automatic by default (a wait returns at once and moves virtual time), so no rate-limit or
+    retry wait ever sleeps. A test that needs the manual mode replaces the registry itself.
+
+    A live test (marked `integration`) talks to Massive, whose limits run in real time and
+    count across tests, so it gets the run's one registry on the real clock instead
+    (`_live_governors`); the returned fake clock then governs nothing.
+
+    Returns:
+        The clock.
+    """
+    clock_module = importlib.import_module("tests._fakes.clock")
+    functools = importlib.import_module("functools")
+    rate_limits = importlib.import_module("deephaven_massive._ingest.rate_limits")
+    wire = importlib.import_module("deephaven_massive._massive")
+    clock: FakeClock = clock_module.FakeClock()
+    if request.node.get_closest_marker(_INTEGRATION) is not None:
+        registry = _live_governors()
+    else:
+        create = functools.partial(
+            wire.RequestGovernor,
+            rate_limits.BUCKETS,
+            unpaced=rate_limits.UNPACED,
+            clock=clock,
+            labels=rate_limits.LABELS,
+        )
+        registry = rate_limits.GovernorRegistry(create)
+    monkeypatch.setattr(rate_limits, "GOVERNORS", registry)
+    # The leak check counts the leases the test's sessions leave behind.
+    request.node.stash[_LEASES] = (registry, registry.leases())
+    return clock
+
+
 @pytest.fixture
 def fake_streams(
     massive_session: MassiveSession, monkeypatch: pytest.MonkeyPatch
@@ -967,6 +1029,9 @@ _SEPARATE = (_LIMITS, _SMOKE)
 """The live tiers that `-m integration` leaves out: each runs only when `-m` names it."""
 _INTEGRATION_FILE_SUFFIX = "_integration.py"
 
+_LEASES: Final = pytest.StashKey["tuple[GovernorRegistry, int]"]()
+"""A test's rate governor registry and its leases when the test began, for the leak check."""
+
 _EVIDENCE: Final = pytest.StashKey[list[tuple[str, str]]]()
 """The config stash key of the evidence lines recorded so far, as (test id, line) pairs."""
 
@@ -1012,13 +1077,6 @@ _PRICES: Final = {
 _S3 = "s3"
 _SOME_BASIC = "some:basic"
 """A requirement met when at least one class is declared Basic: the rate-limit tests need one."""
-
-_BASIC_RATE = 5
-"""REST requests a minute Massive allows each class on Basic; paid plans have no limit."""
-
-_PACE_LOCK = threading.Lock()
-_PACE_CALLS: dict[str, deque[float]] = {}
-"""When each Basic class's recent REST requests started (`time.monotonic()`), run-wide."""
 
 _REQUEST_SECONDS = 13.0
 """Seconds of timeout a live test gets for each REST request it makes to a Basic class."""
@@ -1126,97 +1184,75 @@ def _basic_classes(item: pytest.Item) -> list[str]:
     return sorted(name for name in named if plans.get(name) == "basic")
 
 
-def _request_class(template: str, target: str) -> str | None:
-    """Return the class whose REST request limit a request counts against.
+_TICKER_CLASSES: Final = {"X:": "currencies", "C:": "currencies", "I:": "indices", "O:": "options"}
+"""The class of a ticker by its prefix; a ticker without one is a stock."""
 
-    A path that names a ticker counts against the ticker's class, by its prefix (`X:` and
-    `C:` currencies, `I:` indices, `O:` options; the futures paths futures; any other stocks).
-    A path without one is placed by its words. Reference data, economy data, market status,
-    partner data, and the unified snapshot belong to no class.
+_PATH_CLASSES: Final = (
+    ("/options", "options"),
+    ("/indices", "indices"),
+    ("/crypto", "currencies"),
+    ("/forex", "currencies"),
+    ("/fx/", "currencies"),
+    ("currencies", "currencies"),
+    ("/conversion/", "currencies"),
+    ("/stocks", "stocks"),
+    ("/v2/last/nbbo", "stocks"),
+)
+"""The class of a path without a ticker, by a word in its template."""
+
+
+def _live_bucket(template: str, path_params: Mapping[str, object]) -> str:
+    """Return the rate governor's bucket of a raw live request: the subscription of its data.
+
+    A path that names a ticker is charged to the ticker's class, by its prefix (`X:` and `C:`
+    currencies, `I:` indices, `O:` options, any other stocks); the futures paths to futures; a
+    path without a ticker by a word of its template. Reference data, economy data, market
+    status, partner data, and the unified snapshot belong to no subscription (`other`).
 
     Args:
         template: The generated path template, such as `"/v2/aggs/ticker/{stocksTicker}/prev"`.
-        target: The request's path and query.
+        path_params: The request's placeholder values.
 
     Returns:
-        `"stocks"`, `"options"`, `"indices"`, `"currencies"`, `"futures"`, or None.
+        `"stocks"`, `"options"`, `"indices"`, `"currencies"`, `"futures"`, or `"other"`.
     """
     if template.startswith("/futures/"):
         return "futures"
-    parts = template.split("/")
-    sent = target.split("?", maxsplit=1)[0].split("/")
-    for index, part in enumerate(parts):
-        if part.startswith("{") and "icker" in part and index < len(sent):
-            ticker = unquote(sent[index])
-            prefixes = {"X:": "currencies", "C:": "currencies", "I:": "indices", "O:": "options"}
-            return prefixes.get(ticker[:2], "stocks")
-    words = (
-        ("/options", "options"),
-        ("/indices", "indices"),
-        ("/crypto", "currencies"),
-        ("/forex", "currencies"),
-        ("/fx/", "currencies"),
-        ("currencies", "currencies"),
-        ("/conversion/", "currencies"),
-        ("/stocks", "stocks"),
-        ("/v2/last/nbbo", "stocks"),
-    )
-    return next((name for word, name in words if word in template), None)
+    for name, value in path_params.items():
+        if "icker" in name:
+            return _TICKER_CLASSES.get(str(value)[:2], "stocks")
+    return next((name for word, name in _PATH_CLASSES if word in template), "other")
 
 
-def _pace(name: str) -> None:
-    """Wait until a request to a Basic class fits the class's 5 a minute, then count it.
+_LIVE_GOVERNORS: list[GovernorRegistry] = []
+"""The run's one registry of live rate governors, on the real clock, created by the first live
+test: Massive counts a minute's requests across tests, so the governors must outlive each."""
 
-    The budget is shared by every request of the run (the library's own and the tests' raw
-    ones), so a run on a free key never draws a refusal of its own making.
+_LIVE_LOCK = threading.Lock()
 
-    Args:
-        name: The class.
+
+def _live_governors() -> GovernorRegistry:
+    """Return the run's registry of live rate governors, creating it the first time.
+
+    Returns:
+        The registry; its governors wait on the real clock.
     """
-    pause = threading.Event()  # never set; only waits
-    while True:
-        with _PACE_LOCK:
-            calls = _PACE_CALLS.setdefault(name, deque())
-            now = time.monotonic()
-            while calls and now - calls[0] >= 60.0:
-                calls.popleft()
-            if len(calls) < _BASIC_RATE:
-                calls.append(now)
-                return
-            wait = 60.0 - (now - calls[0])
-        pause.wait(wait)
+    rate_limits = importlib.import_module("deephaven_massive._ingest.rate_limits")
+    with _LIVE_LOCK:
+        if not _LIVE_GOVERNORS:
+            _LIVE_GOVERNORS.append(rate_limits.GovernorRegistry())
+        return _LIVE_GOVERNORS[0]
 
 
-class _Targeted(Protocol):
-    """A REST request as the wire client hands it to one attempt: its path and query."""
+def _basic_subscriptions() -> frozenset[Subscription]:
+    """Return the subscriptions `MASSIVE_LIVE_PLANS` leaves on Basic, for the live sessions.
 
-    target: str
-
-
-@pytest.fixture(autouse=True)
-def _pace_basic_classes(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pace every REST request of a live test to a class declared Basic.
-
-    Each attempt of the wire REST client (the library's requests and the tests' raw ones)
-    waits for a place in its class's budget of 5 a minute (`_pace`); a request of a paid class,
-    or of no class, is never delayed. The library's own pacing replaces this once it lands.
-
-    Args:
-        request: The requesting test, for its markers.
-        monkeypatch: Undoes the wrapping after the test.
+    Returns:
+        Each class declared (or left) Basic, as a `dm.Subscription`.
     """
-    if request.node.get_closest_marker(_INTEGRATION) is None:
-        return
+    dm = importlib.import_module("deephaven_massive")
     plans, _ = _declared_plans()
-    attempt = RestClient._attempt
-
-    def paced(self: RestClient, rest_path: RestPath, sent: _Targeted) -> object:
-        name = _request_class(rest_path.key, sent.target)
-        if name is not None and plans.get(name) == "basic":
-            _pace(name)
-        return attempt(self, rest_path, cast("Any", sent))
-
-    monkeypatch.setattr(RestClient, "_attempt", paced)
+    return frozenset(dm.Subscription(name) for name, plan in plans.items() if plan == "basic")
 
 
 _FLAT_FILE_BLOCK = 1 << 20
@@ -1388,6 +1424,36 @@ def is_entitlement_text(text: object) -> bool:
         of a refused topic.
     """
     return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
+
+
+_CALL_FAILED: Final = pytest.StashKey[bool]()
+"""Whether a test's call failed, so the leak check does not wait on what its traceback holds."""
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """Note a failed call, so the leak check of its teardown returns at once.
+
+    A failed assertion's traceback keeps the test's frame, and with it the test's sessions,
+    alive until pytest drops the report; waiting 30 s for them to go would only delay the
+    failure already reported.
+
+    Args:
+        item: The test.
+        call: The phase's result.
+
+    Yields:
+        Control to the report's creation.
+
+    Returns:
+        The report, unchanged.
+    """
+    report = yield
+    if call.when == "call" and report.failed:
+        item.stash[_CALL_FAILED] = True
+    return report
 
 
 @pytest.hookimpl(wrapper=True)
@@ -1789,11 +1855,16 @@ def pytest_terminal_summary(
 def live_config() -> MassiveConfig:
     """Return a `MassiveConfig` with `MASSIVE_API_KEY`, and the S3 credentials when set.
 
+    The classes `MASSIVE_LIVE_PLANS` leaves on Basic are its `rest_basic_subscriptions`, so the
+    library paces their requests at 5 a minute from the first one.
+
     Returns:
         The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
     """
     dm = importlib.import_module("deephaven_massive")
-    config: MassiveConfig = dm.MassiveConfig(api_key=_required_env("MASSIVE_API_KEY"))
+    config: MassiveConfig = dm.MassiveConfig(
+        api_key=_required_env("MASSIVE_API_KEY"), rest_basic_subscriptions=_basic_subscriptions()
+    )
     return config
 
 
@@ -1835,17 +1906,37 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
     """Yield the wire REST client on the live key, for raw responses; closed at teardown.
 
     Live tests read raw rows through it where the evidence is the wire form itself (a stamp
-    before the library moves it, a key the library renames).
+    before the library moves it, a key the library renames). It takes its permits from the
+    run's governor of the live key, as the live sessions do, declaring the same Basic
+    classes, so a raw request waits its turn like the library's; each call names the bucket
+    of its data.
 
     Args:
-        live_config: The live configuration, for the key and the base URL.
+        live_config: The live configuration, for the key, the base URL, and the Basic classes.
 
     Yields:
         A `RestClient` with one connection.
     """
-    client = RestClient(live_config.api_key, base_url=live_config.rest_base_url, max_concurrency=1)
+    lease = _live_governors().lease(
+        api_key=live_config.api_key,
+        base_url=live_config.rest_base_url,
+        basic=live_config.rest_basic_subscriptions,
+        label="live tests",
+        listener=_ignore,
+    )
+    client = RestClient(
+        live_config.api_key,
+        base_url=live_config.rest_base_url,
+        max_concurrency=1,
+        governor=lease.governor,
+    )
     yield client
     client.close()
+    lease.release()
+
+
+def _ignore() -> None:
+    """Note nothing: the raw client's governor listener (only sessions show diagnostics)."""
 
 
 @pytest.fixture
@@ -2151,7 +2242,9 @@ def rest_rows(
         path: str, path_params: Mapping[str, object], query_params: Mapping[str, object]
     ) -> list[dict[str, Any]]:
         rest_path = source(Transport.REST, path)
-        pages = live_rest.pages(rest_path, path_params, query_params)
+        pages = live_rest.pages(
+            rest_path, path_params, query_params, bucket=_live_bucket(path, path_params)
+        )
         return [row for page in pages for row in page.rows]
 
     return read

@@ -25,12 +25,16 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
+    RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
     STREAMS,
     ConnectionRow,
     ConnectionState,
     Diagnostics,
     DriftRegistry,
+    LimitSource,
+    RateLimitRow,
+    RateLimitState,
     StreamRow,
     StreamState,
     StreamUpdate,
@@ -107,6 +111,22 @@ def test_column_sets() -> None:
         "FAILED",
         "CLOSED",
     ]
+    assert RATE_LIMITS.column_names == (
+        "Bucket",
+        "State",
+        "RequestsPerMinute",
+        "LimitSource",
+        "InFlight",
+        "Waiting",
+        "RecentRequests",
+        "Attempts",
+        "Refusals",
+        "PausedUntil",
+        "LastRefusal",
+        "UpdatedAt",
+    )
+    assert [s.value for s in RateLimitState] == ["READY", "PACED", "PAUSED", "REFUSED"]
+    assert [s.value for s in LimitSource] == ["DECLARED", "LEARNED"]
 
 
 def test_stream_updates_set_only_the_given_fields() -> None:
@@ -647,3 +667,182 @@ def test_the_lock_makes_the_check_and_the_update_one_step(
             thread.join(TIMEOUT)
     assert drift_warnings(caplog) == [extra("stocks.trades", "FLAT_FILES", "halted")]
     assert sorted(texts, key=str) == [None, "REST:halted+"]
+
+
+# --- Rate limits ---------------------------------------------------------------------------------
+
+
+class _RatePull:
+    """A rate-limit pull that counts its calls; `rows` is what the next call returns."""
+
+    def __init__(self) -> None:
+        self.pulls = 0
+        self.rows: list[RateLimitRow] = []
+        self.change: float | None = None
+        # Answers given before `rows` and `change`, in order, so a test can script pulls the
+        # writer makes on its own, before the test could change anything.
+        self.script: list[tuple[list[RateLimitRow], float | None] | Exception] = []
+        self.pulled = threading.Semaphore(0)  # released once per pull
+
+    def __call__(self) -> tuple[list[RateLimitRow], float | None]:
+        self.pulls += 1
+        self.pulled.release()
+        if self.script:
+            answer = self.script.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return list(self.rows), self.change
+
+
+def _rate_row(bucket: str, state: RateLimitState, **changes: object) -> RateLimitRow:
+    return dataclasses.replace(
+        RateLimitRow(bucket=bucket, state=state, updated_at=1),
+        **cast("dict[str, Any]", changes),
+    )
+
+
+def test_rate_limit_rows_are_pulled_from_their_source_when_told(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RatePull()
+    diagnostics.rate_limits_changed()  # no pull yet: nothing is queued
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert source.pulls == 0
+    source.rows = [
+        _rate_row("stocks", RateLimitState.READY),
+        _rate_row("other", RateLimitState.READY),
+    ]
+    diagnostics.watch_rate_limits(source)  # pulls once
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert source.pulls == 1
+    source.rows = [
+        _rate_row(
+            "stocks",
+            RateLimitState.PAUSED,
+            requests_per_minute=5,
+            limit_source=LimitSource.LEARNED,
+            paused_until=2 * 10**18,
+            last_refusal="HTTP 429",
+        )
+    ]
+    diagnostics.rate_limits_changed()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    rows = {r["Bucket"]: r for r in dh_to_pylist(diagnostics.rate_limits)}
+    assert set(rows) == {"stocks", "other"}
+    stocks = rows["stocks"]
+    assert (stocks["State"], stocks["RequestsPerMinute"], stocks["LimitSource"]) == (
+        "PAUSED",
+        5,
+        "LEARNED",
+    )
+    assert stocks["LastRefusal"] == "HTTP 429"
+    assert rows["other"]["State"] == "READY"
+    with pytest.raises(RuntimeError, match="already have a pull"):
+        diagnostics.watch_rate_limits(source)
+    diagnostics.release()
+    diagnostics.rate_limits_changed()  # after release: ignored
+    assert source.pulls == 2
+
+
+def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RatePull()
+    started, go = threading.Event(), threading.Event()
+
+    def slow() -> tuple[list[RateLimitRow], float | None]:
+        started.set()
+        go.wait(TIMEOUT)
+        return source()
+
+    diagnostics.watch_rate_limits(slow)
+    assert started.wait(TIMEOUT)  # the writer is pulling; the marker is taken
+    for _ in range(50):
+        diagnostics.rate_limits_changed()  # one marker queued, the rest dropped
+    assert diagnostics._writer._queue.qsize() == 1  # the queue stays bounded
+    go.set()
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert source.pulls == 2
+    diagnostics.release()
+
+
+def test_rate_limit_rows_are_pulled_again_when_time_alone_changes_them(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RatePull()
+    # The pause has already ended (change due now): the writer must not wait for an item.
+    source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]
+    source.rows = [_rate_row("stocks", RateLimitState.READY)]
+    diagnostics.watch_rate_limits(source)
+    assert source.pulled.acquire(timeout=TIMEOUT)
+    # Nothing is queued: only the writer's timed wait can pull the rows again.
+    assert source.pulled.acquire(timeout=TIMEOUT)
+    assert diagnostics.barrier().wait(TIMEOUT)
+    assert [r["State"] for r in dh_to_pylist(diagnostics.rate_limits)] == ["READY"]
+    assert source.pulls == 2  # and with no change due, it waits for an item again
+    diagnostics.release()
+
+
+def test_a_release_right_after_a_change_leaves_no_thread_behind(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    before = set(threading.enumerate())
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RatePull()
+    source.change = 30.0  # a change due later
+    diagnostics.watch_rate_limits(source)
+    diagnostics.rate_limits_changed()
+    diagnostics.release()
+    assert set(threading.enumerate()) <= before
+
+
+def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RatePull()
+    diagnostics.watch_rate_limits(source)
+    assert source.pulled.acquire(timeout=TIMEOUT)
+    diagnostics.stop()  # as a collected session's finalizer does
+    diagnostics.rate_limits_changed()
+    diagnostics.write(STREAM)
+    diagnostics.thread.join(TIMEOUT)
+    assert not diagnostics.thread.is_alive()
+    assert source.pulls == 1
+    assert diagnostics.barrier().is_set()  # nothing is queued for a writer that is gone
+
+
+def test_a_busy_queue_does_not_hold_back_a_due_rate_limit_pull(
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A queue that never goes quiet never lets the timed wait expire. Stand that in
+    # deterministically: the wait never times out, so only the batch itself can pull.
+    monkeypatch.setattr(Diagnostics, "_rate_wait", lambda _self: None)
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RatePull()
+    source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]  # due at once
+    try:
+        diagnostics.watch_rate_limits(source)
+        assert source.pulled.acquire(timeout=TIMEOUT)  # the first pull
+        diagnostics.write(STREAM)  # a batch handled after the due time
+        assert source.pulled.acquire(timeout=TIMEOUT)  # pulls the rows too
+    finally:
+        diagnostics.release()
+    assert source.pulls == 2
+
+
+def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    source = _RatePull()
+    source.script = [([], 0.0), RuntimeError("source broke")]  # due at once, then it fails
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
+        diagnostics.watch_rate_limits(source)
+        assert source.pulled.acquire(timeout=TIMEOUT)
+        assert source.pulled.acquire(timeout=TIMEOUT)  # the timed pull, which fails
+        # Its due time is spent: the writer waits for the next notice, not in a tight loop.
+        assert not source.pulled.acquire(timeout=0.2)
+    diagnostics.release()
+    assert source.pulls == 2
+    assert "failed to update the rate_limits table" in caplog.text
