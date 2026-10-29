@@ -12,6 +12,7 @@ import statistics
 import sys
 import threading
 import time
+import weakref
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -594,3 +595,12 @@ def test_benchmark_fan_out(
             f"shared batch {shared_rate:,.0f} rows/s, "
             f"Python grouping {grouped_rate:,.0f} rows/s\n"
         )
+
+
+def test_a_failed_watchlist_of_a_finished_stream_does_nothing() -> None:
+    # The JVM may report a listener's error after the stream's sink is gone.
+    class _Gone:
+        pass
+
+    gone = weakref.ref(_Gone())
+    stream._fail_later(cast("weakref.ref[StreamSink]", gone), RuntimeError("late"))

@@ -53,9 +53,11 @@ it routes before it ends.
 
 from __future__ import annotations
 
+import functools
 import logging
 import queue
 import threading
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, TypeVar, cast
 
@@ -375,6 +377,7 @@ class StreamSink:
     """
 
     __slots__ = (
+        "__weakref__",
         "_filter",
         "_filter_version",
         "_lock",
@@ -906,6 +909,22 @@ class Flusher:
             sink.core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
 
 
+def _fail_later(sink_ref: weakref.ref[StreamSink], error: Exception) -> None:
+    """A watchlist listener's `on_error`: queue its stream's failure, if the stream still exists.
+
+    The listener's callbacks are held from Java until the JVM collects the listener, so they
+    hold the sink, and through it the session, only weakly: a strong reference there would
+    keep a finished session alive until the next JVM collection.
+
+    Args:
+        sink_ref: The stream's sink, weakly.
+        error: What the listener reported.
+    """
+    sink = sink_ref()
+    if sink is not None:
+        sink.fail_later(error)
+
+
 def _drain(source: queue.SimpleQueue[_T]) -> list[_T]:
     """Take everything queued so far, without waiting.
 
@@ -999,7 +1018,10 @@ def open_stream_tables(
             )
             if isinstance(symbols, SymbolTable):
                 watch = SymbolWatch(
-                    plan.asset_class, symbols.table, on_symbols, on_error=sink.fail_later
+                    plan.asset_class,
+                    symbols.table,
+                    on_symbols,
+                    on_error=functools.partial(_fail_later, weakref.ref(sink)),
                 )
                 watch.keep_alive_with(blink)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak

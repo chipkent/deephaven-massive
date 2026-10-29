@@ -697,6 +697,10 @@ return result
   deletes it (and queues the stop of a reactive stream's watchlist listener on the reaper), and
   `loop.call_soon_threadsafe(...)` to the connection's loop so the topic reference counts are
   decremented there. Never a send, never a Deephaven call, never the final release of a core.
+  The JVM holds the callback until it collects the publisher, so the callback reaches the
+  session's connections only through a weak reference, as a watchlist listener's callbacks
+  reach the stream: a strong one would form a cycle across Python and Java that neither
+  collector can break, keeping a finished session in memory until a JVM collection.
 - **Reactive watchlists.** The stream's record holds its `SymbolWatch` strongly until the
   stream shuts down. Deephaven keeps a table's listeners only weakly; the blink table that
   manages the watch keeps it reachable today, but the stream's correctness does not rest on
@@ -2239,7 +2243,9 @@ has not ended. `m.close()` closes only the connections no other session leases; 
 one it removes the session's streams (their routes at once, their topics through the loop) and
 leaves the connection to the other sessions. Removing the routes also breaks the cycle between
 Python and Java that a stream's publisher, its shutdown callback, and the connection's routes
-would otherwise form.
+would otherwise form; for the same reason, a stream on a connection whose loop has already ended
+(it was closed, or failed fatally) is dropped from the connection's state directly, once the
+loop can no longer touch it, instead of through a post to the loop that would never run.
 
 **Waiting for a slot.** While a connection is `WAITING_SLOT`, every stream on it shows in its
 `Error`: "waiting for a WebSocket slot on <host><path>: another connection with this API key,

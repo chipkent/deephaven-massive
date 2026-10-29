@@ -231,7 +231,7 @@ def test_a_derived_table_keeps_the_stream_alive(
     result = query(massive_session).append_only()
     user_scope = new_scope()
     with user_scope.open():
-        derived = result.where("Price > 0")
+        derived = result.tail(100)  # not a formula, which would capture these locals
     massive_session.release(result)
     drain()
     assert not fake_streams.shutdown[1].is_set()

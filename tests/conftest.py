@@ -328,40 +328,75 @@ pollers, and a connection's client, flush, and verdict-move threads."""
 
 
 @pytest.fixture(autouse=True)
-def _no_session_outlives_its_test() -> Iterator[None]:
+def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator[None]:
     """Fail a test that leaves a session running or a library thread alive.
 
     A session is in the live set exactly while it has a running stream or poll or a held
     diagnostics view, so a test that ends with one has leaked a table, or the library has.
-    Autouse and defined first, so it runs after every other fixture's teardown (a closed
-    `massive_session` included). It collects garbage, then waits, event-driven and bounded, for
-    the library threads to end and the background work to land, and fails naming what is left.
+    Autouse, and named to sort first (pytest orders autouse fixtures by name), so it is set up
+    first and runs after every other fixture's teardown (a closed `massive_session` included).
+    It collects garbage, then waits, event-driven and bounded, for the library threads to end
+    and the background work to land, and fails naming what is left. Only what the test itself
+    started counts, so one leak fails its own test and not every test after it.
     """
+    before = _running()
     yield
-    core = importlib.import_module("deephaven_massive._tables.core")
-    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    # Every other fixture is torn down, but pytest keeps their values in the item until its
+    # teardown ends; drop them, as pytest is about to, so a closed session can be freed.
+    funcargs: dict[str, object] | None = getattr(request.node, "funcargs", None)
+    if funcargs:
+        funcargs.clear()
     deadline = time.monotonic() + 30.0
     pause = threading.Event()  # never set; only paces the bounded wait
     while True:
+        _drop_logged_objects(request.node)  # a library thread may still be logging
         gc.collect()
-        with core._live_lock:
-            live = sorted(session.label for session in core._live.values())
-        groups = len(ws._groups)
-        threads = [
-            t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
-        ]
-        if not live and not groups and not threads:
+        sessions, groups, threads = _running()
+        sessions, groups, threads = sessions - before[0], groups - before[1], threads - before[2]
+        if not sessions and not groups and not threads:
             return
         if time.monotonic() > deadline:
-            names = sorted(t.name for t in threads)
             pytest.fail(
-                f"left running after the test: sessions {live}, {groups} connection groups, "
-                f"threads {names}"
+                f"left running after the test: sessions {sorted(sessions)}, "
+                f"{len(groups)} connection groups, threads {sorted(t.name for t in threads)}"
             )
         for thread in threads:  # wait on the threads themselves, briefly each
             thread.join(0.05)
         if not threads:
             pause.wait(0.05)
+
+
+def _drop_logged_objects(item: pytest.Item) -> None:
+    """Keep only the text of the log records pytest keeps with a test item.
+
+    The records hold a logged exception (in the arguments and the exception info), and through
+    its traceback the test's frames, for the whole run; the report has their text already.
+
+    Args:
+        item: The test item.
+    """
+    records_key = importlib.import_module("_pytest.logging").caplog_records_key
+    for records in item.stash.get(records_key, {}).values():
+        for record in records:
+            record.msg, record.args, record.exc_info = record.getMessage(), None, None
+
+
+def _running() -> tuple[set[str], set[object], set[threading.Thread]]:
+    """Return what of the library runs now: live sessions, connection groups, and threads.
+
+    Returns:
+        The labels of the sessions in the live set, the connection groups, and the alive
+        library threads (`_LIBRARY_THREADS`).
+    """
+    core = importlib.import_module("deephaven_massive._tables.core")
+    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    with core._live_lock:
+        sessions: set[str] = {session.label for session in core._live.values()}
+    groups: set[object] = set(ws._groups.values())
+    threads = {
+        t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
+    }
+    return sessions, groups, threads
 
 
 @pytest.fixture(autouse=True)

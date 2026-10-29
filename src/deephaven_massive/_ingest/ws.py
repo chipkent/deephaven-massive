@@ -493,6 +493,23 @@ class Connection:
         self.subscriptions.remove(stream.topics, static=stream.static)
         self._after_change()
 
+    def forget(self, stream_id: int) -> None:
+        """Drop a stream from a connection whose loop has ended; any thread.
+
+        The loop-confined state is safe to touch once the loop thread is done with it: after
+        `post` reported the loop closed, or after `join` saw the thread end. A stream left there
+        would keep its sink, and through the publisher's shutdown callback, which the JVM holds,
+        its session, for as long as the process runs: neither Python nor Java could collect
+        that cycle.
+
+        Args:
+            stream_id: The stream.
+        """
+        self._streams.pop(stream_id, None)
+        self._early.pop(stream_id, None)
+        self._deferred_shown.pop(stream_id, None)
+        self.flusher.routes.remove(stream_id)
+
     def change_symbols(
         self, stream_id: int, added: frozenset[str], removed: frozenset[str]
     ) -> None:
@@ -996,6 +1013,24 @@ class _WsClientFactory:
         )
 
 
+def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -> None:
+    """Call a session's `WsConnections` method through a weak reference, if it still exists.
+
+    The blink table's shutdown callback and a watchlist's change callback are held from Java
+    until the JVM collects the publisher or the listener. Holding the session's connections
+    strongly there would keep a finished session alive until the next JVM collection. While a
+    stream runs, its session (and so its `WsConnections`) is alive anyway.
+
+    Args:
+        owner_ref: The session's `WsConnections`, weakly.
+        method: The method's name, `"_shut_down"` or `"_symbols_changed"`.
+        *args: Its arguments.
+    """
+    owner = owner_ref()
+    if owner is not None:
+        getattr(owner, method)(*args)
+
+
 def _wanted(
     asset_class: AssetClass, channel: str, symbols: NormalizedSymbols
 ) -> tuple[frozenset[str] | None, frozenset[str]]:
@@ -1459,8 +1494,12 @@ class WsConnections:
                 stream_id=stream_id,
                 host=decision.host,
                 path=connection.path,
-                on_shutdown=functools.partial(self._shut_down, stream_id),
-                on_symbols=functools.partial(self._symbols_changed, stream_id),
+                # Held from Java until the JVM collects the publisher or the listener: weakly,
+                # so a finished session is freed without waiting for a JVM collection.
+                on_shutdown=functools.partial(_weakly, weakref.ref(self), "_shut_down", stream_id),
+                on_symbols=functools.partial(
+                    _weakly, weakref.ref(self), "_symbols_changed", stream_id
+                ),
             )
         except BaseException:
             self._abandon(connection, stream_id)
@@ -1683,8 +1722,8 @@ class WsConnections:
             cast("SessionCore", self._core()).stream_shut_down(stream_id)
             with self._lock:
                 connection = self._forget(stream_id)
-            if connection is not None:
-                connection.post(connection.release_stream, stream_id)
+            if connection is not None and not connection.post(connection.release_stream, stream_id):
+                connection.forget(stream_id)  # its loop has ended (`Connection.forget`)
         except Exception:
             logger.exception("%s: the shutdown of stream %d failed", self._label, stream_id)
 
@@ -1748,31 +1787,20 @@ class WsConnections:
         failed their tables) and their topics are released on the connections that stay; the
         unused connections are closed (which interrupts a backoff wait at once) and each is
         joined for at most `JOIN_TIMEOUT` seconds, with a WARNING for one that has not ended.
+        A connection whose loop has ended keeps no stream of the session (`Connection.forget`).
         Last, the session leaves the group.
         """
-        group = self.group
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            mine = [(s, cast("Connection", self._forget(s))) for s in sorted(self._mine)]
-            used = {*group.connections.values(), *(c for _, c in mine)}
-            closing = []
-            for connection in used:
-                if self not in connection.users:
-                    continue
-                del connection.users[self]
-                if not connection.leases:  # no other session leases it
-                    closing.append(connection)
-                    if group.connections.get(connection.url) is connection:
-                        del group.connections[connection.url]
-                    connection.retired = True
-            for stream_id, connection in mine:
-                connection.cap_pending.pop(stream_id, None)
+            mine, closing = self._leave()
         for stream_id, connection in mine:
             connection.flusher.routes.remove(stream_id)
-            if connection not in closing:
-                connection.post(connection.release_stream, stream_id)
+            if connection not in closing and not connection.post(
+                connection.release_stream, stream_id
+            ):
+                connection.forget(stream_id)  # its loop has ended (`Connection.forget`)
         for connection in closing:
             connection.close()
         for connection in closing:
@@ -1783,4 +1811,31 @@ class WsConnections:
                     connection.url,
                     JOIN_TIMEOUT,
                 )
-        group.detach(self)
+                continue
+            for stream_id, owner in mine:  # its loop has ended: nothing else touches it now
+                if owner is connection:
+                    connection.forget(stream_id)
+        self.group.detach(self)
+
+    def _leave(self) -> tuple[list[tuple[int, Connection]], list[Connection]]:
+        """Return the session's leases and leave its connections; the group's lock is held.
+
+        Returns:
+            The session's streams with the connection each leased, and the connections that no
+            other session leases, now out of the registry and to be closed.
+        """
+        group = self.group
+        mine = [(s, cast("Connection", self._forget(s))) for s in sorted(self._mine)]
+        for stream_id, connection in mine:
+            connection.cap_pending.pop(stream_id, None)
+        closing = []
+        for connection in {*group.connections.values(), *(c for _, c in mine)}:
+            if self not in connection.users:
+                continue
+            del connection.users[self]
+            if not connection.leases:  # no other session leases it
+                closing.append(connection)
+                if group.connections.get(connection.url) is connection:
+                    del group.connections[connection.url]
+                connection.retired = True
+        return mine, closing

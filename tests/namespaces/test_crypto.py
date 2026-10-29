@@ -841,7 +841,9 @@ def landed(table: Table) -> tuple[Callable[[], list[dict[str, Any]]], Callable[[
 
     scope = new_scope()
     with scope.open():
-        handle = listen(table, on_update)
+        # A view, not the result itself: the JVM holds the listener's handle, and with it the
+        # table it listens to, until it collects it, so the result's wrapper could not be freed.
+        handle = listen(table.view(list(table.column_names)), on_update)
 
     def seen() -> list[dict[str, Any]]:
         with lock:

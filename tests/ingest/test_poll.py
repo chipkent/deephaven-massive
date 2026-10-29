@@ -1,5 +1,6 @@
 """Tests for `poll()` tables: the three modes, the cycle's failures, rows, and lifetime."""
 
+import copy
 import dataclasses
 import functools
 import gc
@@ -70,7 +71,9 @@ class Script:
         self.outcomes.put(pa.Table.from_pylist(data, schema=self.schema))
 
     def fail(self, error: BaseException) -> None:
-        self.outcomes.put(error)
+        # A copy: a test's parameter lives as long as the run, and the raised exception's
+        # traceback would keep the poller's frames, and its session, alive with it.
+        self.outcomes.put(copy.copy(error))
 
     def __call__(
         self,
@@ -597,7 +600,9 @@ def test_a_poll_keeps_polling_while_a_derived_table_remains(
     poller = poller_of(pollers)
     scope = new_scope()  # the user's own scope, released below
     with scope.open():
-        derived = [table.where("CashAmount > 0")]
+        # Not a formula: `where` would capture this frame's locals, the session's fixtures
+        # among them, in the query scope until the JVM collects the table.
+        derived = [table.tail(100)]
     massive_session.release(table)
     del table
     gc.collect()
@@ -710,7 +715,7 @@ def test_an_error_after_a_stop_is_not_reported(
     def stopped(**kwargs: object) -> tuple[pa.Table, int]:
         reading.set()
         gate.wait(TIMEOUT)
-        raise error
+        raise copy.copy(error)  # the parameter outlives the test; its traceback must not
 
     table = open_poll(
         massive_session._core,

@@ -398,7 +398,7 @@ def test_close_fails_derived_tables_and_marks_their_stream_closed(
     assert derived.snapshot().size == 1  # the failed table keeps its rows
     assert len(dh_to_pylist(derived)) == 1
     with pytest.raises(DHError, match="failed table"):
-        derived.where("true")
+        derived.tail(1)  # not a formula: that would capture this frame's locals in the JVM
     user_scope.release()
 
 
@@ -430,12 +430,15 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
 def test_close_on_the_update_graph_thread_fails(massive_session: dm.MassiveSession) -> None:
     errors: list[BaseException] = []
     seen = threading.Event()
+    # The JVM holds the listener, and so its closure, until it collects it: the closure reaches
+    # the session through a list emptied below.
+    closes = [massive_session.close]
 
     def on_update(_update: object, _replay: bool) -> None:
         if seen.is_set():
             return
         try:
-            massive_session.close()
+            closes[0]()
         except ValueError as e:
             errors.append(e)
         seen.set()
@@ -448,6 +451,8 @@ def test_close_on_the_update_graph_thread_fails(massive_session: dm.MassiveSessi
     scope.release()
     assert len(errors) == 1
     assert not massive_session._core.closed
+    closes.clear()
+    errors.clear()  # its traceback holds the session too
 
 
 def test_context_manager_closes() -> None:

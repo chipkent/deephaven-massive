@@ -584,7 +584,7 @@ def test_a_derived_table_keeps_the_stream_alive(
     harness.subscribed("T.AAPL")
     scope = new_scope()  # the user's own scope, released below
     with scope.open():
-        derived = [result.where("Price > 0")]
+        derived = [result.tail(100)]
     harness.session.release(result)
     del result
     gc.collect()
@@ -753,7 +753,7 @@ def test_a_derived_table_keeps_following_the_watchlist(
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     result = harness.query(TRADES, watchlist).append_only()
     harness.subscribed("T.AAPL")
-    derived = result.where("Price > 0")
+    derived = result.tail(100)
     harness.session.release(result)
     del result
     gc.collect()
@@ -1018,7 +1018,9 @@ def test_changes_for_a_moved_stream_follow_it(harness: Harness) -> None:
     successor = spare_connection(harness, "next.test")
     successor.start()
     with harness.connections.group.lock:
-        harness.connections.group.streams[1] = successor
+        harness.connections.group.streams[1] = successor  # moved, as the verdict moves it
+        successor.take(harness.connections)
+        old.give(harness.connections)
         successor.awaiting.add(1)
     harness.on_loop(old, lambda: old.hand_over(successor))
     assert old.join(TIMEOUT)
@@ -1039,7 +1041,9 @@ def test_a_release_that_overtakes_the_adoption_waits_for_it(harness: Harness) ->
     successor = spare_connection(harness, "next.test")
     successor.start()
     with harness.connections.group.lock:
-        harness.connections.group.streams[1] = successor
+        harness.connections.group.streams[1] = successor  # moved, as the verdict moves it
+        successor.take(harness.connections)
+        old.give(harness.connections)
         successor.awaiting.add(1)
     successor.post(successor.release_stream, 1)
     successor.post(successor.change_symbols, 2, frozenset(), frozenset())  # not awaited: dropped
@@ -1888,3 +1892,29 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(harness: 
     harness.close()
     assert connection.join(TIMEOUT)
     del result
+
+
+def test_a_java_held_callback_of_a_freed_session_does_nothing() -> None:
+    # The JVM may run a publisher's shutdown callback after the session's connections are gone.
+    class _Gone:
+        pass
+
+    gone = weakref.ref(_Gone())
+    ws._weakly(cast("weakref.ref[ws.WsConnections]", gone), "_shut_down", 1)
+
+
+def test_closing_a_session_drops_its_streams_from_an_ended_connection(harness: Harness) -> None:
+    # Another session still leases the connection, but its loop has ended: the closing
+    # session's stream is dropped directly, since no post can reach the loop any more.
+    other = harness.join()
+    mine = harness.query(TRADES, ["AAPL"]).blink()
+    theirs = harness.query(TRADES, ["MSFT"], other).blink()
+    harness.subscribed("T.AAPL", "T.MSFT")
+    connection = harness.connection()
+    connection.close()
+    assert connection.join(TIMEOUT)
+    other.close()
+    assert 2 not in connection._streams
+    assert 1 in connection._streams  # the other session's stream stays until it ends
+    harness.session.release(mine)
+    del theirs

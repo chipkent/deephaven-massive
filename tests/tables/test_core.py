@@ -199,6 +199,7 @@ def test_a_waiter_opens_the_stream_when_the_opener_fails(
     assert list(core._streams) == [2]
     massive_session.release(waiter)
     assert fake_streams.shutdown[2].wait(TIMEOUT)
+    failure.__traceback__ = None  # the parameter outlives the test; its traceback holds the core
 
 
 def test_close_during_an_open_wakes_the_waiters(
@@ -1017,11 +1018,14 @@ def test_the_update_graph_check_precedes_the_closed_check(
     massive_session.close()
     errors: list[BaseException] = []
     seen = threading.Event()
+    # The JVM holds the listener, and so its closure, until it collects it: the closure reaches
+    # the session through a list emptied below.
+    calls = [q.blink, massive_session.close, massive_session._core.close]
 
     def on_update(_update: object, _replay: bool) -> None:
         if seen.is_set():
             return
-        for call in (q.blink, massive_session.close, massive_session._core.close):
+        for call in calls:
             try:
                 call()
             except ValueError as e:
@@ -1035,6 +1039,8 @@ def test_the_update_graph_check_precedes_the_closed_check(
     handle.stop()
     scope.release()
     assert len(errors) == 3
+    calls.clear()
+    errors.clear()  # their tracebacks hold the session too
 
 
 def test_calls_under_the_update_graph_lock_are_rejected(
