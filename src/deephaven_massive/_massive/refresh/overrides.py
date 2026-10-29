@@ -1081,8 +1081,9 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             "Massive's text for the same object on the options chain snapshot "
             "(`/v3/snapshot/options/{underlyingAsset}` `last_trade`), say trade. Every column "
             "of the object carries this text as its note. 'For this contract' stays: Massive "
-            "uses it on every object of the unified snapshot, and on a stock's row it is "
-            "imprecise rather than another asset class's text, which is the bar for a fix.",
+            "uses it on most of the unified snapshot's objects (`details`, `greeks`, "
+            "`last_quote`), and on a stock's row it is imprecise rather than another asset "
+            "class's text, which is the bar for a fix.",
         ),
         (_UNIFIED_SNAPSHOT, "last_minute"): DescriptionFix(
             vendor="The most recent minute aggregate for this stock.",
