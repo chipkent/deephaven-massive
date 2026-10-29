@@ -2692,14 +2692,15 @@ authentication frame; the S3 secret goes only to boto3; the proxy password is al
 stripped (`net.http`). A server can still echo a secret, so each client cleans what it
 receives in one place, before anything reads it, through `net.redaction`: the REST client every
 response body and the WebSocket client every frame, the handshake's included
-(`clean_received`), and the flat-file client S3's error words (`redact`), leaving out of the
-error chain a botocore error that quotes them. `clean_received` replaces the secret and its
-JSON-escaped form, and a body or frame that holds any JSON escape is decoded, cleaned string by
-string, and re-encoded if anything changed, so an echo spelled with escapes is caught too. Every
-row, status, error, excerpt, and log line built from them is then free of the secret, wherever
-it is built. A body without a backslash costs one substring search and is passed on uncopied.
-The library never enables
-DEBUG on urllib3 or botocore, and the websockets frame log stays off
+(`Redactor.received`), and the flat-file client S3's error words (`redact`), leaving out of the
+error chain a botocore error that quotes them. Each client builds one `Redactor`, which
+precomputes the secret's spellings and a pattern of the escapes that could spell one of its
+characters. `received` replaces the secret and its JSON-escaped form, and a body or frame
+holding such an escape is decoded, cleaned string by string, and re-encoded if anything
+changed, so an echo spelled with escapes is caught too. Every row, status, error, excerpt, and
+log line built from them is then free of the secret, wherever it is built. Any other body costs
+a few substring searches and is passed on uncopied. The library never enables DEBUG on urllib3
+or botocore, and the websockets frame log stays off
 ([section 19.2](#192-the-websocket-client)). The planted-secret test
 (`tests/massive/net/test_redaction.py`) runs the fakes with distinctive secrets and DEBUG on
 every logger through a 401, a 429, bodies, rows, and a status that echo the key, plainly and
@@ -2725,25 +2726,9 @@ and pool named, no logging call under a leaf lock).
   `404 NoSuchKey`, and S3's `request_id`.
 - Each `DriftReport` carries a sample per drifted key ([section 19.5](#195-runtime-drift)).
 
-**The rules every change follows.** A log from a failing run, with the issue text, must be
-enough for an agent to reproduce and fix the bug:
-
-- A decision is a branch on configuration, server data, or input that changes what is
-  requested, routed, or returned. Each decision logs at DEBUG with its inputs and outcome.
-- A failure logs at ERROR, and a degradation at WARNING. Each names what an agent needs to
-  reproduce it: the offending field and value, the dataset, the endpoint or channel, the
-  symbol, and the call or stream id. Every layer logs what it knows; repeats are fine. Log too
-  much rather than too little.
-- Nothing is logged per row or per frame except a failure.
-- No log call is passed the API key, the S3 secret, a header, or the authentication frame;
-  text built from a server's answer is safe, since the clients clean it on receipt.
-- Log calls use `%` arguments. Every new thread or pool is named `massive #<session> <role>`.
-  Nothing is logged while `registry_lock` or another leaf lock is held.
-
-Tools check what they can: ruff's `G` and `LOG` rules; the logging rules of
-`tests/test_layout.py`; the planted-secret test; and a test that every thread a session starts
-is named after it (`tests/ingest/test_ws.py`). Reviewers check the rest: could an agent fix
-this from the log alone?
+**The rules every change follows** live in the `_debug_log` module docstring, beside the switch,
+with the checks that enforce them: ruff's `G` and `LOG` rules, the logging rules of
+`tests/test_layout.py`, the planted-secret test, and the thread-name tests.
 
 **Cost.** With the log off, a level check fails and nothing is formatted (`%` arguments,
 enforced by ruff's `G` rules); a value that costs a call to compute is computed only under
@@ -2893,7 +2878,7 @@ net/                 shared by every client; imports nothing else in _massive
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
-  redaction.py       clean_received, redact, redact_value: a client's secrets, however JSON
+  redaction.py       Redactor, redact, redact_value: a client's secrets, however JSON
                      spells them, become *** in whatever it receives, before it is decoded,
                      quoted, or logged
 spec/                run-time wire vocabulary; imports nothing else in _massive
@@ -4530,9 +4515,9 @@ document already reflects them.
     session, and `dm.enable_debug_logging()` turn it on; stderr by default and a file
     only when asked for. Log too much rather than too little: offending values, whole rows, and
     error bodies at DEBUG, the same values in error messages, with no truncation that hides the
-    problem. Secrets are never logged. Every change logs what it decides (the rules of
-    section 17.1). The bug report asks for the log and `m.streams()`, and adds no warning about
-    what a log contains ([section 17.1](#171-the-log)).
+    problem. Secrets are never logged. Every change logs what it decides (the rules in the
+    `_debug_log` docstring). The bug report asks for the log and `m.streams()`, and adds no
+    warning about what a log contains ([section 17.1](#171-the-log)).
 
 ## 23. Open verification items
 

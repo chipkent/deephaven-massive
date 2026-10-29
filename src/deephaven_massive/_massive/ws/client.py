@@ -48,7 +48,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.net.http import ssl_context
-from deephaven_massive._massive.net.redaction import clean_received
+from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
 from deephaven_massive._massive.ws.backoff import Backoff
 from deephaven_massive._massive.ws.protocol import (
@@ -271,6 +271,7 @@ class WsClient:
         self._host = parts.hostname
         self._path = parts.path or "/"
         self._api_key = api_key
+        self._redactor = Redactor(api_key)
         self._ssl = ssl_context() if parts.scheme == "wss" else None
         self._decoder = FrameDecoder(sources, host=self._host, path=self._path)
         self._backoff = Backoff(reconnect_backoff, max_reconnect_backoff)
@@ -584,7 +585,7 @@ class WsClient:
         Raises:
             ValueError: If the greeting is not `connected` or the reply is none of those.
         """
-        greeting, _ = handshake_status(await websocket.recv())
+        greeting, _ = handshake_status(self._clean(await websocket.recv()))
         if greeting != "connected":
             raise ValueError(f"expected the 'connected' status, got {greeting!r}")
         await websocket.send(auth_frame(self._api_key))
@@ -651,7 +652,7 @@ class WsClient:
             The frame itself when it does not hold the key, otherwise a copy with `***` in
             its place.
         """
-        return clean_received(frame, self._api_key)
+        return self._redactor.received(frame)
 
     @staticmethod
     async def _send(websocket: ClientConnection, outbox: asyncio.Queue[str | None]) -> None:
