@@ -48,7 +48,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
 
@@ -711,7 +711,9 @@ def _description(
     Returns:
         The description; empty when no source describes the column.
     """
-    asset_class = spec.asset_class.value if spec.asset_class is not None else None
+    # The wire spec keys its per-class descriptions by class value, and has none for a
+    # dataset of every class.
+    asset_class = None if spec.asset_class is ClassFromPrefix.ANY else spec.asset_class.value
     if not own:
         named = ", ".join(f"`{member}`" for member in suppliers)
         return f"Always null for `{spec.name}`; supplied by {named}."

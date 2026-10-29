@@ -17,7 +17,7 @@ import pytest
 from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import AssetClass, ContractType, PollMode, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, ContractType, PollMode, Timespan
 from deephaven_massive._massive import (
     Field,
     ParamKind,
@@ -749,7 +749,7 @@ def test_declared_keys_gate_needs_an_instrument_symbol() -> None:
     # A dataset with no class is an instrument dataset when any source declares a symbol.
     mixed = change(
         CONTRACTS,
-        asset_class=None,
+        asset_class=ClassFromPrefix.ANY,
         keys=without(CONTRACTS, (R, "/v3/reference/options/contracts")),
     )
     assert problems(mixed) == (

@@ -10,7 +10,7 @@ from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import int_col, string_col
 
 import deephaven_massive as dm
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._namespaces import crypto, forex, partners
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.watchlist import (
@@ -88,7 +88,7 @@ def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -
 
 
 def test_the_message_of_a_dataset_that_spans_classes_names_no_class() -> None:
-    message = invalid_row_message(None, "aapl")
+    message = invalid_row_message(ClassFromPrefix.ANY, "aapl")
     assert "tickers are case-sensitive" in message
     assert message.endswith(
         "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and the "
@@ -158,7 +158,7 @@ def test_an_empty_table_reports_nothing(dh_exec_ctx: object) -> None:
 
 def test_a_failing_watch_is_logged_and_refused(caplog: pytest.LogCaptureFixture) -> None:
     refused: list[str] = []
-    counter = _SymbolCounter(None, lambda *_: None, refused.append)
+    counter = _SymbolCounter(ClassFromPrefix.ANY, lambda *_: None, refused.append)
     counter.on_error(RuntimeError("table broke"))
     assert "a symbol table's watch failed and stops following it: table broke" in caplog.text
     assert refused == [
@@ -223,7 +223,7 @@ class _Update:
 def test_the_counter_reports_set_changes_of_updates() -> None:
     seen: list[Change] = []
     refused: list[str] = []
-    counter = _SymbolCounter(None, lambda a, r: seen.append((a, r)), refused.append)
+    counter = _SymbolCounter(ClassFromPrefix.ANY, lambda a, r: seen.append((a, r)), refused.append)
     updates = [
         _Update(added=["A", "A", "B", "b"]),
         _Update(removed=["A", "b"]),  # one of A's two rows remains; a bad row leaves quietly
@@ -237,4 +237,7 @@ def test_the_counter_reports_set_changes_of_updates() -> None:
         (frozenset({"C"}), frozenset({"A"})),
         (frozenset(), frozenset({"C"})),
     ]
-    assert refused == [invalid_row_message(None, "b"), invalid_row_message(None, "x:btc")]
+    assert refused == [
+        invalid_row_message(ClassFromPrefix.ANY, "b"),
+        invalid_row_message(ClassFromPrefix.ANY, "x:btc"),
+    ]

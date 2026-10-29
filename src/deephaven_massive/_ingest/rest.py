@@ -96,7 +96,7 @@ from deephaven_massive._datasets.timestamps import (
     instants,
     utc_day_stamps,
 )
-from deephaven_massive._enums import AssetClass, Timespan, UnknownSymbols
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan, UnknownSymbols
 from deephaven_massive._errors import MassiveError, PermanentError, from_wire
 from deephaven_massive._ingest import hosts, poll
 from deephaven_massive._ingest.poll import (
@@ -258,7 +258,7 @@ def _axis_query(
     rest_path: RestPath,
     *,
     dates: tuple[date | None, date | None],
-    asset_class: AssetClass | None = None,
+    asset_class: AssetClass | ClassFromPrefix,
 ) -> dict[str, object]:
     """Return the time-axis parameters of a request, by wire name.
 
@@ -276,8 +276,8 @@ def _axis_query(
             for an open end), or the exact instants a `history()` window requests. A
             calendar-date axis only ever receives dates (`build_query` refuses datetimes
             there).
-        asset_class: The class whose day rules apply to this request (`dates.day_class`);
-            None, the default, takes the dataset's own class (New York days without one).
+        asset_class: The class whose day rules apply to this request (`dates.day_class`), or
+            `ClassFromPrefix.ANY` for New York days.
 
     Returns:
         The parameters to send; empty when the dataset has no time axis.
@@ -289,7 +289,6 @@ def _axis_query(
     """
     if spec.time_axis is None:
         return {}
-    zone_class = spec.asset_class if asset_class is None else asset_class
     params = {p.name: p for p in rest_path.params}
     query: dict[str, object] = {}
     for index, name in enumerate(spec.time_axis):
@@ -300,7 +299,7 @@ def _axis_query(
             continue
         if takes_instants(rest_path, name, param.kind):
             try:
-                query[name] = instant_bound(zone_class, name, value, unit=param.unit, upper=upper)
+                query[name] = instant_bound(asset_class, name, value, unit=param.unit, upper=upper)
             except ValueError as error:
                 raise ValueError(f"{spec.name}: {error}") from None
         elif param.kind is ParamKind.DATE:
@@ -311,7 +310,7 @@ def _axis_query(
 
 
 def _filter_days(
-    rest_path: RestPath, query: Mapping[str, object], asset_class: AssetClass | None
+    rest_path: RestPath, query: Mapping[str, object], asset_class: AssetClass | ClassFromPrefix
 ) -> dict[str, object]:
     """Return the query with each date on an instant range filter as its day's bound.
 
@@ -326,7 +325,8 @@ def _filter_days(
     Args:
         rest_path: The path, whose parameters and fields are read.
         query: The query parameters, by wire name.
-        asset_class: The class whose day rules apply (`dates.day_class`), or None.
+        asset_class: The class whose day rules apply (`dates.day_class`), or
+            `ClassFromPrefix.ANY` for New York days.
 
     Returns:
         A new mapping.
@@ -1427,7 +1427,12 @@ class RestReader:
             rest_path = self.rest_path(template)
             try:
                 _base(spec, rest_path, request, fixed={})
-                _axis_query(spec, rest_path, dates=(request.start, request.end))
+                _axis_query(
+                    spec,
+                    rest_path,
+                    dates=(request.start, request.end),
+                    asset_class=spec.asset_class,
+                )
             except ValueError as error:
                 errors.append(error)
         if len(errors) == len(templates):

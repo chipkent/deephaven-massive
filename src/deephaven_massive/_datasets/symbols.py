@@ -63,7 +63,13 @@ from typing import TYPE_CHECKING, Final, TypeAlias
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._enums import AssetClass, SymbolConvention, UnknownSymbols, _require_enum
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    SymbolConvention,
+    UnknownSymbols,
+    _require_enum,
+)
 from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._types import _All
 
@@ -289,12 +295,14 @@ def symbol_class(symbol: str) -> AssetClass:
     return _CLASS_BY_PREFIX.get(symbol[:2], AssetClass.STOCKS)
 
 
-def is_canonical(asset_class: AssetClass | None, text: str, *, as_written: bool = False) -> bool:
+def is_canonical(
+    asset_class: AssetClass | ClassFromPrefix, text: str, *, as_written: bool = False
+) -> bool:
     """Tell whether text is exactly a canonical Massive ticker of a class.
 
     Args:
-        asset_class: The class whose grammar applies, or None for a dataset that spans
-            classes: the prefix then selects the class, and text without one is a stock.
+        asset_class: The class whose grammar applies, or `ClassFromPrefix.ANY` for a dataset
+            that spans classes: the prefix then selects the class, and text without one is a stock.
         text: The text to test.
         as_written: True for a dataset whose symbols are a third party's global tickers,
             kept as Massive writes them (`DatasetSpec.symbols_as_written`): any text of the
@@ -305,7 +313,7 @@ def is_canonical(asset_class: AssetClass | None, text: str, *, as_written: bool 
     """
     if as_written:
         return _WRITTEN.fullmatch(text) is not None
-    resolved = symbol_class(text) if asset_class is None else asset_class
+    resolved = symbol_class(text) if asset_class is ClassFromPrefix.ANY else asset_class
     return _CANONICAL[resolved](text)
 
 
@@ -1064,15 +1072,17 @@ def canonical_symbol_crypto(text: str | None) -> str | None:
 # --- checks when a query is built ----------------------------------------------------------------
 
 
-def check_symbol(asset_class: AssetClass | None, text: object, *, as_written: bool = False) -> str:
+def check_symbol(
+    asset_class: AssetClass | ClassFromPrefix, text: object, *, as_written: bool = False
+) -> str:
     """Return a symbol that must already be canonical, or raise with the fix.
 
     The check behind `symbols=`, `underlying=`, and every row of a symbol table: the library
     never converts what a caller passes, it tells the caller what to pass.
 
     Args:
-        asset_class: The class whose grammar applies, or None for a dataset that spans classes
-            (the prefix selects the class; text without one is a stock).
+        asset_class: The class whose grammar applies, or `ClassFromPrefix.ANY` for a dataset
+            that spans classes (the prefix selects the class; text without one is a stock).
         text: The value as passed.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`is_canonical`): any text of that grammar passes.
@@ -1097,7 +1107,7 @@ def check_symbol(asset_class: AssetClass | None, text: object, *, as_written: bo
             f"{text!r} is not a ticker as Massive writes it (not empty, no surrounding "
             "whitespace, no control character, no class prefix)"
         )
-    resolved = symbol_class(text) if asset_class is None else asset_class
+    resolved = symbol_class(text) if asset_class is ClassFromPrefix.ANY else asset_class
     if _CANONICAL[resolved](text):
         return text
     other = symbol_class(text)
@@ -1117,7 +1127,7 @@ def check_symbol(asset_class: AssetClass | None, text: object, *, as_written: bo
 
 
 def normalize(
-    asset_class: AssetClass | None,
+    asset_class: AssetClass | ClassFromPrefix,
     symbols: str | Iterable[str] | _All,
     *,
     as_written: bool = False,
@@ -1131,7 +1141,8 @@ def normalize(
     dataset factory boxes it in a `SymbolTable` first.
 
     Args:
-        asset_class: The class whose grammar applies, or None for a dataset that spans classes.
+        asset_class: The class whose grammar applies, or `ClassFromPrefix.ANY` for a dataset
+            that spans classes.
         symbols: The argument as the user passed it.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`check_symbol`).
@@ -1166,7 +1177,7 @@ def normalize(
 
 
 def canonical_from_wire(
-    asset_class: AssetClass | None, raw: str, *, as_written: bool = False
+    asset_class: AssetClass | ClassFromPrefix, raw: str, *, as_written: bool = False
 ) -> str | None:
     """Read a symbol as a Massive transport sent it, in the canonical form.
 
@@ -1180,8 +1191,8 @@ def canonical_from_wire(
     folded.
 
     Args:
-        asset_class: The dataset's class, or None for a dataset that spans classes: the prefix
-            then selects the class, and text without one is read as a stock.
+        asset_class: The dataset's class, or `ClassFromPrefix.ANY` for a dataset that spans classes:
+            the prefix then selects the class, and text without one is read as a stock.
         raw: The wire text.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`is_canonical`).
@@ -1191,7 +1202,7 @@ def canonical_from_wire(
     """
     if as_written:
         return raw if _WRITTEN.fullmatch(raw) is not None else None
-    resolved = symbol_class(raw) if asset_class is None else asset_class
+    resolved = symbol_class(raw) if asset_class is ClassFromPrefix.ANY else asset_class
     if resolved is AssetClass.FOREX:
         return _forex(raw, ("C:", "X:"))
     if resolved is AssetClass.CRYPTO:
@@ -1203,7 +1214,7 @@ def canonical_from_wire(
     return raw if _CANONICAL[resolved](raw) else None
 
 
-def wire_spellings(asset_class: AssetClass | None, symbol: str) -> tuple[str, ...]:
+def wire_spellings(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> tuple[str, ...]:
     """Return every spelling `canonical_from_wire` reads as a canonical symbol, for a file filter.
 
     A flat file is filtered on its raw `ticker` column before any row is read, so the filter
@@ -1215,14 +1226,14 @@ def wire_spellings(asset_class: AssetClass | None, symbol: str) -> tuple[str, ..
     first.
 
     Args:
-        asset_class: The dataset's class, or None for one that spans classes.
+        asset_class: The dataset's class, or `ClassFromPrefix.ANY` for one that spans classes.
         symbol: A canonical symbol.
 
     Returns:
         The spellings, each of which `canonical_from_wire(asset_class, spelling)` reads as
         `symbol`.
     """
-    resolved = symbol_class(symbol) if asset_class is None else asset_class
+    resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
     prefixes: tuple[str, ...]
     if resolved is AssetClass.FOREX:
         base, quote = symbol[2:5], symbol[5:]
@@ -1353,8 +1364,8 @@ class WireSymbols:
 
     Attributes:
         dataset: The dataset name, for messages.
-        asset_class: The dataset's class (`canonical_from_wire`), or None for one that spans
-            classes.
+        asset_class: The dataset's class (`canonical_from_wire`), or `ClassFromPrefix.ANY`
+            for one that spans classes.
         unknown: The session's rule for a spelling `canonical_from_wire` cannot read: under
             `UnknownSymbols.WARN` each new spelling is logged once at WARNING (a bounded
             number per process) and its rows keep the text in `ReadSymbols.raw`; under
@@ -1364,7 +1375,7 @@ class WireSymbols:
     """
 
     dataset: str
-    asset_class: AssetClass | None
+    asset_class: AssetClass | ClassFromPrefix
     unknown: UnknownSymbols
     as_written: bool = False
 

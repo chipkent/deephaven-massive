@@ -13,6 +13,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType, required_fields
+from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import indicators
 from deephaven_massive._namespaces.base import Namespace
@@ -42,7 +43,7 @@ def test_each_indicator_reads_the_stock_and_crypto_paths(name: str) -> None:
     spec = CATALOG.by_name[f"indicators.{name}"]
     stock = f"/v1/indicators/{name}/{{stockTicker}}"
     crypto = f"/v1/indicators/{name}/{{cryptoTicker}}"
-    assert spec.asset_class is None
+    assert spec.asset_class is ClassFromPrefix.ANY
     assert spec.sources == ((R, stock), (R, crypto))
     assert spec.fetch_path == stock
     assert spec.per_symbol

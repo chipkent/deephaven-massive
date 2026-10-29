@@ -35,6 +35,7 @@ from pathlib import PurePath
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.schema import RAW_SYMBOL, TRANSPORT_LABELS
+from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import Transport
 
 if TYPE_CHECKING:
@@ -357,7 +358,7 @@ def _dataset_urls(spec: DatasetSpec, provenance: Provenance) -> list[str]:
     urls: set[str] = set()
     for source in spec.sources:
         found = provenance.urls.get(source, ())
-        if spec.asset_class is not None:
+        if spec.asset_class is not ClassFromPrefix.ANY:
             own = [url for url in found if spec.asset_class.value in _segments(url)]
             found = own or found
         urls.update(found)

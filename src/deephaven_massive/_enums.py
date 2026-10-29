@@ -21,12 +21,13 @@ private.
 from __future__ import annotations
 
 import logging
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import TypeVar
 
 __all__ = [
     "AssetClass",
     "ChannelFamily",
+    "ClassFromPrefix",
     "ConditionDataType",
     "ContractType",
     "Direction",
@@ -74,6 +75,20 @@ class AssetClass(StrEnum):
     INDICES = "indices"
     FOREX = "forex"
     CRYPTO = "crypto"
+
+
+class ClassFromPrefix(Enum):
+    """The class of a dataset whose symbols span asset classes: each symbol's prefix names it.
+
+    A few datasets take symbols of every class at once: the indicators, the reference data,
+    and the unified `m.snapshots()`. They have no one `AssetClass`, so their `DatasetSpec`
+    holds `ClassFromPrefix.ANY`, and every symbol rule given it reads each symbol's class from
+    its prefix (`O:`, `I:`, `C:`, `X:`, and none for a stock); their days are New York days.
+    Internal: no public signature takes it.
+    """
+
+    ANY = "any"
+    """Each symbol's class is read from its prefix."""
 
 
 class Timespan(StrEnum):

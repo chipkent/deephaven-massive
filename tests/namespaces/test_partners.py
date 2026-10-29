@@ -21,7 +21,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import Order, PollMode
+from deephaven_massive._enums import ClassFromPrefix, Order, PollMode
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import partners
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -183,7 +183,7 @@ def test_news_keeps_its_tickers_and_is_timed_by_publication() -> None:
     assert types["Timestamp"] is ColumnType.INSTANT
     assert "Published" not in types
     assert types["Tickers"] is ColumnType.STRING  # the JSON list, never a Symbol
-    assert spec.asset_class is None
+    assert spec.asset_class is ClassFromPrefix.ANY
     assert spec.time_axis == ("published.gte", "published.lt")
     assert spec.symbol_param == "tickers.any_of"
 

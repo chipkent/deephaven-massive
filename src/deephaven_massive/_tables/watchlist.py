@@ -36,6 +36,7 @@ from deephaven_massive._datasets.symbols import (
     check_symbol,
     is_canonical,
 )
+from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -57,12 +58,13 @@ _SHOWN: Final = 5
 
 
 def invalid_row_message(
-    asset_class: AssetClass | None, symbol: str, *, as_written: bool = False
+    asset_class: AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
 ) -> str:
     """Say why a symbol table's row is refused, and how to convert such a table.
 
     Args:
-        asset_class: The dataset's class, or None for a dataset that spans classes.
+        asset_class: The dataset's class, or `ClassFromPrefix.ANY` for a dataset that spans
+            classes.
         symbol: The row's symbol, which `check_symbol` refuses.
         as_written: True for a dataset whose symbols are kept as Massive writes them.
 
@@ -78,7 +80,7 @@ def invalid_row_message(
         check_symbol(asset_class, symbol, as_written=as_written)
     except ValueError as error:
         reason = f" ({error})"
-    if asset_class is None:
+    if asset_class is ClassFromPrefix.ANY:
         remedy = (
             "convert each row with dm.canonical_symbol(text, asset_class) and the row's own "
             "class, since this dataset's rows may mix classes"
@@ -183,7 +185,7 @@ class SymbolWatch:
 
     def __init__(
         self,
-        asset_class: AssetClass | None,
+        asset_class: AssetClass | ClassFromPrefix,
         table: Table,
         on_change: Callable[[frozenset[str], frozenset[str]], None],
         *,
@@ -195,8 +197,9 @@ class SymbolWatch:
         that should own the view and the listener, and outside every library lock.
 
         Args:
-            asset_class: The class whose grammar the rows must follow, or None for a dataset
-                that spans classes (each symbol's prefix selects its class).
+            asset_class: The class whose grammar the rows must follow, or
+                `ClassFromPrefix.ANY` for a dataset that spans classes (each symbol's prefix
+                selects its class).
             table: The user's refreshing table with a `Symbol` column.
             on_change: Receives each change of the set of symbols; see the class documentation.
             on_invalid: Receives the message of a row that is not canonical.
@@ -242,14 +245,15 @@ class _SymbolCounter(TableListener):
 
     def __init__(
         self,
-        asset_class: AssetClass | None,
+        asset_class: AssetClass | ClassFromPrefix,
         on_change: Callable[[frozenset[str], frozenset[str]], None],
         on_invalid: Callable[[str], None],
     ) -> None:
         """Start with no symbol counted.
 
         Args:
-            asset_class: The class whose grammar the rows must follow, or None.
+            asset_class: The class whose grammar the rows must follow, or
+                `ClassFromPrefix.ANY` (each symbol's prefix selects its class).
             on_change: Receives each change of the set of symbols.
             on_invalid: Receives the message of a row that is not canonical.
         """

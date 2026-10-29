@@ -1400,7 +1400,7 @@ columns that is unique per row, checked against the generated fields of its path
 250 tickers per request, any mix of asset classes. Rows are the union schema of the unified
 snapshot. `ALL` is not accepted here (the endpoint requires tickers). Its catalog record is
 named `reference.snapshots` and is declared in `_namespaces/reference.py` with
-`asset_class=None` (each ticker's prefix selects its class,
+`asset_class=ClassFromPrefix.ANY` (each ticker's prefix selects its class,
 § 10), so it is in the catalog (`CATALOG` in `_session.py`); `m.streams()` and messages show
 that name.
 
@@ -1640,8 +1640,12 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   path and every flat file needs no split: a flat-file filter looks for a crypto pair split
   at every point. Every grammar is
   matched against the whole text, so a trailing newline never passes. A dataset that spans classes
-  (indicators, reference data, the unified `m.snapshots()`) declares no class: the prefix
-  selects the grammar (`O:`, `I:`, `C:`, `X:`), and a symbol without one is a stock.
+  (indicators, reference data, the unified `m.snapshots()`) declares the internal
+  `ClassFromPrefix.ANY` in place of an `AssetClass`, never None: the prefix selects the
+  grammar (`O:`, `I:`, `C:`, `X:`), a symbol without one is a stock, and its days are New
+  York days. The symbol rules (`is_canonical`, `check_symbol`, `canonical_from_wire`,
+  `wire_spellings`) and the day rules take `AssetClass | ClassFromPrefix`; `ClassFromPrefix`
+  is not exported, since no public signature takes it.
 - **Futures spreads.** Massive documents no spread grammar (its contracts and products carry
   only `type: 'combo'`), so the spellings taken are those its vendored samples show, each
   exactly as written: a calendar spread of two contracts (`GCQ6-GCZ6`, `10YN6-10YQ6`,
@@ -3887,7 +3891,7 @@ a description right for it when the rules below pick one. Each field's descripti
 rules is the one for the dataset's asset class, `Field.description_for(spec.asset_class)`: a
 source that serves several classes may carry a per-class correction (`options.snapshots`
 shows the options text of the unified snapshot's last trade, as `options.chain` does), and
-a dataset with no asset class takes the field's own description.
+a dataset of `ClassFromPrefix.ANY` takes the field's own description.
 
 1. **A column the dataset's own sources supply** takes the first non-empty description among
    them, trying the transports in the order REST, flat files, WebSocket and, within one

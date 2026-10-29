@@ -26,7 +26,7 @@ from deephaven_massive._datasets.schema import (
     widen,
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
 from deephaven_massive._tables.columns import col_defs
@@ -740,7 +740,7 @@ def test_a_dataset_takes_its_asset_class_s_description_of_a_shared_source() -> N
     )
     made = Source(key="/shared", transport=R, fields=(price,))
     found = {}
-    for asset_class in (AssetClass.OPTIONS, AssetClass.STOCKS, None):
+    for asset_class in (AssetClass.OPTIONS, AssetClass.STOCKS, ClassFromPrefix.ANY):
         dataset = DatasetSpec(
             name="reference.x",
             summary="A dataset for the tests.",
@@ -752,7 +752,7 @@ def test_a_dataset_takes_its_asset_class_s_description_of_a_shared_source() -> N
     assert found == {
         AssetClass.OPTIONS: "Per share of the underlying.",
         AssetClass.STOCKS: "Per whole share.",
-        None: "Per whole share.",
+        ClassFromPrefix.ANY: "Per whole share.",
     }
 
 

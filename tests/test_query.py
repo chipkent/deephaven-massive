@@ -24,7 +24,7 @@ from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
-from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, PollMode, Timespan
 from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
@@ -979,7 +979,7 @@ SAMPLE_SYMBOLS = {
     AssetClass.INDICES: "I:SPX",
     AssetClass.FOREX: "C:EURUSD",
     AssetClass.CRYPTO: "X:BTCUSD",
-    None: "AAPL",
+    ClassFromPrefix.ANY: "AAPL",
 }
 
 

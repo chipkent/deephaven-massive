@@ -29,6 +29,7 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
+    ClassFromPrefix,
     Direction,
     HistorySource,
     Order,
@@ -523,9 +524,9 @@ def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> Non
     # An instant given by the caller is sent as given, even on an inclusive or exclusive
     # bound that a date would move by one unit.
     given = {"timestamp.gte": instant, "timestamp.lte": instant, "timestamp.gt": instant}
-    assert rest._filter_days(path, given, None) == given
+    assert rest._filter_days(path, given, ClassFromPrefix.ANY) == given
     dividends = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, None) == {
+    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, ClassFromPrefix.ANY) == {
         "ex_dividend_date.gte": day
     }
 
@@ -1683,7 +1684,8 @@ def axis_spec(lower: str, upper: str, path: str = TRADES_PATH) -> DatasetSpec:
 
 def axis(spec: DatasetSpec, start: object, end: object) -> dict[str, object]:
     path = cast("RestPath", _massive.source(R, cast("str", spec.history_path)))
-    return rest._axis_query(spec, path, dates=(cast("Any", start), cast("Any", end)))
+    dates = (cast("Any", start), cast("Any", end))
+    return rest._axis_query(spec, path, dates=dates, asset_class=spec.asset_class)
 
 
 def test_date_axes_are_whole_days_and_shift_for_exclusive_ends() -> None:
@@ -1702,7 +1704,9 @@ def test_timestamp_axes_take_midnights_in_the_day_zone() -> None:
     assert out["timestamp.gte"] == datetime(2025, 3, 3, 5, tzinfo=UTC)
     # A dataset without an asset class bounds its days in New York.
     path = cast("RestPath", _massive.source(R, SMA_STOCK))
-    unclassed = rest._axis_query(SMA, path, dates=(date(2025, 7, 1), None))
+    unclassed = rest._axis_query(
+        SMA, path, dates=(date(2025, 7, 1), None), asset_class=SMA.asset_class
+    )
     assert unclassed == {"timestamp.gte": datetime(2025, 7, 1, 4, tzinfo=UTC)}
     assert out["timestamp.lt"] == datetime(2025, 3, 4, 5, tzinfo=UTC)
 
@@ -1752,7 +1756,10 @@ def test_an_axis_the_path_lacks_or_of_another_kind() -> None:
     assert axis(spec, date(2025, 3, 3), date(2025, 3, 4)) == {"ticker.gte": "2025-03-03"}
     assert (
         rest._axis_query(
-            MOVERS, cast("RestPath", _massive.source(R, MOVERS_PATH)), dates=(None, None)
+            MOVERS,
+            cast("RestPath", _massive.source(R, MOVERS_PATH)),
+            dates=(None, None),
+            asset_class=MOVERS.asset_class,
         )
         == {}
     )
@@ -2029,7 +2036,9 @@ def test_futures_date_bounds_are_whole_sessions() -> None:
         keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
     rest_path = cast("RestPath", _massive.source(R, path))
-    out = rest._axis_query(spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)))
+    out = rest._axis_query(
+        spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)), asset_class=spec.asset_class
+    )
     # The session ending 2025-03-04 opens at 17:00 Chicago time on the 3rd.
     assert out == {
         "timestamp.gte": datetime(2025, 3, 3, 17, tzinfo=CHICAGO),

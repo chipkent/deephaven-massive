@@ -28,6 +28,7 @@ from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.symbols import normalize
 from deephaven_massive._enums import (
     AssetClass,
+    ClassFromPrefix,
     ConditionDataType,
     Locale,
     Market,
@@ -534,7 +535,9 @@ class _Reference(Namespace):
                 "reference.news takes one symbol, not a table; build one query per symbol"
             )
         if symbols is not None and not isinstance(symbols, _All):
-            one = cast("tuple[str, ...]", normalize(None, symbols))  # not ALL: checked above
+            one = cast(
+                "tuple[str, ...]", normalize(ClassFromPrefix.ANY, symbols)
+            )  # not ALL: checked above
             if len(one) > 1:
                 raise ValueError(
                     "reference.news takes one symbol: the endpoint's ticker parameter is "

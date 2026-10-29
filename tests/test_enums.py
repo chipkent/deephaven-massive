@@ -176,7 +176,11 @@ def test_module_exports() -> None:
     assert set(_enums.__all__) == {e.__name__ for e in EXPECTED_VALUES} | {
         "Recency",
         "ChannelFamily",
+        "ClassFromPrefix",
     }
+    # The class of a dataset that spans classes is internal: no public signature takes it.
+    assert not hasattr(dm, "ClassFromPrefix")
+    assert [member.name for member in _enums.ClassFromPrefix] == ["ANY"]
     # The transport is the wire package's, named once for both sides of the boundary.
     assert not hasattr(_enums, "Transport")
 

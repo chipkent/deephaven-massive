@@ -34,6 +34,7 @@ from deephaven_massive._datasets.symbols import check_symbol, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
+    ClassFromPrefix,
     ContractType,
     Order,
     Timespan,
@@ -272,7 +273,7 @@ def _underlying(value: object) -> str:
         raise ValueError(
             f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
         )
-    return check_symbol(None, value)
+    return check_symbol(ClassFromPrefix.ANY, value)
 
 
 def _contract_type(value: object) -> ContractType | None:

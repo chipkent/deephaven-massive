@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
 from deephaven_massive._datasets.schema import dataset_schema, rename
-from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode, Timespan
+from deephaven_massive._enums import AssetClass, ChannelFamily, ClassFromPrefix, PollMode, Timespan
 from deephaven_massive._massive import ParamKind, Transport, WireType, encode_value, sources
 
 if TYPE_CHECKING:
@@ -232,8 +232,9 @@ class DatasetSpec:
             `"Trades of US-listed stocks, tick by tick."`. The dataset method's docstring
             starts with the same sentence; the library keeps it here so it never reads
             `__doc__` at run time, where `python -OO` would have removed it.
-        asset_class: The instruments' asset class, or None for datasets that span classes or
-            have no instruments (reference data, economy, most partner datasets). Its value is
+        asset_class: The instruments' asset class, or `ClassFromPrefix.ANY`, the default, for
+            datasets that span classes or have no instruments (reference data, economy, most
+            partner datasets): each symbol's prefix then names its class. Its value is
             the WebSocket cluster of the channels and the group of the dataset's kind.
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
             by `Timespan`, and the factory picks the query class from the timespan and
@@ -310,7 +311,7 @@ class DatasetSpec:
 
     name: str
     summary: str
-    asset_class: AssetClass | None = None
+    asset_class: AssetClass | ClassFromPrefix = ClassFromPrefix.ANY
     is_bars: bool = False
     kind: str | None = None
     fetch_path: str | None = None
@@ -365,9 +366,9 @@ class DatasetSpec:
             raise ValueError(
                 f"{self.name}: channels and flat_file_prefixes must be keyed by {kind}"
             )
-        if self.channels and self.asset_class is None:
+        if self.channels and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
-        if self.kind is not None and self.asset_class is None:
+        if self.kind is not None and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a dataset in a kind needs a class (its group)")
         if self.symbols_as_written and (self.channels or self.flat_file_prefixes):
             # A stream subscribes and a flat file filters by the class's spellings.
@@ -394,7 +395,7 @@ class DatasetSpec:
     @property
     def group(self) -> str | None:
         """The dataset's group within its kind: its asset class's value, or None."""
-        return None if self.asset_class is None else self.asset_class.value
+        return None if self.asset_class is ClassFromPrefix.ANY else self.asset_class.value
 
     @property
     def rest_paths(self) -> tuple[str, ...]:

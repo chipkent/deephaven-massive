@@ -40,7 +40,7 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import AssetClass, PollMode
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
 
@@ -75,7 +75,7 @@ def _list_spec(
     symbol_param: str | None = None,
     poll_keys: tuple[str, ...],
     page_size: int,
-    asset_class: AssetClass | None = None,
+    asset_class: AssetClass | ClassFromPrefix = ClassFromPrefix.ANY,
     time: str | None = None,
     time_axis: tuple[str, str] | None = None,
     poll_mode: PollMode = PollMode.REPLACE,
@@ -94,7 +94,8 @@ def _list_spec(
         symbol_param: The query parameter that carries the requested symbols, or None.
         poll_keys: The key columns of a keyed `poll()` table, unique per row.
         page_size: The page size requested: the endpoint's documented maximum `limit`.
-        asset_class: The class whose symbol rules apply to `symbols`, or None.
+        asset_class: The class whose symbol rules apply to `symbols`, or `ClassFromPrefix.ANY`
+            for a dataset whose symbols span classes.
         time: The path's instant column that holds the row's time, renamed to `Timestamp`.
         time_axis: The wire parameter pair behind `start` and `end`, or None.
         poll_mode: The default `poll()` mode.
@@ -149,7 +150,7 @@ def _benzinga(
         f"partners.benzinga.{name}",
         path,
         summary=summary,
-        asset_class=AssetClass.STOCKS if tickers else None,
+        asset_class=AssetClass.STOCKS if tickers else ClassFromPrefix.ANY,
         symbol=KeySpec("Ticker", required=False) if tickers else None,
         symbol_param="ticker.any_of" if tickers else None,
         poll_keys=("BenzingaId",),

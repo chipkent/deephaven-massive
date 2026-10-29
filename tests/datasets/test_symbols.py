@@ -30,7 +30,7 @@ from deephaven_massive._datasets.symbols import (
     wire_spellings,
     ws_symbol,
 )
-from deephaven_massive._enums import AssetClass, SymbolConvention, UnknownSymbols
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, UnknownSymbols
 from deephaven_massive._errors import BoundedWarnings
 
 if TYPE_CHECKING:
@@ -151,7 +151,7 @@ def test_other_text_is_not_canonical(asset_class: AssetClass, text: str) -> None
     ],
 )
 def test_without_a_class_the_prefix_selects_the_grammar(text: str, expected: bool) -> None:
-    assert is_canonical(None, text) is expected
+    assert is_canonical(ClassFromPrefix.ANY, text) is expected
 
 
 CONVERSIONS = [
@@ -439,7 +439,7 @@ def test_no_conversion_looks_a_name_up() -> None:
     for name in ("SPX", "ZZQX", "AAPL"):
         assert dm.canonical_symbol_index(name) == f"I:{name}"
         assert canonical_from_wire(IDX, name) == f"I:{name}"
-        assert canonical_from_wire(None, name) == name
+        assert canonical_from_wire(ClassFromPrefix.ANY, name) == name
         assert canonical_from_wire(STK, name) == name
         with pytest.raises(ValueError, match="use 'I:"):
             check_symbol(IDX, name)
@@ -531,16 +531,16 @@ def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
         (STK, "KIMpL", "KIMpL"),
         (STK, "BRK/B", None),
         (FUT, "ESZ5", "ESZ5"),
-        (None, "X:BTC-USD", "X:BTCUSD"),
-        (None, "C:EURUSD", "C:EURUSD"),
-        (None, "X:EUR-USD", "X:EURUSD"),  # without the forex class, X: is crypto
-        (None, "I:SPX", "I:SPX"),
-        (None, "AAPL", "AAPL"),
-        (None, "aapl", None),
+        (ClassFromPrefix.ANY, "X:BTC-USD", "X:BTCUSD"),
+        (ClassFromPrefix.ANY, "C:EURUSD", "C:EURUSD"),
+        (ClassFromPrefix.ANY, "X:EUR-USD", "X:EURUSD"),  # without the forex class, X: is crypto
+        (ClassFromPrefix.ANY, "I:SPX", "I:SPX"),
+        (ClassFromPrefix.ANY, "AAPL", "AAPL"),
+        (ClassFromPrefix.ANY, "aapl", None),
     ],
 )
 def test_canonical_from_wire(
-    asset_class: AssetClass | None, raw: str, expected: str | None
+    asset_class: AssetClass | ClassFromPrefix, raw: str, expected: str | None
 ) -> None:
     assert canonical_from_wire(asset_class, raw) == expected
 
@@ -553,13 +553,13 @@ def test_canonical_from_wire(
         (IDX, "I:SPX"),
         (STK, "BRK.B"),
         (OPT, "O:AAPL250117C00150000"),
-        (None, "C:EURUSD"),
-        (None, "X:ETHBTC"),
-        (None, "AAPL"),
+        (ClassFromPrefix.ANY, "C:EURUSD"),
+        (ClassFromPrefix.ANY, "X:ETHBTC"),
+        (ClassFromPrefix.ANY, "AAPL"),
     ],
 )
 def test_wire_spellings_are_the_inverse_of_canonical_from_wire(
-    asset_class: AssetClass | None, symbol: str
+    asset_class: AssetClass | ClassFromPrefix, symbol: str
 ) -> None:
     spellings = wire_spellings(asset_class, symbol)
     assert spellings[0] == symbol
@@ -600,15 +600,24 @@ def test_option_roots() -> None:
 def test_normalize_sorts_and_deduplicates_canonical_symbols() -> None:
     assert normalize(STK, ["MSFT", "AAPL", "MSFT"]) == ("AAPL", "MSFT")
     assert normalize(STK, "KIMpL") == ("KIMpL",)
-    assert normalize(None, ["X:BTCUSD", "I:SPX", "AAPL"]) == ("AAPL", "I:SPX", "X:BTCUSD")
+    assert normalize(ClassFromPrefix.ANY, ["X:BTCUSD", "I:SPX", "AAPL"]) == (
+        "AAPL",
+        "I:SPX",
+        "X:BTCUSD",
+    )
 
 
 @pytest.mark.parametrize(
     ("asset_class", "value"),
-    [(STK, "aapl"), (FX, ["C:EURUSD", "EUR/USD"]), (IDX, "SPX"), (None, ["X:BTC-USD"])],
+    [
+        (STK, "aapl"),
+        (FX, ["C:EURUSD", "EUR/USD"]),
+        (IDX, "SPX"),
+        (ClassFromPrefix.ANY, ["X:BTC-USD"]),
+    ],
 )
 def test_normalize_refuses_what_is_not_canonical(
-    asset_class: AssetClass | None, value: str | list[str]
+    asset_class: AssetClass | ClassFromPrefix, value: str | list[str]
 ) -> None:
     with pytest.raises(ValueError, match="symbols must be Massive's exact tickers"):
         normalize(asset_class, value)
