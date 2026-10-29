@@ -255,72 +255,123 @@ lines, or one whose first line lists more than two subjects, is split or says in
 why it is one subject. Review enforces these rules, not a test: checks of placement over source
 text would be brittle and costly to keep for little protection.
 
+The tree below is the target layout: the modules as they will be once the open feature PRs and
+the package layout cleanup, a series of refactoring PRs, have all merged. Until then, some
+modules named here do not exist yet, and some of today's modules do not appear here.
+
 ```
 src/deephaven_massive/
 __init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
-_config.py               MassiveConfig (section 5)
-_enums.py                the fifteen public enums, Recency, ChannelFamily, _require_enum
+_config.py               MassiveConfig (section 5), HostMap, the environment readers;
+                         require_positive_int and require_positive_number, the two argument
+                         checks used across layers
+_enums.py                the sixteen public enums, Recency, ChannelFamily, _require_enum,
+                         subscription_of
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
-                         from_wire
+                         from_wire; RowDataError and UnsupportedParameterError, which the ingest
+                         layer raises and the tables layer names
+_log_limits.py           rate-limited log records: log_once, BoundedWarnings
+_debug_log.py            enable_debug_logging, LogOutput, the DEEPHAVEN_MASSIVE_LOG variables, and
+                         the environment line; no Deephaven import, so it works before a server
+                         exists
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
-                         (section 6)
-_query.py                the six query classes and their verbs, through the core's ports (section 7)
+                         (section 6); applies the logging variables and logs the environment
+                         line; NAMESPACE_MODULES and CATALOG (section 4.3)
+_query.py                the six query classes and their verbs, through the core's ports
+                         (section 7); query_class and bar_query_class, which choose a dataset's
+                         query class
 _namespaces/
   __init__.py            docstring only
-  base.py                the shared dataset factory
-  stocks.py options.py futures.py indices.py forex.py crypto.py
-  reference.py indicators.py economy.py partners.py      namespace class + DATASETS
+  query_building.py      Namespace, the shared dataset factory (build_query), list_query,
+                         ticker_key, argument normalization
+  stocks.py              m.stocks
+  stock_financials.py    m.stocks.financials
+  stock_filings.py       m.stocks.filings: SEC filings and insiders
+  options.py futures.py indices.py forex.py crypto.py
+  reference.py indicators.py economy.py                   namespace class + DATASETS
+  partners.py            m.partners and its four partner sub-namespaces
 _datasets/               dataset semantics: no network I/O, no threads, no Deephaven calls;
                          only column_reference.sync writes files
   __init__.py            docstring only
   catalog.py             DatasetSpec (summary, role paths and fetch paths by symbol class,
                          kind, per-source key columns, channels, prefixes, poll defaults,
-                         page size, symbols per request), Catalog (the specs by name,
-                         members(kind)), filter validation
-  schema.py              ColumnType, Column, Schema, WireType -> ColumnType, rename(),
-                         dataset_schema() with column descriptions (section 19.4)
-  request.py             Request, StreamKey, ParamValue, HostDecision
-  timestamps.py          the one timestamp routine (section 12), the FMV magnitude rule
-  row_times.py           the library's time columns: Date, TimestampStart, TimestampEnd,
-                         TimestampInsert; RowTimes and TimeRule (section 12)
-  dates.py               DateLike parsing, day zones, sessions, publish_time, [start, end)
-  symbols.py             the canonical ticker grammar, the public converters, check_symbol()
-                         and normalize(), canonical_from_wire(), wire_spellings(),
-                         WireSymbols, option_roots(), symbol_class() (section 10)
-  history_source.py      partition dates, publication grace, REST capability, the AUTO choice
+                         page size, symbols per request), KeySpec, SourceKeys, Catalog (the
+                         specs by name, members(kind))
+  filters.py             the filters= rules: filter validation (section 9)
+  request.py             Request, ParamValue, StreamKey
+  schema.py              ColumnType, Column, Schema, WireType -> ColumnType, dataset_schema(): the
+                         merge of a dataset's sources (section 19.4)
+  source_columns.py      SourceColumn: the key rename, required fields, join, widen
+  column_descriptions.py the description rules of dataset columns, the transport labels and
+                         their order (section 7.4)
   column_reference.py    the column reference: render(catalog, provenance) -> {file name:
                          Markdown} (pure); sync(directory, pages) owns docs/datasets/
                          (section 7.4)
+  symbols.py             the canonical ticker grammar and its checks (check_symbol(),
+                         normalize()), the public scalar converters, option_roots(),
+                         symbol_class() (section 10)
+  wire_symbols.py        a symbol's transport spellings, both ways: canonical_from_wire(),
+                         wire_spellings(), ws_symbol(), WireSymbols, ReadSymbols,
+                         unknown_symbol_message() (section 10)
+  dates.py               DateLike parsing, [start, end) ranges and bounds, day zones, the
+                         trading-day test
+  futures_sessions.py    the 17:00 Chicago futures session rule, scalar and Arrow; the weekday
+                         roll
+  bar_periods.py         intraday spans, bar periods, bar starts, days and sessions
+  timestamps.py          the one epoch-unit routine (section 12), the FMV magnitude rule
+  row_times.py           the library's time columns: Date, TimestampStart, TimestampEnd,
+                         TimestampInsert; RowTimes, TimeRule, and the bar-stamp rule (section 12)
+  history_source.py      the history window, partition dates, publication and its grace, REST
+                         capability, the AUTO choice (section 16)
 _tables/                 the Deephaven side: tables, liveness, library threads
   __init__.py            docstring only
-  core.py                SessionCore, registry_lock, registries, closers, stream ids, the
-                         transport ports, IngestPorts, attach (sections 4.3, 6)
-  liveness.py            result and stream scopes, records, reaper queue (section 6.1)
-  diagnostics.py         connections() and streams() with SchemaDrift; DriftRegistry (section 17)
-  columns.py             ColumnType -> Deephaven type, column definitions; describe() (section 7.4)
+  session_core.py        SessionCore, registry_lock, the registries, closers, stream ids, the
+                         live set, the poll() registry, diagnostics_view, attach, close()
+                         (sections 4.3, 6)
+  transports.py          the transport ports (RestTransport, StreamTransport,
+                         FlatFileTransport), IngestPorts, StreamHandle, HostDecision
+  execution_context.py   entered(), the execution-context and update-graph probes
+  liveness.py            result and stream scopes, ResultRegistry, records, Reaper,
+                         QueueWorker (section 6.1)
+  diagnostics.py         connections(), streams() with SchemaDrift, and rate_limits();
+                         DriftRegistry, pascal_case (section 17)
+  columns.py             ColumnType -> Deephaven type, column definitions; describe(),
+                         column_table() (section 7.4)
+  stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
+                         (section 14)
+  poll.py                poll(): Poller, Pollers, open_poll; REPLACE/UPSERT/APPEND, fan-out, data
+                         failures -> publish_failure; SymbolRowError
   watchlist.py           read_symbols(), SymbolWatch: the check and watch of symbol tables
                          (section 10)
   symbols.py             canonicalize_symbols(), the table form of the symbol converters
                          (section 10)
-  stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
-                         (section 14)
 _ingest/                 the only holder of wire clients
   __init__.py            docstring only
   clients.py             SessionClients: the session's wire clients and connections, the ports
+  rest.py                REST transport: RestState, RestReader, RestEndpoints; 403/429 policy,
+                         drift routing, each request's subscription, per-read cancellation;
+                         UnlistedPairError
+  rest_requests.py       the requests of a call, from a DatasetSpec: Call, plan_calls(),
+                         fetch_paths(), the history calls
+  rest_rows.py           page rows to dataset batches, renamed and converted; error rows; the
+                         history window's keep
+  host_decision.py       host resolution from REST evidence (section 13.2): the host rule, its
+                         probes and constants, HostDecisionCache (single-flight)
+  rate_limits.py         the process's REST governors per (API key digest, REST origin),
+                         session leases, the first-429 WARNING, rate_limits() rows, the INFO
+                         download notice, the poll() pace WARNING (section 13.4)
   flatfiles.py           flat-file transport: read plans, reader pool, cancellation, conversion,
                          merge to tables, missing-file policy, drift routing (section 16)
-  rest.py                REST transport: requests from a DatasetSpec, batches renamed and
-                         converted, 403/429 policy, drift routing, host-decision cache
-                         (single-flight)
-  hosts.py               host resolution from REST evidence (section 13.2)
   futures_calendar.py    the futures schedule calendar that dates streamed futures rows by
                          their trading session (section 12)
-  poll.py                poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
   subscriptions.py       topics and the reconcile loop of one connection: wildcards,
                          watchdogs, the NO_ACK rule, the options cap's admission (section 13.3)
-  ws.py                  connections over WsClient: leases, the verdict rule, rejects and drift
-                         routing, the options cap's verb check (section 13.3)
+  ws.py                  WsConnections and WsTransport: the session's connections over
+                         WsClient, leases, the verdict rule, rejects and drift routing, the
+                         options cap's verb check (section 13.3)
+  ws_connection.py       Connection and its client factories; ConnectionGroup, which shares
+                         connections between sessions
 _massive/                the wire package (section 19)
 py.typed
 ```
@@ -373,7 +424,7 @@ module's test. A directory directly under `tests/` whose name starts with `_` is
 package outside the mirror rule; a test module (`test_*.py`, `*_test.py`, `conftest.py`) inside
 one is still checked. Fixtures live in `tests/data/<test owner path>/` (for example
 `tests/data/massive/rest/`, `tests/data/ingest/flatfiles/`), so no fixture directory starts
-with `_`. Examples:
+with `_`. Examples, from the target layout of [section 4.1](#41-source-modules):
 
 | Source | Unit test | Live integration test |
 |---|---|---|
@@ -381,8 +432,8 @@ with `_`. Examples:
 | `_config.py` | `tests/test_config.py` | |
 | `_datasets/__init__.py` | `tests/datasets/test_init.py` | |
 | `_datasets/catalog.py` | `tests/datasets/test_catalog.py` | |
-| `_tables/core.py` | `tests/tables/test_core.py` | |
-| `_ingest/hosts.py` | `tests/ingest/test_hosts.py` | `tests/ingest/test_hosts_integration.py` |
+| `_tables/session_core.py` | `tests/tables/test_session_core.py` | |
+| `_ingest/host_decision.py` | `tests/ingest/test_host_decision.py` | `tests/ingest/test_host_decision_integration.py` |
 | `_ingest/flatfiles.py` | `tests/ingest/test_flatfiles.py` | `tests/ingest/test_flatfiles_integration.py` |
 | `_datasets/column_reference.py` | `tests/datasets/test_column_reference.py` (also the parity test of `docs/datasets/`) | |
 | `_namespaces/__init__.py` | `tests/namespaces/test_init.py` | |
@@ -391,7 +442,7 @@ with `_`. Examples:
 | `_massive/rest/client.py` | `tests/massive/rest/test_client.py` | |
 | `_massive/refresh/__main__.py` | `tests/massive/refresh/test_main.py` | |
 | `_massive/refresh/generate.py` | `tests/massive/refresh/test_generate.py` (also the parity test) | |
-| `_massive/refresh/rest.py` | `tests/massive/refresh/test_rest.py` | |
+| `_massive/refresh/rest_sources.py` | `tests/massive/refresh/test_rest_sources.py` | |
 
 **Import roots.** `[tool.pytest] pythonpath = ["."]` and `[tool.mypy] mypy_path = ["src"]`;
 test code imports helpers as `tests._fakes…`. So `tests/massive/` can never shadow a top-level
@@ -3473,7 +3524,8 @@ is the library's: Deephaven tables, sessions and liveness, dataset semantics
 (`Symbol`, `Timestamp`, `Underlying`, the merged dataset schemas, conversion to nanoseconds,
 the timestamp bound), the source choice, the missing-file policy, reader pools, cancellation,
 public error text, and drift reporting. The clients take plain arguments, never
-`MassiveConfig`, so they are tested alone against the fakes of `tests/_fakes/`.
+`MassiveConfig`, so they are tested alone against the fakes of `tests/_fakes/`. The listing
+below, like the tree of [section 4.1](#41-source-modules), is the target layout.
 
 ```
 src/deephaven_massive/_massive/
@@ -3487,14 +3539,24 @@ net/                 shared by every client; imports nothing else in _massive
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
+  cancel.py          Cancel: a one-way threading.Event that follows parent tokens and runs
+                     callbacks when set
+  origins.py         origin_of(url): the (scheme, host, port) a URL reaches, default port
+                     filled in
+  redaction.py       Redactor, redact, redact_value: a client's secrets, however JSON
+                     spells them, become *** in whatever it receives, before it is decoded,
+                     quoted, or logged
 spec/                run-time wire vocabulary; imports nothing else in _massive
-  __init__.py        source(transport, key), sources(transport): load once under a lock
+  __init__.py        source(transport, key), sources(transport), provenance(): load once under
+                     a lock, and the cache that holds them
+  generated_schemas.py  parsing of the generated spec/*.json files into the types of spec.types
   types.py           Transport, Source(key, transport, fields, memberships),
                      Membership(kind, group, position, projection), RestPath(Source + template,
                      result key, params), Field(wire key, column, WireType, unit, required,
                      conversion), Conversion (named conversions, each with its declared and
                      resulting WireType), Param(+ unit), ParamKind, WireType, WireUnit,
-                     ENVELOPE_KEYS, DriftReport(extra, missing, statuses)
+                     ENVELOPE_KEYS, DriftReport(extra, missing, statuses); WireType.join, the
+                     one type-lattice join that the refresh and the run-time schema merge share
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
                      convert_field applies a field's named conversion and raises with the
@@ -3506,8 +3568,11 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
 rest/                imports net, spec
   __init__.py        RestClient, Page, to_batch
   client.py          pool, bearer auth, retries, not-before instant (leaf lock), next_url paging, close
+  governor.py        RequestGovernor: per-bucket pacing (Basic: 5 per minute), pauses after
+                     429, learning, give-up; BucketState snapshots
   query.py           request targets (values encoded by spec.values), next_url checks
-  response.py        strict decoding, envelopes, result keys, error mapping
+  response.py        strict decoding, envelopes, result keys, error mapping (http_error);
+                     RequestTarget, the request a page answers
   batch.py           to_batch(rows, rest_path, *, required) -> (RecordBatch, DriftReport)
 ws/                  imports net, spec
   __init__.py        WsClient, WsState, Status, StatusKind, Reject
@@ -3522,7 +3587,7 @@ flatfiles/           imports net, spec
   client.py          FlatFileClient: lazy boto3 client under its lock, shared model loader,
                      closed flag, open(key) -> FlatFile | None, S3 error mapping, prefixes(),
                      close(); botocore's body read errors become OSError
-  layout.py          object_key(prefix, day, venue): <prefix>/<YYYY>/<MM>/<date>.csv.gz; {venue} template
+  object_keys.py     object_key(prefix, day, venue): <prefix>/<YYYY>/<MM>/<date>.csv.gz; {venue} template
   reader.py          FlatFile.batches(plan) -> (RecordBatch, DriftReport) per block; header peek
 refresh/             build time only; excluded from the wheel; may import any of the above
   __init__.py        empty
@@ -3541,10 +3606,10 @@ refresh/             build time only; excluded from the wheel; may import any of
                      case concepts, short and timestamp-like names, the dataset key columns
   fields.py          the field rules every generator shares: representation rules, names,
                      units, type fixes, documented examples, and the gates met per field
-  rest.py            REST paths -> RestPath: flattening, result keys, parameters, path
+  rest_sources.py    REST paths -> RestPath: flattening, result keys, parameters, path
                      coverage, and the gates met per parameter
-  ws.py, flatfiles.py  the WebSocket and flat-file generators
-  kinds.py           KINDS and PROJECTIONS -> memberships; the type lattice, type-agreement,
+  ws_sources.py, flat_file_sources.py  the WebSocket and flat-file generators
+  kinds.py           KINDS and PROJECTIONS -> memberships; type-agreement (by WireType.join),
                      transport-agreement, and the kind column order
   gates.py           Gate (the named gates of section 19.4), Problem, RefreshError, and the
                      checks that span sources: stale entries, exclusions, concept collisions
