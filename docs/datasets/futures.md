@@ -180,7 +180,7 @@ Futures contracts: the specification of every listed contract.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Active` | boolean | Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date <= last_trade_date) and false otherwise. | REST | `active` |
-| `Date` | String | A date string in the format YYYY-MM-DD. This parameter will return point-in-time information about contracts for the specified day. | REST | `date` |
+| `Date` | String | The day, YYYY-MM-DD, whose point-in-time state the row describes: whether the contract was tradeable that day (`active`) and its days to maturity from it. | REST | `date` |
 | `DaysToMaturity` | long | The number of calendar days between the 'date' and the contract's final settlement date. | REST | `days_to_maturity` |
 | `FirstTradeDate` | String | The first day on which the contract was tradeable. | REST | `first_trade_date` |
 | `GroupCode` | String | An identifier used to identify logical groups of products. The group_code is only populated for contracts listed for trading on CME Globex. | REST | `group_code` |
@@ -216,7 +216,7 @@ Futures products: the specification of every product, the family of its contract
 | `AssetSubClass` | String | The asset sub-class to which the product belongs. | REST | `asset_sub_class` |
 | `ClearingSymbol` | String | The clearing symbol assigned to this product by the exchange's clearing house. | REST | `clearing_symbol` |
 | `ClearingVenue` | String | The exchange identifier for the clearing house that clears this product's contracts. | REST | `clearing_venue` |
-| `Date` | String | A date string in the format YYYY-MM-DD. This parameter will return point-in-time information about products for the specified day. | REST | `date` |
+| `Date` | String | The day, YYYY-MM-DD, whose point-in-time state the row describes. | REST | `date` |
 | `LastUpdated` | String | The date and time at which this product was last updated. | REST | `last_updated` |
 | `Name` | String | The full name of the product. | REST | `name` |
 | `PriceQuotation` | String | The quoted price for this product. | REST | `price_quotation` |
@@ -293,7 +293,7 @@ Futures schedules: the timed events of each product's trading sessions.
 | `Event` | String | The type of session on the given trading date. | REST | `event` |
 | `ProductCode` | String | The product code of the futures contract. | REST | `product_code` |
 | `ProductName` | String | The name of the futures product to which this schedule applies. | REST | `product_name` |
-| `SessionEndDate` | String | The session end date for the schedules (also known as the trading date). This field is optional and can be used to filter results by a specific session end date. If left blank, schedules for all dates will be returned. Note that trading sessions end at 5 PM Central Time, so a session ending at 5 PM CT on January 1st would have a session_end_date of 2025-01-01. | REST | `session_end_date` |
+| `SessionEndDate` | String | The session end date (also known as the trading date) of the session the event belongs to. Trading sessions end at 5 PM Central Time, so a session ending at 5 PM CT on January 1st has a session_end_date of 2025-01-01. | REST | `session_end_date` |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this schedule's product trades. | REST | `trading_venue` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 

@@ -1006,6 +1006,13 @@ _FUTURES_FILES = "us_futures_{venue}"
 # The unified snapshot serves every asset class, and its trade texts are the stock ones.
 _UNIFIED_SNAPSHOT = "/v3/snapshot"
 
+_PARAMETER_TEXT_REASON = (
+    "Massive describes the response field with its request parameter's text (what passing it "
+    "returns or filters), which says nothing about the value a row carries; the text says "
+    "what the row's value means, keeping the vendor's own definition where it gives one."
+)
+"""Why a field described by its request parameter's text gets its own description."""
+
 DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
     {
         ("/v1/last/crypto/{from}/{to}", "price"): _CRYPTO_PRICE,
@@ -1086,6 +1093,30 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             "`futures.snapshots` column blank. The text is Massive's own for the same field of "
             "the contracts endpoint (`/futures/v1/contracts` `product_code`); each snapshot "
             "row describes one contract, as each contracts row does.",
+        ),
+        ("/futures/v1/contracts", "date"): DescriptionFix(
+            vendor="A date string in the format YYYY-MM-DD. This parameter will return "
+            "point-in-time information about contracts for the specified day.",
+            text="The day, YYYY-MM-DD, whose point-in-time state the row describes: whether the "
+            "contract was tradeable that day (`active`) and its days to maturity from it.",
+            reason=_PARAMETER_TEXT_REASON,
+        ),
+        ("/futures/v1/products", "date"): DescriptionFix(
+            vendor="A date string in the format YYYY-MM-DD. This parameter will return "
+            "point-in-time information about products for the specified day.",
+            text="The day, YYYY-MM-DD, whose point-in-time state the row describes.",
+            reason=_PARAMETER_TEXT_REASON,
+        ),
+        ("/futures/v1/schedules", "session_end_date"): DescriptionFix(
+            vendor="The session end date for the schedules (also known as the trading date). "
+            "This field is optional and can be used to filter results by a specific session "
+            "end date. If left blank, schedules for all dates will be returned. Note that "
+            "trading sessions end at 5 PM Central Time, so a session ending at 5 PM CT on "
+            "January 1st would have a session_end_date of 2025-01-01.",
+            text="The session end date (also known as the trading date) of the session the "
+            "event belongs to. Trading sessions end at 5 PM Central Time, so a session ending "
+            "at 5 PM CT on January 1st has a session_end_date of 2025-01-01.",
+            reason=_PARAMETER_TEXT_REASON,
         ),
     }
 )
