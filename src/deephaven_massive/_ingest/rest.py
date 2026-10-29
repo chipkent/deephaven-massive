@@ -86,9 +86,9 @@ from deephaven_massive._datasets.history_source import StampRule, partition_date
 from deephaven_massive._datasets.row_times import (
     DATE,
     RowTimes,
-    ended_by,
     time_column,
     time_rule,
+    within,
 )
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
@@ -806,6 +806,21 @@ class _Converter:
             return value
 
 
+def _whole(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
+    """Keep the bars of a `history()` window whose filled window lies in it (`row_times.within`).
+
+    Args:
+        rows: Rows with their time columns filled.
+        window: The `history()` window, or None for `fetch()` and `poll()`.
+
+    Returns:
+        The rows kept; every row where the window bounds no bar (ticks, `fetch()`, `poll()`).
+    """
+    if window is None or window.ended_by is None:
+        return rows
+    return within(rows, earliest=window.started_by, latest=window.ended_by)
+
+
 def _keep(batch: pa.RecordBatch, window: HistoryWindow | None, *, time: str) -> pa.RecordBatch:
     """Keep the rows of a `history()` window: on their time, and for sessions on `Date`.
 
@@ -1163,14 +1178,11 @@ class RestReader:
                 # not be dropped unseen by `_keep`.
                 if stamps is not None:
                     batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
-                latest = None if window is None else window.ended_by
                 filled = (
                     times.fill(_keep(batch, window, time=converter.time_name), received=received)
                     for batch in batches
                 )
-                kept.extend(
-                    filled if latest is None else (ended_by(rows, latest) for rows in filled)
-                )
+                kept.extend(_whole(rows, window) for rows in filled)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
                 if requests:

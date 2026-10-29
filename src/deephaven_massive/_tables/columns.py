@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
-import numpy as np
+import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
@@ -44,8 +44,6 @@ from deephaven_massive._datasets.schema import TRANSPORT_LABELS, ColumnType
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-
-    import pyarrow as pa
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.schema import Schema
@@ -145,10 +143,10 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     table: the date columns must be ISO dates, whose set is small, never other text, which
     would grow the pool without bound.
 
-    It costs no more than `to_table` of all the columns, since the date strings are never made
-    per row: on 50, 2,000, and 1,000,000 rows of four dates it took about 0.5, 0.7, and 100 ms,
-    against 0.8, 0.9, and 210 ms for `to_table` alone and 10, 8, and 360 ms through `update()`,
-    on one loaded machine.
+    Its fixed cost per call is under a millisecond, against several through `update()`: on 50
+    rows about 1.4 ms, against 0.6 ms for `to_table` alone; on 2,000 rows the two match; on
+    large batches it is faster than `to_table`, since the date strings are never made per row
+    (about 29 against 46 ms on 200,000 rows), all on one loaded machine.
 
     Runs on any thread inside the session's execution context; the table is static and is
     created in the liveness scope at the top of the calling thread's stack. A schema without
@@ -243,10 +241,13 @@ class _DateRuns:
         if count == 0:
             return cls(0, (), ())
         distinct = pc.unique(column)
-        codes = pc.index_in(column, value_set=distinct).to_numpy(zero_copy_only=False)
-        starts = [0, *(np.flatnonzero(codes[1:] != codes[:-1]) + 1).tolist()]
+        # A null row's code is the null entry's, so a run of nulls is a run like any other.
+        codes = pc.fill_null(pc.index_in(column, value_set=distinct), -1).combine_chunks()
+        changes = pc.indices_nonzero(pc.not_equal(codes[1:], codes[:-1]))
+        starts = [0, *pc.add(changes, 1).to_pylist()]
         texts = distinct.to_pylist()
-        return cls(count, tuple(starts), tuple(texts[int(codes[s])] for s in starts))
+        firsts = codes.take(pa.array(starts, pa.int64())).to_pylist()
+        return cls(count, tuple(starts), tuple(None if c < 0 else texts[c] for c in firsts))
 
     def strings(self) -> object:
         """Build the Java `String[]` of the column, every row of a date sharing one `String`.

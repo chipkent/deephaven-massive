@@ -679,25 +679,30 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     ranged = rows(q.history(day, day, source=dm.HistorySource.REST))
     assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
     assert [r["TimestampStart"] for r in rows(q.fetch())] == [MIDNIGHT_MS * MS]
-    # A week bar stamped 01:00 on the Sunday before its week covers that week: it starts at
-    # Monday's midnight, and since an index can update around the clock, it ends an hour after
-    # the next Monday's midnight. A range must reach that Sunday to keep it.
+    # A week bar stamped 01:00 on the Sunday before its week covers that week, and since an
+    # index can update around the clock, it may hold that Sunday too: it starts at Sunday's
+    # midnight and ends an hour after the next Monday's. A range must reach both Sundays.
     saturday, sunday = MIDNIGHT_MS - 2 * DAY_MS, MIDNIGHT_MS - DAY_MS
     week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{saturday}/{MIDNIGHT_MS + 7 * DAY_MS - 1}"
     fake_rest.reply(
-        quote(week_path), bars_reply(sunday + HOUR_MS), bars_reply(sunday + 16 * HOUR_MS)
+        quote(week_path),
+        bars_reply(sunday + HOUR_MS),
+        bars_reply(sunday + HOUR_MS),
+        bars_reply(sunday + 16 * HOUR_MS),
     )
     week = rest_session.indices.bars("I:SPX", dm.Timespan.WEEK)
-    last = date(2025, 6, 8)
-    weeks = rows(week.history(day, last, source=dm.HistorySource.REST))
+    first, last = date(2025, 6, 1), date(2025, 6, 8)
+    weeks = rows(week.history(first, last, source=dm.HistorySource.REST))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in weeks] == [
-        (None, MIDNIGHT_MS * MS, (MIDNIGHT_MS + 7 * DAY_MS + HOUR_MS) * MS)
+        (None, sunday * MS, (MIDNIGHT_MS + 7 * DAY_MS + HOUR_MS) * MS)
     ]
+    # A range from the Monday leaves it out: the bar may hold the Sunday before.
+    assert rows(week.history(day, last, source=dm.HistorySource.REST)) == []
     # A week bar at the close, or a day bar at 02:00, is another cut: each fails loudly.
     with pytest.raises(
         dm.MassiveError, match=r"^indices\.bars: a bar from .* is stamped 2025-06-01T20:00:00"
     ):
-        week.history(day, last, source=dm.HistorySource.REST)
+        week.history(first, last, source=dm.HistorySource.REST)
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
     with pytest.raises(
         dm.MassiveError,

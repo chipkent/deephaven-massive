@@ -10,7 +10,8 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   instants a REST request covers. Bars are kept only when their whole window lies inside the
   range and has ended: a request selects them by their start (`dates.bar_starts`,
   `dates.bar_sessions`), and a bar whose `TimestampEnd` lies after the range's end or after
-  now is dropped once its time columns are filled (`HistoryWindow.ended_by`).
+  now, or whose `TimestampStart` lies before the range's start, is dropped once its time
+  columns are filled (`HistoryWindow.ended_by` and `started_by`).
 - `partition_dates` turns a window into the dates of the flat files it needs, in the asset
   class's day zone; a futures date names a trading session.
 - `rest_history_problem` says why REST cannot serve a request, if it cannot: the dataset has
@@ -146,7 +147,10 @@ class HistoryWindow:
             now and the range's end, which for dates is the last day's end
             (`dates.day_end`: for futures, 17:00 Chicago on the last session's date). The
             transports drop every later bar once its time columns are filled
-            (`row_times.ended_by`). None for ticks.
+            (`row_times.within`). None for ticks.
+        started_by: For bars, the earliest `TimestampStart` a kept bar may have: the range's
+            start. None for ticks, and for futures named by session dates, whose bars are kept
+            by their label and may open before their first session's date (a holiday fold).
     """
 
     span: TimeRange | DaySpan
@@ -154,6 +158,7 @@ class HistoryWindow:
     sessions: DaySpan | None
     requested: TimeRange | None
     ended_by: datetime | None = None
+    started_by: datetime | None = None
 
     @property
     def empty(self) -> bool:
@@ -217,7 +222,7 @@ def history_window(
     # whether Massive selects bars by their stamp or builds them from `{from}`.
     requested = instants if futures else TimeRange(keep.start, instants.end)
     last = instants.end if isinstance(span, TimeRange) else day_end(asset_class, span.last)
-    return HistoryWindow(span, keep, None, requested, min(last, moment))
+    return HistoryWindow(span, keep, None, requested, min(last, moment), instants.start)
 
 
 def _futures_sessions(

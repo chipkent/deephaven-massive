@@ -595,25 +595,25 @@ class HistoryQuery(QueryBase):
           end` (for bars, `TimestampStart`). Equal instants give an empty table.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole window
-        lies inside the range and has ended: its start lies in the range, and its `TimestampEnd`
-        is no later than now or than the range's end (for dates, the end of the last day: the
-        next midnight, 01:00 New York time for indices, 17:00 Chicago time on the last session's
-        date for futures). Its window is an intraday or 1-day bar's own interval; for stocks,
-        options, and futures, a week Monday to Friday and a month, quarter, or year its calendar
-        period less its leading and trailing weekend days; for indices, which can update around
-        the clock, the same periods as whole calendar periods, weekends included at both ends;
-        for forex and crypto, which trade at weekends, whole calendar weeks (Monday to Sunday),
-        months, quarters, and years; a bar of several units all of them, where several days or
-        sessions end as late as holidays could push them (one weekday more, and one more for
-        every five further days); and a futures bar named by session dates its sessions. So the
-        current day's, week's, or month's bar is never returned, and `history("2025-03-05",
-        "2025-03-20")` of monthly bars is empty. Datetime bounds keep only whole calendar days
-        of 1-day bars: Monday 09:30 to Friday 16:00 New York time returns Tuesday to Thursday,
-        so pass dates for daily bars. A futures bar of several sessions, weeks, or months named
-        by dates is kept only when it fits the range whether Massive labels it with its first or
-        its last session, which is not documented. There is no holiday calendar: a week whose
-        Friday is a holiday is still that Monday-to-Friday week. There is no `limit`: the
-        library pages internally.
+        lies inside the range and has ended: its `TimestampStart` lies in the range, and its
+        `TimestampEnd` is no later than now or than the range's end (for dates, the end of the
+        last day: the next midnight, 01:00 New York time for indices, 17:00 Chicago time on the
+        last session's date for futures). Its window is an intraday or 1-day bar's own interval;
+        for stocks, options, and futures, a week Monday to Friday and a month, quarter, or year
+        its calendar period less its leading and trailing weekend days; for indices, which can
+        update around the clock, the same periods as whole calendar periods, weekends included
+        at both ends; for forex and crypto, which trade at weekends, whole calendar weeks
+        (Monday to Sunday), months, quarters, and years; a bar of several units all of them,
+        where several days or sessions end as late as holidays could push them (one weekday
+        more, and one more for every five further days); and a futures bar named by session
+        dates its sessions. So the current day's, week's, or month's bar is never returned, and
+        `history("2025-03-05", "2025-03-20")` of monthly bars is empty. Datetime bounds keep
+        only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
+        returns Tuesday to Thursday, so pass dates for daily bars. A futures bar of several
+        sessions, weeks, or months named by dates is kept only when it fits the range whether
+        Massive labels it with its first or its last session, which is not documented. There is
+        no holiday calendar: a week whose Friday is a holiday is still that Monday-to-Friday
+        week. There is no `limit`: the library pages internally.
 
         Every row says when it happened, its trading day, and when it arrived: a tick its
         `Timestamp`; a bar its window, `TimestampStart` and the exclusive `TimestampEnd`

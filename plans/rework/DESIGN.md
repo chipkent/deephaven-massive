@@ -1754,15 +1754,15 @@ and `window_start` become `TimestampStart` and the WebSocket bars' `e` becomes `
 Every calendar date, the vendor's (`ExDividendDate`, the economy `Date`) and the library's
 (`Date`), is ISO `yyyy-MM-dd` text, a `String`, so a date compares and joins as text. The
 library stores one shared `String` per distinct date. The Arrow conversion makes one Java
-`String` per row, so every dataset table is built through `_tables/columns.py`
-`dataset_table`: the other columns convert from Arrow, and each date column is built from a
-process-wide pool of one `String` per date, run by run (a copy and doublings per run of rows of
-one date), and joins them as an in-memory column source, with no Deephaven `update()`, whose
-fixed cost of a few milliseconds would fall on every stream flush. A column of interleaved
-dates (more than 4,096 runs) is interned by a formula instead. A million rows of five dates
-hold five `String`s, a reference per row, at no more cost than converting the column from
-Arrow; nothing else may build a dataset table, and only date columns, a small set, go into the
-pool.
+`String` per row, so every dataset table is built through `_tables/columns.py` `dataset_table`:
+the other columns convert from Arrow, and each date column is built from a process-wide pool of
+one `String` per date, run by run (a copy and doublings per run of rows of one date), and joins
+them as an in-memory column source, with no Deephaven `update()`, whose fixed cost of a few
+milliseconds would fall on every stream flush. A column of interleaved dates (more than 4,096
+runs) is interned by a formula instead. A million rows of five dates hold five `String`s, a
+reference per row; the fixed cost per table is under a millisecond, and large batches build
+faster than a plain Arrow conversion; nothing else may build a dataset table, and only date
+columns, a small set, go into the pool.
 
 **`history(start, end=None)` bounds.** A range has two kinds of bounds, and one call never mixes
 them:
@@ -1788,13 +1788,15 @@ partition dates, and the instants a REST request covers (`HistoryWindow`).
 
 **Bars: whole windows.** A bar, of any timespan and multiplier, is returned only when its whole
 window lies inside the range and has ended. One rule decides both, the bar's own `TimestampEnd`
-("Time columns" below): a bar is kept only when its start lies in the range and its
-`TimestampEnd` is no later than the earlier of now and the range's end. A range of dates ends
-where its last day's bar would (`dates.day_end`: the next midnight in the class day zone; 01:00
-New York time for indices; 17:00 Chicago on the last session's date for futures); a range of
-datetimes at its end (`HistoryWindow.ended_by`). The transports drop a later bar once its time
-columns are filled (`row_times.ended_by`), so selection and the join key can never disagree:
-wherever the end is conservative, so is the selection. The windows:
+("Time columns" below): a bar is kept only when its `TimestampStart` is no earlier than the
+range's start (`HistoryWindow.started_by`; futures named by dates are kept by their label
+instead, since a folded session opens before its date) and its `TimestampEnd` is no later than
+the earlier of now and the range's end. A range of dates ends where its last day's bar would
+(`dates.day_end`: the next midnight in the class day zone; 01:00 New York time for indices;
+17:00 Chicago on the last session's date for futures); a range of datetimes at its end
+(`HistoryWindow.ended_by`). The transports drop a later bar once its time columns are filled
+(`row_times.within`), so selection and the join key can never disagree: wherever the end is
+conservative, so is the selection. The windows:
 
 - An intraday bar (second, minute, hour) spans `multiplier` units from its `Timestamp`, on whole
   units of UTC time (whole hours in every zone the library uses).
@@ -1817,11 +1819,12 @@ wherever the end is conservative, so is the selection. The windows:
   calendar period, at its start and its end: an index week runs Monday to Sunday and ends an
   hour after the next Monday begins, so a range must reach that Sunday to keep it, and an index
   month of June 2024 starts on Saturday the 1st, so a range from Monday the 3rd leaves it out.
-  Forex (which trades from Sunday evening UTC) and crypto (every day) keep their weekends:
-  Monday-to-Sunday weeks and whole calendar months, quarters, and years. A forex week is the
-  calendar week until the live check of Massive's forex week bucket ([section
-  23](#23-open-verification-items)) settles where it starts. A bar of `multiplier` periods spans
-  that many.
+  An index week stamped on the Saturday or Sunday before its Monday starts on that day, the
+  earlier reading, since it may hold it. Forex (which trades from Sunday evening UTC) and crypto
+  (every day) keep their weekends: Monday-to-Sunday weeks and whole calendar months, quarters,
+  and years. A forex week is the calendar week until the live check of Massive's forex week
+  bucket ([section 23](#23-open-verification-items)) settles where it starts. A bar of
+  `multiplier` periods spans that many.
 - A futures bar named by session dates is kept by its session label, Massive's
   `session_end_date` (the row's `Date` before a bar of several units has it set to null): an
   intraday bar when its session lies in the range; a session, week, month, quarter, or year bar

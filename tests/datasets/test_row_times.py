@@ -26,10 +26,10 @@ from deephaven_massive._datasets.row_times import (
     TIMESTAMP,
     RowTimes,
     TimeRule,
-    ended_by,
     local_dates,
     time_column,
     time_rule,
+    within,
 )
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._namespaces import futures, indicators, stocks
@@ -91,18 +91,23 @@ def iso(values: pa.Array | pa.ChunkedArray) -> list[str | None]:
     return [None if v is None else v.isoformat() for v in values.to_pylist()]
 
 
-def test_only_rows_ended_by_an_instant_are_kept() -> None:
+def test_only_bars_whose_window_lies_in_the_range_are_kept() -> None:
     rule = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 1)
     filled = rule.fill(bars(["2025-03-03T05:00:00", "2025-03-04T05:00:00"]), received=7)
     latest = datetime(2025, 3, 4, 5, tzinfo=UTC)
-    assert iso(ended_by(filled, latest).column(START)) == ["2025-03-03T05:00:00+00:00"]
+    assert iso(within(filled, earliest=None, latest=latest).column(START)) == [
+        "2025-03-03T05:00:00+00:00"
+    ]
+    # A start bound drops a bar that starts before it.
+    later = datetime(2025, 3, 4, 5, tzinfo=UTC)
+    assert within(filled, earliest=later, latest=latest).num_rows == 0
     # A row whose end is unknown is kept; rows without an end column are all kept.
     unknown = filled.set_column(
         filled.schema.get_field_index(END), END, pa.nulls(2, filled.schema.field(END).type)
     )
-    assert ended_by(unknown, latest).num_rows == 2
+    assert within(unknown, earliest=None, latest=latest).num_rows == 2
     ticks = pa.RecordBatch.from_pydict({"Price": [1.0]})
-    assert ended_by(ticks, latest) is ticks
+    assert within(ticks, earliest=None, latest=latest) is ticks
 
 
 def fill(rule: TimeRule, rows: pa.RecordBatch) -> dict[str, list[object]]:
@@ -370,6 +375,8 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     # after the next Monday begins.
     indices = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.WEEK, 1)
     assert fill(indices, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-10T05:00:00+00:00"]
+    # Stamped on the Sunday before, an index week may hold that Sunday: it starts there.
+    assert fill(indices, bars(["2025-03-02T05:00:00"]))[START] == ["2025-03-02T05:00:00+00:00"]
     index_days = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.DAY, 2)
     assert fill(index_days, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-06T06:00:00+00:00"]
 

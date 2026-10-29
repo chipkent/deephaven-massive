@@ -245,6 +245,8 @@ def test_a_bar_must_end_by_the_range_s_end_and_by_now() -> None:
     # Dates end with their last day: midnight after it, 01:00 New York time for indices.
     stocks = window(STOCK_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
     assert stocks.ended_by == datetime(2025, 3, 5, tzinfo=NEW_YORK)
+    # A bar must also start no earlier than the range.
+    assert stocks.started_by == datetime(2025, 3, 3, tzinfo=NEW_YORK)
     indices = window(INDEX_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
     assert indices.ended_by == datetime(2025, 3, 5, 1, tzinfo=NEW_YORK)
     # Datetimes end at their end; an open end, or one after now, at now.
@@ -257,6 +259,8 @@ def test_a_bar_must_end_by_the_range_s_end_and_by_now() -> None:
     for timespan in (Timespan.MINUTE, Timespan.SESSION):
         sessions = window(FUTURES_BARS, *span, timespan=timespan)
         assert sessions.ended_by == datetime(2025, 3, 5, 17, tzinfo=CHICAGO)
+        # Kept by their label: a folded session opens before its first date.
+        assert sessions.started_by is None
 
 
 def test_an_index_month_covers_its_weekend_days_for_its_start_too() -> None:

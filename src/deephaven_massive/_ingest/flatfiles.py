@@ -125,9 +125,9 @@ from deephaven_massive._datasets.history_source import (
 from deephaven_massive._datasets.row_times import (
     DATE,
     TimeRule,
-    ended_by,
     time_column,
     time_rule,
+    within,
 )
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.timestamps import (
@@ -304,6 +304,8 @@ class _Transform:
             zone (`history_source.stamp_rule`); None otherwise.
         latest_end: For bars, the latest `TimestampEnd` a kept bar may have
             (`HistoryWindow.ended_by`); None otherwise.
+        earliest_start: For bars, the earliest `TimestampStart` a kept bar may have
+            (`HistoryWindow.started_by`); None where the window bounds no start.
     """
 
     dataset: str
@@ -317,6 +319,7 @@ class _Transform:
     time_name: str
     stamps: StampRule | None = None
     latest_end: datetime | None = None
+    earliest_start: datetime | None = None
 
     @classmethod
     def build(
@@ -399,6 +402,7 @@ class _Transform:
             time_name=time_name,
             stamps=stamps,
             latest_end=window.ended_by,
+            earliest_start=window.started_by,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -422,7 +426,7 @@ class _Transform:
         columns the prefix does not carry, and the library's time columns
         (`row_times.TimeRule.fill`). The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
-        reader. A bar whose `TimestampEnd` is after `latest_end` is dropped.
+        reader. A bar whose window does not lie in the window is dropped (`row_times.within`).
 
         Args:
             batch: One block's surviving rows, with the plan's columns.
@@ -440,7 +444,9 @@ class _Transform:
         arrays = [self._column(batch, column) for column in self.columns]
         rows = pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
         filled = self.times.fill(rows, received=received)
-        return filled if self.latest_end is None else ended_by(filled, self.latest_end)
+        if self.latest_end is None:
+            return filled
+        return within(filled, earliest=self.earliest_start, latest=self.latest_end)
 
     def _column(
         self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]

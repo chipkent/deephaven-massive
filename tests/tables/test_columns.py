@@ -26,6 +26,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._massive import Transport
+from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
     COLUMN_TABLE_DESCRIPTIONS,
     col_defs,
@@ -327,6 +328,22 @@ def test_a_dataset_table_shares_one_string_per_date_across_calls(dh_exec_ctx: ob
     assert first.column_names == ["Note", "Date", "Price"]
     assert dh_arrow.to_arrow(first).column("Date").to_pylist() == days
     assert dh_arrow.to_arrow(first).column("Price").to_pylist() == [1.0] * len(days)
+
+
+def test_dates_in_runs_never_take_the_formula(
+    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rows in runs, as every transport sends them, are built from the pool: the formula, whose
+    # fixed cost would fall on every flush, is only for interleaved dates.
+    def refused(*_: object) -> Table:
+        raise AssertionError("the formula path was taken")
+
+    monkeypatch.setattr(columns, "_interned", refused)
+    days = [*["2025-03-03"] * 500, None, *["2025-03-04"] * 500]
+    table = dataset_table(
+        pa.table({"Date": pa.array(days), "Price": pa.array([1.0] * 1001)}), ("Date",)
+    )
+    assert _string_objects(table, "Date") == 2
 
 
 def test_interleaved_dates_are_shared_through_a_formula(dh_exec_ctx: object) -> None:

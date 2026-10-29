@@ -117,10 +117,10 @@ __all__ = [
     "RowTimes",
     "SessionDates",
     "TimeRule",
-    "ended_by",
     "local_dates",
     "time_column",
     "time_rule",
+    "within",
 ]
 
 logger = logging.getLogger(__name__)
@@ -415,26 +415,35 @@ def _ns(moment: datetime) -> int:
     return (moment - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
-def ended_by(rows: _Rows, latest: datetime) -> _Rows:
-    """Keep the rows whose `TimestampEnd` is no later than an instant.
+def within(rows: _Rows, *, earliest: datetime | None, latest: datetime) -> _Rows:
+    """Keep the bars whose filled window lies inside a range: the whole-window rule.
 
     `history()` keeps a bar only when its window has ended by the end of the range and by
     now, judged by the same `TimestampEnd` a join on the end uses, so a bar a join would not
-    yet attach is never returned. A row whose end is unknown (a futures bar sent without its
-    start) is kept, its `TimestampEnd` null.
+    yet attach is never returned; and, where the range bounds starts, only when its
+    `TimestampStart` is no earlier than the range's start, so a bar whose conservative start
+    reaches before the range (an index week stamped on its weekend) is left out. A row whose
+    start or end is unknown (a futures bar sent without its start) is kept, the column null.
 
     Args:
         rows: Rows with their time columns filled (`TimeRule.fill`).
+        earliest: The earliest start to keep (`HistoryWindow.started_by`), or None where the
+            window bounds no start (futures named by session dates, kept by their label).
         latest: The latest end to keep (`HistoryWindow.ended_by`).
 
     Returns:
-        The rows kept, in order; every row of a batch without `TimestampEnd`.
+        The rows kept, in order; every row of a batch without the bar columns.
     """
-    if END not in rows.schema.names:
+    names = rows.schema.names
+    if END not in names:
         return rows
     ends = rows.column(END)
-    keep = pc.less_equal(ends, pa.scalar(_ns(latest), ends.type))
-    return rows.filter(pc.fill_null(keep, fill_value=True))
+    keep = pc.fill_null(pc.less_equal(ends, pa.scalar(_ns(latest), ends.type)), fill_value=True)
+    if earliest is not None and START in names:
+        starts = rows.column(START)
+        late = pc.greater_equal(starts, pa.scalar(_ns(earliest), starts.type))
+        keep = pc.and_(keep, pc.fill_null(late, fill_value=True))
+    return rows.filter(keep)
 
 
 def _midnight(day: date, zone: tzinfo) -> datetime:
@@ -738,6 +747,10 @@ class TimeRule:
             first, after = bar_days(
                 self.asset_class, day, timespan=timespan, multiplier=self.multiplier
             )
+            if self.asset_class is AssetClass.INDICES:
+                # An index can update at weekends: a week stamped on its Saturday or Sunday may
+                # hold that day, so it starts there, the earlier reading.
+                first = min(first, day)
             starts.append(_ns(_midnight(first, zone)))
             ends.append(_ns(day_end(self.asset_class, after - timedelta(days=1))))
             dates.append(day.isoformat() if single else None)
