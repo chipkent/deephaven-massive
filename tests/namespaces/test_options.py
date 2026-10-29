@@ -99,6 +99,29 @@ def test_the_options_datasets_pass_every_catalog_gate() -> None:
     assert Catalog(options.DATASETS).problems() == ()
 
 
+def test_every_options_dataset_has_an_option_root() -> None:
+    for spec in options.DATASETS:
+        schema = CATALOG.dataset_schema(spec)
+        names = schema.column_names
+        assert names.index("OptionRoot") == names.index("Symbol") + (
+            2 if "Timestamp" in names[:2] else 1
+        ), spec.name
+
+
+def test_contracts_carry_the_raw_deliverable_fields() -> None:
+    columns = {c.name: c for c in CATALOG.dataset_schema(options.CONTRACTS).columns}
+    assert columns["SharesPerContract"].description == (
+        "The number of shares per contract for this contract."
+    )
+    assert columns["AdditionalUnderlyings"].type is ColumnType.STRING  # the list as JSON text
+    assert columns["AdditionalUnderlyings"].description.startswith(
+        "If an option contract has additional underlyings or deliverables"
+    )
+    assert columns["Cfi"].description.startswith("The 6 letter CFI code of the contract")
+    assert columns["Correction"].description == "The correction number for this option contract."
+    assert "StandardDeliverable" not in columns
+
+
 def test_each_dataset_reads_its_sources() -> None:
     assert {spec.name: spec.kind for spec in options.DATASETS} == {
         "options.trades": "trades",
@@ -303,21 +326,29 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
 # --- Factories -------------------------------------------------------------------------------
 
 
-def test_trades_quotes_and_fmv_normalize_occ_symbols(massive_session: dm.MassiveSession) -> None:
+def test_trades_quotes_and_fmv_take_massive_option_tickers(
+    massive_session: dm.MassiveSession,
+) -> None:
     m = massive_session
     for factory, cls in (
         (m.options.trades, StreamHistoryLatestQuery),
         (m.options.quotes, StreamHistoryQuery),
         (m.options.fmv, StreamQuery),
     ):
-        q = factory(["AAPL250117C00150000", "o:aapl250117p00150000"])
+        q = factory(["O:AAPL250117P00150000", "O:AAPL250117C00150000"])
         assert type(q) is cls
         assert q._request.symbols == ("O:AAPL250117C00150000", "O:AAPL250117P00150000")
         assert factory(dm.ALL)._request.symbols is dm.ALL
-        with pytest.raises(ValueError, match="is not an OCC option symbol"):
+        with pytest.raises(
+            ValueError, match=r"use 'O:AAPL250117C00150000' .*canonical_symbol_option"
+        ):
+            factory("AAPL250117C00150000")
+        with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
             factory("AAPL")
-        with pytest.raises(ValueError, match="carries the prefix of another asset class"):
+        with pytest.raises(ValueError, match=r"is a crypto ticker; this dataset takes option"):
             factory("X:BTCUSD")
+        with pytest.raises(ValueError, match="not an OCC option symbol with a real expiry"):
+            factory("O:BRK.B250117C00400000")  # an OCC root has no dot
 
 
 def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
@@ -349,7 +380,7 @@ def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSess
 
 def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.MassiveSession) -> None:
     q = massive_session.options.chain(
-        " aapl ",
+        "AAPL",
         contract_type=dm.ContractType.PUT,
         sort="strike_price",
         order=dm.Order.DESC,
@@ -375,8 +406,18 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
     chain = massive_session.options.chain
     with pytest.raises(TypeError, match="underlying must be a str, not _All"):
         chain(cast("str", dm.ALL))
-    with pytest.raises(ValueError, match="underlying must not be empty"):
+    with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        chain("aapl")
+    with pytest.raises(ValueError, match=r"'i:SPX' is an index ticker \(prefix I:\)"):
+        chain("i:SPX")
+    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
+        chain("C:EURUSD")
+    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
+        chain("O:AAPL250117C00150000")
+    assert request_of(chain("KIMpL"))["params"]["underlyingAsset"] == "KIMpL"  # case is kept
+    assert request_of(chain("I:SPX"))["params"]["underlyingAsset"] == "I:SPX"
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
         chain("AAPL", contract_type=cast("dm.ContractType", "call"))
     with pytest.raises(ValueError, match=r"^contract_type is set through its own argument"):
@@ -406,7 +447,7 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
 def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
     contracts = massive_session.options.contracts
     listed = contracts(
-        underlying="nvda",
+        underlying="NVDA",
         contract_type=dm.ContractType.CALL,
         as_of="2025-01-02",
         expired=False,
@@ -461,7 +502,7 @@ def test_as_of_and_date_refuse_a_time(massive_session: dm.MassiveSession) -> Non
 
 def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSession) -> None:
     daily = massive_session.options.daily_open_close
-    q = daily("AAPL250117C00150000", date(2025, 1, 2))
+    q = daily("O:AAPL250117C00150000", date(2025, 1, 2))
     assert type(q) is Query
     assert request_of(q) == {
         "symbols": (CONTRACT,),
@@ -588,11 +629,12 @@ def test_trades_fetch_reads_the_last_trade(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(wire(f"/v2/last/trade/{TSLA}"), Reply(body(load_fixture, "last_trade.json")))
-    out = rows(rest_session.options.trades("TSLA210903C00700000").fetch())
+    out = rows(rest_session.options.trades("O:TSLA210903C00700000").fetch())
     assert sent(fake_rest) == [(f"/v2/last/trade/{TSLA}", {})]
     assert len(out) == 1
     row = out[0]
     assert (row["Symbol"], row["Timestamp"], row["Price"]) == (TSLA, 1617901342969834000, 115.55)
+    assert row["OptionRoot"] == "TSLA"
     assert (row["Size"], row["Exchange"], row["Conditions"]) == (25.0, 312, [227])
     assert row["ParticipantTimestamp"] == 1617901342969834000
     with pytest.raises(ValueError, match=r"use m\.options\.snapshots\(dm\.ALL\)\.fetch\(\)"):
@@ -688,7 +730,7 @@ def test_chain_reads_one_underlying(
     fake_rest.reply("/v3/snapshot/options/AAPL", Reply(body(load_fixture, "chain.json")))
     out = rows(
         rest_session.options.chain(
-            "aapl",
+            "AAPL",
             contract_type=dm.ContractType.CALL,
             sort="strike_price",
             order=dm.Order.ASC,
@@ -710,6 +752,7 @@ def test_chain_reads_one_underlying(
     ]
     (row,) = out
     assert (row["Symbol"], row["Underlying"]) == ("O:AAPL220121C00150000", "AAPL")
+    assert row["OptionRoot"] == "AAPL"
     assert (row["DetailsStrikePrice"], row["GreeksTheta"], row["OpenInterest"]) == (
         150.0,
         0.00229,
@@ -765,7 +808,7 @@ def test_contracts_list_or_read_each_contract(
     fake_rest.reply("/v3/reference/options/contracts", Reply(body(load_fixture, "contracts.json")))
     listed = rows(
         rest_session.options.contracts(
-            underlying="aapl",
+            underlying="AAPL",
             contract_type=dm.ContractType.CALL,
             as_of=date(2021, 11, 1),
             expired=False,
@@ -925,6 +968,7 @@ def test_a_frame_of_each_channel_lands_in_blink(
     rows_when(seen, lambda arrived: len(arrived) == 1)
     (row,) = rows(seen)
     assert row["Symbol"] == SPY
+    assert row["OptionRoot"] == "SPY"
     assert {name: row[name] for name in expected} == expected
     family = ChannelFamily.FMV if topic == "FMV" else ChannelFamily.TICK
     assert ws_session.decisions == [(dm.AssetClass.OPTIONS, family)]
@@ -1024,6 +1068,7 @@ def test_a_flat_file_of_each_prefix_round_trips(
     assert fake_s3.requests == [("flatfiles", key)]
     (row,) = out  # the other contract's row is filtered out
     assert row["Symbol"] == PUT
+    assert row["OptionRoot"] == PUT[2:-15]
     assert {name: row[name] for name in expected} == expected
 
 

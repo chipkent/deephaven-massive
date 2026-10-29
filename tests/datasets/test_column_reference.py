@@ -9,6 +9,7 @@ them on a copy of the directory and on synthetic namespaces that break them.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import os
 import re
@@ -479,6 +480,11 @@ def test_the_rendered_stocks_page() -> None:
 
 {_GUIDE}
 
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), \
+`m.stocks.trades` also have a `RawSymbol` String column, which holds Massive's spelling of a \
+symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every \
+other row. The tables below show the default session, without it.
+
 <a id="trades"></a>
 
 ## `m.stocks.trades`
@@ -517,6 +523,25 @@ Massive's documentation of this dataset:
 {_FOOTER}
 """
     assert page == expected
+
+
+def test_the_raw_symbol_note_names_the_datasets_that_read_their_symbol_from_rows() -> None:
+    second = dataclasses.replace(_STOCK_TRADES, name="stocks.more_trades")
+    catalog = Catalog(
+        (_STOCK_TRADES, second, _RATIOS),
+        source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
+    )
+    page = render(catalog, _PROVENANCE)["stocks.md"]
+    assert "`MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.stocks.trades` and `m.stocks.more_trades` also" in (
+        page
+    )
+    assert page.count("`RawSymbol` String column") == 1
+    # A page whose datasets take their symbols only from requests, or have none, has no note.
+    alone = Catalog(
+        (_RATIOS,),
+        source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
+    )
+    assert "RawSymbol" not in render(alone, _PROVENANCE)["stocks.md"]
 
 
 def test_the_rendered_crypto_page() -> None:

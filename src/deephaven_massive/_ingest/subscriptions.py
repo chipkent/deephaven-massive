@@ -23,7 +23,7 @@ from deephaven_massive._datasets.symbols import ws_symbol
 from deephaven_massive._massive import StatusKind
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven_massive._enums import AssetClass
     from deephaven_massive._massive import Status
@@ -79,7 +79,13 @@ def channel_of(topic: str) -> str:
     return topic.partition(".")[0]
 
 
-def stream_topics(asset_class: AssetClass, channel: str, symbols: Iterable[str]) -> frozenset[str]:
+def stream_topics(
+    asset_class: AssetClass,
+    channel: str,
+    symbols: Iterable[str],
+    *,
+    pairs: Mapping[str, tuple[str, str]],
+) -> frozenset[str]:
     """Return the topics of canonical symbols on a channel, in the wire's spelling.
 
     Args:
@@ -87,11 +93,15 @@ def stream_topics(asset_class: AssetClass, channel: str, symbols: Iterable[str])
             (`ws_symbol`: `C:EURUSD` is `EUR-USD`, `X:BTCUSD` is `BTC-USD`).
         channel: The channel, such as `"T"`.
         symbols: Canonical symbols.
+        pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list;
+            empty for a class other than crypto.
 
     Returns:
         The topics, such as `{"T.AAPL", "T.MSFT"}`.
+
+    A crypto symbol not in `pairs` raises the `KeyError` of `ws_symbol`.
     """
-    return frozenset(f"{channel}.{ws_symbol(asset_class, symbol)}" for symbol in symbols)
+    return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
 
 
 class Sender(Protocol):
