@@ -13,12 +13,13 @@ subscribe frame with one error status that names no topic.
 The server logs through its own logger at WARNING, so its DEBUG frame log (which would show
 the client's authentication frame) never reaches a test that captures every logger.
 
-Tests script the next connections before they happen (`reject_next`, `greet_next`,
-`auth_replies`, each a status, a `(status, message)` pair, a raw frame, or no reply) and act
-on the live one (`send`, `close`) from the test thread. Everything the server observes is kept
-under one lock, and `wait_for` blocks on a condition until a predicate over it holds, so tests
-synchronize with the client's thread deterministically, never by sleeping. Built by the
-`fake_ws_server` fixture in `tests/conftest.py`.
+Tests script the next connections before they happen (`reject_next`, `greet_next`, and
+`auth_replies`, whose entries are a status, a `(status, message)` pair, a raw frame, or `None`
+for a server that never answers the key) and act on the live one (`send`, `close`) from the
+test thread. Everything the server observes is kept under one lock, and `wait_for` blocks on a
+condition until a predicate over it holds, so tests synchronize with the client's thread
+deterministically, never by sleeping. Built by the `fake_ws_server` fixture in
+`tests/conftest.py`.
 """
 
 from __future__ import annotations

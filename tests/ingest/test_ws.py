@@ -1789,14 +1789,16 @@ def test_a_close_during_a_move_leaves_the_old_connection_to_its_hand_over(
         assert release.wait(TIMEOUT)
 
     assert old.post(hold)  # the old loop is busy: the hand-over waits behind it
-    assert held.wait(TIMEOUT)
-    decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
-    custom_session.connections.group._move(old, decision)
-    successor = custom_session.connection("wss://delayed.test/futures")
-    custom_session.close()
-    assert successor.join(0)  # the close closed and joined the successor
-    assert not old.closing  # and left the old connection to its hand-over
-    release.set()
+    try:
+        assert held.wait(TIMEOUT)
+        decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
+        custom_session.connections.group._move(old, decision)
+        successor = custom_session.connection("wss://delayed.test/futures")
+        custom_session.close()
+        assert successor.join(0)  # the close closed and joined the successor
+        assert not old.closing  # and left the old connection to its hand-over
+    finally:  # a failed check must not leave the old loop held
+        release.set()
     assert old.join(TIMEOUT)
     with custom_session.connections.group.lock:
         assert not successor.awaiting
