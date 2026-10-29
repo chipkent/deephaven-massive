@@ -1,5 +1,8 @@
+import os
 import ssl
+import threading
 import urllib.request
+from pathlib import Path
 
 import certifi
 import pytest
@@ -7,18 +10,20 @@ import pytest
 from deephaven_massive._massive.net import http
 
 _CERT_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR")
+_KEY_LOG_VAR = "SSLKEYLOGFILE"
 _PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy")
 
 
 @pytest.fixture
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Remove every certificate and proxy variable for the test.
+    """Remove every certificate, key-log, and proxy variable, and start with no cached TLS context.
 
     Returns:
         The monkeypatch, for further changes the test undoes on exit.
     """
-    for name in (*_CERT_VARS, *_PROXY_VARS):
+    for name in (*_CERT_VARS, _KEY_LOG_VAR, *_PROXY_VARS):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(http, "_CONTEXTS", {})
     return monkeypatch
 
 
@@ -39,9 +44,13 @@ def _record_cafile(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
     return calls
 
 
+REST = http.TlsConsumer.URLLIB3
+WEBSOCKET = http.TlsConsumer.WEBSOCKETS
+
+
 def test_ssl_context_trusts_certifi_by_default(clean_env: pytest.MonkeyPatch) -> None:
     calls = _record_cafile(clean_env)
-    context = http.ssl_context()
+    context = http.ssl_context(REST)
     assert calls == [certifi.where()]
     assert context.verify_mode is ssl.CERT_REQUIRED
     assert context.check_hostname
@@ -53,7 +62,7 @@ def test_ssl_context_defers_to_openssl_when_a_cert_variable_is_set(
 ) -> None:
     clean_env.setenv(variable, certifi.where())
     calls = _record_cafile(clean_env)
-    http.ssl_context()
+    http.ssl_context(REST)
     assert calls == [None]
 
 
@@ -63,12 +72,131 @@ def test_an_empty_cert_variable_counts_as_unset(
 ) -> None:
     clean_env.setenv(variable, "")
     calls = _record_cafile(clean_env)
-    http.ssl_context()
+    http.ssl_context(REST)
     assert calls == [certifi.where()]
 
 
-def test_each_ssl_context_is_new(clean_env: pytest.MonkeyPatch) -> None:
-    assert http.ssl_context() is not http.ssl_context()
+def test_the_same_settings_share_one_ssl_context(clean_env: pytest.MonkeyPatch) -> None:
+    calls = _record_cafile(clean_env)
+    first = http.ssl_context(REST)
+    clean_env.setenv("SSL_CERT_FILE", "")  # empty counts as unset, so it is the same setting
+    assert http.ssl_context(REST) is first
+    assert calls == [certifi.where()]  # built once
+
+
+def test_urllib3_and_websockets_never_share_an_ssl_context(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    rest, websocket = http.ssl_context(REST), http.ssl_context(WEBSOCKET)
+    assert rest is not websocket
+    assert (http.ssl_context(REST), http.ssl_context(WEBSOCKET)) == (rest, websocket)
+
+
+def test_different_settings_get_different_ssl_contexts(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _record_cafile(clean_env)
+    default = http.ssl_context(REST)
+    clean_env.setenv("SSL_CERT_FILE", certifi.where())
+    by_file = http.ssl_context(REST)
+    clean_env.setenv("SSL_CERT_DIR", str(tmp_path))
+    by_both = http.ssl_context(REST)
+    clean_env.delenv("SSL_CERT_FILE")
+    by_dir = http.ssl_context(REST)
+    assert len({id(default), id(by_file), id(by_both), id(by_dir)}) == 4
+    clean_env.delenv("SSL_CERT_DIR")
+    assert http.ssl_context(REST) is default  # a setting seen before reuses its context
+    assert calls == [certifi.where(), None, None, None]
+
+
+def test_a_cert_file_created_after_the_first_call_gets_a_new_context(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = tmp_path / "ca.pem"
+    clean_env.setenv("SSL_CERT_FILE", str(bundle))
+    missing = http.ssl_context(REST)
+    bundle.write_bytes(Path(certifi.where()).read_bytes())
+    created = http.ssl_context(REST)
+    assert created is not missing
+    assert http.ssl_context(REST) is created
+
+
+def test_a_cert_file_replaced_in_place_gets_a_new_context(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = tmp_path / "ca.pem"
+    certificates = Path(certifi.where()).read_bytes()
+    bundle.write_bytes(certificates)
+    clean_env.setenv("SSL_CERT_FILE", str(bundle))
+    original = http.ssl_context(REST)
+    bundle.write_bytes(certificates + b"\n")  # the same path and inode, a different size
+    replaced = http.ssl_context(REST)
+    assert replaced is not original
+    assert http.ssl_context(REST) is replaced
+    # A new file renamed over the old one, with the same size and modification time: only
+    # its inode tells it apart.
+    swapped = tmp_path / "new.pem"
+    swapped.write_bytes(certificates + b"\n")
+    current = bundle.stat()
+    os.utime(swapped, ns=(current.st_atime_ns, current.st_mtime_ns))
+    swapped.replace(bundle)
+    assert http.ssl_context(REST) is not replaced
+
+
+def test_a_cert_directory_created_after_the_first_call_gets_a_new_context(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = tmp_path / "certs"
+    clean_env.setenv("SSL_CERT_DIR", str(directory))
+    missing = http.ssl_context(REST)
+    directory.mkdir()
+    assert http.ssl_context(REST) is not missing
+
+
+def test_a_key_log_file_gets_its_own_context(clean_env: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    plain = http.ssl_context(REST)
+    key_log = tmp_path / "keys.log"
+    clean_env.setenv("SSLKEYLOGFILE", str(key_log))
+    logging_keys = http.ssl_context(REST)
+    assert logging_keys is not plain
+    assert logging_keys.keylog_filename == str(key_log)
+    clean_env.delenv("SSLKEYLOGFILE")
+    assert http.ssl_context(REST) is plain
+
+
+def test_concurrent_first_calls_build_one_ssl_context(clean_env: pytest.MonkeyPatch) -> None:
+    calls = _record_cafile(clean_env)
+    start = threading.Barrier(16, timeout=30)
+    contexts: list[ssl.SSLContext] = []
+    guard = threading.Lock()
+
+    def first_call() -> None:  # a failure leaves its context out of the count below
+        start.wait()
+        context = http.ssl_context(REST)
+        with guard:
+            contexts.append(context)
+
+    threads = [threading.Thread(target=first_call) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert len(contexts) == 16
+    assert all(context is contexts[0] for context in contexts)
+    assert calls == [certifi.where()]
+
+
+@pytest.mark.parametrize("consumer", list(http.TlsConsumer))
+def test_the_ssl_context_offers_http_1_1(
+    clean_env: pytest.MonkeyPatch, consumer: http.TlsConsumer
+) -> None:
+    # The client's first handshake message lists the offered protocols, each length-prefixed.
+    outgoing = ssl.MemoryBIO()
+    context = http.ssl_context(consumer)
+    tls = context.wrap_bio(ssl.MemoryBIO(), outgoing, server_hostname="example.com")
+    with pytest.raises(ssl.SSLWantReadError):
+        tls.do_handshake()
+    assert b"\x08http/1.1" in outgoing.read()
 
 
 def test_ca_file_is_certifi_by_default(clean_env: pytest.MonkeyPatch) -> None:

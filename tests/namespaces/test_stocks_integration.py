@@ -1,4 +1,4 @@
-"""Live checks of stock data against Massive: stream time units, bar alignment, and filings.
+"""Live checks of stock data against Massive: stream time units, bar alignment and stamps, filings.
 
 Each test records what Massive sent (`evidence`) and asserts only that the requests worked,
 except where the check is a plain yes or no. Streams subscribe to one symbol, wait for their
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, date, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    from deephaven_massive._query import HistoryQuery
 
 pytestmark = pytest.mark.integration
 
@@ -40,6 +43,18 @@ FlatFileTickers: TypeAlias = (
 )
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
+StampedBar: TypeAlias = "tuple[int, tuple[float | None, ...]]"
+StampDays: TypeAlias = "dict[str, tuple[date, date]]"
+RangeBars: TypeAlias = "Callable[[str, str, tuple[date, date]], list[dict[str, Any]]]"
+ToStampedBar: TypeAlias = "Callable[[Mapping[str, Any]], StampedBar]"
+DayBarReport: TypeAlias = (
+    "Callable[[str, tuple[date, ...], Mapping[str, Mapping[date, list[StampedBar]]]], list[date]]"
+)
+PrevBarReport: TypeAlias = "Callable[[str], int]"
+PeriodBarReport: TypeAlias = (
+    "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
+)
+LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 
 _SYMBOL = "AAPL"
 _RANGE = "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"
@@ -52,6 +67,7 @@ _COST = (date(2023, 12, 22), date(2023, 12, 29))
 _HALF_DAYS = (date(2025, 11, 28), date(2025, 12, 24))
 """US market half days, closing at 13:00 New York time."""
 _GROUPED = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
+_DAY_FILE = "us_stocks_sip/day_aggs_v1"
 _DAY_NS = 86_400 * 1_000_000_000
 _STREAM_WAIT = 60.0
 """Seconds a stream test waits for its first frame; stocks trade on weekdays only."""
@@ -395,6 +411,131 @@ def test_half_day_stock_flat_files_and_their_stamps(
             stamps = [_new_york(int(str(r["window_start"]))) for r in (rows[:1] + rows[-1:])]
             evidence(f"{prefix} {day}: {len(rows)} rows; first and last window_start {stamps}")
     assert read
+
+
+def _symbol_rows(query: HistoryQuery, day: date) -> Table:
+    """Return the test symbol's rows of one day of a `dm.ALL` history over REST.
+
+    Returns:
+        The rows, filtered in Deephaven.
+    """
+    return query.history(day, day, source=dm.HistorySource.REST).where(f"Symbol == `{_SYMBOL}`")
+
+
+def _record_library_stock_stamps(
+    session: dm.MassiveSession,
+    *,
+    stamp_days: StampDays,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> None:
+    """Record the library's windows of the bars the REST stamp check reads raw, call by call.
+
+    One evidence line per library call, each recorded as it returns: `history()` of the two
+    days, `fetch()`, the grouped-daily `dm.ALL` history of each day (AAPL's row), and the
+    week and month history.
+    """
+    days = stamp_days["day"]
+    rest = dm.HistorySource.REST
+    day_bars = session.stocks.bars(_SYMBOL, dm.Timespan.DAY)
+    every = session.stocks.bars(dm.ALL, dm.Timespan.DAY)
+    evidence(
+        "library history(REST): " + library_stamps(partial(day_bars.history, *days, source=rest))
+    )
+    evidence(f"library fetch() (/prev): {library_stamps(day_bars.fetch)}")
+    for day in days:
+        outcome = library_stamps(partial(_symbol_rows, every, day))
+        evidence(f"library dm.ALL history(REST) {day} (grouped daily): {outcome}")
+    for span in (dm.Timespan.WEEK, dm.Timespan.MONTH):
+        query = session.stocks.bars(_SYMBOL, span)
+        outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
+        evidence(f"library {span.value} history: {outcome}")
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("50")
+@pytest.mark.requests(16)
+@pytest.mark.timeout(100)
+def test_stock_day_and_longer_bar_stamps_from_rest(
+    live_session: dm.MassiveSession,
+    *,
+    stamp_days: StampDays,
+    rest_rows: RestRows,
+    stamped_bar: ToStampedBar,
+    day_bar_report: DayBarReport,
+    prev_bar_report: PrevBarReport,
+    period_bar_report: PeriodBarReport,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> None:
+    """How every REST source stamps AAPL's 1-day, week, and month bars, and whether they agree.
+
+    The days are those of the most recent finished Thanksgiving week: its Wednesday, a full
+    trading day, and its Friday, a half day closing at 13:00 New York time. Records, each stamp
+    in UTC and New York time: the range endpoint's 1-day bars around both days and each day's
+    grouped-daily row, with which day's range bar it matches and the largest relative error;
+    `/prev`, which serves only the most recent completed trading day (a short-day stamp shows
+    only on a run the trading day after a half day), beside the range bars of that day; the
+    week bars of Thanksgiving week and the week before, and the month bars of the two whole
+    months before the current one; and the library's `TimestampStart`, `TimestampEnd`, and
+    `Date` for the same requests. Reading it: 1-day stamps at 00:00, 13:00, or 16:00 New
+    York time, longer bars at 00:00 New York time on their period's first day (or the weekend
+    before a week's Monday), and matching values confirm the library's day label; a
+    `MassiveError` in the library lines shows a stamp it refuses.
+    """
+    days = stamp_days["day"]
+    grouped = {
+        day: [
+            stamped_bar(r) for r in rest_rows(_GROUPED, {"date": day}, {}) if r.get("T") == _SYMBOL
+        ]
+        for day in days
+    }
+    missing = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
+    prevs = prev_bar_report(_SYMBOL)
+    spans = {span: stamp_days[span] for span in ("week", "month")}
+    periods = period_bar_report(_SYMBOL, spans, {"week": (2, 2), "month": (2, 2)})
+    _record_library_stock_stamps(
+        live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
+    )
+    assert not missing, f"no range bar on {missing}"
+    assert all(grouped.values()), f"a stamp day has no grouped-daily row: {grouped}"
+    assert prevs, "/prev returned no bar"
+    assert periods, "the range did not return one bar for each of two weeks and two months"
+
+
+@pytest.mark.needs("stocks:starter", "s3")
+@pytest.mark.settles("50")
+@pytest.mark.timeout(100)
+def test_stock_day_bar_stamps_of_the_day_file(
+    live_session: dm.MassiveSession,
+    *,
+    stamp_days: StampDays,
+    flat_file_tickers: FlatFileTickers,
+    stamped_bar: ToStampedBar,
+    day_bar_report: DayBarReport,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> None:
+    """How `us_stocks_sip/day_aggs_v1` stamps AAPL's 1-day bars, and whether they match REST.
+
+    Records the file's AAPL row of the most recent finished Thanksgiving week's Wednesday (a
+    full day) and Friday (a half day), its `window_start` in UTC and New York time, beside the
+    range endpoint's bars around those days and which day's bar it matches with the largest
+    relative error, and the library's `history(source=FLAT_FILES)` windows. Reading it: a
+    stamp the library accepts (00:00 or 16:00 New York time, or 13:00 on the half day) and a
+    match on the same day confirm one day label for files and REST.
+    """
+    days = stamp_days["day"]
+    files: dict[date, list[StampedBar]] = {}
+    for day in days:
+        result = flat_file_tickers(_DAY_FILE, day, [_SYMBOL])
+        files[day] = [] if result is None else [stamped_bar(r) for r in result[0]]
+    missing = day_bar_report(_SYMBOL, days, {_DAY_FILE: files})
+    as_traded = live_session.stocks.bars(_SYMBOL, dm.Timespan.DAY, adjusted=False)
+    outcome = library_stamps(partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES))
+    evidence(f"library history(FLAT_FILES): {outcome}")
+    assert not missing, f"no range bar on {missing}"
+    assert all(files.values()), f"the day file lacks a stamp day: {files}"
 
 
 def _days(
