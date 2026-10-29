@@ -71,7 +71,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven.dherror import DHError
-from deephaven.update_graph import has_exclusive_lock, has_shared_lock
+from deephaven.update_graph import has_exclusive_lock, has_shared_lock, shared_lock
 
 from deephaven_massive._enums import UnknownSymbols
 from deephaven_massive._errors import MassiveError
@@ -1498,10 +1498,11 @@ class SessionCore:
         updates")`, and with it every table derived from it (a failed table keeps its rows for
         `snapshot()`, `to_pandas`, and `to_arrow`); the closers run (the session's streams leave
         their connections, connections no other session uses close, and the pollers stop); the
-        final rows are written and the diagnostics scope released. Results stay tracked, so
-        garbage collection and `release()` still free them. Logs "MassiveSession #1 closed; N live
-        tables failed": a WARNING when N > 0, INFO otherwise; the tables themselves are not
-        logged one by one.
+        final rows are written and the diagnostics scope released, and `close()` returns once
+        the update cycle that applied them has ended, so a held view shows them. Results stay
+        tracked, so garbage collection and `release()` still free them. Logs "MassiveSession #1
+        closed; N live tables failed": a WARNING when N > 0, INFO otherwise; the tables
+        themselves are not logged one by one.
 
         Raises:
             ValueError: On an update-graph thread, even when the session is already closed.
@@ -1535,6 +1536,11 @@ class SessionCore:
             except Exception:
                 logger.exception("%s: a transport failed to close", self.label)
         self.diagnostics.release()
+        # The final rows are in the diagnostics tables, but a view of them (a held
+        # `m.streams()`) updates later in the update cycle that applied them: wait for that
+        # cycle to end, so a view read right after close() shows them.
+        with shared_lock(self.exec_ctx.update_graph):
+            pass
         level = logging.WARNING if failed else logging.INFO
         logger.log(level, "%s closed; %d live tables failed", self.label, failed)
 

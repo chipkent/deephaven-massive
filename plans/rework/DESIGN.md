@@ -779,7 +779,9 @@ return result
   4. It runs the closers: the session's own streams leave their connections, and every
      connection no other session leases is closed and joined for a bounded time; the pollers
      stop.
-  5. It writes the final rows, then releases the diagnostics scope.
+  5. It writes the final rows, then releases the diagnostics scope, and returns once the
+     update cycle that applied the rows has ended (it takes the shared update-graph lock once),
+     so a held `m.streams()` view, which updates later in that cycle, shows them.
   6. It logs "MassiveSession #1 closed; N live tables failed", at WARNING when N > 0 and at
      INFO when N is 0. N counts the tables that are failed once the close is done, including
      one a racing failure failed first; the tables are not logged one by one.

@@ -348,7 +348,11 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
         assert gate.wait(TIMEOUT)
 
     core.defer(hold)
-    sink.fail_later("the symbol table failed, so the result can no longer follow it")
+    # What the watch's callback does, called here from a Python thread, which line coverage
+    # before 3.14 can see.
+    stream._fail_later(
+        weakref.ref(sink), "the symbol table failed, so the result can no longer follow it"
+    )
     assert not sink.failed  # nothing failed on the reporting thread
     gate.set()
     drain()
