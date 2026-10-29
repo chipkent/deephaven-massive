@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import gc
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
@@ -670,7 +671,7 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
             session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
         )
         assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
-    reader = cast("Any", session._core.rest_transport())._reader()
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
     assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
     # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
     assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
@@ -696,7 +697,7 @@ def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000",
         Reply(envelope([_ticker("X:FTTUSD", "FTT", "USD"), _ticker("X:BTCUSD", "BT", "CUSD")])),
     )
-    reader = cast("Any", session._core.rest_transport())._reader()
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
     assert reader.crypto_pair("X:FTTUSD") == ("FTT", "USD")
     assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
     assert sent(fake_rest) == [
@@ -711,15 +712,13 @@ def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
     # The list is crypto reference data: its pages count against the currencies subscription,
     # and they take one turn at a time among the bucket's other reads, as one read does.
     admitted: list[tuple[str, object]] = []
-    acquire = _massive.RequestGovernor.acquire
+    admission = _massive.RequestGovernor.admission
 
-    def recording(
-        governor: _massive.RequestGovernor, bucket: str, cancel: _massive.Cancel, *, lane: object
-    ) -> object:
+    def recording(governor: _massive.RequestGovernor, bucket: str, *, lane: object) -> object:
         admitted.append((bucket, lane))
-        return acquire(governor, bucket, cancel, lane=lane)
+        return admission(governor, bucket, lane=lane)
 
-    monkeypatch.setattr(_massive.RequestGovernor, "acquire", recording)
+    monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
     second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
     first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
     fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
@@ -727,7 +726,7 @@ def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
     fake_rest.reply(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
     )
-    reader = cast("Any", session._core.rest_transport())._reader()
+    reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
     assert requests_by_bucket(session) == {"currencies": 3}
     assert [bucket for bucket, _ in admitted] == ["currencies"] * 3
@@ -760,7 +759,7 @@ def test_a_crypto_pair_lookup_never_guesses(
     message: str | None,
 ) -> None:
     fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)), Reply(envelope([])))
-    reader = cast("Any", session._core.rest_transport())._reader()
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
     if message is None:  # the row of the ticker itself decides
         assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
         return
@@ -777,7 +776,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
         Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
         Reply(envelope([])),
     )
-    reader = cast("Any", session._core.rest_transport())._reader()
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
     with pytest.raises(
         dm.EntitlementError,
         match=r"^'X:DOTUSD' cannot be split into its two currencies: reading Massive's crypto",
@@ -791,7 +790,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    reader = cast("Any", session._core.rest_transport())._reader()
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
     claimed: list[Future[Any]] = []
 
     def pages(*_: object, **__: object) -> Iterator[Any]:
@@ -845,7 +844,7 @@ def _wait_for_pair(
 def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     *, session: dm.MassiveSession, outcome: str
 ) -> None:
-    reader = cast("Any", session._core.rest_transport())._reader()
+    reader = cast("Any", session._core.rest_transport())._reader("call-1")
     future = _WatchedFuture()
     results, waiter = _wait_for_pair(reader, future)
     if outcome == "fails":
@@ -1003,7 +1002,26 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
     assert "X:ETHUSD has no data (HTTP 404" in caplog.text
 
 
+def test_fan_out_threads_are_named_after_the_session_and_the_call(
+    session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    last = {"conditions": [1], "exchange": 1, "price": 1.5, "size": 0.1, "timestamp": 1704310200000}
+    for pair in ("BTC/USD", "ETH/USD"):
+        body = {"status": "success", "request_id": "r", "symbol": pair, "last": last}
+        fake_rest.reply(f"/v1/last/crypto/{pair}", Reply(body))
+    serve_pairs(fake_rest)
+    with caplog.at_level(logging.DEBUG, "deephaven_massive"):
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
+    workers = {str(r.threadName) for r in caplog.records if r.threadName != "MainThread"}
+
+    # The call's id is the first of the test, and each worker's number follows the prefix.
+    prefix = f"{session._core.thread_prefix} call-1 rest_"
+    assert workers
+    assert all(re.fullmatch(rf"{re.escape(prefix)}\d", name) for name in workers), workers
+
+
 def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
+
     spec = DatasetSpec(
         summary="A dataset for the tests.",
         name="stocks.pair",
@@ -1366,7 +1384,7 @@ def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     session.close()
     with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
-        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)))
+        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1)
 
 
 # --- History -----------------------------------------------------------------------------------
@@ -2005,7 +2023,7 @@ def test_a_read_fans_out_on_the_callers_pool(
             f"/v1/last/crypto/{pair}",
             Reply({"status": "success", "request_id": "r", "symbol": pair, "last": last}),
         )
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
     calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
@@ -2048,7 +2066,7 @@ def test_an_error_row_needs_only_its_symbol(
     )
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     table, _ = reader.read_fetch(timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",))
     assert table.column("Symbol").to_pylist() == ["I:VIX"]
     assert table.column("Timestamp").to_pylist() == [None]
@@ -2058,7 +2076,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest.plan_calls(
@@ -2165,7 +2183,7 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
 
 
 def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> None:
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
     table, requests = reader.read_fetch(DIVIDENDS, request, symbols=())
@@ -2634,14 +2652,28 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
     governor = governor_of(m)
     for _ in range(4):  # one slot is left
         governor.done(
-            governor.acquire("currencies", _massive.Cancel(), lane=object()), answered=True
+            governor.admission("currencies", lane=object()).acquire(_massive.Cancel()),
+            answered=True,
         )
     refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
     for pair in ("EUR/USD", "GBP/USD", "AUD/USD"):
         fake_rest.reply(f"/v1/conversion/{pair}", refused)
-    try:
-        with pytest.raises(dm.EntitlementError, match="upgrade"):
+    errors: list[BaseException] = []
+
+    def read() -> None:
+        try:
             fetch(m, CONVERSION, symbols=["C:EURUSD", "C:GBPUSD", "C:AUDUSD"])
+        except dm.EntitlementError as error:
+            errors.append(error)
+
+    try:
+        # On its own thread, so a call left waiting for a slot fails the test, not hangs it.
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        reader.join(TIMEOUT)
+        assert not reader.is_alive(), "the calls waiting for a slot were not stopped"
+        assert len(errors) == 1
+        assert "upgrade" in str(errors[0])
         assert len(fake_rest.requests) == 1  # the others gave up their places unsent
         assert next(s for s in governor.snapshot() if s.bucket == "currencies").waiting == 0
     finally:
@@ -2694,7 +2726,7 @@ def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
     session: dm.MassiveSession,
 ) -> None:
     # The first call only fails because the second one's failure cancelled its wait.
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     stop = _massive.Cancel()
 
     def run(call: rest.Call) -> NoReturn:
@@ -2727,7 +2759,9 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
     m = dm.MassiveSession(config)
     governor = governor_of(m)
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+        governor.done(
+            governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
     q = query(m, DIVIDENDS, symbols=["AAPL"])
     assert isinstance(q, Query)
     left = threading.Event()

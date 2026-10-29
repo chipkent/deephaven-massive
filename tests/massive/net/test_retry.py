@@ -99,10 +99,20 @@ def test_the_system_clock_wait_ends_when_its_event_is_set() -> None:
     assert retry.SYSTEM_CLOCK.wait(event, 60.0) is True
 
 
-def test_the_system_clock_waits_without_a_deadline_until_its_event_is_set() -> None:
-    # `threading.Event.wait` refuses an infinite timeout; the clock waits for the event alone.
+def test_the_system_clock_waits_without_a_deadline_until_its_event_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `threading.Event.wait` refuses an infinite timeout; the clock waits for the event alone,
+    # in short chunks. The event is set only once the waiter has been blocked for a while.
+    monkeypatch.setattr(retry, "UNTIMED_CHUNK", 0.01)
     event = threading.Event()
-    setter = threading.Thread(target=event.set, daemon=True)
-    setter.start()
-    assert retry.SYSTEM_CLOCK.wait(event, math.inf) is True
-    setter.join(10)
+    results: list[bool] = []
+    waiter = threading.Thread(
+        target=lambda: results.append(retry.SYSTEM_CLOCK.wait(event, math.inf)), daemon=True
+    )
+    waiter.start()
+    waiter.join(0.2)
+    assert waiter.is_alive()  # still waiting, across several chunks
+    event.set()
+    waiter.join(10)
+    assert results == [True]

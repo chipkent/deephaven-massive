@@ -24,10 +24,10 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _namespaces, _session
+from deephaven_massive import _debug_log, _namespaces, _session
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._enums import AssetClass, ClassFromPrefix
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import reference
@@ -68,7 +68,7 @@ SPEC = DatasetSpec(
     name="test.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(Transport.WS, "stocks/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 
@@ -151,6 +151,44 @@ def test_labels_count_up() -> None:
     assert label(b) == f"MassiveSession #{first + 1}"
     a.close()
     b.close()
+
+
+def test_the_session_threads_are_named_after_the_session() -> None:
+    with dm.MassiveSession(dm.MassiveConfig(api_key="k")) as m:
+        number = label(m).removeprefix("MassiveSession #")
+        assert m._core.thread_prefix == f"massive #{number}"
+        names = {thread.name for thread in threading.enumerate()}
+        assert {f"massive #{number} reaper", f"massive #{number} diagnostics"} <= names
+
+
+def test_the_first_session_applies_the_logging_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_debug_log, "_switch", _debug_log._Switch())
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "verbose")
+    with pytest.raises(
+        ValueError, match=r"^DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level"
+    ):
+        dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+
+
+@pytest.mark.parametrize("s3", [False, True])
+def test_creating_a_session_logs_its_configuration_without_secrets(
+    *, s3: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = dm.MassiveConfig(
+        api_key="api-hidden",
+        s3_access_key_id="AKIDLOG" if s3 else None,
+        s3_secret_access_key="s3-hidden" if s3 else None,
+    )
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._session"):
+        m = dm.MassiveSession(config)
+    m.close()
+    [line] = [r.getMessage() for r in caplog.records if "with api_key set" in r.getMessage()]
+    secret = "set" if s3 else "unset"
+    assert line == f"{label(m)}: {config!r} with api_key set, s3_secret_access_key {secret}"
+    assert "api-hidden" not in line
+    assert "s3-hidden" not in line
 
 
 def test_config_must_be_a_massive_config() -> None:
