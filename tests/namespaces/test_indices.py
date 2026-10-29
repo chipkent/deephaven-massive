@@ -27,6 +27,7 @@ from deephaven.stream import blink_to_append_only
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+from deephaven_massive._enums import NotBars
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import indices
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -114,7 +115,7 @@ def test_every_dataset_is_an_instrument_dataset() -> None:
 def test_values_history_is_flat_files_only() -> None:
     assert indices.VALUES.has_fetch
     assert not indices.VALUES.has_rest_history
-    assert indices.VALUES.flat_file_prefixes == {None: "us_indices/values_v1"}
+    assert indices.VALUES.flat_file_prefixes == {NotBars.ANY: "us_indices/values_v1"}
 
 
 def _schema(spec: DatasetSpec) -> list[tuple[str, str]]:

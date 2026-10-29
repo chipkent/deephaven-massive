@@ -31,7 +31,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import HostDecision, Request
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, hosts, poll, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import Diagnostics, StreamUpdate
@@ -73,28 +73,28 @@ TRADES = DatasetSpec(
     name="test.trades",
     summary="A test dataset.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(W, "stocks/T"): STOCK_KEYS},
 )
 QUOTES = DatasetSpec(
     name="test.quotes",
     summary="A test dataset.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "Q"},
+    channels={NotBars.ANY: "Q"},
     keys={(W, "stocks/Q"): STOCK_KEYS},
 )
 FOREX = DatasetSpec(
     name="test.forex",
     summary="A test dataset.",
     asset_class=AssetClass.FOREX,
-    channels={None: "C"},
+    channels={NotBars.ANY: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
 )
 FOREX_FMV = DatasetSpec(
     name="test.forex_fmv",
     summary="A test dataset.",
     asset_class=AssetClass.FOREX,
-    channels={None: "FMV"},
+    channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
     keys={(W, "forex/FMV"): SourceKeys(KeySpec("Ticker"))},
 )
@@ -102,28 +102,28 @@ CRYPTO = DatasetSpec(
     name="test.crypto",
     summary="A test dataset.",
     asset_class=AssetClass.CRYPTO,
-    channels={None: "XT"},
+    channels={NotBars.ANY: "XT"},
     keys={(W, "crypto/XT"): SourceKeys(KeySpec("Pair"), KeySpec("ParticipantTimestamp"))},
 )
 OPTIONS = DatasetSpec(
     name="test.options",
     summary="A test dataset.",
     asset_class=AssetClass.OPTIONS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(W, "options/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 OPTION_QUOTES = DatasetSpec(
     name="test.option_quotes",
     summary="A test dataset.",
     asset_class=AssetClass.OPTIONS,
-    channels={None: "Q"},
+    channels={NotBars.ANY: "Q"},
     keys={(W, "options/Q"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 FUTURES = DatasetSpec(
     name="test.futures",
     summary="A test dataset.",
     asset_class=AssetClass.FUTURES,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(W, "futures/T"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
 )
 
@@ -131,7 +131,7 @@ QUOTES_FUTURES = DatasetSpec(
     name="test.futures_quotes",
     summary="A test dataset.",
     asset_class=AssetClass.FUTURES,
-    channels={None: "Q"},
+    channels={NotBars.ANY: "Q"},
     keys={(W, "futures/Q"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
 )
 

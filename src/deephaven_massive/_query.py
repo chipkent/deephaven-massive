@@ -51,6 +51,7 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 
 from deephaven_massive._config import require_positive_int, require_positive_number
+from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.history_source import (
     choose_source,
@@ -482,7 +483,7 @@ class StreamQuery(QueryBase):
         A stream query exists only for a timespan with a channel (`bar_query_class`), so the
         lookup always finds one.
         """
-        return self._spec.channels[self._request.timespan]
+        return self._spec.channels[timespan_key(self._request.timespan)]
 
     def _stream_request(self) -> Request:
         """Return the request the stream is opened for, with a static symbol table read once.

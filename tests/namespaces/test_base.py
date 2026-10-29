@@ -26,7 +26,7 @@ from deephaven_massive import _enums, _query, _types
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     ADJUSTED_PRICE,
@@ -92,7 +92,7 @@ TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
 )
 DIVIDENDS = DatasetSpec(
     name="stocks.dividends",
@@ -231,7 +231,7 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         name="forex.quotes",
         summary="A dataset for the tests.",
         asset_class=AssetClass.FOREX,
-        channels={None: "C"},
+        channels={NotBars.ANY: "C"},
     )
     assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
     with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
@@ -437,7 +437,7 @@ def test_a_symbol_table_needs_a_symbol_column(
 
 _FETCH = {"fetch_path": "/v2/last/trade/{stocksTicker}"}
 _HISTORY = {"history_path": "/v3/trades/{stockTicker}"}
-_CHANNELS = {"channels": {None: "T"}}
+_CHANNELS = {"channels": {NotBars.ANY: "T"}}
 
 
 @pytest.mark.parametrize(
@@ -469,8 +469,8 @@ def test_flat_files_are_a_history_source() -> None:
         name="indices.values",
         summary="A dataset for the tests.",
         asset_class=AssetClass.INDICES,
-        channels={None: "V"},
-        flat_file_prefixes={None: "us_indices/values_v1"},
+        channels={NotBars.ANY: "V"},
+        flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
         keys={(FF, "us_indices/values_v1"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
     )
     assert query_class(values) is StreamHistoryQuery

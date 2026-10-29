@@ -27,7 +27,7 @@ from deephaven_massive._datasets.schema import (
     widen,
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars, Timespan
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
 from deephaven_massive._namespaces import crypto, forex, futures, indicators, indices, stocks
@@ -222,7 +222,7 @@ def spec(
         asset_class=asset_class,
         kind=kind,
         fetch_path=key if transport is R else None,
-        channels={None: key.split("/")[1]} if transport is W else {},
+        channels={NotBars.ANY: key.split("/")[1]} if transport is W else {},
         keys=one,
     )
 
@@ -265,7 +265,7 @@ def test_the_date_key_becomes_the_date_column() -> None:
         summary="A dataset for the tests.",
         asset_class=AssetClass.FUTURES,
         row_times=RowTimes.TICK,
-        flat_file_prefixes={None: files[1]},
+        flat_file_prefixes={NotBars.ANY: files[1]},
         keys={
             files: SourceKeys(
                 KeySpec("Ticker"), KeySpec("Timestamp"), date=KeySpec("SessionEndDate")
@@ -398,7 +398,7 @@ def test_required_keys_resolve_to_the_fields_behind_them() -> None:
         asset_class=AssetClass.FUTURES,
         row_times=RowTimes.TICK,
         history_path=trades[1],
-        flat_file_prefixes={None: files[1]},
+        flat_file_prefixes={NotBars.ANY: files[1]},
         keys={
             trades: SourceKeys(
                 KeySpec("ticker", from_request=True),
@@ -619,7 +619,7 @@ def test_the_merge_follows_the_membership_positions() -> None:
         kind="trades",
         fetch_path=last[1],
         history_path=history[1],
-        channels={None: "T"},
+        channels={NotBars.ANY: "T"},
         keys={
             last: sip,
             history: SourceKeys(KeySpec("stockTicker", from_request=True), sip.time),
@@ -657,7 +657,7 @@ def test_the_merge_joins_types_across_sources() -> None:
         asset_class=AssetClass.STOCKS,
         fetch_path=nbbo[1],
         history_path="/v3/quotes/{stockTicker}",
-        channels={None: "Q"},
+        channels={NotBars.ANY: "Q"},
         keys={nbbo: both, stream: both},
     )
     schema = dataset_schema(quotes, (quotes,), lookup)
@@ -681,7 +681,7 @@ def test_the_merge_reports_a_type_conflict() -> None:
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         history_path="/v3/trades/{stockTicker}",
-        channels={None: "T"},
+        channels={NotBars.ANY: "T"},
     )
 
     def made_up(transport: Transport, key: str) -> Source:
@@ -710,13 +710,13 @@ def test_epochs_of_different_units_share_a_column() -> None:
         name="stocks.x",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        channels={None: "T"},
+        channels={NotBars.ANY: "T"},
     )
     second = DatasetSpec(
         name="stocks.y",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        channels={None: "Q"},
+        channels={NotBars.ANY: "Q"},
     )
     tables = {"stocks/T": made, "stocks/Q": other}
     schema = dataset_schema(stream, (stream, second), lambda _, key: tables[key])
@@ -747,7 +747,7 @@ def test_rest_text_wins_and_source_order_breaks_ties() -> None:
         asset_class=AssetClass.STOCKS,
         fetch_path="/first",
         history_path="/second",
-        channels={None: "T"},
+        channels={NotBars.ANY: "T"},
     )
     made = {
         "/first": Source(
@@ -849,8 +849,8 @@ STOCK_TRADES = DatasetSpec(
     kind="trades",
     fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
-    channels={None: "T"},
-    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
         (R, "/v2/last/trade/{stocksTicker}"): TRADES_KEYS,
         (R, "/v3/trades/{stockTicker}"): SourceKeys(
@@ -866,7 +866,7 @@ CRYPTO_TRADES = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     kind="trades",
     history_path="/v3/trades/{cryptoTicker}",
-    channels={None: "XT"},
+    channels={NotBars.ANY: "XT"},
     keys={
         (R, "/v3/trades/{cryptoTicker}"): SourceKeys(
             KeySpec("cryptoTicker", from_request=True), KeySpec("ParticipantTimestamp")

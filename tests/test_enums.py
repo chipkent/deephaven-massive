@@ -182,10 +182,14 @@ def test_module_exports() -> None:
         "ChannelFamily",
         "subscription_of",
         "ClassFromPrefix",
+        "NotBars",
     }
     # The class of a dataset that spans classes is internal: no public signature takes it.
     assert not hasattr(dm, "ClassFromPrefix")
     assert [member.name for member in _enums.ClassFromPrefix] == ["ANY"]
+    # The source key of a dataset that is not bars is internal too.
+    assert not hasattr(dm, "NotBars")
+    assert [member.name for member in _enums.NotBars] == ["ANY"]
     # The transport is the wire package's, named once for both sides of the boundary.
     assert not hasattr(_enums, "Transport")
 
