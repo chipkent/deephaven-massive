@@ -135,14 +135,12 @@ class RateLimitState(StrEnum):
 
     `READY`: it starts at once. `PACED`: it waits behind the requests already queued for a slot
     of the bucket's per-minute limit. `PAUSED`: it waits for the pause Massive's latest 429
-    asked for. `REFUSED`: Massive has refused the bucket for longer than the library waits, so
-    it fails at once with status 429 until `PausedUntil`.
+    asked for, unless its read will not wait until `PausedUntil` and fails with status 429.
     """
 
     READY = "READY"
     PACED = "PACED"
     PAUSED = "PAUSED"
-    REFUSED = "REFUSED"
 
 
 class LimitSource(StrEnum):
@@ -425,8 +423,8 @@ class RateLimitRow:
     rows, since Massive counts the requests of all of them together.
 
     Attributes:
-        bucket: The bucket: a `dm.Subscription` value, or `other` for the datasets Massive
-            assigns to no subscription, which are never paced.
+        bucket: The bucket: a `dm.Subscription` value, or `other` for reference data and the
+            other datasets Massive assigns to no subscription, which it counts on their own.
         state: What a new request meets now.
         requests_per_minute: The pace, 5 for a Basic subscription; null while unpaced.
         limit_source: Why it is paced; null while unpaced.

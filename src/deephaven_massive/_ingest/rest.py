@@ -124,8 +124,6 @@ from deephaven_massive._datasets.timestamps import (
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
-    Market,
-    Subscription,
     Timespan,
     UnknownSymbols,
     subscription_of,
@@ -133,7 +131,14 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import MassiveError, PermanentError, from_wire
 from deephaven_massive._ingest import hosts, poll
 from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
-from deephaven_massive._ingest.rate_limits import PaceCheck, ReadShape, announce, bucket_of
+from deephaven_massive._ingest.rate_limits import (
+    OTHER,
+    PaceCheck,
+    ReadShape,
+    announce,
+    bucket_of,
+    give_up_at,
+)
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -150,6 +155,7 @@ from deephaven_massive._types import _All
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
@@ -1092,6 +1098,8 @@ class RestReader:
         max_concurrency: The most requests of one fan-out at a time.
         unknown_symbols: The session's rule for a symbol spelling the library cannot read
             (`MassiveConfig.unknown_symbols`).
+        exec_ctx: The session's execution context, which tells whether a read's thread holds
+            the update graph's lock, and so how long the read waits out a pause.
     """
 
     state: RestState
@@ -1099,6 +1107,18 @@ class RestReader:
     drift: DriftRegistry
     max_concurrency: int
     unknown_symbols: UnknownSymbols
+    exec_ctx: ExecutionContext
+
+    def give_up_at(self) -> float:
+        """Return when a read starting now stops waiting for its bucket's pauses.
+
+        Call it on the read's own thread, before any fan-out and outside every library lock:
+        it asks Deephaven whether this thread holds the update graph's lock.
+
+        Returns:
+            The time on the governor's clock (`rate_limits.give_up_at`).
+        """
+        return give_up_at(self.state.client.governor, self.exec_ctx)
 
     def rest_path(self, template: str) -> RestPath:
         """Return a generated REST path.
@@ -1120,7 +1140,7 @@ class RestReader:
         once, on first need (`/v3/reference/tickers?market=crypto`, every page, first with
         `active=true` and then with `active=false`, so a delisted pair splits too), keeping
         each ticker's `base_currency_symbol` and `currency_symbol`, whose join must be the
-        ticker. Its requests count against the currencies subscription's rate limit, so on a
+        ticker. Its requests count against Massive's limit on reference data, so on a
         Basic subscription they wait their turn. Blocks the calling thread for that read, or
         while another thread makes it; holds no lock meanwhile. A failed read is not kept, so
         the next call tries again. A read that succeeds is kept for the session as it is, even
@@ -1171,9 +1191,10 @@ class RestReader:
             return future.result()
         tickers: dict[str, tuple[str, str] | str] = {}
         try:
-            # The list is crypto reference data, charged to the currencies subscription. Its
+            # The list is reference data, which Massive counts in a bucket of its own. Its
             # pages share one lane of their own, so they wait their turn with other reads
             # instead of queueing behind them; closing the client still ends their waits.
+            deadline = self.give_up_at()
             with Cancel() as lane:
                 # Listed pairs first, then delisted ones, so that a past date of a delisted
                 # pair still splits; a ticker in both keeps its listed entry.
@@ -1183,8 +1204,9 @@ class RestReader:
                         self.rest_path(_TICKERS_PATH),
                         {},
                         query,
-                        bucket=bucket_of(Subscription.CURRENCIES),
+                        bucket=OTHER,
                         cancel=lane,
+                        give_up_at=deadline,
                     ):
                         for row in page.rows:
                             ticker = row.get("ticker")
@@ -1258,6 +1280,7 @@ class RestReader:
         converter = _Converter.build(
             self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
         )
+        deadline = self.give_up_at()  # on this thread, before any fan-out
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
                 self._call,
@@ -1269,6 +1292,7 @@ class RestReader:
                 record=record,
                 spec=spec,
                 stop=stop,
+                give_up_at=deadline,
             )
             if len(calls) <= 1:
                 outcomes = [run(call) for call in calls]
@@ -1335,6 +1359,7 @@ class RestReader:
         remedy: str,
         record: Callable[[DriftReport], None] | None,
         stop: Cancel,
+        give_up_at: float,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
 
@@ -1354,6 +1379,7 @@ class RestReader:
             remedy: What the caller can do instead when a stamp is refused.
             record: Also given each page's drift, or None.
             stop: The read's token, which ends the call's waits.
+            give_up_at: When the read stops waiting for its bucket's pauses.
 
         Returns:
             The call's rows and request count; no rows for a per-symbol call whose first
@@ -1384,6 +1410,7 @@ class RestReader:
                 call.query,
                 bucket=call_bucket(spec, call),
                 cancel=stop,
+                give_up_at=give_up_at,
                 limit=limit,
             ):
                 received = time.time_ns()
@@ -1504,9 +1531,10 @@ class RestReader:
         """Return the public error of a wire error.
 
         A closed session's error is `MassiveError("MassiveSession #1 is closed")`, whatever
-        the request returned. A rate limit Massive kept up for longer than the governor waits
-        is `MassiveError("rate limited: ...")` with status 429. Every other error is
-        `_errors.from_wire`'s.
+        the request returned. A pause that outlasts the read's patience is
+        `MassiveError("rate limited: ...")` with status 429: the governor's message (which
+        requests, when they resume as an ISO 8601 time, the latest refusal), then the likely
+        cause and what to do. Every other error is `_errors.from_wire`'s.
 
         Args:
             error: The wire error.
@@ -1518,7 +1546,12 @@ class RestReader:
             return MassiveError(f"{self.state.label} is closed")
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
             return MassiveError(
-                f"rate limited: {error.message}; m.rate_limits() shows when requests resume",
+                f"rate limited: {error.message}. This usually means another program, session, "
+                "or API key is using the same Massive account, whose limit they share. To go "
+                "on: wait until that time and retry; stop the other program; or, for a "
+                "subscription on the Basic tier, declare it in "
+                "MassiveConfig(rest_basic_subscriptions=...) so its requests are paced, or "
+                "upgrade it. m.rate_limits() shows each subscription's state",
                 status=429,
                 request_id=error.request_id,
             )
@@ -1547,11 +1580,12 @@ class RestReader:
         `AuthenticationError`, `EntitlementError`, or `MassiveError`.
         """
         rest_path = self.rest_path(template)
+        deadline = self.give_up_at()
         try:
             return [
                 row
                 for page in self.state.client.pages(
-                    rest_path, {}, query, bucket=bucket, cancel=cancel
+                    rest_path, {}, query, bucket=bucket, cancel=cancel, give_up_at=deadline
                 )
                 for row in page.rows
             ]
@@ -1574,12 +1608,14 @@ class RestReader:
         A failed request raises the public error of its `WireError` (`_public`):
         `AuthenticationError`, `EntitlementError`, or `MassiveError`.
         """
+        deadline = self.give_up_at()
         try:
             page = self.state.client.get(
                 self.rest_path(probe.path),
                 probe.path_params,
                 probe.query,
                 bucket=bucket_of(subscription_of(asset_class)),
+                give_up_at=deadline,
             )
         except WireError as error:
             raise self._public(error) from error
@@ -1815,6 +1851,7 @@ class RestEndpoints:
             core.drift,
             core.config.max_concurrency,
             core.config.unknown_symbols,
+            core.exec_ctx,
         )
 
     def _static(self, spec: DatasetSpec, table: pa.Table) -> Table:
@@ -2139,26 +2176,15 @@ class RestEndpoints:
         )
 
 
-_MARKET_CLASSES: Final[dict[str, AssetClass]] = {
-    Market.STOCKS: AssetClass.STOCKS,
-    Market.OTC: AssetClass.STOCKS,
-    Market.INDICES: AssetClass.INDICES,
-    Market.FX: AssetClass.FOREX,
-    Market.CRYPTO: AssetClass.CRYPTO,
-}
-"""The asset class whose data a request's `market` filter selects (OTC tickers are stocks)."""
-
-
 def call_bucket(spec: DatasetSpec, call: Call) -> str:
     """Return the governor bucket a planned request is charged to: its Massive subscription.
 
     The request reads the data of the class `dates.day_class` gives it (the dataset's class, or
     for a dataset with a path per symbol class the class its symbols share), and that class's
-    subscription covers it. A request with no class of its own whose `market` filter names
-    one, such as `m.reference.tickers(market=dm.Market.CRYPTO)`, reads that class's data and
-    is charged to its subscription (`crypto` and `fx` to currencies, `stocks` and `otc` to
-    stocks), as the session's own read of the crypto ticker list is. Any other request of no
-    class is charged to `rate_limits.OTHER`.
+    subscription covers it. A request of no class goes to `rate_limits.OTHER`, whatever its
+    filters: Massive counts reference requests in a bucket of their own, so
+    `m.reference.tickers(market=dm.Market.CRYPTO)` is charged there, as is the session's own
+    read of the crypto ticker list.
 
     Args:
         spec: The dataset.
@@ -2168,11 +2194,7 @@ def call_bucket(spec: DatasetSpec, call: Call) -> str:
         The bucket's name, such as `"stocks"`, `"currencies"`, or `"other"`.
     """
     classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
-    asset_class = day_class(spec, classes)
-    market = call.query.get("market")
-    if asset_class is ClassFromPrefix.ANY and isinstance(market, str):
-        asset_class = _MARKET_CLASSES.get(market, ClassFromPrefix.ANY)
-    return bucket_of(subscription_of(asset_class))
+    return bucket_of(subscription_of(day_class(spec, classes)))
 
 
 def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) -> list[str]:

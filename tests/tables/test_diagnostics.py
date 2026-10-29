@@ -124,7 +124,7 @@ def test_column_sets() -> None:
         "LastRefusal",
         "UpdatedAt",
     )
-    assert [s.value for s in RateLimitState] == ["READY", "PACED", "PAUSED", "REFUSED"]
+    assert [s.value for s in RateLimitState] == ["READY", "PACED", "PAUSED"]
     assert [s.value for s in LimitSource] == ["DECLARED", "LEARNED"]
 
 

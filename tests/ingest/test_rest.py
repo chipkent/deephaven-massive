@@ -705,17 +705,19 @@ def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
     ]
 
 
-def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
+def test_the_crypto_ticker_list_is_charged_to_other_in_one_lane_of_its_own(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The list is crypto reference data: its pages count against the currencies subscription,
-    # and they take one turn at a time among the bucket's other reads, as one read does.
+    # The list is reference data, which Massive counts in a bucket of its own (`other`),
+    # and its pages take one turn at a time among the bucket's other reads, as one read does.
     admitted: list[tuple[str, object]] = []
     admission = _massive.RequestGovernor.admission
 
-    def recording(governor: _massive.RequestGovernor, bucket: str, *, lane: object) -> object:
+    def recording(
+        governor: _massive.RequestGovernor, bucket: str, *, lane: object, give_up_at: float
+    ) -> object:
         admitted.append((bucket, lane))
-        return admission(governor, bucket, lane=lane)
+        return admission(governor, bucket, lane=lane, give_up_at=give_up_at)
 
     monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
     second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
@@ -727,8 +729,8 @@ def test_the_crypto_ticker_list_is_charged_to_currencies_in_one_lane_of_its_own(
     )
     reader = cast("Any", session._core.rest_transport())._reader()
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
-    assert requests_by_bucket(session) == {"currencies": 3}
-    assert [bucket for bucket, _ in admitted] == ["currencies"] * 3
+    assert requests_by_bucket(session) == {"other": 3}
+    assert [bucket for bucket, _ in admitted] == ["other"] * 3
     lanes = {id(lane) for _, lane in admitted}
     assert len(lanes) == 1  # every page, listed and delisted, in the read's one lane
     assert isinstance(admitted[0][1], _massive.Cancel)  # the read's own token
@@ -1329,12 +1331,17 @@ def test_refusals_raise_their_public_errors(
 def test_a_lasting_rate_limit_names_itself_and_warns_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Massive asks for a pause beyond the ten minutes the library waits: it gives up at once.
+    # Massive asks for a pause beyond the ten minutes a read waits: the read gives up at once.
     refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
     given_up = (
-        r"^rate limited: Massive has refused stocks requests .*; "
-        r"m\.rate_limits\(\) shows when requests resume$"
+        r"^rate limited: Massive is refusing stocks requests with HTTP 429; they resume at "
+        r"2027-01-15T08:11:40\+00:00, later than this request waits \(latest refusal: .*r7.*\)\. "
+        r"This usually means another program, session, or API key is using the same Massive "
+        r"account, whose limit they share\. To go on: wait until that time and retry; stop the "
+        r"other program; or, for a subscription on the Basic tier, declare it in "
+        r"MassiveConfig\(rest_basic_subscriptions=\.\.\.\) so its requests are paced, or "
+        r"upgrade it\. m\.rate_limits\(\) shows each subscription's state$"
     )
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
@@ -2522,31 +2529,15 @@ def test_each_request_is_charged_to_its_subscription() -> None:
     assert rest.call_bucket(SMA, rest.Call({}, {}, "AAPL")) == "stocks"
 
 
-@pytest.mark.parametrize(
-    ("market", "bucket"),
-    [
-        (Market.CRYPTO, "currencies"),
-        (Market.FX, "currencies"),
-        (Market.STOCKS, "stocks"),
-        (Market.OTC, "stocks"),
-        (Market.INDICES, "indices"),
-    ],
-)
-def test_a_request_of_no_class_is_charged_to_the_market_it_filters(
-    market: Market, bucket: str
+@pytest.mark.parametrize("market", list(Market))
+def test_a_reference_request_is_charged_to_other_whatever_market_it_filters(
+    market: Market,
 ) -> None:
-    # A user's crypto ticker listing and the session's own read of it share one bucket.
+    # Massive counts reference requests in a bucket of their own, not under the asset class
+    # they filter by; the session's own crypto ticker list goes there too.
     call = rest.Call({}, {"market": market, "active": True})
-    assert rest.call_bucket(reference.TICKERS, call) == bucket
-    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": str(market)})) == bucket
-
-
-def test_a_request_of_no_class_and_no_market_is_charged_to_other() -> None:
+    assert rest.call_bucket(reference.TICKERS, call) == "other"
     assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"active": True})) == "other"
-    assert rest.call_bucket(reference.TICKERS, rest.Call({}, {"market": None})) == "other"
-    # A dataset of one class keeps its class, whatever a market filter says.
-    call = rest.Call({}, {"ticker.any_of": ("AAPL",), "market": Market.CRYPTO})
-    assert rest.call_bucket(DIVIDENDS, call) == "stocks"
 
 
 def test_a_session_charges_reads_and_host_decisions_to_their_buckets(
@@ -2618,7 +2609,10 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
     # A manual clock: a call waiting for a slot can only stop by being cancelled.
     clock = FakeClock(manual=True)
     create = functools.partial(
-        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+        _massive.RequestGovernor,
+        rate_limits.BUCKETS,
+        learn_only=rate_limits.LEARN_ONLY,
+        clock=clock,
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
@@ -2725,7 +2719,10 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
 ) -> None:
     clock = FakeClock(manual=True)  # a waiting cycle can only stop through its poller's token
     create = functools.partial(
-        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+        _massive.RequestGovernor,
+        rate_limits.BUCKETS,
+        learn_only=rate_limits.LEARN_ONLY,
+        clock=clock,
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))

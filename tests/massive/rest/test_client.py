@@ -549,7 +549,7 @@ def test_a_429_pauses_only_its_bucket_and_every_client_of_the_governor(
     second.close()
 
 
-def test_a_lasting_refusal_gives_up_with_status_429_naming_the_request(
+def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_request(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     refusal = Reply(
@@ -557,20 +557,18 @@ def test_a_lasting_refusal_gives_up_with_status_429_naming_the_request(
     )
     fake_rest.reply("/v3/trades/AAPL", refusal)
     with pytest.raises(WireError) as caught:
-        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+        client.get(_TRADES, _AAPL, {}, bucket="stocks", give_up_at=600.0)
     assert str(caught.value) == (
-        "Massive has refused stocks requests with HTTP 429 for 0 s, and its pauses come to "
-        "601 s, past the 600 s the library waits out; they fail at once for 601 s more, until "
-        "the pause ends (latest refusal: HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1 "
-        "(request_id r): quota)"
+        "Massive is refusing stocks requests with HTTP 429; they resume at "
+        "2027-01-15T08:10:01+00:00, later than this request waits (latest refusal: HTTP 429 "
+        "from GET /v3/trades/AAPL on 127.0.0.1 (request_id r): quota)"
     )
-    assert (caught.value.status, caught.value.request_id) == (429, "r")
+    assert caught.value.status == 429
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
-    assert type(caught.value.__cause__) is WireError
-    # Another request of the bucket fails at once, without being sent.
+    # Another call with the same patience fails at once, without being sent.
     fake_rest.reply("/v3/trades/MSFT", _ok())
-    with pytest.raises(WireError, match="601 s") as again:
-        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks")
+    with pytest.raises(WireError, match="they resume at") as again:
+        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", give_up_at=600.0)
     assert (again.value.status, again.value.path) == (429, "/v3/trades/MSFT")
     assert len(fake_rest.requests) == 1
     assert clock.waits == []
@@ -1025,7 +1023,7 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
     cancel = Cancel()
     # A short pause makes the request queue, so its admission sends a change notice.
     refused = governor.acquire("stocks", Cancel(), lane=object())
-    governor.refused(refused, retry_after=1.0, message="slow down", request_id=None)
+    governor.refused(refused, retry_after=1.0, message="slow down")
 
     def admitted() -> None:  # the change notice of the admission sets the token
         if governor.snapshot()[0].attempts == 2:
@@ -1117,8 +1115,8 @@ def test_a_retry_after_of_now_pauses_on_the_schedule_and_gives_up_in_time(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers))
     with pytest.raises(WireError) as caught:
-        client.get(_TRADES, _AAPL, {}, bucket="stocks")
-    # Never a resend at once: 15, 30, then 60 s, until the run would pass ten minutes.
+        client.get(_TRADES, _AAPL, {}, bucket="stocks", give_up_at=600.0)
+    # Never a resend at once: 15, 30, then 60 s, until a pause would end past the patience.
     assert caught.value.status == 429
     assert clock.waits[:3] == [15.0, 30.0, 60.0]
     assert len(fake_rest.requests) == 12
@@ -1152,9 +1150,9 @@ class _RecordingGovernor(RequestGovernor):
         self.lanes: list[object] = []
 
     @override
-    def admission(self, bucket: str, *, lane: Hashable) -> Admission:
+    def admission(self, bucket: str, *, lane: Hashable, give_up_at: float = math.inf) -> Admission:
         self.lanes.append(lane)
-        return super().admission(bucket, lane=lane)
+        return super().admission(bucket, lane=lane, give_up_at=give_up_at)
 
 
 def test_a_call_without_a_token_is_a_lane_of_its_own_and_a_token_shares_one(

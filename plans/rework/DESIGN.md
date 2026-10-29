@@ -2899,15 +2899,15 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   reads (`subscription_of(dates.day_class(spec, its symbols' classes))`: the dataset's class,
   or for a dataset with a path per symbol class the class its request's symbols share), and a
   host-decision probe to the subscription of the class it decides, whatever path it reads.
-  A request with no class of its own whose `market` filter names one (`m.reference.tickers`)
-  goes to that class's subscription: `crypto` and `fx` to `currencies`, `stocks` and `otc` to
-  `stocks`, `indices` to `indices`. The session's own read of Massive's crypto ticker list
-  goes to `currencies` too, its pages in one lane of their own, so it and a user's
-  `tickers(market=dm.Market.CRYPTO)` count against the same limit. The futures calendar's
-  contract and schedule lookups go to `futures`, each in a lane of its own under a token
-  the calendar's close sets. Other datasets Massive
-  assigns to no subscription (cross-market reference data, economy, partner data, the
-  unified snapshot) go to the `other` bucket, which is never paced.
+  The futures calendar's contract and schedule lookups go to `futures`, each in a lane of its
+  own under a token the calendar's close sets. Reference data and the other datasets Massive
+  assigns to no subscription (economy, partner data, the unified snapshot) go to the `other`
+  bucket, whatever their filters: Massive's knowledge base ("What is the request limit for
+  Massive's RESTful APIs?") says reference and cross-asset endpoints are counted in a bucket
+  of their own. So `m.reference.tickers(market=dm.Market.CRYPTO)` goes to `other`, as does
+  the session's own read of Massive's crypto ticker list, its pages in one lane of their own.
+  `other` cannot be declared, since no setting names it, but it is paced like a subscription
+  once a 429 names the per-minute limit.
 - **Sharing.** One `RequestGovernor` ([section 19.1](#191-the-rest-client)) per (SHA-256 of the
   API key, REST scheme, host, and port) serves every session of the process that uses them
   (`_ingest/rate_limits.py`, `GOVERNORS`). The registry keeps the digest, never the key. A
@@ -2915,8 +2915,9 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   `rest_basic_subscriptions` (the stricter wins), or once it is learned; two sessions that
   each declare a non-empty, different set log one WARNING naming both and the union. A
   governor without a lease is kept until it holds no slot and no pause, so a session created
-  again soon after does not start with an empty window; what it learned is kept for its key
-  and origin for the life of the process, so a governor created again starts paced.
+  again soon after does not start with an empty window; what it learned goes with it, so a
+  governor created again starts unpaced and relearns a Basic subscription from its first
+  refusal (one refused request and one WARNING).
 - **Pacing.** A paced bucket lets a request start only while fewer than 5 slots are held; a
   slot is held by a request in flight, and by a finished one until 61 s (the minute plus one
   second of margin) after its response arrived. A request that never reached Massive (a connection
@@ -2947,16 +2948,21 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   its pause ended with no refusal and no probe in flight (the read was cancelled or the
   session closed), so a 429 hours later starts a new run while a slow probe's 429 stays in
   its run. A 429 is never counted as a retry.
-- **Giving up.** Once a run's pauses add up to more than 10 minutes (`RATE_LIMIT_PATIENCE`,
-  the time spent paused, not the time since the first refusal), the bucket gives up: the
-  refused request and every request of the bucket, waiting or new, fail with status 429
-  (`MassiveError("rate limited: ...")`, which names `m.rate_limits()` for when requests
-  resume) until that pause has passed; the pause is still set, so the bucket's other requests
-  do not each collect a 429. The first refusal after it starts a new run.
-- **Learning.** A 429 whose message names the per-minute maximum makes its subscription's
-  bucket learned Basic, paced from then on, for the life of the process for that key and
-  origin; any other 429 only pauses. The `other` bucket is never paced: such a 429 there only
-  pauses it, since data of no subscription belongs to no tier.
+- **Giving up.** The bucket never gives up: it keeps pausing and probing for as long as
+  Massive refuses it. Each read decides how long it waits: from its start, 10 minutes
+  (`READ_PATIENCE`), or 90 s (`CONSOLE_PATIENCE`) when its thread holds the Deephaven update
+  graph's lock, as a console command does, since no table of the process updates meanwhile.
+  The lock is checked on the read's thread when the read starts, outside every library lock.
+  A request of the read that would wait for a pause ending past that time fails at once with
+  `MassiveError("rate limited: ...")`, status 429: it names the subscription's requests, the
+  time they resume (an ISO 8601 UTC time), and the latest refusal, says that the usual cause
+  is another program, session, or API key using the same account, and gives the remedies:
+  wait and retry, stop the other consumer, or declare or upgrade the subscription. Only that
+  read stops; the requests of other reads, a stream's host decision and other sessions
+  included, keep their own patience. No setting changes the patience.
+- **Learning.** A 429 whose message names the per-minute maximum makes its bucket learned
+  Basic, paced from then on, for the governor's life (see Sharing); any other 429 only
+  pauses. `other` learns as a subscription does.
 - **Warnings and notices.** The first 429 of each bucket in a session logs one WARNING, naming
   the session and the refusal (status, path, `request_id`, Massive's message) and saying what
   it means: for a declared subscription, that other sessions, processes, or keys of the account
@@ -3382,8 +3388,8 @@ again; a batch handled after that moment pulls them too, so a busy queue cannot 
 
 | Column | Meaning |
 |---|---|
-| `Bucket` | key: a `Subscription` value (`stocks`, `options`, `indices`, `currencies`, `futures`), or `other` for the datasets Massive assigns to no subscription (never paced) |
-| `State` | `READY` (a request starts at once), `PACED` (a request would wait for a slot: some wait, or every slot is held), `PAUSED` (a 429's pause is active), `REFUSED` (the bucket has given up on a run of refusals; requests fail until `PausedUntil`) |
+| `Bucket` | key: a `Subscription` value (`stocks`, `options`, `indices`, `currencies`, `futures`), or `other` for reference data and the other datasets Massive assigns to no subscription, which it counts on their own |
+| `State` | `READY` (a request starts at once), `PACED` (a request would wait for a slot: some wait, or every slot is held), `PAUSED` (a 429's pause is active; a read that will not wait until `PausedUntil` fails) |
 | `RequestsPerMinute` | 5 while paced; null while unpaced |
 | `LimitSource` | `DECLARED` (`rest_basic_subscriptions` of a sharing session) or `LEARNED` (Massive's refusal named the per-minute maximum); null while unpaced |
 | `InFlight`, `Waiting`, `RecentRequests` | counts: requests on the wire; waiting for a slot or a pause; holding a slot (in flight, or answered within 61 s) |
@@ -3632,7 +3638,7 @@ net/                 shared by every client; imports nothing else in _massive
                      filled in; the REST client's next_url check and the governor registry's
                      key both compare origins with it
   retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; an unpaced 429
-                     pauses; RATE_LIMIT_PATIENCE, 10 minutes),
+                     pauses,
                      retryable classification; TLS never retried (net.errors finds it);
                      Clock (injectable, tests never sleep); an unusable Retry-After is logged
                      at WARNING, never 0
@@ -3885,10 +3891,11 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   probe request goes alone until it is answered, or for at most `PROBE_TIMEOUT` (300 s);
   a run ends with an answer to a request
   started after the latest pause, or a window after its pause ended with no refusal; a 429 is
-  not a retry, and the attempt is made again once the governor allows it; once the run's
-  pauses add up to more than `RATE_LIMIT_PATIENCE` (600 s), the refused request and every
-  request of the bucket raise `WireError(status=429)`, quoting the latest refusal, until that
-  pause has passed. A bucket named `unpaced` at construction (`other`) is never paced. A
+  not a retry, and the attempt is made again once the governor allows it; the bucket never
+  gives up, and a call whose `give_up_at` (its read's start plus the read's patience) comes
+  before the pause ends raises `WireError(status=429)` naming the bucket's requests, the ISO
+  time they resume, and the latest refusal. A bucket named `learn_only` at construction
+  (`other`) cannot be declared and is paced once a refusal names the limit. A
   request that may start at once with nothing queued before it is granted without queuing,
   and a wait without a deadline is woken only by a change of its bucket, never by a timer;
   the system clock waits it out in half-second chunks, so Ctrl-C ends it on every operating
@@ -4021,9 +4028,9 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
 - **Fatal and retryable failures.** `protocol.py` classifies an exception from `connect()`:
   - an HTTP 429 at the upgrade is retryable, and its wait is the larger of its `Retry-After`
     and the backoff, with the `Retry-After` capped at `max_reconnect_backoff`, so every wait
-    still lies in `[reconnect_backoff, max_reconnect_backoff]`. This differs from REST, which
-    honours a `Retry-After` of up to 10 minutes and then gives up, because a caller is blocked
-    on the request: the WebSocket client never gives up, and an unbounded `Retry-After` would
+    still lies in `[reconnect_backoff, max_reconnect_backoff]`. This differs from REST, whose
+    reads give up once a pause outlasts their patience, because a caller is blocked on the
+    request: the WebSocket client never gives up, and an unbounded `Retry-After` would
     leave its streams silent for as long as the server named;
   - a TLS certificate failure (`ssl.SSLCertVerificationError`) is fatal, naming
     `SSL_CERT_FILE`, although it is an `OSError`;
@@ -5528,7 +5535,8 @@ document already reflects them.
     ([section 6](#6-massivesession-and-lifecycle),
     [section 6.1](#61-how-a-live-table-is-kept-alive-and-released),
     [section 13.1](#131-invariants)).
-60. **A REST rate governor per subscription** (2026-10-28). Massive limits REST requests per
+60. **A REST rate governor per subscription** (2026-10-28; giving up, the `other` bucket,
+    and what is learned revised 2026-10-29 by decision 61). Massive limits REST requests per
     subscription (Basic: 5 per minute; paid: none), shared by every key of the account, so the
     library keeps one `RequestGovernor` per (API key digest, REST origin) in the process,
     shared by its sessions, with one bucket per `dm.Subscription` and an unpaced `other` bucket
@@ -5556,6 +5564,23 @@ document already reflects them.
     carries is its limit. Live tests share one real-clock governor per key for the run, with
     the classes `MASSIVE_LIVE_PLANS` leaves on Basic declared ([section 13.4](#134-rest),
     [section 17](#17-diagnostics), [section 19.1](#191-the-rest-client)).
+61. **Each read gives up on its own; `other` learns; learned Basic lives with its governor**
+    (2026-10-29, the owner's decisions after an adversarial review of decision 60). The
+    bucket never gives up: it keeps pausing and probing, and each read decides how long it
+    waits out a pause, 10 minutes, or 90 s when its thread holds the update graph's lock (a
+    console command), with no setting, so one session giving up no longer fails another's
+    requests, a stream's host decision included. The give-up error names the subscription,
+    the usual cause (another program using the same account), the ISO 8601 time requests
+    resume, and the remedies (wait and retry, stop the other consumer, declare or upgrade the
+    subscription). Massive's knowledge base says reference and cross-asset endpoints are
+    counted in a bucket of their own, so reference reads filtered by market, the session's
+    crypto ticker list included, go to `other` rather than to the class's subscription, and
+    `other` learns Basic from a 429 that names the per-minute limit, as a subscription does;
+    declaring it still raises. What a governor learned is forgotten with the governor, once
+    the last session of its key has gone and it holds no slot or pause, rather than kept for
+    the life of the process: relearning costs one refused request and one WARNING. The `REFUSED`
+    state of `m.rate_limits()` goes, since no bucket gives up
+    ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
 
 ## 23. Open verification items
 
@@ -5634,5 +5659,5 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 63 | Whether a stock, option, or index bar of several days (`multiplier` above 1) counts calendar days or trading days | Its days count as trading days, the later reading: with no holiday calendar it ends after the latest day they can reach, one weekday more and one more per five further days (`dates.last_trading_day`), and `history()` keeps it only when that end lies in the range; a forex or crypto bar counts calendar days | `tests/datasets/test_row_times.py`, `tests/datasets/test_dates.py`: a 2-day bar from a Friday ends at 00:00 on Wednesday; the allowance holds for every start date of the NYSE calendar of 2024 to 2026 | `tests/namespaces/test_stocks_integration.py`: AAPL's 2-day bars over two weeks beside its 1-day bars; record which days each bar's volume sums |
 | 64 | Whether Massive publishes forex flat files for a Saturday and a Sunday (forex trades from Sunday evening to Friday evening UTC) | A forex Saturday is a day without trading (`dates.is_trading_day`): its missing file is skipped silently and never raises "not yet published", and REST grouped daily does not request it; a missing Sunday file warns like a missing weekday | `tests/datasets/test_dates.py`, `tests/ingest/test_flatfiles.py`, `tests/ingest/test_rest.py`: a missing Saturday file is silent even within its publication grace, a Sunday's warns, and grouped daily skips the Saturday | `tests/namespaces/test_forex_integration.py`: `global_forex/day_aggs_v1` for a Saturday and a Sunday; record whether each file exists and its row count |
 | 65 | Exact text of Massive's 429 for a Basic subscription ("You've exceeded the maximum requests per minute"), and whether any other 429 carries it | A case-insensitive substring match makes the subscription learned Basic; any other 429 only pauses, without learning | `tests/massive/rest/test_governor.py`: the message, any case, and a 429 without it | `tests/massive/rest/test_client_integration.py` (a class on Basic): seven requests within a minute; record each answer's status, rate-limit headers, and message |
-| 66 | Whether the datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count against a subscription's limit, and which | They go to the unpaced `other` bucket, except a request whose `market` filter names a class, which goes to that class's subscription; a 429 in `other` pauses it as any unpaced bucket | `tests/ingest/test_rest.py`: such a request is charged to `other`, and one filtered by market to the market's subscription | `tests/massive/rest/test_client_integration.py` (a class on Basic): spend the class's minute, then one request each of market status, ticker types, and treasury yields; and ten such requests alone within a minute; record which are refused |
+| 66 | Whether reference data and the other datasets Massive assigns to no subscription (cross-market reference data, economy, partner data, the unified snapshot) count in a bucket of their own, as Massive's knowledge base says ("What is the request limit for Massive's RESTful APIs?": reference and cross-asset endpoints are "counted in their own bucket"), rather than against a subscription's limit, and whether that bucket has the Basic limit of 5 per minute | They go to the `other` bucket, a reference read filtered by market included; `other` cannot be declared and is paced once a 429 names the per-minute limit | `tests/ingest/test_rest.py`: such a request, filtered by market or not, is charged to `other`; `tests/ingest/test_rate_limits.py`: a Basic-worded refusal paces `other` | `tests/massive/rest/test_client_integration.py` (a class on Basic): spend the class's minute, then one request each of market status, ticker types, and treasury yields; and ten such requests alone within a minute; record which are refused |
 | 67 | Whether Massive's minute is a sliding 60 s window from each request, and whether a refused request counts against it | A slot is held until 61 s after each response, refused ones included, and a 429 without `Retry-After` pauses a paced bucket for a whole 61 s window | `tests/massive/rest/test_governor.py`: the sixth request starts 61 s after the first answer; a refused request holds its slot | `tests/massive/rest/test_client_integration.py` (a class on Basic): requests until the first 429, then one every 5 s; record when the first is answered again |

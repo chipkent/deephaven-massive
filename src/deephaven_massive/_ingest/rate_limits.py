@@ -2,22 +2,32 @@
 
 Massive limits REST requests per subscription (stocks, options, indices, currencies, futures),
 5 per minute on the free Basic tier and none on a paid one, and every API key of an account
-shares the counters. The wire package's `RequestGovernor` enforces that for the requests it
-admits; this module decides which requests share one, and what the user is told:
+shares the counters. Reference and cross-asset requests are counted in a bucket of their own
+(Massive's knowledge base, "What is the request limit for Massive's RESTful APIs?", at
+`https://massive.com/knowledge-base/article/` and the slug
+`what-is-the-request-limit-for-massives-restful-apis`). The wire package's `RequestGovernor`
+enforces that for the requests it admits; this module decides which requests share one, how
+long each read waits, and what the user is told:
 
 - **Sharing.** `GOVERNORS`, the process's `GovernorRegistry`, keeps one governor per (API key,
   REST origin). Each session takes a `GovernorLease` at construction and releases it when it
   closes or is collected, so the sessions of a process that use one key share its counters.
-  The registry keys entries by the key's SHA-256 digest, never the key itself, and remembers
-  the subscriptions a governor learned are Basic for the life of the process, so a governor
-  created again for the same key and origin starts paced. The governor
+  The registry keys entries by the key's SHA-256 digest, never the key itself. What a governor
+  learned is Basic lives and dies with it: a governor created again for the same key and origin
+  starts unpaced, and relearns a Basic subscription from its first refusal. The governor
   paces every subscription that any live session declares Basic
   (`MassiveConfig.rest_basic_subscriptions`: the stricter wins), and logs one WARNING when two
   sessions declare different non-empty sets. An entry outlives its last lease until its
   governor is idle (no slot held, no pause active), so a notebook cell that makes a new session
   does not start with an empty window.
-- **Buckets.** A request is charged to its dataset's subscription (`bucket_of`); the datasets
-  Massive assigns to none go to `OTHER`, which is never paced.
+- **Buckets.** A request is charged to its dataset's subscription (`bucket_of`); reference
+  data and the other datasets Massive assigns to no subscription go to `OTHER`, which is paced
+  once a refusal names the per-minute limit, like a subscription, but cannot be declared.
+- **Patience.** Each read decides how long it waits out a pause (`give_up_at`): `READ_PATIENCE`
+  (10 minutes), or `CONSOLE_PATIENCE` (90 s) for a read made while its thread holds the
+  Deephaven update graph's lock, as a console command does, since every table of the process
+  stops updating meanwhile. A read that gives up fails alone; the bucket keeps pausing and
+  probing for every other read.
 - **Warnings.** `RateLimitWarnings` is the REST client's refusal hook: the first 429 of each
   subscription in a session logs one WARNING that says what happened and what to do.
 - **Diagnostics.** `rate_limit_rows` turns the governor's snapshot into the rows of
@@ -47,26 +57,32 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
+from deephaven_massive._tables.core import on_update_graph
 from deephaven_massive._tables.diagnostics import LimitSource, RateLimitRow, RateLimitState
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from collections.abc import Set as AbstractSet
 
+    from deephaven.execution_context import ExecutionContext
+
     from deephaven_massive._massive import RequestGovernor, WireError
 
 __all__ = [
     "BUCKETS",
+    "CONSOLE_PATIENCE",
     "GOVERNORS",
     "LABELS",
+    "LEARN_ONLY",
     "OTHER",
-    "UNPACED",
+    "READ_PATIENCE",
     "GovernorLease",
     "GovernorRegistry",
     "PaceCheck",
     "RateLimitWarnings",
     "announce",
     "bucket_of",
+    "give_up_at",
     "rate_limit_pull",
     "rate_limit_rows",
 ]
@@ -74,15 +90,23 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 OTHER: Final = "other"
-"""The bucket of the datasets Massive assigns to no subscription (cross-market reference data,
-economy, partner data, the unified snapshot); it is never paced."""
+"""The bucket of reference data and the other datasets Massive assigns to no subscription
+(cross-market reference data, economy, partner data, the unified snapshot), which Massive
+counts in a bucket of its own; it is paced once a refusal names the per-minute limit."""
 
 BUCKETS: Final = (*(subscription.value for subscription in Subscription), OTHER)
 """Every bucket of a governor: one per subscription, then `OTHER`."""
 
-UNPACED: Final = frozenset({OTHER})
-"""The buckets no refusal or declaration ever paces: data of no subscription belongs to no
-tier, so a 429 there pauses its requests but never paces them."""
+LEARN_ONLY: Final = frozenset({OTHER})
+"""The buckets that cannot be declared Basic, since no setting names them; a refusal naming
+the per-minute limit paces them as it does a subscription."""
+
+READ_PATIENCE: Final = 600.0
+"""Seconds a read waits out its bucket's pauses before it fails with status 429."""
+
+CONSOLE_PATIENCE: Final = 90.0
+"""Seconds a read waits out pauses while its thread holds the update graph's lock: every table
+of the process stops updating meanwhile, so it gives up sooner."""
 
 LABELS: Final = {OTHER: "requests outside Massive's subscriptions"}
 """How the governor's messages name the requests of `OTHER`; a subscription's bucket is
@@ -119,12 +143,31 @@ _SHAPE_WORDS: Final = {
 
 
 def _real_clock_governor() -> RequestGovernor:
-    """Make a governor of `BUCKETS`, `OTHER` never paced, named by `LABELS`, on the real clock.
+    """Make a governor of `BUCKETS`, `OTHER` learn-only, named by `LABELS`, on the real clock.
 
     Returns:
         A new `RequestGovernor` with nothing declared.
     """
-    return _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, labels=LABELS)
+    return _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, labels=LABELS)
+
+
+def give_up_at(governor: RequestGovernor, exec_ctx: ExecutionContext) -> float:
+    """Return when a read starting now stops waiting for its bucket's pauses.
+
+    A read waits out a pause for `READ_PATIENCE` (10 minutes), or for `CONSOLE_PATIENCE`
+    (90 s) when its thread holds the Deephaven update graph's lock, as a console command does:
+    no table of the process updates meanwhile. Call it on the read's own thread, outside every
+    library lock, since it asks Deephaven (a Java call).
+
+    Args:
+        governor: The governor the read's requests wait on.
+        exec_ctx: The session's execution context, whose update graph is asked.
+
+    Returns:
+        The time, on the governor's clock, to pass as the read's `give_up_at`.
+    """
+    console = on_update_graph(exec_ctx)
+    return governor.clock.monotonic() + (CONSOLE_PATIENCE if console else READ_PATIENCE)
 
 
 def bucket_of(subscription: Subscription | None) -> str:
@@ -247,7 +290,7 @@ class GovernorRegistry:
             two.release()
     """
 
-    __slots__ = ("_create", "_entries", "_holders", "_learned", "_lock")
+    __slots__ = ("_create", "_entries", "_holders", "_lock")
 
     def __init__(self, create: Callable[[], RequestGovernor] = _real_clock_governor) -> None:
         """Start with no governor.
@@ -259,8 +302,6 @@ class GovernorRegistry:
         self._create = create
         self._lock = threading.Lock()
         self._entries: dict[tuple[str, tuple[str, str, int]], _Entry] = {}
-        # The buckets learned Basic by a pruned governor, by key: kept for the process's life.
-        self._learned: dict[tuple[str, tuple[str, str, int]], frozenset[str]] = {}
         self._holders = itertools.count(1)
 
     def __len__(self) -> int:
@@ -295,8 +336,8 @@ class GovernorRegistry:
     ) -> GovernorLease:
         """Take a hold on the governor of an API key and REST origin, creating it if needed.
 
-        Idle entries without a lease are dropped first; a new governor starts with what an
-        earlier one of the same key and origin learned. The governor then paces the union of
+        Idle entries without a lease are dropped first, and with them what their governors
+        learned; a new governor starts unpaced. The governor then paces the union of
         every holder's Basic subscriptions. When this session and another holder each declare
         a non-empty set and the sets differ, one WARNING names both sessions and the union.
 
@@ -320,8 +361,6 @@ class GovernorRegistry:
             entry = self._entries.get(key)
             if entry is None:
                 entry = self._entries[key] = _Entry(self._create())
-                if key in self._learned:
-                    entry.governor.learn(self._learned[key])
             conflict = next(
                 (h for h in entry.holders.values() if h.basic and mine and h.basic != mine),
                 None,
@@ -361,13 +400,10 @@ class GovernorRegistry:
     def _prune(self) -> None:
         """Drop the entries that have no holder and an idle governor; the lock is held.
 
-        What a dropped governor learned is kept for its key.
+        What a dropped governor learned goes with it.
         """
         for key, entry in list(self._entries.items()):
             if not entry.holders and entry.governor.idle():
-                learned = frozenset(s.bucket for s in entry.governor.snapshot() if s.learned)
-                if learned:
-                    self._learned[key] = learned
                 del self._entries[key]
 
 
@@ -413,8 +449,9 @@ class RateLimitWarnings:
 
         The WARNING says what the refusal means: a subscription the session declared Basic is
         refused because other sessions, processes, or keys of the account share its limit; a
-        refusal that names the per-minute maximum shows a Basic subscription, which is paced
-        from now on (and could be declared); any other refusal pauses the requests, and a
+        refusal that names the per-minute maximum shows the Basic limit, which is paced from
+        now on (a subscription could be declared; `OTHER` cannot); any other refusal pauses
+        the requests, and a
         paid subscription that keeps getting them is a matter for Massive's support.
 
         Args:
@@ -438,9 +475,9 @@ class RateLimitWarnings:
             )
         elif basic and bucket == OTHER:
             advice = (
-                f"its message names the Basic tier's limit of {rate} requests per minute, but "
-                "requests outside Massive's subscriptions belong to no tier, so they pause and "
-                "resume and are not paced"
+                f"that is Massive's limit of {rate} requests per minute on reference and other "
+                "data outside the subscriptions, which it counts on their own, so these "
+                "requests are paced at that rate from now on"
             )
         elif basic:
             advice = (
@@ -472,9 +509,7 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
     now = round(governor.clock.time() * 1e9)  # the clock `PausedUntil` is read on
     rows = []
     for state in governor.snapshot():
-        if state.gave_up:
-            status = RateLimitState.REFUSED
-        elif state.paused_until is not None:
+        if state.paused_until is not None:
             status = RateLimitState.PAUSED
         elif state.limit is not None and (state.waiting or state.recent >= state.limit):
             status = RateLimitState.PACED
