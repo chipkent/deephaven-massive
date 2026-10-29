@@ -153,13 +153,10 @@ class WsSession:
         self.fetched: list[tuple[str, dict[str, object]]] = []
         self.rows: dict[str, list[dict[str, object]]] = {}
         self.pair_answers: dict[str, tuple[str, str] | Exception] = dict(PAIRS)
-        self.session = dm.MassiveSession(
-            dm.MassiveConfig(
-                api_key="test-key",
-                flush_interval=flush_interval,
-                **cast("dict[str, Any]", config),
-            )
+        self.config = dm.MassiveConfig(
+            api_key="test-key", flush_interval=flush_interval, **cast("dict[str, Any]", config)
         )
+        self.session = dm.MassiveSession(self.config)
         clients: Any = self.session._core._ports
         self.connections = ws.WsConnections(
             self.session._core,
@@ -354,13 +351,21 @@ class WsSession:
                 f"states={self._states}, statuses={self._statuses}"
             )
 
-    def query(self, spec: DatasetSpec, symbols: object) -> StreamQuery:
+    def query(
+        self, spec: DatasetSpec, symbols: object, session: dm.MassiveSession | None = None
+    ) -> StreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
+
+        Args:
+            spec: The dataset.
+            symbols: Its symbols.
+            session: The session to build it on; None for this wrapper's own.
 
         Returns:
             The query.
         """
-        q = build_query(self.session._core, spec, symbols=cast("list[str]", symbols))
+        core = (session or self.session)._core
+        q = build_query(core, spec, symbols=cast("list[str]", symbols))
         assert isinstance(q, StreamQuery)
         return q
 
@@ -370,8 +375,8 @@ class WsSession:
         Returns:
             The connection.
         """
-        with self.session._core.registry_lock:
-            return self.connections._connections[url]
+        with self.connections.group.lock:
+            return self.connections.group.connections[url]
 
     def send(self, *items: dict[str, object]) -> None:
         """Send one frame of `items` and wait until the clients have delivered every data item.
@@ -398,8 +403,8 @@ class WsSession:
 
     def flush(self) -> None:
         """Publish the rows every connection holds, on the test thread."""
-        with self.session._core.registry_lock:
-            connections = list(self.connections._connections.values())
+        with self.connections.group.lock:
+            connections = list(self.connections.group.connections.values())
         for connection in connections:
             connection.flusher.flush()
 

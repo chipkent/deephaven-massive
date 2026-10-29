@@ -312,7 +312,12 @@ class Query(QueryBase):
         Every non-null row must be Massive's exact ticker: a bad row present at the call raises
         `ValueError`, and one added later fails the table, naming `dm.canonicalize_symbols`.
         Fan-out endpoints issue one request per symbol per cycle, at most `max_concurrency` at a
-        time. Releasing the table (`m.release`, garbage collection) stops its poller. A
+        time. The poller runs while the table, or a table derived from it, is in use; releasing
+        the table (`m.release`, garbage collection) stops it once nothing derived from it is
+        left, and `m.close()` stops it at once. A table derived in the console stays in use
+        until the JVM next collects it, and until then the poll keeps making its requests,
+        which on the Basic tier come out of the five a minute every session of the key shares.
+        A
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
         non-positive `interval` raises `ValueError`.
 

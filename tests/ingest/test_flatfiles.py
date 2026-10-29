@@ -2126,6 +2126,7 @@ def test_a_close_during_a_request_reports_the_close(
             query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when)
     finally:
         m.close()
+        fake_s3.before_answer = None  # the fake lives in a cycle: it must not keep the session
     # Closed by the close, then once more as the in-flight request returned, which drops any
     # connection pool that request opened.
     assert fake_s3.closes == 2
@@ -2653,7 +2654,11 @@ def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
 
 
 def test_every_row_of_a_day_shares_one_stored_date(
-    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    string_objects: Callable[[Table, str], int],
 ) -> None:
     header = "ticker,volume,open,close,high,low,window_start,transactions\n"
     minutes = [epoch_ns(datetime(2025, 3, 3, 15, m, tzinfo=UTC)) for m in range(20)]
@@ -2663,6 +2668,4 @@ def test_every_row_of_a_day_shares_one_stored_date(
     q = query(session, STOCK_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=False)
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 20
-    # Counted inside Deephaven: a string crossing to Python is copied.
-    refs = t.update("DateRef = java.lang.System.identityHashCode(Date)").select_distinct("DateRef")
-    assert refs.size == 1
+    assert string_objects(t, "Date") == 1

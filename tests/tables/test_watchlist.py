@@ -198,6 +198,8 @@ def test_a_watch_lives_as_long_as_its_keeper(dh_exec_ctx: object) -> None:
     watch_scope.release()  # the keeper still holds the view and the listener
     watchlist.add(new_table([string_col("Symbol", ["C:EURUSD"])]))
     wait_for(lambda: len(seen) == 1)
+    watch.stop()  # no more reports; a second stop does nothing
+    watch.stop()
     keeper_scope.release()
 
 

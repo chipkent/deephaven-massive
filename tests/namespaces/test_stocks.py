@@ -2002,6 +2002,7 @@ def test_every_other_symbol_key_is_required(name: str) -> None:
     assert all(key.required for key in symbols)
 
 
+@pytest.mark.jvm_held  # its formula hands the session in its frame to the JVM
 def test_the_split_factors_adjust_bars_as_traded(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

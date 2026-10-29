@@ -19,17 +19,20 @@ from __future__ import annotations
 import atexit
 import contextlib
 import faulthandler
+import gc
 import gzip
 import importlib
 import os
 import sys
 import threading
 import time
+import types
+import weakref
 from collections import Counter, deque
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias, cast
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
@@ -212,6 +215,39 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     return to_pylist
 
 
+@pytest.fixture
+def string_objects() -> Callable[[Table, str], int]:
+    """Return a function that counts the distinct Java string objects of a column's values.
+
+    Identity is read inside Deephaven, since a string crossing to Python is copied. The formula
+    goes straight to Java: the Python `Table.update` copies the calling frame's locals into the
+    query scope through jpy, where they would live until the JVM collected them, keeping a
+    result (and through it its session) alive.
+
+    Returns:
+        A function of a table and a column name, counting the objects among non-null values.
+    """
+    liveness = importlib.import_module("deephaven.liveness_scope")
+    jpy = importlib.import_module("jpy")
+    update_graph = importlib.import_module("deephaven.update_graph")
+    java_table = jpy.get_type("io.deephaven.engine.table.Table")
+
+    def count(table: Table, column: str) -> int:
+        # The derived tables live in a scope of their own, released at once: a refreshing table
+        # derived from a live result would keep its stream or poll running.
+        scope = liveness.LivenessScope()
+        try:
+            # Java calls: the Python wrappers would copy this frame's locals.
+            with scope.open(), update_graph.shared_lock(table):
+                refs = table.j_table.update(f"Ref = java.lang.System.identityHashCode({column})")
+                distinct = refs.where(f"!isNull({column})").selectDistinct("Ref")
+                return int(jpy.cast(distinct, java_table).size())
+        finally:
+            scope.release()
+
+    return count
+
+
 _ROWS_WHEN_TIMEOUT = 15.0
 """Seconds `rows_when` waits for a live table's rows to match."""
 
@@ -322,6 +358,287 @@ def massive_session() -> Iterator[MassiveSession]:
     session.close()
 
 
+_LIBRARY_THREADS: Final = ("MassiveSession #", "massive")
+"""The name prefixes of the library's threads: a session's reaper, diagnostics writer, pollers,
+and crypto-pair worker (`MassiveSession #N ...`), and a connection's client, flush, and
+verdict-move threads (`massive-ws ...`, `massive-flush ...`, `massive-move ...`). The bare
+`massive` prefix also matches the `massive #N ...` names of the session-named threads."""
+
+
+@pytest.fixture(autouse=True)
+def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Fail a test that leaves a session running or alive, or a library thread alive.
+
+    A session is in the live set exactly while it has a running stream or poll or a held
+    diagnostics view, so a test that ends with one has leaked a table, or the library has. A
+    session the test created that is still alive at the end, in the live set or not, is held
+    by something that should have let it go. Only what the test itself started counts, so one
+    leak fails its own test and not every test after it.
+
+    Autouse, and named to sort first (pytest orders autouse fixtures by name), so it is set up
+    first and runs after every other fixture's teardown (a closed `massive_session` included).
+    The library frees an unused session by reference counting alone, so the check runs with
+    the cyclic collector off and polls, bounded and in Python, until nothing is left. Unless
+    the first look finds nothing, it collects with `gc.DEBUG_SAVEALL`, at most once a second,
+    which keeps what it would free in `gc.garbage`: a session a cycle there holds
+    (`_held_by_cycles`) is one reference counting never frees, and the test fails with "freed
+    only by the cyclic collector", unless the cycle runs through an exception's traceback. A
+    test marked `jvm_held`, whose own formula hands its frame's locals to the JVM, gets one JVM
+    collection for what is still alive or running after a second.
+    """
+    before = _running()
+    yield
+    # Every other fixture is torn down, but pytest keeps their values in the item until its
+    # teardown ends; drop them, as pytest is about to, so a closed session can be freed.
+    funcargs: dict[str, object] | None = getattr(request.node, "funcargs", None)
+    if funcargs:
+        funcargs.clear()
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        cyclic: set[str] = set()
+        started = time.monotonic()
+        deadline = started + 30.0
+        pause = threading.Event()  # never set; only paces the bounded wait
+        next_collect = started + 0.04  # after a first look, then at most once a second: slow
+        jvm_collected = False
+        jvm_held = request.node.get_closest_marker("jvm_held") is not None
+        while True:
+            _drop_logged_objects(request.node)  # a library thread may still be logging
+            if time.monotonic() > next_collect:
+                cyclic |= _collect_cycles(before)
+                next_collect = time.monotonic() + 1.0
+            sessions, alive, groups, threads = _new(before)
+            if not sessions and not alive and not groups and not threads:
+                break
+            if time.monotonic() > deadline:
+                pytest.fail(f"left running after the test: {_left(before)}")
+            if jvm_held and not jvm_collected and time.monotonic() > started + 1.0:
+                # A formula a test ran (`t.update("...")`) copies its frame's locals into the
+                # query scope through jpy, and a session, a result, or a table derived from it
+                # among them lives until the JVM collects them: that is Deephaven's, not a leak
+                # of the library.
+                jpy = importlib.import_module("jpy")
+                jpy.get_type("java.lang.System").gc()
+                jvm_collected = True
+            for thread in threads:  # wait on the threads themselves, briefly each
+                thread.join(0.05)
+            if not threads:
+                pause.wait(0.05)
+        if cyclic:
+            pytest.fail(f"freed only by the cyclic collector: sessions {sorted(cyclic)}")
+    finally:
+        if enabled:
+            gc.enable()
+
+
+_Running: TypeAlias = "tuple[set[str], set[str], set[object], set[threading.Thread]]"
+
+
+def _new(before: _Running) -> _Running:
+    """Return what of the library runs now that did not run before the test.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The new live sessions, alive sessions, connection groups, and threads.
+    """
+    sessions, alive, groups, threads = _running()
+    return sessions - before[0], alive - before[1], groups - before[2], threads - before[3]
+
+
+def _left(before: _Running) -> str:
+    """Name what a test left running, for a failure message.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The text.
+    """
+    sessions, alive, groups, threads = _new(before)
+    return (
+        f"sessions {sorted(sessions)}, alive sessions {sorted(alive)}, {len(groups)} connection "
+        f"groups, threads {sorted(t.name for t in threads)}"
+    )
+
+
+def _collect_cycles(before: _Running) -> set[str]:
+    """Collect garbage, and name the sessions the test started that only a cycle held.
+
+    Collects with `gc.DEBUG_SAVEALL`, so what the collector would free stays in `gc.garbage`
+    to be inspected; then empties it, which frees it. A session in that garbage was reachable
+    only through a reference cycle, which reference counting never frees.
+
+    Args:
+        before: What ran when the test started.
+
+    Returns:
+        The labels of those sessions, except the ones only a traceback's frames held.
+    """
+    session = importlib.import_module("deephaven_massive._session")
+    _, alive, _, _ = _new(before)
+    with session._keys_lock:
+        cores = [ref() for ref in session._open_sessions]
+    wanted = {id(core): core.label for core in cores if core is not None and core.label in alive}
+    del cores
+    gc.set_debug(gc.DEBUG_SAVEALL)
+    try:
+        gc.collect()
+        garbage = list(gc.garbage)
+        gc.garbage.clear()
+    finally:
+        gc.set_debug(0)
+    # A raised exception and the frames of its traceback form a cycle, and a frame holds its
+    # locals: a session a failing call had in hand lives until the collector breaks that
+    # cycle. That is how Python works, not a leak, so the references out of frames and
+    # tracebacks are not followed, and only a session another cycle holds is named.
+    cyclic = _held_by_cycles(garbage, follow=_not_a_traceback) & set(wanted)
+    del garbage
+    return {wanted[key] for key in cyclic}
+
+
+def _not_a_traceback(item: object) -> bool:
+    """Tell whether the references out of an object count: not out of a frame or traceback.
+
+    Args:
+        item: A garbage object.
+
+    Returns:
+        False for a frame or a traceback.
+    """
+    return type(item) not in {types.FrameType, types.TracebackType}
+
+
+_RESTORES_METHODS: Final = pytest.version_tuple < (9, 2)
+"""Whether this pytest restores a patched method as an attribute of its own instance."""
+
+
+def _held_by_cycles(garbage: list[object], *, follow: Callable[[object], bool]) -> set[int]:
+    """Return the ids of the garbage that a reference cycle holds.
+
+    Not everything the collector finds is held by a cycle. On a free-threaded build a reference
+    another thread dropped waits for its object's creating thread to merge it, and the
+    collector merges it first; an object that then has no reference left is garbage too,
+    although reference counting alone frees it. So the references among the garbage are
+    counted, and what nothing else in the garbage refers to is let go, repeatedly, as
+    reference counting would let it go; what remains is held by a cycle.
+
+    pytest before 9.2 restores a patched method by setting it on its own instance: a bound
+    method under its own name in the instance's `__dict__`, a cycle of the test tool's. On such
+    a pytest that one reference is not counted; any other self-reference is.
+
+    Args:
+        garbage: What the collector found unreachable.
+        follow: Whether the references out of an object count.
+
+    Returns:
+        The ids of the objects reference counting alone would never free.
+    """
+    ids = {id(item) for item in garbage}
+    owners = (
+        {id(vars(item)): item for item in garbage if _has_dict(item)} if _RESTORES_METHODS else {}
+    )
+    holds: dict[int, list[int]] = {}
+    held = dict.fromkeys(ids, 0)
+    for item in garbage:
+        referents: list[object]
+        if not follow(item):
+            referents = []
+        elif id(item) in owners:
+            owner = owners[id(item)]
+            attributes = cast("dict[str, object]", item).items()
+            referents = [v for k, v in attributes if not _restored_method(owner, k, v)]
+        else:
+            referents = gc.get_referents(item)
+        holds[id(item)] = [id(each) for each in referents if id(each) in ids]
+        for key in holds[id(item)]:
+            held[key] += 1
+    free = [key for key, count in held.items() if not count]
+    while free:
+        for key in holds[free.pop()]:
+            held[key] -= 1
+            if not held[key]:
+                free.append(key)
+    return {key for key, count in held.items() if count}
+
+
+def _restored_method(owner: object, name: str, value: object) -> bool:
+    """Tell whether an instance attribute is a method pytest restored onto its own instance.
+
+    Args:
+        owner: The instance.
+        name: The attribute's name.
+        value: Its value.
+
+    Returns:
+        True for a bound method of `owner`, under its own name, of the class's own function.
+    """
+    return (
+        type(value) is types.MethodType
+        and value.__self__ is owner
+        and value.__name__ == name
+        and value.__func__ is getattr(type(owner), name, None)
+    )
+
+
+def _has_dict(item: object) -> bool:
+    """Tell whether an object has an instance `__dict__`, without touching a dead proxy.
+
+    Args:
+        item: The object.
+
+    Returns:
+        True if `vars(item)` returns its attributes.
+    """
+    if issubclass(type(item), (type, types.ModuleType, weakref.ProxyTypes)):
+        return False
+    try:
+        vars(item)
+    except TypeError:
+        return False
+    return True
+
+
+def _drop_logged_objects(item: pytest.Item) -> None:
+    """Keep only the text of the log records pytest keeps with a test item.
+
+    The records hold a logged exception (in the arguments and the exception info), and through
+    its traceback the test's frames, for the whole run; the report has their text already.
+
+    Args:
+        item: The test item.
+    """
+    records_key = importlib.import_module("_pytest.logging").caplog_records_key
+    for records in item.stash.get(records_key, {}).values():
+        for record in records:
+            record.msg, record.args, record.exc_info = record.getMessage(), None, None
+
+
+def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
+    """Return what of the library runs now: sessions, connection groups, and threads.
+
+    Returns:
+        The labels of the sessions in the live set, the labels of every session not yet
+        freed, the connection groups, and the alive library threads (`_LIBRARY_THREADS`).
+    """
+    core = importlib.import_module("deephaven_massive._tables.core")
+    session = importlib.import_module("deephaven_massive._session")
+    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    with core._live_lock:
+        live: set[str] = {each.label for each in core._live.values()}
+    with session._keys_lock:
+        cores = [ref() for ref in session._open_sessions]
+    alive = {each.label for each in cores if each is not None}
+    with ws._groups_lock:
+        groups: set[object] = set(ws._groups.values())
+    threads = {
+        t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
+    }
+    return live, alive, groups, threads
+
+
 @pytest.fixture(autouse=True)
 def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Number each test's streams from 1, so tests can name them by id.
@@ -371,6 +688,7 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
 
         def make(**options: object) -> WsSession:
             session: WsSession = module.WsSession(fake_ws_server, **options)
+            sessions.callback(_drop_session, session)  # last: after the close below
             sessions.callback(session.close)
             return session
 
@@ -380,6 +698,20 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
     while (left := _client_threads()) and time.monotonic() < deadline:
         pause.wait(0.02)
     assert not left, f"threads outlived their session: {left}"
+
+
+def _drop_session(harness: WsSession) -> None:
+    """Drop a closed wrapper's session and transport, once the test is done with them.
+
+    The wrapper and the transport refer to each other (the transport holds the wrapper's bound
+    methods), so without this the session would live until the cyclic collector broke that
+    cycle.
+
+    Args:
+        harness: The wrapper.
+    """
+    vars(harness).pop("session", None)
+    vars(harness).pop("connections", None)
 
 
 _CLIENT_THREADS_TIMEOUT: Final = 15.0
