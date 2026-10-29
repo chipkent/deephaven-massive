@@ -114,6 +114,7 @@ from typing import TYPE_CHECKING, Final, cast
 import pyarrow as pa
 from deephaven import merge
 
+from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import TimeRange, is_trading_day
 from deephaven_massive._datasets.history_source import (
     NOT_PUBLISHED,
@@ -629,7 +630,7 @@ class FlatFileHistory:
         `x-amz-request-id` as `request_id`. An extra or missing documented header is not an
         error: it logs a WARNING once per header and session.
         """
-        prefix = spec.flat_file_prefixes[request.timespan]
+        prefix = spec.flat_file_prefixes[timespan_key(request.timespan)]
         transform = _Transform.build(
             self._core.catalog,
             spec,

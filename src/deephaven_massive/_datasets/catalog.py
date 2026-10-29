@@ -37,7 +37,14 @@ from typing import TYPE_CHECKING, Final, cast
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.schema import dataset_schema, rename
-from deephaven_massive._enums import AssetClass, ChannelFamily, ClassFromPrefix, PollMode, Timespan
+from deephaven_massive._enums import (
+    AssetClass,
+    ChannelFamily,
+    ClassFromPrefix,
+    NotBars,
+    PollMode,
+    Timespan,
+)
 from deephaven_massive._massive import ParamKind, Transport, WireType, encode_value, sources
 
 if TYPE_CHECKING:
@@ -52,6 +59,7 @@ __all__ = [
     "DatasetSpec",
     "KeySpec",
     "SourceKeys",
+    "timespan_key",
 ]
 
 logger = logging.getLogger(__name__)
@@ -203,7 +211,7 @@ class DatasetSpec:
         ::
 
             from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-            from deephaven_massive._enums import AssetClass
+            from deephaven_massive._enums import AssetClass, NotBars
             from deephaven_massive._massive import Transport
 
             # Channels, history, and a fetch path: a StreamHistoryLatestQuery.
@@ -214,8 +222,8 @@ class DatasetSpec:
                 kind="trades",
                 fetch_path="/v2/last/trade/{stocksTicker}",
                 history_path="/v3/trades/{stockTicker}",
-                channels={None: "T"},
-                flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+                channels={NotBars.ANY: "T"},
+                flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
                 keys={
                     (Transport.REST, "/v2/last/trade/{stocksTicker}"): SourceKeys(
                         symbol=KeySpec("Ticker"), time=KeySpec("SipTimestamp")
@@ -246,7 +254,7 @@ class DatasetSpec:
             the WebSocket cluster of the channels and the group of the dataset's kind.
         is_bars: True for a `bars()` dataset: its `channels` and `flat_file_prefixes` are keyed
             by `Timespan`, and the factory picks the query class from the timespan and
-            multiplier. False datasets key them by None.
+            multiplier. False datasets key them by `NotBars.ANY`.
         kind: The dataset kind its rows share a schema with, across asset classes and
             transports (`"trades"`, `"quotes"`, `"bars"`, `"values"`, `"luld"`,
             `"imbalances"`, `"fmv"`), or None for a dataset in no kind. The sources of a kind
@@ -262,13 +270,15 @@ class DatasetSpec:
             `"/v3/reference/options/contracts/{options_ticker}"`; `fetch_path` serves calls
             without symbols.
         extra_paths: Further REST paths the dataset reads.
-        channels: The WebSocket channel per bar timespan, or under the key None for datasets
-            that are not bars, such as `{None: "T"}` or
+        channels: The WebSocket channel per bar timespan, or under the key `NotBars.ANY` for
+            datasets that are not bars, such as `{NotBars.ANY: "T"}` or
             `{Timespan.SECOND: "A", Timespan.MINUTE: "AM"}`. Its source is
             `"<asset class>/<channel>"`.
         family: The channel family, which decides the WebSocket host.
-        flat_file_prefixes: The S3 key prefix per bar timespan, or under None for non-bar
-            datasets. A futures prefix contains the placeholder `{venue}`.
+        flat_file_prefixes: The S3 key prefix per bar timespan, or under the key `NotBars.ANY`
+            for datasets that are not bars, such as `{NotBars.ANY: "us_stocks_sip/trades_v1"}`.
+            A futures prefix contains the placeholder `{venue}`. `timespan_key` gives a
+            request's key.
         keys: The key columns of each source, keyed by `(transport, source key)` as
             `sources` gives them; a source without an entry declares no key.
         time_axis: The wire parameter pair that `start` and `end` map to, such as
@@ -338,9 +348,9 @@ class DatasetSpec:
     grouped_daily_path: str | None = None
     detail_path: str | None = None
     extra_paths: tuple[str, ...] = ()
-    channels: Mapping[Timespan | None, str] = field(default_factory=dict)
+    channels: Mapping[Timespan | NotBars, str] = field(default_factory=dict)
     family: ChannelFamily = ChannelFamily.TICK
-    flat_file_prefixes: Mapping[Timespan | None, str] = field(default_factory=dict)
+    flat_file_prefixes: Mapping[Timespan | NotBars, str] = field(default_factory=dict)
     keys: Mapping[tuple[Transport, str], SourceKeys] = field(default_factory=dict)
     time_axis: tuple[str, str] | None = None
     symbol_param: str | None = None
@@ -385,8 +395,8 @@ class DatasetSpec:
             raise ValueError(f"dataset name {self.name!r} must be '<namespace>.<dataset>'")
         self._check_summary()
         keys = {*self.channels, *self.flat_file_prefixes}
-        if any((key is None) == self.is_bars for key in keys):
-            kind = "Timespan" if self.is_bars else "None"
+        if any((key is NotBars.ANY) == self.is_bars for key in keys):
+            kind = "Timespan" if self.is_bars else "NotBars.ANY"
             raise ValueError(
                 f"{self.name}: channels and flat_file_prefixes must be keyed by {kind}"
             )
@@ -653,6 +663,23 @@ class DatasetSpec:
             )
 
 
+def timespan_key(timespan: Timespan | None) -> Timespan | NotBars:
+    """Return the key of a request's channel and flat-file prefix in a dataset's mappings.
+
+    `DatasetSpec.channels` and `DatasetSpec.flat_file_prefixes` key a bars dataset's sources by
+    the bar timespan and every other dataset's one source by `NotBars.ANY`; a request carries
+    a timespan only for bars. Call this to look a request's source up in either mapping.
+
+    Args:
+        timespan: The request's bar timespan (`Request.timespan`), or None for a request
+            without one, which is any request of a dataset that is not bars.
+
+    Returns:
+        The timespan itself, or `NotBars.ANY` when there is none.
+    """
+    return NotBars.ANY if timespan is None else timespan
+
+
 def param_family(name: str) -> frozenset[str]:
     """Return a wire parameter, its base name, and every suffixed form of the base.
 
@@ -871,14 +898,14 @@ class Catalog:
                 KeySpec,
                 SourceKeys,
             )
-            from deephaven_massive._enums import AssetClass
+            from deephaven_massive._enums import AssetClass, NotBars
             from deephaven_massive._massive import Transport
 
             trades = DatasetSpec(
                 name="stocks.trades",
                 summary="Trades of US-listed stocks, tick by tick.",
                 asset_class=AssetClass.STOCKS,
-                channels={None: "T"},
+                channels={NotBars.ANY: "T"},
                 keys={
                     (Transport.WS, "stocks/T"): SourceKeys(
                         KeySpec("Ticker"), KeySpec("SipTimestamp")

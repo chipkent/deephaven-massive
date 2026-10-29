@@ -63,7 +63,7 @@ def _paced(governor: _massive.RequestGovernor) -> dict[str, int | None]:
 def _refuse(
     governor: _massive.RequestGovernor, bucket: str, message: str, *, retry_after: float
 ) -> None:
-    permit = governor.acquire(bucket, _massive.Cancel(), lane=object())
+    permit = governor.admission(bucket, lane=object()).acquire(_massive.Cancel())
     with contextlib.suppress(_massive.WireError):  # a pause past the patience gives up
         governor.refused(permit, retry_after=retry_after, message=message, request_id="r1")
 
@@ -152,7 +152,9 @@ def test_an_idle_entry_outlives_its_last_lease_until_its_window_passes() -> None
     registry = _registry(clock)
     lease = _lease(registry, basic=frozenset({Subscription.STOCKS}))
     governor = lease.governor
-    governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+    governor.done(
+        governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+    )
     lease.release()
     # A new session soon after (a notebook cell run again) still sees the slot held.
     again = _lease(registry, basic=frozenset({Subscription.STOCKS}))
@@ -277,11 +279,12 @@ def test_rows_show_each_buckets_state() -> None:
     governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+        governor.done(
+            governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
     waiting = threading.Thread(
-        target=governor.acquire,
-        args=("stocks", _massive.Cancel()),
-        kwargs={"lane": object()},
+        target=governor.admission("stocks", lane=object()).acquire,
+        args=(_massive.Cancel(),),
         daemon=True,
     )
     waiting.start()
@@ -383,7 +386,9 @@ def test_a_paced_bucket_with_every_slot_held_shows_paced() -> None:
     governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+        governor.done(
+            governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
     rows, change = rate_limits.rate_limit_pull(governor)
     stocks = next(row for row in rows if row.bucket == "stocks")
     # Nobody waits, but the next request would: it is not READY.
@@ -410,7 +415,7 @@ def test_a_learned_basic_outlives_its_pruned_governor() -> None:
 def test_the_default_registry_names_the_other_buckets_requests() -> None:
     lease = _lease(GovernorRegistry())
     governor = lease.governor
-    permit = governor.acquire(OTHER, _massive.Cancel(), lane=object())
+    permit = governor.admission(OTHER, lane=object()).acquire(_massive.Cancel())
     with pytest.raises(_massive.WireError, match="refused requests outside Massive's"):
         governor.refused(permit, retry_after=700.0, message="busy", request_id=None)
     lease.release()

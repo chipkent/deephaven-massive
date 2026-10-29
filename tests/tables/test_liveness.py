@@ -20,7 +20,7 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import AssetClass
+from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
@@ -49,7 +49,7 @@ SPEC = DatasetSpec(
     name="test.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(Transport.WS, "stocks/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 

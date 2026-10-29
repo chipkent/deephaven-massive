@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from urllib3 import BaseHTTPResponse
 
     from deephaven_massive._massive.net.origins import Origin
-    from deephaven_massive._massive.rest.governor import Permit, RequestGovernor
+    from deephaven_massive._massive.rest.governor import Admission, Permit, RequestGovernor
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec.types import RestPath
 
@@ -349,8 +349,8 @@ class RestClient:
         """Request one page of a REST path.
 
         Blocks the calling thread for the request and its waits: for the governor's permit
-        (a paced bucket's slot, or a pause after a 429, until a run's pauses add up to 10
-        minutes), and for up to three retries of a 5xx or connection failure, 0.5 to
+        (a paced bucket's slot, or a pause after a 429, until a run's pauses add up to more
+        than 10 minutes), and for up to three retries of a 5xx or connection failure, 0.5 to
         2.4 s each. A 429 is not a retry: the attempt is made again once the governor allows.
 
         Errors: `WireError` when the request fails after its retries, Massive keeps refusing
@@ -408,8 +408,9 @@ class RestClient:
 
         Returns:
             An iterator of pages. Iterating raises what `get` raises, and `WireError` when a
-            `next_url` points to a scheme, host, or port other than the base URL's (it is
-            never requested).
+            `next_url` points to a scheme, host, or port other than the base URL's, or names
+            a page this pagination has already fetched (a cycle); such a `next_url` is never
+            requested. A new call to `pages` starts with no fetched pages.
 
         Raises:
             ValueError: When `limit` is less than 1, or the parameters do not fit the path
@@ -448,10 +449,12 @@ class RestClient:
             Each page, the last cut to `limit`.
 
         Raises:
-            WireError: If a `next_url` leaves the base URL's origin, or repeats the target
-                just fetched (which would page forever).
+            WireError: If a `next_url` leaves the base URL's origin, or names a target this
+                pagination has already fetched (a cycle such as A to B to A, which would
+                page forever). The check keeps one target string per page until paging ends.
         """
         remaining = limit
+        fetched = {target}
         while True:
             page = self._fetch(job, target)
             if remaining is not None and len(page.rows) >= remaining:
@@ -469,13 +472,14 @@ class RestClient:
                 raise WireError(
                     f"{job.rest_path.template}: refusing to follow {error}", host=self._host
                 ) from error
-            if following == target:
+            if following in fetched:
                 raise WireError(
-                    f"{job.rest_path.template}: next_url repeats the page just fetched "
-                    f"({target}); refusing to loop",
+                    f"{job.rest_path.template}: next_url {following} repeats a page this "
+                    "pagination already fetched; refusing to loop",
                     host=self._host,
-                    path=target,
+                    path=following,
                 )
+            fetched.add(following)
             target = following
 
     def _fetch(self, job: _Job, target: str) -> Page:
@@ -531,14 +535,15 @@ class RestClient:
         verification, a proxy that refused its credentials (HTTP 407), or a bucket Massive
         kept refusing for longer than the governor waits (status 429).
         """
-        permit = self._permit(request, job, stop)
-        try:
+        lane = job if job.cancel is None else job.cancel
+        # The claim is open before anything is granted, and its exit reports the permit if
+        # nothing else did, so no interrupt can leave the permit unreported.
+        with self._governor.admission(job.bucket, lane=lane) as admission:
+            permit = self._permit(request, admission, stop)
             if stop.is_set():  # cancelled just as it was admitted: it is never sent
                 self._governor.release(permit)
                 raise self._stopped(request)
             return self._send(job, request, permit)
-        finally:  # whatever escaped, the permit is reported; a report already made stands
-            self._governor.done(permit, answered=False)
 
     def _send(self, job: _Job, request: Request, permit: Permit) -> Page | _Retryable | object:
         """Send an admitted attempt and report its end to the governor.
@@ -662,7 +667,7 @@ class RestClient:
             path=request.target,
         )
 
-    def _permit(self, request: Request, job: _Job, stop: Cancel) -> Permit:
+    def _permit(self, request: Request, admission: Admission, stop: Cancel) -> Permit:
         """Wait for the governor to admit an attempt, in the call's lane.
 
         The lane is the caller's cancellation token, which a read shares among its calls, or
@@ -670,7 +675,7 @@ class RestClient:
 
         Args:
             request: The request, for messages.
-            job: The call: its bucket, and its lane.
+            admission: The attempt's claim on its bucket, in the call's lane.
             stop: Set when the client closes or the caller cancels.
 
         Returns:
@@ -684,9 +689,8 @@ class RestClient:
         """
         if stop.is_set():
             raise self._stopped(request)
-        lane = job if job.cancel is None else job.cancel
         try:
-            return self._governor.acquire(job.bucket, stop, lane=lane)
+            return admission.acquire(stop)
         except WireError as error:
             if error.status is None:  # the wait was cancelled
                 raise self._stopped(request) from None

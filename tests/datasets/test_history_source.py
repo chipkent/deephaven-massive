@@ -34,7 +34,7 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, NotBars, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces import indicators
 
@@ -45,7 +45,7 @@ NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 
 
 def files(
-    prefixes: Mapping[Timespan | None, str], time: str, *, session: bool = False
+    prefixes: Mapping[Timespan | NotBars, str], time: str, *, session: bool = False
 ) -> dict[tuple[Transport, str], SourceKeys]:
     # The keys every flat-file prefix declares: its ticker, its time, and a futures session.
     keys = SourceKeys(
@@ -55,7 +55,11 @@ def files(
 
 
 def bars(
-    spec: DatasetSpec, name: str, *, asset_class: AssetClass, prefixes: dict[Timespan | None, str]
+    spec: DatasetSpec,
+    name: str,
+    *,
+    asset_class: AssetClass,
+    prefixes: dict[Timespan | NotBars, str],
 ) -> DatasetSpec:
     # Another class's bars: its own name, class, and flat files.
     return replace(
@@ -72,10 +76,10 @@ STOCK_TRADES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
-    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
-    keys=files({None: "us_stocks_sip/trades_v1"}, "SipTimestamp"),
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
+    keys=files({NotBars.ANY: "us_stocks_sip/trades_v1"}, "SipTimestamp"),
 )
-STOCK_BAR_FILES: dict[Timespan | None, str] = {
+STOCK_BAR_FILES: dict[Timespan | NotBars, str] = {
     Timespan.MINUTE: "us_stocks_sip/minute_aggs_v1",
     Timespan.DAY: "us_stocks_sip/day_aggs_v1",
 }
@@ -123,8 +127,8 @@ INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
     summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
-    flat_file_prefixes={None: "us_indices/values_v1"},
-    keys=files({None: "us_indices/values_v1"}, "Timestamp"),
+    flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
+    keys=files({NotBars.ANY: "us_indices/values_v1"}, "Timestamp"),
 )
 FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
@@ -132,10 +136,10 @@ FUTURES_TRADES = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
-    flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
-    keys=files({None: "us_futures_{venue}/trades_v1"}, "Timestamp", session=True),
+    flat_file_prefixes={NotBars.ANY: "us_futures_{venue}/trades_v1"},
+    keys=files({NotBars.ANY: "us_futures_{venue}/trades_v1"}, "Timestamp", session=True),
 )
-FUTURES_BAR_FILES: dict[Timespan | None, str] = {
+FUTURES_BAR_FILES: dict[Timespan | NotBars, str] = {
     Timespan.MINUTE: "us_futures_{venue}/minute_aggs_v1",
     Timespan.SESSION: "us_futures_{venue}/session_aggs_v1",
 }
