@@ -305,7 +305,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
   request.py             Request, ParamValue, StreamKey
   schema.py              ColumnType, Column, Schema, WireType -> ColumnType, dataset_schema(): the
                          merge of a dataset's sources (section 19.4)
-  source_columns.py      SourceColumn: the key rename, required fields, join, widen
+  source_columns.py      SourceColumn: the key rename, required fields, widen
   column_descriptions.py the description rules of dataset columns, the transport labels and
                          their order (section 7.4)
   column_reference.py    the column reference: render(catalog, provenance) -> {file name:
@@ -3696,8 +3696,9 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      result key, params), Field(wire key, column, WireType, unit, required,
                      conversion), Conversion (named conversions, each with its declared and
                      resulting WireType), Param(+ unit), ParamKind, WireType, WireUnit,
-                     ENVELOPE_KEYS, DriftReport(extra, missing, statuses); WireType.join, the
-                     one type-lattice join that the refresh and the run-time schema merge share
+                     ENVELOPE_KEYS, DriftReport(extra, missing, statuses);
+                     WireType.common_type, the narrowest wire type that holds values of two
+                     types, which the refresh and the run-time schema merge both call
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
                      convert_field applies a field's named conversion and raises with the
@@ -3751,8 +3752,8 @@ refresh/             build time only; excluded from the wheel; may import any of
   rest_sources.py    REST paths -> RestPath: flattening, result keys, parameters, path
                      coverage, and the gates met per parameter
   ws_sources.py, flat_file_sources.py  the WebSocket and flat-file generators
-  kinds.py           KINDS and PROJECTIONS -> memberships; type-agreement (by WireType.join),
-                     transport-agreement, and the kind column order
+  kinds.py           KINDS and PROJECTIONS -> memberships; type-agreement (by
+                     WireType.common_type), transport-agreement, and the kind column order
   gates.py           Gate (the named gates of section 19.4), Problem, RefreshError, and the
                      checks that span sources: stale entries, exclusions, concept collisions
   render.py          spec/*.json in canonical text
@@ -3772,7 +3773,7 @@ vendor/massive/      outside the package; Massive's published content, vendored 
   rest/  websocket/  flat-files/   (the pages of each area llms.txt links)
 ```
 
-**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 32
+**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 35
 names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
 websockets:
 
