@@ -8,6 +8,7 @@ field-descriptions (#91).
 In review: layer-rules (#98).
 **Companion:** [`DESIGN.md`](DESIGN.md) is the specification; this file is the schedule. When
 they disagree, `DESIGN.md` wins and this file gets a `docs:` fix.
+The package layout cleanup has its own schedule, [`LAYOUT.md`](LAYOUT.md).
 
 ## Purpose and lifetime of this file
 
