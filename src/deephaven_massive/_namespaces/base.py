@@ -269,7 +269,7 @@ def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
 
     Returns:
         `{name: value, f"{name}.any_of": None}` for one value or None, and
-        `{name: None, f"{name}.any_of": values}` for a sequence, as a tuple.
+        `{name: None, f"{name}.any_of": values}` for a sequence, with the values as a tuple.
 
     Raises:
         TypeError: If the argument is neither None, a `str`, nor a sequence.

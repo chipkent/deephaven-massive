@@ -660,9 +660,9 @@ def test_insider_datasets_take_issuer_and_owner(
         make(issuer_cik=320193)
     with pytest.raises(TypeError, match="owner_cik must be a str, a sequence of str, or None"):
         make(owner_cik=1214156)
-    with pytest.raises(ValueError, match="issuer_cik is empty; pass None for every issuer"):
+    with pytest.raises(ValueError, match=r"issuer_cik is empty; pass None for every issuer$"):
         make(issuer_cik=[])
-    with pytest.raises(ValueError, match="owner_cik is empty; pass None for every owner"):
+    with pytest.raises(ValueError, match=r"owner_cik is empty; pass None for every owner$"):
         make(owner_cik=())
     with pytest.raises(TypeError):
         make(issuer_cik=[320193])
