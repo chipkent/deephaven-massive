@@ -1452,6 +1452,12 @@ def test_a_dropped_connection_is_a_massive_error(
         q.history("2025-03-03", "2025-03-03")
 
 
+_HOLD = 10.0
+"""Seconds `hold_each_drop` holds one dropped read's failure at most: short enough that a test
+whose reads build no table fails on its own assertions within the 60-second test timeout, even
+after two held drops."""
+
+
 def hold_each_drop(fake_s3: FakeS3) -> threading.Event:
     # Holds each dropped read's failure until the returned event is set, and clears the event
     # at every request, so a test can make each dropped read build a table first. Arrow reads
@@ -1459,7 +1465,7 @@ def hold_each_drop(fake_s3: FakeS3) -> threading.Event:
     # a single block into a table.
     built = threading.Event()
     fake_s3.before_answer = lambda _: built.clear()
-    fake_s3.before_drop = lambda _: built.wait(TIMEOUT)
+    fake_s3.before_drop = lambda _: built.wait(_HOLD)
     return built
 
 
