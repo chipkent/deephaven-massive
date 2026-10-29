@@ -39,8 +39,11 @@ from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
 
-# Plain constants of the ws_session, which no fixture can hand over; sessions come from fixtures.
+# Imported, not taken from a fixture: no shared fixture provides the manual clock that
+# `poll.open_poll` needs for the thread-name test's poller, which must not cycle on its own.
 from tests._fakes.clock import FakeClock
+
+# Plain constants of the ws_session, which no fixture can hand over; sessions come from fixtures.
 from tests._fakes.ws_session import REALTIME, TIMEOUT
 
 if TYPE_CHECKING:

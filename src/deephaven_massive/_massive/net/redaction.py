@@ -9,30 +9,29 @@ response body and the WebSocket client every frame (`Redactor.received`), and th
 client S3's error words (`redact`). Every row, status, excerpt, error message, and log line
 built from them is then free of the secret by construction, wherever it is built.
 
-A JSON text can spell the secret with escapes (a `u0050` escape for `P`), which no search of the raw
-bytes finds but which decodes to the secret. `Redactor.received` therefore also replaces the
-secret's own JSON-escaped form, and when a body or frame holds an escape that spells a character
-of a secret it decodes it, replaces the secret in every decoded string, and re-encodes it if
-anything changed. Any other body, which is nearly every one, costs one substring search per
-spelling and one pattern search, and is passed on uncopied.
+A JSON text can spell the secret with escapes (a `u0050` escape for `P`), which no search for
+the secret itself finds but which decodes to it. `Redactor` therefore matches, for each secret,
+a pattern in which every character is itself or any JSON escape that spells it, and replaces
+each match in the raw text. That works the same whether the text is valid JSON, cut short, or
+not JSON at all (a proxy's HTML page that quotes an escaped key), and it never decodes or
+re-encodes anything. A body that holds neither a secret nor an escape able to spell one of its
+characters, which is nearly every body, costs one substring search per secret and one pattern
+search, and is passed on uncopied.
 
-The replacement is exact and literal: no pattern that could miss a variant or blank out
-unrelated text. An empty secret is skipped, since replacing the empty string would insert the
-marker between every character.
+An empty secret is skipped, since replacing the empty string would insert the marker between
+every character. The match errs toward hiding: text that spells a secret with escapes is
+replaced even where those escapes are themselves quoted text rather than JSON.
 
-This module imports only the standard library and `net.codec`. It is part of `net`, the layer
-every client shares.
+This module imports only the standard library. It is part of `net`, the layer every client
+shares.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Final, overload
 
-from deephaven_massive._massive.net import codec
-
-__all__ = ["REDACTED", "Redactor", "redact", "redact_value"]
+__all__ = ["REDACTED", "Redactor", "redact"]
 
 REDACTED: Final = "***"
 """What each occurrence of a secret becomes."""
@@ -55,66 +54,52 @@ def redact(text: str, *secrets: str | None) -> str:
     return text
 
 
-def redact_value(value: object, *secrets: str | None) -> object:
-    """Return a decoded JSON value with each secret replaced in every string it holds.
-
-    Args:
-        value: A decoded JSON value: an object, a list, a string, or a scalar.
-        *secrets: The client's secrets, as `redact` takes them.
-
-    Returns:
-        `value` itself when no string in it holds a secret, otherwise a copy (objects and lists
-        rebuilt, keys included) with `REDACTED` in place of each occurrence.
-    """
-    if isinstance(value, str):
-        return redact(value, *secrets)
-    if isinstance(value, list):
-        items = [redact_value(item, *secrets) for item in value]
-        changed = any(new is not old for new, old in zip(items, value, strict=True))
-        return items if changed else value
-    if isinstance(value, dict):
-        pairs = [(redact(k, *secrets), redact_value(v, *secrets)) for k, v in value.items()]
-        changed = any(
-            new_key is not key or new is not old
-            for (new_key, new), (key, old) in zip(pairs, value.items(), strict=True)
-        )
-        return dict(pairs) if changed else value
-    return value
-
-
 class Redactor:
-    """One client's secrets, ready to clean whatever the client receives.
+    r"""One client's secrets, ready to clean whatever the client receives.
 
     A client builds one at construction and passes every response body or frame through
-    `received` before anything decodes, quotes, or logs it. It precomputes, once, each secret's
-    spellings (as it is, and as JSON escapes it) and a pattern that matches only the JSON
+    `received` before anything decodes, quotes, or logs it. It compiles, once, a pattern that
+    matches each secret however JSON spells it (every character as itself or as any of its
+    escapes, their hex digits in either case), and a cheaper pattern that matches only the
     escapes able to spell a character some secret contains, so a body whose escapes spell
-    nothing of a secret (the quotes of a news headline) is never decoded. Immutable after
-    construction, so one instance is shared safely by every thread of its client.
+    nothing of a secret (the quotes of a news headline) is never searched with the full one.
+    Immutable after construction, so one instance is shared safely by every thread of its
+    client.
 
     Example:
         ::
 
             redactor = Redactor("my-key")
             assert redactor.received(b'{"error":"bad key my-key"}') == b'{"error":"bad key ***"}'
+            assert redactor.received(b"<p>\\u006dy-key</p>") == b"<p>***</p>"
     """
 
-    __slots__ = ("_bytes_escapes", "_needles", "_secrets", "_text_escapes")
+    __slots__ = (
+        "_bytes_escapes",
+        "_bytes_secrets",
+        "_needles",
+        "_text_escapes",
+        "_text_secrets",
+    )
 
     def __init__(self, *secrets: str | None) -> None:
-        """Precompute the secrets' spellings and the escapes that could spell them.
+        """Compile the patterns of the secrets and of the escapes that could spell them.
 
         Args:
             *secrets: The client's secrets; `None` and the empty string are skipped.
         """
-        self._secrets: tuple[str, ...] = tuple(secret for secret in secrets if secret)
-        self._needles = tuple(n for secret in self._secrets for n in _spellings(secret))
-        characters = {c for secret in self._secrets for c in secret}
-        escapes = sorted({escape for c in characters for escape in _escapes(c)})
-        pattern = "|".join(re.escape(escape) for escape in escapes)
+        kept = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+        self._needles: tuple[str, ...] = tuple(kept)
+        escapes = sorted({e for secret in kept for c in secret for e in _escapes(c)})
         # Never matches when there is no secret: an empty alternation would match everywhere.
-        self._text_escapes = re.compile(pattern or r"(?!)", re.IGNORECASE)
-        self._bytes_escapes = re.compile((pattern or r"(?!)").encode(), re.IGNORECASE)
+        nothing = r"(?!)"
+        prefilter = "|".join(_hex_insensitive(escape) for escape in escapes) or nothing
+        self._text_escapes = re.compile(prefilter)
+        self._bytes_escapes = re.compile(prefilter.encode())
+        self._text_secrets = re.compile("|".join(_spelled(s) for s in kept) or nothing)
+        self._bytes_secrets = re.compile(
+            b"|".join(_spelled_bytes(s) for s in kept) or nothing.encode()
+        )
 
     @overload
     def received(self, data: bytes) -> bytes: ...
@@ -126,58 +111,36 @@ class Redactor:
     def received(self, data: str | bytes) -> str | bytes: ...
 
     def received(self, data: str | bytes) -> str | bytes:
-        """Return a received body or frame with each secret replaced, however its JSON spells it.
+        """Return a received body or frame with each secret replaced, however JSON spells it.
 
         Args:
             data: The body or frame as received: `bytes`, or `str` for a WebSocket text frame.
-                It is usually JSON, but need not be (a proxy's HTML page).
+                It is usually JSON, but need not be: a body cut short or a proxy's HTML page is
+                cleaned the same way.
 
         Returns:
-            `data` with each secret and its JSON-escaped form replaced by `REDACTED`, and, when
-            it holds an escape that spells a character of a secret, decoded, cleaned string by
-            string (`redact_value`), and re-encoded if anything changed; `data` itself, uncopied,
-            when nothing was replaced. Text that is not JSON keeps its escapes as they are.
+            `data` with every spelling of each secret (as it is, with any of its characters
+            spelled by a JSON escape, or both) replaced by `REDACTED`; `data` itself, uncopied,
+            when nothing was replaced.
         """
         if isinstance(data, bytes):
-            for needle in self._needles:
-                raw = needle.encode()
-                if raw in data:
-                    data = data.replace(raw, REDACTED.encode())
-            spelled = self._bytes_escapes.search(data) is not None
-        else:
-            for needle in self._needles:
-                if needle in data:
-                    data = data.replace(needle, REDACTED)
-            spelled = self._text_escapes.search(data) is not None
-        if not spelled:
+            plain = any(needle.encode() in data for needle in self._needles)
+            if not plain and self._bytes_escapes.search(data) is None:
+                return data
+            cleaned, count = self._bytes_secrets.subn(REDACTED.encode(), data)
+            return cleaned if count else data
+        plain = any(needle in data for needle in self._needles)
+        if not plain and self._text_escapes.search(data) is None:
             return data
-        try:
-            value = codec.loads(data)
-        except ValueError:
-            return data
-        cleaned = redact_value(value, *self._secrets)
-        if cleaned is value:
-            return data
-        text = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
-        return text.encode() if isinstance(data, bytes) else text
+        text, count = self._text_secrets.subn(REDACTED, data)
+        return text if count else data
 
 
-def _spellings(secret: str) -> tuple[str, ...]:
-    """Return how a secret appears in JSON text: as it is, and as JSON escapes it.
-
-    Args:
-        secret: A non-empty secret.
-
-    Returns:
-        The secret, and its JSON-escaped form when that differs (a quote or a backslash in it).
-    """
-    escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
-    return (secret,) if escaped == secret else (secret, escaped)
-
-
-# The last code point a single four-digit escape spells, and the first high surrogate.
+# The last code point a single four-digit escape spells, and the first high and low surrogates.
 _LAST_BMP: Final = 0xFFFF
 _HIGH_SURROGATE: Final = 0xD800
+_LOW_SURROGATE: Final = 0xDC00
+_SURROGATE_BITS: Final = 10
 
 # The short JSON escapes, by the character each spells.
 _SHORT_ESCAPES: Final = {
@@ -193,19 +156,66 @@ _SHORT_ESCAPES: Final = {
 
 
 def _escapes(character: str) -> tuple[str, ...]:
-    """Return every JSON escape that spells a character (its hex digits match in any case).
+    """Return every JSON escape that spells a character, with lower-case hex digits.
 
     Args:
         character: One character.
 
     Returns:
-        Its four-hex-digit `u` escape (the first half of a surrogate pair for a character beyond the
-        Basic Multilingual Plane, which no other character's escape starts with), and its short
-        escape when it has one.
+        Its `u` escape (for a character beyond the Basic Multilingual Plane, the surrogate
+        pair of two), and its short escape when it has one.
     """
     code = ord(character)
     if code > _LAST_BMP:
-        code = _HIGH_SURROGATE + ((code - _LAST_BMP - 1) >> 10)
-    long = f"\\u{code:04x}"
+        offset = code - _LAST_BMP - 1
+        high = _HIGH_SURROGATE + (offset >> _SURROGATE_BITS)
+        low = _LOW_SURROGATE + (offset & ((1 << _SURROGATE_BITS) - 1))
+        long = f"\\u{high:04x}\\u{low:04x}"
+    else:
+        long = f"\\u{code:04x}"
     short = _SHORT_ESCAPES.get(character)
     return (long,) if short is None else (long, short)
+
+
+def _hex_insensitive(escape: str) -> str:
+    """Return a pattern that matches an escape with its hex digits in either case.
+
+    Args:
+        escape: A JSON escape, its hex digits in lower case.
+
+    Returns:
+        The escape's pattern: its letters a to f as a class of both cases, everything else
+        literal. The `u` itself is lower case in JSON and stays so.
+    """
+    return "".join(f"[{c}{c.upper()}]" if c in "abcdef" else re.escape(c) for c in escape)
+
+
+def _spelled(secret: str) -> str:
+    """Return a pattern that matches a secret with any of its characters spelled by escapes.
+
+    Args:
+        secret: A non-empty secret.
+
+    Returns:
+        The pattern: for each character, itself or any of its escapes.
+    """
+    return "".join(
+        "(?:" + "|".join([re.escape(c), *map(_hex_insensitive, _escapes(c))]) + ")" for c in secret
+    )
+
+
+def _spelled_bytes(secret: str) -> bytes:
+    """Return `_spelled`'s pattern for UTF-8 bytes: each character as its UTF-8 or its escapes.
+
+    Args:
+        secret: A non-empty secret.
+
+    Returns:
+        The pattern, as bytes.
+    """
+    return b"".join(
+        b"(?:"
+        + b"|".join([re.escape(c.encode()), *(_hex_insensitive(e).encode() for e in _escapes(c))])
+        + b")"
+        for c in secret
+    )
