@@ -229,7 +229,7 @@ _enums.py                the fifteen public enums, Recency, ChannelFamily, _requ
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
                          from_wire
-_logging.py              enable_debug_logging and the DEEPHAVEN_MASSIVE_LOG variables; standard
+_debug_log.py            enable_debug_logging and the DEEPHAVEN_MASSIVE_LOG variables; standard
                          library only, so it works before a Deephaven server exists (section 17.1)
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
                          (section 6); applies the logging variables and logs the environment line
@@ -394,7 +394,7 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
 | 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
-| 5 | API | the root `__init__`, `_logging`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. `_logging` imports only the standard library. |
+| 5 | API | the root `__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. `_debug_log` imports only the standard library. |
 
 **Composition.** `_session.py` is the one module that sees every layer. It imports every
 namespace module statically and names each once, in `NAMESPACE_MODULES` (a test compares the

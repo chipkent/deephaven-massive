@@ -22,7 +22,7 @@ from deephaven.execution_context import make_user_exec_ctx
 from deephaven.table_listener import listen
 
 import deephaven_massive as dm
-from deephaven_massive import _logging, _namespaces, _session
+from deephaven_massive import _debug_log, _namespaces, _session
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass
@@ -140,7 +140,7 @@ def test_the_session_threads_are_named_after_the_session() -> None:
 def test_the_first_session_applies_the_logging_variables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_logging, "_switch", _logging._Switch())
+    monkeypatch.setattr(_debug_log, "_switch", _debug_log._Switch())
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "verbose")
     with pytest.raises(
         ValueError, match=r"^DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level"
