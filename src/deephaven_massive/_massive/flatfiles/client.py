@@ -44,6 +44,10 @@ The client follows the network rules the REST and WebSocket clients follow, from
   them and read the object again from its start, waiting first with `wait_to_reread`, which
   follows the same schedule and limit.
 
+botocore parses the JSON files that describe S3 once per process, not once per client: every
+client's botocore session is given the same model loader, which stays in memory for the life of
+the process.
+
 The body of an object reaches `FlatFile` through a small stream that turns botocore's and
 urllib3's read errors (a connection dropped, reset, or broken at the TLS layer part-way
 through the body) into `OSError`, so the reader needs no
@@ -54,6 +58,7 @@ the rest of `flatfiles` and `net`; the package's interface resolves it only when
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import random
@@ -64,6 +69,7 @@ from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
 
 import boto3
+import botocore.loaders
 import botocore.session
 from botocore.config import Config
 from botocore.exceptions import (
@@ -95,7 +101,7 @@ from deephaven_massive._massive.net.retry import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from botocore.response import StreamingBody
     from types_boto3_s3.client import S3Client
@@ -141,6 +147,68 @@ _CONNECT_TIMEOUT: Final = 60.0
 
 _READ_TIMEOUT: Final = 60.0
 """Seconds to wait for each read of a response (botocore's default)."""
+
+
+class _ModelLoader:
+    """botocore's model loader, shared by every S3 client the process builds.
+
+    botocore describes S3, its endpoints, and its retry rules in JSON files it ships, and a
+    fresh botocore session reads and parses them again for every client it builds: about
+    100 ms of CPU per client. One loader, registered on each client's botocore session, reads
+    them once per process; every later client is built in about a tenth of that time.
+
+    The loader is created with this object, when the module is imported, which reads no file;
+    the first client build parses the models, and the loader keeps them in memory for the life
+    of the process (about 12 MB). It searches botocore's own data and `~/.aws/models`, as
+    botocore does by default; the `data_path` setting (`AWS_DATA_PATH`) is not consulted.
+
+    Each boto3 session appends boto3's own data directory to the loader's search paths when it
+    is created. `building()` removes the copies a build adds, keeping each directory once, so
+    the list stays the length it had after the first build however many clients are built.
+
+    Thread-safety: botocore's loader is not safe to share between threads that are loading.
+    It fills its cache without a lock, on the first load of S3's model it merges S3's extra
+    definitions into the cached copy in place, and boto3 writes its search paths. Every use of
+    the loader therefore happens inside `building()`, which holds this object's lock while one
+    client is built. A built client reads the loader again only for paginators and waiters,
+    which `FlatFileClient` never uses. The lock is taken under `FlatFileClient`'s own lock and
+    takes no other lock, and no network call or wait happens while it is held.
+    """
+
+    __slots__ = ("_loader", "_lock")
+
+    def __init__(self) -> None:
+        """Create the holder and its loader; nothing is read until the first build."""
+        self._lock = threading.Lock()
+        self._loader = botocore.loaders.create_loader()
+
+    @contextlib.contextmanager
+    def building(self) -> Iterator[botocore.loaders.Loader]:
+        """Hold the lock for building one client and yield the shared loader.
+
+        The caller registers the loader on the client's botocore session and builds the client
+        before leaving the block, so no two clients read the loader at once. On leaving, every
+        search path the build added that the loader already had is removed again (boto3 adds
+        its data directory on each session), even if the build failed.
+
+        Yields:
+            The process-wide loader.
+        """
+        with self._lock:
+            paths = self._loader.search_paths
+            before = list(paths)
+            try:
+                yield self._loader
+            finally:
+                kept = list(before)
+                for path in paths[len(before) :]:
+                    if path not in kept:
+                        kept.append(path)
+                paths[:] = kept
+
+
+_MODEL_LOADER: Final = _ModelLoader()
+"""The one botocore model loader of the process, shared by every `FlatFileClient`."""
 
 
 @dataclass(frozen=True)
@@ -203,12 +271,14 @@ class FlatFileClient:
 
     The library's session creates one on its first flat-file read and closes it when the
     session closes. The boto3 client is created by the first request, under the client's own
-    leaf lock (no network call and no wait happen while it is held: the credentials are given,
-    the proxy is decided before the lock is taken, and the `legacy` defaults mode keeps boto3
-    from asking the instance-metadata service for a region), and shared by every reader
-    thread, since boto3 clients are thread-safe. Once `close()` has run, no request starts; a
-    request already in flight when the client closed is answered, and its connection pool is
-    closed once more as it returns, so nothing it opened outlives the close.
+    lock (no network call and no wait happen while it is held: the credentials are given, the
+    proxy is decided before the lock is taken, and the `legacy` defaults mode keeps boto3 from
+    asking the instance-metadata service for a region), and shared by every reader thread,
+    since boto3 clients are thread-safe. Every client in the process reads botocore's model
+    files through one shared loader, so only the first pays to parse them; building a client
+    takes that loader's lock, a leaf lock, inside the client's own. Once `close()` has run, no
+    request starts; a request already in flight when the client closed is answered, and its
+    connection pool is closed once more as it returns, so nothing it opened outlives the close.
 
     Example:
         ::
@@ -571,9 +641,10 @@ class FlatFileClient:
 
         The certificate bundle and the proxy are read first, outside the client's lock: on
         macOS, the system's proxy exceptions can make the proxy lookup resolve the endpoint's
-        host name, and the lock is a leaf lock under which nothing waits on the network.
-        Creating the client then reads local AWS configuration but makes no request, so it is
-        done under the lock; concurrent first calls create exactly one client.
+        host name, and nothing waits on the network under the lock. Creating the client then
+        reads local AWS configuration but makes no request, so it is done under the lock
+        (taking the shared model loader's leaf lock inside it); concurrent first calls create
+        exactly one client.
 
         Args:
             key: The key about to be requested, for the errors' `path`.
@@ -636,7 +707,11 @@ class FlatFileClient:
         and from more variables (`HTTP_PROXY`, `ALL_PROXY`) than the other clients read. The
         session's defaults mode is fixed at `legacy` because `AWS_DEFAULTS_MODE=auto` would
         make boto3 ask the instance-metadata service for the region, a network call under the
-        lock.
+        lock. The session reads botocore's model files through the process-wide loader
+        (`_ModelLoader`), whose lock is held, under the client's lock, while the client is
+        built: the first client of the process parses the files, and every later one reuses
+        them. The boto3 session appends boto3's data directory to the shared loader's search
+        paths; leaving the loader's block removes that copy again once the path is listed.
 
         Args:
             bundle: The certificate bundle (`ca_file()`) that verifies the endpoint and an
@@ -646,28 +721,30 @@ class FlatFileClient:
         Returns:
             A client for the endpoint; it makes no request until it is used.
         """
-        core = botocore.session.get_session()
-        # A session setting outranks AWS_DEFAULTS_MODE and the user's AWS configuration files.
-        core.set_config_variable("defaults_mode", "legacy")
-        session = boto3.session.Session(
-            aws_access_key_id=self._access_key_id,
-            aws_secret_access_key=self._secret_access_key,
-            botocore_session=core,
-        )
-        return session.client(
-            "s3",
-            endpoint_url=self._endpoint_url,
-            verify=bundle,
-            config=Config(
-                signature_version="s3v4",
-                max_pool_connections=self._max_pool,
-                connect_timeout=_CONNECT_TIMEOUT,
-                read_timeout=_READ_TIMEOUT,
-                proxies={} if proxy is None else {"https": proxy},
-                proxies_config={"proxy_ca_bundle": bundle},
-                retries={"total_max_attempts": 1, "mode": "standard"},
-            ),
-        )
+        with _MODEL_LOADER.building() as loader:
+            core = botocore.session.get_session()
+            core.register_component("data_loader", loader)
+            # A session setting outranks AWS_DEFAULTS_MODE and the user's AWS configuration.
+            core.set_config_variable("defaults_mode", "legacy")
+            session = boto3.session.Session(
+                aws_access_key_id=self._access_key_id,
+                aws_secret_access_key=self._secret_access_key,
+                botocore_session=core,
+            )
+            return session.client(
+                "s3",
+                endpoint_url=self._endpoint_url,
+                verify=bundle,
+                config=Config(
+                    signature_version="s3v4",
+                    max_pool_connections=self._max_pool,
+                    connect_timeout=_CONNECT_TIMEOUT,
+                    read_timeout=_READ_TIMEOUT,
+                    proxies={} if proxy is None else {"https": proxy},
+                    proxies_config={"proxy_ca_bundle": bundle},
+                    retries={"total_max_attempts": 1, "mode": "standard"},
+                ),
+            )
 
     def _refusal(self, error: ClientError, *, key: str, location: str, verb: str) -> WireError:
         """Map an S3 error response to the wire error it means.

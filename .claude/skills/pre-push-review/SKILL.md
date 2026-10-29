@@ -86,6 +86,9 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the
   and side effect, and examples that run. They describe the code as it is now: reread the
   docstring and comments of every function whose body changed.
 - `DESIGN.md`, `PLAN.md`, `AGENTS.md`, and `docs/dev/` say exactly what the code does.
+- Every comment in a config file, pytest marker description, and CLI help text the diff adds or
+  changes reads as edited prose for a reader new to the project: what it means, when to use
+  it, and what each argument means, with no internal shorthand.
 - No planning references in code, comments, tests or messages:
   `git diff origin/main...HEAD -- src tests scripts .github | grep -nE '^\+.*(DESIGN|PLAN|§)'`.
 - The PR description meets `docs/dev/pull-requests.md`: read that page, then go through its
