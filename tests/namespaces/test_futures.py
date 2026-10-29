@@ -1044,8 +1044,8 @@ def test_bars_of_several_sessions_by_date_fit_under_both_readings_of_their_label
     # documented, so a bar is selected only when both readings fit the range: Tuesday to
     # Thursday of 2025-02-03 to 02-07, never the Monday (its other session may be the Friday
     # before) or the Friday (its other session may be the Monday after). It is kept only when
-    # it has ended by Friday's close, counting its sessions with a holiday allowance, which
-    # leaves out the bar labelled Thursday: a holiday could push it to Monday.
+    # it has ended by Friday's close, counting its sessions with a fold and a holiday allowed,
+    # which leaves only the bar opening Monday evening.
     def bar(label: str) -> dict[str, object]:
         start = chicago_open(date.fromisoformat(label) - timedelta(days=1))
         return {"ticker": "GCJ5", "session_end_date": label, "window_start": start, "close": 1.0}
@@ -1056,11 +1056,12 @@ def test_bars_of_several_sessions_by_date_fit_under_both_readings_of_their_label
     )
     q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION, multiplier=2)
     out = rows(q.history("2025-02-03", "2025-02-07", source=dm.HistorySource.REST))
-    assert [r["TimestampStart"] for r in out] == [bar(day)["window_start"] for day in labels[1:3]]
+    assert [r["TimestampStart"] for r in out] == [bar(labels[1])["window_start"]]
     # A bar of several sessions has no single date; it ends at the latest its sessions can:
-    # the second weekday session from its start, plus one weekday for a holiday.
+    # the second weekday session from its start's date, plus one for a fold and one for a
+    # holiday.
     assert {r["Date"] for r in out} == {None}
-    assert out[0]["TimestampEnd"] == chicago_open(date(2025, 2, 6))
+    assert out[0]["TimestampEnd"] == chicago_open(date(2025, 2, 7))
 
 
 def test_bars_of_several_sessions_are_kept_once_their_latest_end_has_passed(
@@ -1069,9 +1070,9 @@ def test_bars_of_several_sessions_are_kept_once_their_latest_end_has_passed(
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # On Thursday 2025-02-06 at noon, the 2-session bar that opened Monday evening may still
-    # be open: with a holiday its second session would close Thursday at 17:00.
-    now = datetime(2025, 2, 6, 12, tzinfo=CHICAGO)
+    # On Friday 2025-02-07 at noon, the 2-session bar that opened Monday evening may still be
+    # open: counted with a fold and a holiday, its last session would close Friday at 17:00.
+    now = datetime(2025, 2, 7, 12, tzinfo=CHICAGO)
     monkeypatch.setattr(history_source, "_now", lambda: now)
     labels = ["2025-02-04", "2025-02-05"]
     fake_rest.reply(
@@ -1096,7 +1097,7 @@ def test_bars_of_several_sessions_are_kept_once_their_latest_end_has_passed(
     assert early == []
     monkeypatch.setattr(history_source, "_now", lambda: now + timedelta(hours=5))
     late = rows(q.history("2025-02-03", None, source=dm.HistorySource.REST))
-    assert [r["TimestampEnd"] for r in late] == [chicago_open(date(2025, 2, 6))]
+    assert [r["TimestampEnd"] for r in late] == [chicago_open(date(2025, 2, 7))]
 
 
 def test_history_with_dates_refuses_a_session_end_date_filter(

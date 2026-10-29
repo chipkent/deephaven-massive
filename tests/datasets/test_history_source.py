@@ -259,6 +259,18 @@ def test_a_bar_must_end_by_the_range_s_end_and_by_now() -> None:
         assert sessions.ended_by == datetime(2025, 3, 5, 17, tzinfo=CHICAGO)
 
 
+def test_an_index_month_covers_its_weekend_days_for_its_start_too() -> None:
+    # June 2024 starts on a Saturday. A stock's month starts Monday the 3rd, so a range from
+    # the 3rd holds it; an index can update at weekends, so its month starts on the 1st, and
+    # only a range from the 1st holds it.
+    stock = window(STOCK_BARS, "2024-06-03", "2024-06-30", timespan=Timespan.MONTH)
+    index = window(INDEX_BARS, "2024-06-03", "2024-06-30", timespan=Timespan.MONTH)
+    whole = window(INDEX_BARS, "2024-06-01", "2024-06-30", timespan=Timespan.MONTH)
+    assert not stock.empty
+    assert index.empty
+    assert not whole.empty
+
+
 def test_futures_trades_by_date_are_whole_sessions_requested_one_at_a_time() -> None:
     sessions = window(FUTURES_TRADES, "2025-03-03", "2025-03-05")
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))

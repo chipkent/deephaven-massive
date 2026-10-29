@@ -28,6 +28,7 @@ from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
+from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.stream import (
     ChannelPlan,
@@ -703,7 +704,8 @@ def test_benchmark_fan_out(
     rows_per_flush: int,
 ) -> None:
     # Records, never gates: the flush's shared batch against grouping the rows per stream in
-    # one Python pass (one conversion and one table per stream).
+    # one Python pass (one conversion and one table per stream). Each table is built as the
+    # flush builds it, through `dataset_table`, so the cost of sharing dates is counted.
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
     symbols = [f"S{i}" for i in range(streams)]
@@ -712,7 +714,7 @@ def test_benchmark_fan_out(
 
     def shared() -> None:
         converted = plan.convert(rows, {}, arrived=arrivals(rows))
-        table = to_table(converted.batch)
+        table = dataset_table(converted.batch, plan.date_columns)
         for sink in sinks:
             sink.publish(table, converted)
 
@@ -722,15 +724,24 @@ def test_benchmark_fan_out(
             buckets.setdefault(row["Ticker"], []).append(row)
         for symbol, sink in zip(symbols, sinks, strict=True):
             own = buckets.get(symbol, [])
-            sink.publisher.add(to_table(plan.convert(own, {}, arrived=arrivals(own)).batch))
+            batch = plan.convert(own, {}, arrived=arrivals(own)).batch
+            sink.publisher.add(dataset_table(batch, plan.date_columns))
 
-    shared_rate = rows_per_flush / _median_seconds(shared)
+    def stored() -> None:
+        dataset_table(plan.convert(rows, {}, arrived=arrivals(rows)).batch, plan.date_columns)
+
+    def converted_only() -> None:
+        to_table(plan.convert(rows, {}, arrived=arrivals(rows)).batch)
+
+    shared_seconds = _median_seconds(shared)
     grouped_rate = rows_per_flush / _median_seconds(grouped)
+    sharing = _median_seconds(stored) - _median_seconds(converted_only)
     with capsys.disabled():
         sys.stderr.write(
             f"\nfan-out of {rows_per_flush} rows to {streams} streams: "
-            f"shared batch {shared_rate:,.0f} rows/s, "
-            f"Python grouping {grouped_rate:,.0f} rows/s\n"
+            f"shared batch {rows_per_flush / shared_seconds:,.0f} rows/s "
+            f"({shared_seconds * 1000:.2f} ms a flush, {sharing * 1000:.2f} ms of it sharing "
+            f"dates), Python grouping {grouped_rate:,.0f} rows/s\n"
         )
 
 

@@ -49,8 +49,9 @@ become `Date`.
 - **Futures session bar.** Massive's `window_start` to 17:00 Chicago time on its session date;
   `Date` is that date.
 - **Futures bar of several sessions.** `window_start` to 17:00 Chicago time on the latest day
-  its sessions can end on, counted from its start with the same holiday allowance
-  (`dates.last_trading_day`), or on its label if that is later; `Date` is null.
+  its sessions can end on, counted with the same holiday allowance (`dates.last_trading_day`)
+  from the session date of its start plus one more session (a folded first session opens on
+  the evening before its holiday), or on its label if that is later; `Date` is null.
 - **Futures week or longer.** `window_start` to 17:00 Chicago time on the last weekday of the
   latest period its label allows; `Date` is null.
 - **Daily open-close.** As a 1-day bar of its date.
@@ -737,17 +738,6 @@ class TimeRule:
             first, after = bar_days(
                 self.asset_class, day, timespan=timespan, multiplier=self.multiplier
             )
-            if self.asset_class is AssetClass.INDICES and timespan is not Timespan.DAY:
-                # An index can update around the clock: its periods may hold their weekends,
-                # so it ends after the calendar period that begins with its first day.
-                _, every = bar_days(
-                    self.asset_class,
-                    first,
-                    timespan=timespan,
-                    multiplier=self.multiplier,
-                    every_day=True,
-                )
-                after = max(after, every)
             starts.append(_ns(_midnight(first, zone)))
             ends.append(_ns(day_end(self.asset_class, after - timedelta(days=1))))
             dates.append(day.isoformat() if single else None)
@@ -760,9 +750,11 @@ class TimeRule:
         """Fill a futures bar of a session or longer from its start and its session label.
 
         One session: it ends at 17:00 Chicago time on its date, which is its `Date`. Several
-        sessions: 17:00 Chicago on the latest day its sessions can end on, counted from its
-        start's session with a holiday allowance (`dates.last_trading_day`), or on its label
-        when that is later. A week or longer: 17:00 Chicago on the last weekday of the
+        sessions: 17:00 Chicago on the latest day its sessions can end on, or on its label when
+        that is later. The sessions are counted with the holiday allowance
+        (`dates.last_trading_day`) from the session date of its start, plus one: a bar whose
+        first session a holiday folded opens on the evening before the holiday, whose date is
+        the holiday itself. A week or longer: 17:00 Chicago on the last weekday of the
         latest period its label allows (`dates.futures_period_last`). Only a one-session bar
         keeps its `Date`.
 
@@ -809,7 +801,9 @@ class TimeRule:
             return _ns(futures_session_end(session))
         if start is None:
             return None
-        last = last_trading_day(futures_session(_instant(start)), self.multiplier)
+        # A session a holiday folded opens on the evening before the holiday, so the date its
+        # `window_start` falls in can be the holiday itself: count one session more.
+        last = last_trading_day(futures_session(_instant(start)), self.multiplier + 1)
         return _ns(futures_session_end(max(session, last)))
 
 

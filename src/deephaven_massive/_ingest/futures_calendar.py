@@ -19,8 +19,8 @@ already trades for the next session.
 A spread is never looked up: its ticker is not a contract (`GCQ6-GCJ7`, `BOB 02-01 U6`,
 `BZ:BF F7-G7-H7`, `6A:XF:AUDUSD:Q6`), so `/futures/v1/contracts` would list none of them, and
 reading its legs needs the spread grammar of each product family. Any ticker holding a `-`, a
-space, or a `:` is taken for a spread; its rows keep the rule's date, logged once per spread at
-DEBUG.
+space, or a `:` is taken for a spread; its rows keep the rule's date, which a holiday fold can
+make wrong, so the first batch that dates a spread's rows logs one WARNING for it.
 
 `correct` runs on the connection's flush thread and never waits: a row inside the session the
 rule gave it is kept, a row the schedules place in another session moves there, and a row in the
@@ -264,12 +264,7 @@ class FuturesCalendar:
             symbols: Canonical futures symbols, contracts or spreads; spreads are not looked
                 up.
         """
-        contracts: set[str] = set()
-        spreads: set[str] = set()
-        for symbol in symbols:
-            (spreads if _is_spread(symbol) else contracts).add(symbol)
-        self._note_spreads(spreads)
-        self._ask_contracts(contracts)
+        self._ask_contracts({symbol for symbol in symbols if not _is_spread(symbol)})
 
     def wait_idle(self, timeout: float) -> bool:
         """Wait until the worker has served every lookup queued so far, or the calendar closed.
@@ -438,7 +433,7 @@ class FuturesCalendar:
         return out
 
     def _note_spreads(self, spreads: set[str]) -> None:
-        """Log, once per spread, that a spread's rows keep the rule's date.
+        """Warn, once per spread, that a spread's rows keep the rule's date.
 
         Args:
             spreads: Spread tickers seen.
@@ -449,9 +444,9 @@ class FuturesCalendar:
             new = sorted(spreads - self._spreads)
             self._spreads.update(new)
         for spread in new:
-            logger.debug(
-                "%s: futures spread %s is not looked up; its rows keep the session the 17:00 "
-                "Chicago rule gives them",
+            logger.warning(
+                "%s: futures spread %s is not looked up in the schedules; its rows keep the "
+                "session the 17:00 Chicago rule gives them, which a holiday can make wrong",
                 self._label,
                 spread,
             )

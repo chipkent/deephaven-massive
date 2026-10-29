@@ -183,8 +183,8 @@ nothing is kept or shimmed for compatibility.
     big-picture Summary from which a reader with no context could explain the whole PR, the
     required sections in order with the engineering detail in How it works, nothing the reader
     must decode, and rewritten to the final state on every push that changes the PR.
-18. Date columns are stored ISO `yyyy-MM-dd` strings; the library owns the names `Date` and
-    `Timestamp*` (`_datasets/schema.py`).
+18. **Dates are stored ISO strings.** Every date column, vendor dates included, is `yyyy-MM-dd`
+    text, never a `LocalDate` or a view, built only by `_tables/columns.py` `dataset_table`.
 
 ## Layers
 

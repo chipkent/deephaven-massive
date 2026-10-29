@@ -1705,8 +1705,8 @@ class RestEndpoints:
     def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
-        `dm.ALL` reads the grouped-daily path, one request per day of the window (weekdays only
-        for the classes that do not trade at weekends, `dates.trades_at_weekends`). Futures
+        `dm.ALL` reads the grouped-daily path, one request per trading day of the window
+        (`dates.is_trading_day`: weekdays, plus Sundays for forex and every day for crypto). Futures
         trades and quotes named by session dates read one request series per weekday session
         and symbol (`session_end_date=<date>`), sessions in date order and the symbols of one
         session in symbol order; Saturdays and Sundays hold no session and are skipped. Every

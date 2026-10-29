@@ -602,18 +602,23 @@ def futures_bar_request(span: DaySpan) -> TimeRange:
 def is_trading_day(asset_class: AssetClass | None, day: date) -> bool:
     """Tell whether a day can hold a class's trading, without a holiday calendar.
 
-    Every weekday can; a Saturday or Sunday only for a class that trades at weekends
-    (`trades_at_weekends`: forex and crypto). A futures session ends on weekdays only. The
-    one test the transports use to skip a weekend request or a weekend's missing file.
+    Every weekday can. Crypto trades every day, and forex from Sunday evening to Friday
+    evening UTC, so its Sunday holds trading but its Saturday none. Stocks, options, indices,
+    and futures sessions trade on weekdays only. The one test the transports use to skip a
+    weekend request or a weekend's missing file.
 
     Args:
         asset_class: The class, or None for data of no class.
-        day: The day; for futures, a session date.
+        day: The day, in the class's day zone; for futures, a session date.
 
     Returns:
-        True for a weekday, or any day of a class that trades at weekends.
+        True for a weekday, a forex Sunday, or any crypto day.
     """
-    return day.weekday() < _SATURDAY or trades_at_weekends(asset_class)
+    if asset_class is AssetClass.CRYPTO:
+        return True
+    if asset_class is AssetClass.FOREX:
+        return day.weekday() != _SATURDAY
+    return day.weekday() < _SATURDAY
 
 
 def trades_at_weekends(asset_class: AssetClass | None) -> bool:
@@ -654,22 +659,22 @@ class _Periods:
     quarter, or year leaves out the period's leading and trailing weekend days
     (a week runs Monday to Friday, and March 2024 from Friday the 1st to Friday the 29th), and
     a week's Saturday and Sunday belong to the next week, so a bar Massive stamps on the Sunday
-    before a week still names that week. There is no holiday calendar: a holiday is a
-    weekday like any other.
+    before a week still names that week. An index can update around the clock (`I:AAVE100`),
+    so its periods are named the same way but its windows are whole calendar periods, weekends
+    included: an index week runs Monday to Sunday and March 2024 from the 1st to the 31st, for
+    its start and its end alike. There is no holiday calendar: a holiday is a weekday like any
+    other.
 
     Attributes:
         asset_class: The class; futures days are trading sessions.
         timespan: The bar unit: `DAY`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
         multiplier: How many units one bar spans; a stock, option, or index bar of several
             days counts its days as weekdays (`sessions`).
-        every_day: True to read weeks and longer periods as whole calendar periods, as for a
-            class that trades every day.
     """
 
     asset_class: AssetClass | None
     timespan: Timespan
     multiplier: int = 1
-    every_day: bool = False
 
     def day_of(self, moment: datetime) -> date:
         """Return the day an instant belongs to: its session for futures, else its zone date.
@@ -727,7 +732,7 @@ class _Periods:
         if self.asset_class is AssetClass.FUTURES:
             return self.timespan is Timespan.SESSION
         several = self.timespan is Timespan.DAY and self.multiplier > 1
-        return several and not self.every_day and not trades_at_weekends(self.asset_class)
+        return several and not trades_at_weekends(self.asset_class)
 
     def period_of(self, day: date) -> date:
         """Return the anchor of the period a day belongs to, its leading weekend included.
@@ -767,14 +772,23 @@ class _Periods:
         return anchor + timedelta(days=count)
 
     def _weekdays_only(self) -> bool:
-        """Tell whether the period's window leaves out its leading and trailing weekend days.
+        """Tell whether a period's weekend days belong to it only through the week after.
 
         Returns:
-            True for weeks, months, quarters, and years of every class but forex and
-            crypto, which trade at weekends.
+            True for weeks, months, quarters, and years of every class but forex and crypto,
+            which trade at weekends: a Saturday or Sunday names the next week.
         """
         longer = self.timespan is Timespan.WEEK or self.timespan in _PERIOD_MONTHS
-        return longer and not self.every_day and not trades_at_weekends(self.asset_class)
+        return longer and not trades_at_weekends(self.asset_class)
+
+    def _trimmed(self) -> bool:
+        """Tell whether a period's window leaves out its leading and trailing weekend days.
+
+        Returns:
+            True where `_weekdays_only` holds, except for indices, whose windows are whole
+            calendar periods since an index can update at weekends.
+        """
+        return self._weekdays_only() and self.asset_class is not AssetClass.INDICES
 
     def window_start(self, anchor: date) -> date:
         """Return the first day of a period's window: its first weekday where weekends are out.
@@ -786,7 +800,7 @@ class _Periods:
             The first day the period's bar covers.
         """
         day = anchor
-        while self._weekdays_only() and day.weekday() >= _SATURDAY:
+        while self._trimmed() and day.weekday() >= _SATURDAY:
             day += _ONE_DAY
         return day
 
@@ -801,7 +815,7 @@ class _Periods:
             period's trailing weekend days where weekends are out.
         """
         end = self.shift(anchor, 1)
-        while self._weekdays_only() and (end - _ONE_DAY).weekday() >= _SATURDAY:
+        while self._trimmed() and (end - _ONE_DAY).weekday() >= _SATURDAY:
             end -= _ONE_DAY
         return end
 
@@ -977,17 +991,17 @@ def bar_days(
     *,
     timespan: Timespan,
     multiplier: int,
-    every_day: bool = False,
 ) -> tuple[date, date]:
     """Return the days a bar of a day or longer covers, from a day of its first period.
 
     The window of `multiplier` periods from the period `day` belongs to: days, weeks, or
-    calendar months, quarters, and years. For stocks, options, and indices, which do not trade
-    at weekends, a week runs Monday to Friday (a Saturday or Sunday belongs to the week after
-    it) and a longer period loses its leading and trailing weekend days; forex and crypto keep
-    whole calendar weeks (Monday to Sunday) and periods. A stock, option, or index bar of
-    several days may count trading days, which Massive does not document, so its window runs
-    to the latest day such a run can end on (`last_trading_day`). It gives a bar's
+    calendar months, quarters, and years. For stocks and options, which do not trade at
+    weekends, a week runs Monday to Friday (a Saturday or Sunday belongs to the week after it)
+    and a longer period loses its leading and trailing weekend days; an index's period is named
+    the same way but covers its whole calendar period, since an index can update at weekends;
+    forex and crypto keep whole calendar weeks (Monday to Sunday) and periods. A stock, option,
+    or index bar of several days may count trading days, which Massive does not document, so its
+    window runs to the latest day such a run can end on (`last_trading_day`). It gives a bar's
     `TimestampStart` and `TimestampEnd`, the midnights of the two days in the class day zone.
 
     Args:
@@ -995,14 +1009,11 @@ def bar_days(
         day: A day of the bar's first period: the day its stamp falls on.
         timespan: The bar unit: `DAY`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
         multiplier: How many units one bar spans, at least 1.
-        every_day: True to read the periods as whole calendar periods whatever the class, as
-            for a class that trades every day; the later reading for an index that updates
-            around the clock.
 
     Returns:
         The window's first day, and the day after its last day.
     """
-    periods = _Periods(asset_class, timespan, multiplier, every_day)
+    periods = _Periods(asset_class, timespan, multiplier)
     anchor = periods.period_of(day)
     if periods.sessions:
         return anchor, last_trading_day(anchor, multiplier) + _ONE_DAY

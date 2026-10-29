@@ -2,7 +2,8 @@
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -346,8 +347,13 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     # June 2024 starts on a Saturday: its stock month starts on Monday the 3rd.
     month = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.MONTH, 1)
     index_month = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.MONTH, 1)
-    # An index month ends an hour after the calendar month does, weekend or not.
-    assert fill(index_month, bars(["2024-06-03T04:00:00"]))[END] == ["2024-07-01T05:00:00+00:00"]
+    # An index month covers the whole calendar month, weekends included: June 2024 from
+    # Saturday the 1st, to an hour after the month ends.
+    assert fill(index_month, bars(["2024-06-01T04:00:00"])) == {
+        DATE: [None],
+        START: ["2024-06-01T04:00:00+00:00"],
+        END: ["2024-07-01T05:00:00+00:00"],
+    }
     assert fill(month, bars(["2024-06-01T04:00:00"]))[START] == ["2024-06-03T04:00:00+00:00"]
     assert fill(month, bars(["2024-06-01T04:00:00"]))[END] == ["2024-06-29T04:00:00+00:00"]
     # Crypto weeks are calendar weeks, in UTC.
@@ -404,10 +410,10 @@ def test_a_futures_session_bar_ends_at_17_chicago_on_its_date() -> None:
 def test_a_futures_bar_of_several_sessions_ends_at_its_latest_possible_close() -> None:
     rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, 2)
     # Labelled Thursday 2024-03-28 before Good Friday: counted as weekdays it ends with
-    # Friday's session, but the holiday moved that trading to Monday 04-01, which the holiday
-    # allowance of one weekday covers.
+    # Friday's session, but the holiday moved that trading to Monday 04-01. The count allows
+    # one session more for a fold and one weekday for a holiday, so it ends on Tuesday.
     sent = bars(["2024-03-27T22:00:00"], dates=["2024-03-28"])
-    end = datetime(2024, 4, 1, 17, tzinfo=CHICAGO).astimezone(UTC)
+    end = datetime(2024, 4, 2, 17, tzinfo=CHICAGO).astimezone(UTC)
     assert fill(rule, sent) == {
         DATE: [None],
         START: ["2024-03-27T22:00:00+00:00"],
@@ -421,6 +427,73 @@ def test_a_futures_bar_of_several_sessions_ends_at_its_latest_possible_close() -
     # Without a start, the sessions cannot be counted, so there is no end.
     no_start = bars([None], dates=["2024-03-28"])
     assert fill(rule, no_start)[END] == [None]
+
+
+# Weekdays on which the CME equity and interest-rate futures hold no session of their own,
+# 2024 to 2026: their trading folds into the next session, which opens the evening before.
+CME_FOLDED = frozenset(
+    {
+        date(2024, 1, 1), date(2024, 1, 15), date(2024, 2, 19), date(2024, 3, 29),
+        date(2024, 5, 27), date(2024, 6, 19), date(2024, 7, 4), date(2024, 9, 2),
+        date(2024, 11, 28), date(2024, 12, 25),
+        date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17), date(2025, 4, 18),
+        date(2025, 5, 26), date(2025, 6, 19), date(2025, 7, 4), date(2025, 9, 1),
+        date(2025, 11, 27), date(2025, 12, 25),
+        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
+        date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
+        date(2026, 11, 26), date(2026, 12, 25),
+    }
+)  # fmt: skip
+
+
+def _cme_sessions() -> list[date]:
+    day, sessions = date(2023, 12, 27), []
+    while day.year < 2027:
+        if day.weekday() < 5 and day not in CME_FOLDED:
+            sessions.append(day)
+        day += timedelta(days=1)
+    return sessions
+
+
+def _opens(sessions: list[date], index: int) -> datetime:
+    # A session opens at 17:00 Chicago on the day the one before it closed (Sunday after a
+    # Friday), so a session after a folded holiday opens on the evening before the holiday.
+    before = sessions[index - 1]
+    opens = datetime.combine(before, time(17), CHICAGO)
+    return opens + timedelta(days=2) if before.weekday() == 4 else opens
+
+
+def test_a_futures_bar_of_several_sessions_never_ends_before_its_last_session() -> None:
+    # Every 2- to 40-session bar of the CME calendar of 2024 to 2026, counted from its real
+    # open, Sunday and folded opens included, under both readings of its label.
+    sessions = _cme_sessions()
+    for count in range(2, 41):
+        rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, count)
+        firsts = range(1, len(sessions) - count)
+        starts = [
+            _opens(sessions, i).astimezone(UTC).replace(tzinfo=None).isoformat() for i in firsts
+        ]
+        lasts = [sessions[i + count - 1] for i in firsts]
+        for labels in ([sessions[i] for i in firsts], lasts):
+            ends = fill(rule, bars(starts, dates=[d.isoformat() for d in labels]))[END]
+            for end, last in zip(ends, lasts, strict=True):
+                closes = datetime.combine(last, time(17), CHICAGO).astimezone(UTC)
+                assert datetime.fromisoformat(cast("str", end)) >= closes, (count, last, end)
+
+
+def test_a_five_session_bar_from_after_christmas_ends_with_its_fifth_session() -> None:
+    # Its first session, 12-26, opened on Christmas Eve, whose session date is the holiday.
+    rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, 5)
+    for opens, fifth in (
+        (date(2024, 12, 24), date(2025, 1, 2)),
+        (date(2025, 12, 24), date(2026, 1, 2)),
+    ):
+        start = datetime.combine(opens, time(17), CHICAGO).astimezone(UTC).replace(tzinfo=None)
+        (end,) = fill(
+            rule, bars([start.isoformat()], dates=[(opens + timedelta(days=2)).isoformat()])
+        )[END]
+        closes = datetime.combine(fifth, time(17), CHICAGO).astimezone(UTC)
+        assert datetime.fromisoformat(cast("str", end)) >= closes
 
 
 def test_a_futures_week_or_month_ends_with_the_latest_period_its_label_allows() -> None:

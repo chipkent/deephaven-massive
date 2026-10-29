@@ -14,7 +14,7 @@ from typing import Any, cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, new_table
+from deephaven import dtypes, merge, new_table
 from deephaven.column import double_col, string_col
 from deephaven.execution_context import ExecutionContext
 from deephaven.stream import blink_to_append_only
@@ -312,14 +312,37 @@ def _string_objects(table: Table, column: str) -> int:
     return ids.where(f"!isNull({column})").select_distinct("Id").size
 
 
-def test_a_dataset_table_shares_one_string_per_date(dh_exec_ctx: object) -> None:
+def test_a_dataset_table_shares_one_string_per_date_across_calls(dh_exec_ctx: object) -> None:
+    # Rows in runs of one date, as every transport sends them, nulls among them.
+    days = [None, *["2025-03-03"] * 1000, *[None] * 3, *["2025-03-04"] * 777, "2025-03-03"]
+    rows = pa.table(
+        {"Note": pa.array(days), "Date": pa.array(days), "Price": pa.array([1.0] * len(days))}
+    )
+    first, second = dataset_table(rows, ("Date",)), dataset_table(rows, ("Date",))
+    # The column holds one string per distinct date, the same one in every table the process
+    # builds; any other text column is as made. The columns keep their order and values.
+    both = merge([first, second])
+    assert _string_objects(both, "Date") == 2
+    assert _string_objects(first, "Note") > 2
+    assert first.column_names == ["Note", "Date", "Price"]
+    assert dh_arrow.to_arrow(first).column("Date").to_pylist() == days
+    assert dh_arrow.to_arrow(first).column("Price").to_pylist() == [1.0] * len(days)
+
+
+def test_interleaved_dates_are_shared_through_a_formula(dh_exec_ctx: object) -> None:
+    # More runs than are worth copying one by one: the column is interned by a formula.
     days = [None if n % 7 == 0 else f"2025-03-0{1 + n % 3}" for n in range(30_000)]
     rows = pa.table({"Date": pa.array(days), "Note": pa.array(days)})
     table = dataset_table(rows, ("Date",))
-    # The date column holds one string per distinct date; any other text column is as made.
     assert _string_objects(table, "Date") == 3
     assert _string_objects(table, "Note") > 3
     assert dh_arrow.to_arrow(table).column("Date").to_pylist() == days
+
+
+def test_an_empty_dataset_table_keeps_its_columns(dh_exec_ctx: object) -> None:
+    rows = pa.table({"Date": pa.array([], pa.string()), "Price": pa.array([], pa.float64())})
+    table = dataset_table(rows, ("Date",))
+    assert (table.size, table.column_names) == (0, ["Date", "Price"])
 
 
 def test_a_dataset_table_without_dates_is_converted_as_is(dh_exec_ctx: object) -> None:

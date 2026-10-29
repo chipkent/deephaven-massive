@@ -25,10 +25,15 @@ thread-safe; `dataset_table` creates a table too.
 
 from __future__ import annotations
 
+import importlib
 import logging
+import threading
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
+import numpy as np
+import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
@@ -55,6 +60,17 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# jpy, the Python-Java bridge Deephaven runs on, ships no type information, so it is loaded
+# as a plain module object.
+jpy = importlib.import_module("jpy")
+_JString = jpy.get_type("java.lang.String")
+_System = jpy.get_type("java.lang.System")
+_LinkedHashMap = jpy.get_type("java.util.LinkedHashMap")
+_QueryTable = jpy.get_type("io.deephaven.engine.table.impl.QueryTable")
+_ArrayBackedColumnSource = jpy.get_type(
+    "io.deephaven.engine.table.impl.sources.ArrayBackedColumnSource"
+)
 
 # `dtypes.Instant` is annotated as `type` by deephaven-core although it is a `DType`
 # instance, so the table is typed by value and narrowed on lookup.
@@ -116,26 +132,156 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     `deephaven.arrow.to_table` makes one Java `String` per row of a text column, so a
     column of a million rows of one date would hold a million copies of it. Every
     calendar-date column (`Schema.date_columns`: the library's `Date` and every vendor date,
-    ISO `yyyy-MM-dd` text) is therefore stored again through `String.intern()`, so every row
-    of one date refers to one shared `String`: a stored date costs a reference per row, not a
-    string. On a million rows of five dates the column holds five `String`s instead of a
-    million, for about 0.15 seconds more per million rows once the formula is compiled. Every
-    transport converts its rows through here.
+    ISO `yyyy-MM-dd` text) is therefore built here instead, from one shared Java `String` per
+    distinct date for the whole process (`_DatePool`), so a stored date costs a reference per
+    row. The other columns convert through `to_table`, and the date columns join them as
+    in-memory column sources of the same rows, in schema order, with no Deephaven `update()`,
+    whose fixed cost of a few milliseconds a call would fall on every stream flush. Each run
+    of rows of one date is filled by copying its shared `String` and then doubling the filled
+    stretch, so a column costs a few Java calls per run. A column of more than `_MAX_RUNS`
+    runs, which only interleaved dates make, is interned by a formula instead (`_interned`),
+    whose JVM-interned `String`s are shared within that table too.
+    Every transport converts its rows through here, and nothing else may build a dataset
+    table: the date columns must be ISO dates, whose set is small, never other text, which
+    would grow the pool without bound.
+
+    It costs no more than `to_table` of all the columns, since the date strings are never made
+    per row: on 50, 2,000, and 1,000,000 rows of four dates it took about 0.5, 0.7, and 100 ms,
+    against 0.8, 0.9, and 210 ms for `to_table` alone and 10, 8, and 360 ms through `update()`,
+    on one loaded machine.
 
     Runs on any thread inside the session's execution context; the table is static and is
     created in the liveness scope at the top of the calling thread's stack. A schema without
-    a date column is converted as is.
+    a date column is converted as is. `rows` must hold at least one column that is not a date
+    (every dataset has `TimestampInsert`).
 
     Args:
         rows: The rows, an Arrow table in the dataset's schema.
         dates: The dataset's calendar-date columns (`Schema.date_columns`).
 
     Returns:
-        The static table, with every column of `rows`.
+        The static table, with every column of `rows`, in order.
+    """
+    if not dates:
+        return dh_arrow.to_table(rows)
+    others = dh_arrow.to_table(rows.drop_columns(list(dates))).j_table
+    runs = {name: _DateRuns.of(rows.column(name)) for name in dates}
+    if any(len(found.starts) > _MAX_RUNS for found in runs.values()):
+        return _interned(rows, dates)
+    sources = _LinkedHashMap()
+    for name in rows.column_names:
+        if name in runs:
+            values = runs[name].strings()
+            column = _ArrayBackedColumnSource.getMemoryColumnSource(values, _JString.jclass, None)
+            sources.put(name, column)
+        else:
+            sources.put(name, others.getColumnSource(name))
+    return Table(_QueryTable(others.getRowSet(), sources))
+
+
+_MAX_RUNS: Final = 4096
+"""The most runs of one date a column is built from by copying; more fall back to a formula."""
+
+
+class _DatePool:
+    """One Java `String` per distinct date text, for the life of the process.
+
+    Each date's `String` lives in a one-element Java array, so it never crosses into Python,
+    where jpy would turn it into a Python `str` and back into a new `String`. Thread-safe: the
+    map sits behind a leaf lock, held only to look up or add an entry; the Java array is
+    created under it, with no Deephaven call.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._arrays: dict[str, object] = {}
+
+    def array(self, text: str) -> object:
+        """Return the one-element `String[]` that holds a date's shared `String`.
+
+        Args:
+            text: An ISO `yyyy-MM-dd` date.
+
+        Returns:
+            The Java array; the same one for every call with the same text.
+        """
+        with self._lock:
+            found = self._arrays.get(text)
+            if found is None:
+                found = self._arrays[text] = cast("object", jpy.array("java.lang.String", [text]))
+            return found
+
+
+_POOL: Final = _DatePool()
+
+
+@dataclass(frozen=True, slots=True)
+class _DateRuns:
+    """A date column as runs of rows of one date: where each run starts, and its date.
+
+    Attributes:
+        count: The number of rows.
+        starts: The first row of each run, ascending; the first is 0 when there are rows.
+        texts: Each run's date, ISO text, or None for a run of nulls.
+    """
+
+    count: int
+    starts: tuple[int, ...]
+    texts: tuple[str | None, ...]
+
+    @classmethod
+    def of(cls, column: pa.ChunkedArray) -> _DateRuns:
+        """Split a column into runs, with Arrow compute and one numpy pass.
+
+        Args:
+            column: An Arrow string column of ISO dates and nulls.
+
+        Returns:
+            Its runs.
+        """
+        count = len(column)
+        if count == 0:
+            return cls(0, (), ())
+        distinct = pc.unique(column)
+        codes = pc.index_in(column, value_set=distinct).to_numpy(zero_copy_only=False)
+        starts = [0, *(np.flatnonzero(codes[1:] != codes[:-1]) + 1).tolist()]
+        texts = distinct.to_pylist()
+        return cls(count, tuple(starts), tuple(texts[int(codes[s])] for s in starts))
+
+    def strings(self) -> object:
+        """Build the Java `String[]` of the column, every row of a date sharing one `String`.
+
+        Each run copies its date's pooled `String` once and then doubles the filled stretch,
+        so it costs about one Java call per doubling, not one per row.
+
+        Returns:
+            The array, nulls kept.
+        """
+        out: object = jpy.array("java.lang.String", self.count)
+        ends = (*self.starts[1:], self.count) if self.starts else ()
+        for first, end, text in zip(self.starts, ends, self.texts, strict=True):
+            if text is None:
+                continue
+            _System.arraycopy(_POOL.array(text), 0, out, first, 1)
+            filled = 1
+            while filled < end - first:
+                step = min(filled, end - first - filled)
+                _System.arraycopy(out, first, out, first + filled, step)
+                filled += step
+        return out
+
+
+def _interned(rows: pa.Table, dates: Sequence[str]) -> Table:
+    """Convert rows with interleaved dates, interning their date columns by a formula.
+
+    Args:
+        rows: The rows.
+        dates: The date columns.
+
+    Returns:
+        The static table, every date `String` the JVM's interned one.
     """
     table = dh_arrow.to_table(rows)
-    if not dates:
-        return table
     return table.update([f"{name} = {name} == null ? null : {name}.intern()" for name in dates])
 
 

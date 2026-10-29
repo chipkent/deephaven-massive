@@ -204,14 +204,17 @@ def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
     caplog: pytest.LogCaptureFixture,
     spread: str,
 ) -> None:
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
         watched(calendar, spread)
+        assert caplog.records == []
         row = (spread, "2024-03-27T21:50:00", "2024-03-27")
         assert correct(calendar, [row, row]) == (["2024-03-27", "2024-03-27"], [])
+        assert correct(calendar, [row]) == (["2024-03-27"], [])
         idle(calendar)
     assert fetch.calls == []
-    # Logged once, at DEBUG: a spread is no error.
-    assert [r.levelno for r in caplog.records if spread in r.getMessage()] == [logging.DEBUG]
+    # Its rows are dated by the rule, which a holiday can make wrong: one WARNING per spread,
+    # however many batches date it; watching it alone dates nothing and says nothing.
+    assert [r.levelno for r in caplog.records if spread in r.getMessage()] == [logging.WARNING]
 
 
 def test_a_long_watchlist_is_looked_up_in_chunks(
@@ -470,6 +473,32 @@ def test_close_stops_the_worker_once_and_queues_nothing_after(
     assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
     assert calendar.wait_idle(0)
     assert fetch.calls == []
+
+
+def test_closing_wakes_a_caller_waiting_for_the_worker(fetch: FakeFetch, clock: Clock) -> None:
+    # A lookup is on the wire, so the calendar is not idle; closing it must release a caller
+    # already waiting in `wait_idle` at once, not when the lookup finally returns.
+    calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
+    fetch.hold(CONTRACTS_PATH)
+    calendar.watch(["ESM4"])
+    fetch.wait(1)
+    waiting = threading.Event()
+    results: list[bool] = []
+
+    def wait() -> None:
+        waiting.set()
+        results.append(calendar.wait_idle(TIMEOUT))
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    assert waiting.wait(TIMEOUT)
+    closing = threading.Thread(target=calendar.close)
+    closing.start()
+    waiter.join(TIMEOUT / 3)
+    assert results == [True]  # woken by the close, while the lookup is still held
+    fetch.release.set()
+    closing.join(TIMEOUT)
+    assert not closing.is_alive()
 
 
 @pytest.mark.parametrize(

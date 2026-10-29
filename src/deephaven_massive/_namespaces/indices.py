@@ -279,9 +279,9 @@ class _Indices(Namespace):
         the 16:00 session close (13:00 on a short trading day), and each is moved to the day's
         start. It ends an hour after the midnight that follows its window's last day, at 01:00
         New York time, since whether an index day bar covers the New York or the Chicago day
-        is not verified. A week starts on its Monday and a longer period on its first weekday,
-        and since an index can update around the clock (`I:AAVE100`), either ends an hour after
-        the midnight that follows the last calendar day of its period, its weekend included.
+        is not verified. Since an index can update around the clock (`I:AAVE100`), a week or a
+        longer period covers its whole calendar period, weekends included: it starts at 00:00 of
+        its first calendar day and ends an hour after the midnight that follows its last.
         A bar of several days counts trading days, ending as late as holidays could push it
         (one weekday more, and one more for every five further days), since there is no
         holiday calendar. A longer bar must be stamped at 00:00 or 01:00 on the day its period

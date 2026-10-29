@@ -2139,11 +2139,12 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
         crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
 
 
-def test_forex_grouped_daily_keeps_its_weekend_days(
+def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Forex trades from Sunday evening UTC, so its grouped days include the weekend.
-    for day in ("2025-03-07", "2025-03-08", "2025-03-09"):
+    # Forex trades from Sunday evening to Friday evening UTC: its Sunday is a grouped day, its
+    # Saturday holds no trading and is not requested.
+    for day in ("2025-03-07", "2025-03-09"):
         fake_rest.reply(FOREX_GROUPED_PATH.format(date=day), Reply(envelope([])))
     history(
         session,
@@ -2156,7 +2157,6 @@ def test_forex_grouped_daily_keeps_its_weekend_days(
     )
     assert sorted(path.rsplit("/", 1)[1] for path, _ in sent(fake_rest)) == [
         "2025-03-07",
-        "2025-03-08",
         "2025-03-09",
     ]
 
@@ -2360,10 +2360,10 @@ def test_futures_bars_of_two_sessions_named_by_dates_fit_both_readings_of_their_
     )
     assert sent(fake_rest)[0][1]["resolution"] == ["2session"]
     # The label is not the bar's day: a bar of two sessions has no `Date`. The bar opening
-    # Monday evening may end as late as Thursday's session, so it is kept; the one opening
-    # Wednesday evening may end on Monday 04-01 (Good Friday folds), after the range.
+    # Monday evening may end as late as Friday's close, so it is kept; the one opening
+    # Wednesday evening may end on Tuesday 04-02 (Good Friday folds), after the range.
     assert [(r["Date"], r["TimestampEnd"]) for r in out] == [
-        (None, epoch_ns(datetime(2024, 3, 28, 17, tzinfo=CHICAGO))),
+        (None, epoch_ns(datetime(2024, 3, 29, 17, tzinfo=CHICAGO))),
     ]
 
 

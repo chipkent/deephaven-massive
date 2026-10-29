@@ -988,6 +988,27 @@ def test_a_missing_weekend_file_of_a_class_that_trades_at_weekends_warns(
     ]
 
 
+def test_a_missing_forex_saturday_file_is_skipped_silently_even_as_the_last_day(
+    *,
+    session: dm.MassiveSession,
+    clock: Callable[[datetime], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Forex does not trade on a UTC Saturday, so its file need not exist: no WARNING, and no
+    # "not yet published" error while the Saturday is still within its publication grace.
+    transport = session._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
+    saturday = date(2025, 3, 1)
+    key = flatfiles._Key("global_forex/trades_v1/2025/03/2025-03-01.csv.gz", saturday, None)
+    clock(datetime(2025, 3, 2, 12, tzinfo=NEW_YORK))
+    cutoff = session._core.config.flat_file_publish_cutoff
+    assert history_source.within_publication_grace(forex, saturday, cutoff=cutoff)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        transport._skip_missing(forex, [key], last=saturday)
+    assert caplog.messages == []
+
+
 def test_crypto_trades_every_day(
     *,
     session: dm.MassiveSession,

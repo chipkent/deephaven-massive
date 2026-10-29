@@ -338,6 +338,26 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     assert filed
 
 
+@pytest.mark.needs("currencies:starter", "s3")
+@pytest.mark.settles("57")
+@pytest.mark.timeout(100)
+def test_forex_flat_files_of_a_weekend(
+    *, flat_file_tickers: FlatFileTickers, evidence: Evidence
+) -> None:
+    """Whether Massive publishes forex day files for a Saturday and a Sunday.
+
+    Reads `global_forex/day_aggs_v1` for Saturday 2026-05-30 and Sunday 2026-05-31 and records,
+    for each, whether the file exists and how many pairs it holds. Reading it: the library
+    takes a forex Saturday for a day without trading, so a missing Saturday file is skipped
+    silently and a Sunday's is reported as a possible holiday; a Saturday file with rows, or
+    no Sunday file at all, means that rule must change.
+    """
+    for day in (_FILE_DAY - timedelta(days=2), _FILE_DAY - timedelta(days=1)):
+        read = flat_file_tickers(_DAY_FILE, day, None)
+        pairs = None if read is None else len(read[0])
+        evidence(f"{_DAY_FILE} {day} ({day:%A}): {'no file' if read is None else f'{pairs} rows'}")
+
+
 @pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("33")
 @pytest.mark.requests(4)

@@ -921,9 +921,10 @@ class FlatFileHistory:
     def _skip_missing(self, spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
         """Apply the missing-file rules to the files that did not exist.
 
-        A weekend file is skipped silently, except for a class that trades at weekends (forex
-        and crypto, `dates.is_trading_day`); a trading day's file is skipped with a WARNING
-        (most likely a market holiday). The file for the
+        A file of a day without trading is skipped silently: a weekend for stocks, options,
+        indices, and futures, a Saturday for forex (`dates.is_trading_day`); crypto trades
+        every day. A trading day's file is skipped with a WARNING (most likely a market
+        holiday). The file for the
         last requested date may instead be late, so within `PUBLICATION_GRACE` (in
         `_datasets/history_source.py`) after its publication time it raises; after that it is
         skipped with a WARNING too.
