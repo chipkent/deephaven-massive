@@ -155,7 +155,8 @@ def body_excerpt(data: bytes) -> str:
     """Return the start of a failed response's body as text, for the client's DEBUG line.
 
     Longer than an error's excerpt, so the line shows Massive's whole error envelope or the
-    meaningful part of a proxy's page. The caller replaces its secrets in it (`net.secrets`).
+    meaningful part of a proxy's page. The client has already cleaned the body of its secrets
+    (`net.redaction`).
 
     Args:
         data: The body.

@@ -13,10 +13,12 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import dtypes, input_table, new_table
@@ -25,9 +27,9 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.request import HostDecision
+from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._ingest import hosts, poll, ws
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
@@ -35,12 +37,14 @@ from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
 
 # Plain constants of the harness, which no fixture can hand over; sessions come from fixtures.
+from tests._fakes.clock import FakeClock
 from tests._fakes.ws_session import REALTIME, TIMEOUT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import TypeAlias
 
+    import pyarrow as pa
     from deephaven.table import Table
 
     from tests._fakes.ws import FakeMassiveServer
@@ -1431,3 +1435,86 @@ def test_a_topic_reconnects_once_per_session(ws_session: WsSession) -> None:
     assert ws_session.connections.first_no_ack("/stocks", "T.AAPL")
     assert not ws_session.connections.first_no_ack("/stocks", "T.AAPL")
     assert ws_session.connections.first_no_ack("/options", "T.AAPL")
+
+
+# --- thread names --------------------------------------------------------------------------------
+
+_DIVIDENDS_PATH = "/stocks/v1/dividends"
+_DIVIDENDS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="stocks.dividends",
+    asset_class=AssetClass.STOCKS,
+    fetch_path=_DIVIDENDS_PATH,
+    symbol_param="ticker.any_of",
+    keys={(Transport.REST, _DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
+
+
+def test_every_library_thread_is_named_after_its_session(
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every thread the library starts, recorded by name: the session's own, a connection's
+    # client and flush threads, a verdict's move and delayed start, a poller and its pool.
+    started: list[str] = []
+    start = threading.Thread.start
+
+    def recording(thread: threading.Thread) -> None:
+        started.append(thread.name)
+        start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", recording)
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections._reconnect_backoff = 0.01
+    fake_ws_server.step_refusals.append("Real-time data requires an upgrade")
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.wait(lambda s: s.opens == 2)  # moved to the delayed host, after a delay
+    core = custom_session.session._core
+    pooled = threading.Event()
+
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int]:
+        executor.submit(pooled.set).result(TIMEOUT)
+        return core.catalog.dataset_schema(_DIVIDENDS).arrow_schema().empty_table(), 1
+
+    table = poll.open_poll(
+        core,
+        spec=_DIVIDENDS,
+        request=Request(symbols=("AAPL",)),
+        interval=timedelta(seconds=60),
+        mode=dm.PollMode.REPLACE,
+        read=read,
+        pollers=poll.Pollers(core.label),
+        host="api.test",
+        path=_DIVIDENDS_PATH,
+        clock=FakeClock(manual=True),
+    )
+    assert pooled.wait(TIMEOUT)
+    # The host decision's reader would name a fan-out pool after the hosts.
+    readers: list[str] = []
+
+    def decide(*_: object, fetch: Callable[..., object], **__: object) -> HostDecision:
+        readers.append(cast("Any", fetch).__self__.threads)
+        return REALTIME
+
+    monkeypatch.setattr(hosts, "decide", decide)
+    core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    prefix = core.thread_prefix
+    assert readers == [f"{prefix} hosts rest"]
+    assert all(name.startswith(f"{prefix} ") for name in started), started
+    roles = {name.removeprefix(f"{prefix} ") for name in started}
+    assert {
+        "diagnostics",
+        "reaper",
+        "ws 127.0.0.1/futures",  # the client of each connection, on the fake server
+        "flush socket.test/futures",
+        "move socket.test/futures",
+        "start delayed.test/futures",
+        "flush delayed.test/futures",
+    } <= roles
+    polls = sorted(role for role in roles if role.startswith("poll-"))
+    assert len(polls) == 2
+    assert re.fullmatch(r"poll-\d+", polls[0])
+    assert polls[1] == f"{polls[0]} rest_0"
+    custom_session.session.release(result)
+    custom_session.session.release(table)

@@ -243,3 +243,6 @@ vendor/massive-previous/
 # rows, so they are never committed.
 live-checks.log
 live-evidence.log
+
+# Extra project environments, such as the free-threaded one (UV_PROJECT_ENVIRONMENT=.venv-314t).
+.venv-*/

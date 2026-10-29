@@ -7,15 +7,18 @@ handler a test installs outlives it.
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 import re
+import sys
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _debug_log
+from deephaven_massive._massive import provenance
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -62,15 +65,15 @@ def test_enable_debug_logging_writes_every_level_to_stderr(
 ) -> None:
     dm.enable_debug_logging()
     CHILD.debug("call %d start", 7)
-    assert _lines(capsys.readouterr().err) == [
-        (
-            "INFO",
-            "MainThread",
-            "deephaven_massive._debug_log",
-            "logging deephaven_massive at DEBUG to stderr (from enable_debug_logging())",
-        ),
-        ("DEBUG", "MainThread", "deephaven_massive._query", "call 7 start"),
-    ]
+    lines = _lines(capsys.readouterr().err)
+    assert lines[0] == (
+        "INFO",
+        "MainThread",
+        "deephaven_massive._debug_log",
+        "logging deephaven_massive at DEBUG to stderr (from enable_debug_logging())",
+    )
+    assert lines[1][3].startswith("deephaven-massive ")  # the process, described once
+    assert lines[2:] == [("DEBUG", "MainThread", "deephaven_massive._query", "call 7 start")]
     # Records still reach the root's handlers, such as pytest's own.
     assert LIBRARY.propagate
 
@@ -181,7 +184,7 @@ def test_an_unknown_level_names_the_variable(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "verbose")
     message = (
         "DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level; use one of DEBUG, INFO, "
-        "WARNING, ERROR, CRITICAL"
+        "WARN, WARNING, ERROR, CRITICAL"
     )
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         _debug_log.configure_from_environment()
@@ -213,3 +216,80 @@ def test_the_variables_lose_a_race_with_the_function(tmp_path: Path) -> None:
     _debug_log._install(logging.ERROR, path, environment=True)
     assert (LIBRARY.handlers, LIBRARY.level) == (handlers, logging.DEBUG)
     assert path.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.parametrize("value", ["WARN", "warn"])
+def test_warn_is_a_level_name(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", value)
+    _debug_log.configure_from_environment()
+    assert LIBRARY.level == logging.WARNING
+
+
+def test_a_log_file_that_cannot_be_opened_names_the_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "missing" / "massive.log"
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "DEBUG")
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", str(path))
+    message = f"DEEPHAVEN_MASSIVE_LOG_FILE={str(path)!r} cannot be opened for appending: "
+    with pytest.raises(OSError, match=f"^{re.escape(message)}") as info:
+        _debug_log.configure_from_environment()
+    assert isinstance(info.value.__cause__, FileNotFoundError)
+    assert not [h for h in LIBRARY.handlers if isinstance(h, logging.FileHandler)]
+
+
+def test_output_must_be_a_log_output_or_a_path() -> None:
+    with pytest.raises(
+        TypeError, match=r"^output must be a dm\.LogOutput or a file path, not int$"
+    ):
+        dm.enable_debug_logging(cast("str", 3))
+
+
+@pytest.mark.parametrize("proxy", [False, True])
+def test_turning_the_log_on_describes_the_process(
+    *, proxy: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    for name in ("HTTPS_PROXY", "https_proxy", "SSL_CERT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    if proxy:
+        monkeypatch.setenv("HTTPS_PROXY", "http://user:proxy-password@proxy:3128")
+        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/bundle.pem")
+    with caplog.at_level(logging.INFO, logger=_debug_log.__name__):
+        dm.enable_debug_logging(dm.LogOutput.STDERR)
+    [line] = [m for m in caplog.messages if m.startswith("deephaven-massive ")]
+    gil = "on" if getattr(sys, "_is_gil_enabled", lambda: True)() else "off"
+    setting = "set" if proxy else "unset"
+    assert line.startswith(
+        f"deephaven-massive {dm.__version__}, Python {sys.version.split()[0]} (GIL {gil}), "
+    )
+    for part in (
+        f"pyarrow {importlib.metadata.version('pyarrow')}",
+        "orjson ",
+        f"; Massive spec snapshot of {provenance().fetched}; ",
+    ):
+        assert part in line
+    assert line.endswith(f"HTTPS_PROXY {setting}, SSL_CERT_FILE {setting}")
+    assert "proxy-password" not in line
+    assert "bundle.pem" not in line
+
+
+def test_the_variables_describe_the_process_too(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "INFO")
+    with caplog.at_level(logging.INFO, logger=_debug_log.__name__):
+        _debug_log.configure_from_environment()
+    assert [m for m in caplog.messages if m.startswith("deephaven-massive ")]
+
+
+def test_nothing_describes_the_process_when_info_is_off(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "ERROR")
+    with caplog.at_level(logging.ERROR, logger=_debug_log.__name__):
+        _debug_log.configure_from_environment()
+    assert caplog.messages == []
+
+
+def test_a_missing_distribution_is_named_not_installed() -> None:
+    assert _debug_log._version("no-such-distribution-of-this-name") == "not installed"

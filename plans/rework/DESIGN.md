@@ -144,7 +144,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 23 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 24 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -180,8 +180,9 @@ dm.ConditionDataType
 dm.Sip
 
 # Logging
-dm.enable_debug_logging    # enable_debug_logging(path=None): the library's log, DEBUG and up,
-                           # to stderr or a file (section 17.1)
+dm.enable_debug_logging    # enable_debug_logging(output=LogOutput.STDERR): the library's log,
+                           # DEBUG and up, to stderr or a file path (section 17.1)
+dm.LogOutput               # Enum, not a wire value: STDERR, the default output
 
 # Version
 dm.__version__             # from importlib.metadata
@@ -229,8 +230,9 @@ _enums.py                the fifteen public enums, Recency, ChannelFamily, _requ
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
                          from_wire
-_debug_log.py            enable_debug_logging and the DEEPHAVEN_MASSIVE_LOG variables; standard
-                         library only, so it works before a Deephaven server exists (section 17.1)
+_debug_log.py            enable_debug_logging, LogOutput, the DEEPHAVEN_MASSIVE_LOG variables, and
+                         the environment line; no Deephaven import, so it works before a server
+                         exists (section 17.1)
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
                          (section 6); applies the logging variables and logs the environment line
 _query.py                the six query classes and their verbs, through the core's ports (section 7)
@@ -397,7 +399,7 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
 | 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
-| 5 | API | the root `__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. `_debug_log` imports only the standard library. |
+| 5 | API | the root `__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. `_debug_log` imports no Deephaven. |
 
 **Composition.** `_session.py` is the one module that sees every layer. It imports every
 namespace module statically and names each once, in `NAMESPACE_MODULES` (a test compares the
@@ -497,8 +499,8 @@ Two environment variables turn it on, read once per process when the first sessi
 
 | Variable | Meaning |
 |---|---|
-| `DEEPHAVEN_MASSIVE_LOG` | A level name (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, any case). Unset or blank changes nothing; any other value raises `ValueError` naming the variable from `MassiveSession()`. |
-| `DEEPHAVEN_MASSIVE_LOG_FILE` | With `DEEPHAVEN_MASSIVE_LOG`, append the lines to this file (UTF-8) instead of stderr; ignored alone. |
+| `DEEPHAVEN_MASSIVE_LOG` | A level name (`DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `CRITICAL`, any case). Unset or blank changes nothing; any other value raises `ValueError` naming the variable from `MassiveSession()`. |
+| `DEEPHAVEN_MASSIVE_LOG_FILE` | With `DEEPHAVEN_MASSIVE_LOG`, append the lines to this file (UTF-8) instead of stderr; ignored alone. A file that cannot be opened raises `OSError` naming the variable. |
 
 ## 6. `MassiveSession` and lifecycle
 
@@ -1435,17 +1437,21 @@ The generator knows every vendor extension it accepts, each with the reason in `
 an unknown one stops the refresh (`shape`).
 
 **Coverage.** Everything documented is generated or excluded, and everything generated is
-used or listed as still to be declared:
+used or deferred:
 
 - **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft)**, tested against the
-  pinned snapshot in `tests/massive/refresh/test_generate.py`;
-- **generated ⊆ used ∪ undeclared**, tested in `tests/datasets/test_catalog.py`. Every generated item
-  is used by a declared dataset or listed in some undeclared file. The file
-  `tests/data/datasets/catalog/undeclared/<namespace>.txt` lists the sources that namespace will
-  declare, so a shared source (the aggregate range path, `/prev`) appears in the file of every
-  namespace that will use it, and the files may overlap. A namespace's file must not list a
-  source that namespace already uses. Each namespace's dataset planned PR deletes only its own
-  file, so those planned PRs land in any order; when all are gone, generated = used.
+  pinned snapshot in `tests/massive/refresh/test_generate.py` (WebSocket channels and flat-file
+  prefixes) and `tests/massive/refresh/test_rest.py` (REST paths, and every path a
+  documentation page names is in the OpenAPI spec);
+- **generated = used ⊎ deferred**, tested in `tests/datasets/test_catalog.py`: every generated
+  item is read by a declared dataset or deferred (the coverage test, with a negative test that
+  drops a dataset), and every item a dataset reads is generated (the generated-sources gate).
+  A deferred item is a `DEFERRED` entry of the coverage test: the generated source key, a
+  reason, and the number of the issue that will add its dataset, both required. An entry that
+  names an item not generated, or one a dataset reads, fails the test, so the list cannot go
+  stale. A new generated item, from a refresh that takes a vendor addition, therefore fails the
+  coverage test until a dataset reads it, a `DEFERRED` entry defers it, or an `EXCLUSIONS`
+  entry, with its reason, keeps the refresh from generating it.
 
 `/fed/v1/funding-conditions` and `/v1/open-close/crypto/{from}/{to}/{date}` are ordinary
 generated paths: every path reaches the same REST client in the same way.
@@ -2648,9 +2654,11 @@ logger's level; turning the log on again replaces the handler and closes the old
   `sys.stderr`, and a handler made then would keep the old stream. A session needs the server,
   so by then `sys.stderr` is final. The variables are skipped once `enable_debug_logging` has
   run.
-- `dm.enable_debug_logging(path=None)`, for a running console, where a new variable takes effect
-  only after a worker restart. It sets DEBUG; `path` appends to a file instead of stderr, and an
-  unopenable `path` raises its `OSError` and keeps the previous handler.
+- `dm.enable_debug_logging(output=LogOutput.STDERR)`, for a running console, where a new variable
+  takes effect only after a worker restart. It sets DEBUG; `output` is `LogOutput.STDERR` or a
+  file path to append to, an unopenable file raises its `OSError` and keeps the previous
+  handler, and anything else raises `TypeError`. `LogOutput` is an `Enum`, not a `StrEnum`:
+  its value is no Massive wire string.
 
 Setting the level alone (`logging.getLogger("deephaven_massive").setLevel(logging.DEBUG)`) shows
 nothing below WARNING, because the last-resort handler drops lower levels; that is why the
@@ -2672,26 +2680,31 @@ and then `call <id> done: <rows> rows in <s> s` or `call <id> failed after <s> s
 DEBUG, and its worker threads are `call-<id> rest_<n>` or `call-<id> files_<n>`. The wire
 clients cannot see the session, so `WsClient` takes the prefix as a constructor argument.
 
-**The environment line.** `MassiveSession()` logs one INFO line at creation: the library's
-version; Python's, with whether the GIL is enabled; the version of every dependency the
-library declares (an absent `orjson` means the standard library decodes JSON); the date of the
-Massive spec snapshot; the configuration's `repr`, with each secret shown only as set or unset;
-and whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values.
+**The environment line.** Each time the log is turned on, by a variable or by the function,
+it logs one INFO line describing the process: the library's version; Python's, with whether
+the GIL is enabled; the version of every dependency the library declares (an absent `orjson`
+means the standard library decodes JSON); the date of the Massive spec snapshot; and whether
+`HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values. Each `MassiveSession()` then logs
+its label and its configuration's `repr` at INFO, with each secret shown only as set or unset.
 
 **Secrets.** The API key travels only in the REST client's header and the WebSocket
 authentication frame; the S3 secret goes only to boto3; the proxy password is already
 stripped (`net.http`). A server can still echo a secret, so each client cleans what it
-receives before anything reads it, through `net.secrets`: the REST client every response body
-(`redact_bytes`), the WebSocket client every frame, the handshake's included (`redact`), and the
-flat-file client S3's error words, leaving out of the error chain a botocore error that quotes
-them. Every row, error, excerpt, and log line built from them is then free of the secret,
-wherever it is built. The replacement runs only when the secret is present (a fast substring
-search), so a clean body is passed on uncopied. The library never enables
+receives in one place, before anything reads it, through `net.redaction`: the REST client every
+response body and the WebSocket client every frame, the handshake's included
+(`clean_received`), and the flat-file client S3's error words (`redact`), leaving out of the
+error chain a botocore error that quotes them. `clean_received` replaces the secret and its
+JSON-escaped form, and a body or frame that holds any JSON escape is decoded, cleaned string by
+string, and re-encoded if anything changed, so an echo spelled with escapes is caught too. Every
+row, status, error, excerpt, and log line built from them is then free of the secret, wherever
+it is built. A body without a backslash costs one substring search and is passed on uncopied.
+The library never enables
 DEBUG on urllib3 or botocore, and the websockets frame log stays off
 ([section 19.2](#192-the-websocket-client)). The planted-secret test
-(`tests/massive/net/test_secrets.py`) runs the fakes with distinctive secrets and DEBUG on every
-logger through a 401, a 429, bodies, rows, and a status that echo the key, `auth_failed`, and S3
-errors, and finds neither secret in any record or error; the logging rules of
+(`tests/massive/net/test_redaction.py`) runs the fakes with distinctive secrets and DEBUG on
+every logger through a 401, a 429, bodies, rows, and a status that echo the key, plainly and
+spelled with JSON escapes, `auth_failed`, and S3 errors, and finds neither secret in any record
+or error; the logging rules of
 `tests/test_layout.py` are a cheap backstop (no secret name in a logging call, every thread
 and pool named, no logging call under a leaf lock).
 
@@ -2711,6 +2724,26 @@ and pool named, no logging call under a leaf lock).
 - The flat-file client logs each object request at DEBUG: the object, `200` with its size or
   `404 NoSuchKey`, and S3's `request_id`.
 - Each `DriftReport` carries a sample per drifted key ([section 19.5](#195-runtime-drift)).
+
+**The rules every change follows.** A log from a failing run, with the issue text, must be
+enough for an agent to reproduce and fix the bug:
+
+- A decision is a branch on configuration, server data, or input that changes what is
+  requested, routed, or returned. Each decision logs at DEBUG with its inputs and outcome.
+- A failure logs at ERROR, and a degradation at WARNING. Each names what an agent needs to
+  reproduce it: the offending field and value, the dataset, the endpoint or channel, the
+  symbol, and the call or stream id. Every layer logs what it knows; repeats are fine. Log too
+  much rather than too little.
+- Nothing is logged per row or per frame except a failure.
+- No log call is passed the API key, the S3 secret, a header, or the authentication frame;
+  text built from a server's answer is safe, since the clients clean it on receipt.
+- Log calls use `%` arguments. Every new thread or pool is named `massive #<session> <role>`.
+  Nothing is logged while `registry_lock` or another leaf lock is held.
+
+Tools check what they can: ruff's `G` and `LOG` rules; the logging rules of
+`tests/test_layout.py`; the planted-secret test; and a test that every thread a session starts
+is named after it (`tests/ingest/test_ws.py`). Reviewers check the rest: could an agent fix
+this from the log alone?
 
 **Cost.** With the log off, a level check fails and nothing is formatted (`%` arguments,
 enforced by ruff's `G` rules); a value that costs a call to compute is computed only under
@@ -2860,8 +2893,9 @@ net/                 shared by every client; imports nothing else in _massive
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
-  secrets.py         redact, redact_bytes: a client's secrets become *** in whatever it receives,
-                     before it is decoded, quoted, or logged
+  redaction.py       clean_received, redact, redact_value: a client's secrets, however JSON
+                     spells them, become *** in whatever it receives, before it is decoded,
+                     quoted, or logged
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport): load once under a lock
   types.py           Transport, Source(key, transport, fields, memberships),
@@ -3868,8 +3902,9 @@ so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
   schema;
 - **Generated sources:** every path, channel, and prefix a dataset uses is generated; a miss names
   the dataset and says "deprecated or removed in the snapshot";
-- **Coverage:** generated ⊆ used ∪ undeclared, and no namespace's undeclared file lists a source
-  that namespace already uses ([section 8.12](#812-excluded-endpoints)).
+- **Coverage:** generated = used ⊎ deferred: every generated source is read by some dataset,
+  or deferred with a reason and an issue
+  ([section 8.12](#812-excluded-endpoints)).
 
 `KINDS` overlaps the catalog by design: the refresh checks names before any dataset is
 declared, and the kind-membership gate keeps the two in step. A test loads `spec/` with `refresh/`
@@ -3980,7 +4015,7 @@ refresh gate and the catalog gates. What each change does:
 | Field renamed | A removal plus an addition. | The column is renamed in the diff, or stays the same if the long form is unchanged; `transport-agreement` catches a one-sided rename. |
 | Type changed | A value that no longer converts fails loudly. | `type-agreement` or the member-types gate fails on disagreement, resolved as a naming error first, then by a vendor fix or a `TYPE_FIXES` entry. |
 | Unit changed | The overflow check or the bound fails loudly. | `--check` reports the changed tag, and the `UNITS` entry is re-verified. |
-| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec` or an `EXCLUSIONS` entry is added. |
+| New endpoint, channel, or file | Nothing. | `--check` reports it as unaccounted, the refresh generates it, and the coverage gate fails until a `DatasetSpec`, a `DEFERRED` entry, or an `EXCLUSIONS` entry is added. |
 | Endpoint deprecated or removed | `MassiveError` with the HTTP status. | It leaves the generated set, and the generated-sources gate names every dataset that uses it. |
 
 ## 20. Quality gates
@@ -4001,7 +4036,7 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
   `_massive` boundary and layers of [section 19](#19-wire-clients-and-the-spec-snapshot).
 - **Spec:** `tests/massive/refresh/test_generate.py` passes (parity of `spec/*.json` byte for
   byte, documented = generated ⊎ excluded ⊎ (deprecated ∪ draft), and every refresh gate),
-  and `tests/datasets/test_catalog.py` passes (the catalog gates, generated ⊆ used ∪ undeclared) ([section
+  and `tests/datasets/test_catalog.py` passes (the catalog gates, generated = used ⊎ deferred) ([section
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
 - **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
   exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
@@ -4100,7 +4135,11 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **Packaging.** `uv.lock` is not committed, and CI resolves afresh on every run. The wheel
   excludes all of `refresh/` (`[tool.hatch.build.targets.wheel] exclude =
   ["src/deephaven_massive/_massive/refresh"]`), the snapshot included; `spec/*.json` ship as
-  package data, and the CI build job asserts both. Development dependencies use a PEP 735
+  package data, and the CI build job asserts both. The build job also installs the wheel, with
+  `deephaven-server`, into a fresh environment and runs `scripts/check_wheel.py` there: inside
+  a started server it imports every shipped module, resolves every public name, renders the
+  column reference from the installed catalog and compares it with `docs/datasets/`, and opens
+  and closes a session. Development dependencies use a PEP 735
   `[dependency-groups]` table; license metadata follows PEP 639. `__version__` comes from
   `importlib.metadata`. `deephaven-server` is a development dependency only. The runtime
   dependencies are declared directly, with floors: `deephaven-core`, `pyarrow`, `boto3`,
@@ -4488,12 +4527,12 @@ document already reflects them.
     date ([section 7.4](#74-column-descriptions)).
 56. **A debug log good enough to fix a bug from** (2026-10-28). Standard `logging` only, off
     by default; `DEEPHAVEN_MASSIVE_LOG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`), read at the first
-    session, and `dm.enable_debug_logging(path=None)` turn it on; stderr by default and a file
+    session, and `dm.enable_debug_logging()` turn it on; stderr by default and a file
     only when asked for. Log too much rather than too little: offending values, whole rows, and
     error bodies at DEBUG, the same values in error messages, with no truncation that hides the
-    problem. Secrets are never logged. Every change logs what it decides (`AGENTS.md`). The bug
-    report asks for the log and `m.streams()`, and adds no warning about what a log contains
-    ([section 17.1](#171-the-log)).
+    problem. Secrets are never logged. Every change logs what it decides (the rules of
+    section 17.1). The bug report asks for the log and `m.streams()`, and adds no warning about
+    what a log contains ([section 17.1](#171-the-log)).
 
 ## 23. Open verification items
 

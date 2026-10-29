@@ -35,8 +35,8 @@ body:
     attributes:
       label: The log of the run, with DEBUG on
       description: >-
-        Everything from the `deephaven-massive <version>, Python ...` line a new session logs
-        (or the `logging deephaven_massive at DEBUG` line) to the failure.
+        Everything from the `logging deephaven_massive at DEBUG` line, and the
+        `deephaven-massive <version>, Python ...` line that follows it, to the failure.
       render: text
     validations:
       required: true

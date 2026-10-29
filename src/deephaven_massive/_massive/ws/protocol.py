@@ -161,7 +161,7 @@ class Reject:
     channel: str
     symbol: str | None
     error: WireError
-    raw: str = ""
+    raw: str
 
 
 @dataclass(frozen=True, kw_only=True)

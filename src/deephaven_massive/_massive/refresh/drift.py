@@ -118,8 +118,9 @@ class Section(Enum):
     UNACCOUNTED = (
         "Unaccounted items",
         (
-            f"run `{_COMMAND} --fetch` and the plain refresh, then add a dataset, or add an "
-            "`EXCLUSIONS` entry with its reason."
+            f"run `{_COMMAND} --fetch` and the plain refresh, then add a dataset, add an "
+            "`EXCLUSIONS` entry with its reason, or defer the item with a `DEFERRED` entry "
+            "that names its issue."
         ),
     )
     CHANGES = (
