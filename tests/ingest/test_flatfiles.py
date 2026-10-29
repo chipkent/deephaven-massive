@@ -1641,7 +1641,7 @@ def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
     assert sorted(fake_s3.keys()) == [TRADES_0303] + [TRADES_0304] * 4
     assert len(retry_clock.waits) == 3
     assert [r.levelno for r in caplog.records if "giving up after 4 reads" in r.getMessage()] == [
-        logging.ERROR
+        logging.WARNING
     ]
 
 

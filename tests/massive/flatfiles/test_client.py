@@ -499,7 +499,7 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
         (logging.INFO, f"{error}; retry 1 of 3 in 0.55 s"),
         (logging.INFO, f"{error}; retry 2 of 3 in 1.10 s"),
         (logging.INFO, f"{error}; retry 3 of 3 in 2.20 s"),
-        (logging.ERROR, f"{error}; giving up after 4 attempts"),
+        (logging.WARNING, f"{error}; giving up after 4 attempts"),
     ]
 
 
@@ -769,7 +769,7 @@ def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
         (logging.INFO, f"{error}; reading it again from its start, reread 1 of 3 in 0.55 s"),
         (logging.INFO, f"{error}; reading it again from its start, reread 2 of 3 in 1.10 s"),
         (logging.INFO, f"{error}; reading it again from its start, reread 3 of 3 in 2.20 s"),
-        (logging.ERROR, f"{error}; giving up after 4 reads"),
+        (logging.WARNING, f"{error}; giving up after 4 reads"),
     ]
 
 
@@ -1595,7 +1595,7 @@ def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
         logging.INFO,
         logging.INFO,
         logging.INFO,
-        logging.ERROR,
+        logging.WARNING,
     ]
 
 

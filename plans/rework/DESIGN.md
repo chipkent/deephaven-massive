@@ -4235,7 +4235,8 @@ stays in memory for the life of the process, and its lock serializes client buil
     error handling, so urllib3's `ProtocolError` and `ReadTimeoutError` reach the client
     unwrapped.
 
-  Each retry is logged at INFO and giving up at ERROR, naming the object and the failure.
+  Each retry is logged at INFO and giving up at WARNING, naming the object and the failure;
+  the call that fails logs the one ERROR.
   Three failures are never retried:
   - A TLS failure (botocore's `SSLError`, or any error `is_tls_failure` recognises). A
     certificate failure's message names `SSL_CERT_FILE`.

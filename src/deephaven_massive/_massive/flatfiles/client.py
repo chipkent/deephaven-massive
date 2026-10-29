@@ -35,7 +35,7 @@ The client follows the network rules the REST and WebSocket clients follow, from
   most `MAX_RETRIES` times, with every wait taken on the client's `Clock`: HTTP 500, 502,
   503 (S3's `SlowDown`), and 504, S3's `RequestTimeout` error (HTTP 400), a connection that
   cannot be made, is reset, or times out, and an error response whose body is cut short or
-  stalls. Each retry is logged at INFO and giving up at ERROR. A TLS failure is never
+  stalls. Each retry is logged at INFO and giving up at WARNING. A TLS failure is never
   retried, nor is a proxy's refusal of its credentials (HTTP 407: the same credentials would be
   refused again, and a corporate proxy may lock the account).
 - **Rereads.** A failure part-way through an object's body is not retried here: the reader has
@@ -45,8 +45,8 @@ The client follows the network rules the REST and WebSocket clients follow, from
   follows the same schedule and limit.
 - **Logging.** Each object request logs one DEBUG line on this module's logger: the object's
   location, `200` with its size or `404 NoSuchKey`, and S3's `x-amz-request-id`. A retry logs
-  at INFO and giving up at ERROR; an error names S3's code and message, with the secret
-  replaced by `***` should S3 ever quote it.
+  at INFO and giving up at WARNING (the call that fails logs the one ERROR); an error names
+  S3's code and message, with the secret replaced by `***` should S3 ever quote it.
 
 botocore parses the JSON files that describe S3 once per process, not once per client: every
 client's botocore session is given the same model loader, which stays in memory for the life of
@@ -427,7 +427,7 @@ class FlatFileClient:
         part-way through (`FlatFile.dropped`) calls this before it opens the object again and
         reads it from the start. Rereads follow the schedule of `open`'s retries: at most
         three (`retry` 0, 1, 2), after 0.5, 1, then 2 seconds plus up to 20 % jitter, on the
-        client's clock. Each is logged at INFO and giving up at ERROR, naming the failure.
+        client's clock. Each is logged at INFO and giving up at WARNING, naming the failure.
         Blocks the calling thread for the wait, which ends early once `cancel` is set, by the
         caller or by `close()`; the caller then finds the call stopped or the client closed.
         When `cancel` is already set or the client already closed, it returns at once, with
@@ -441,10 +441,10 @@ class FlatFileClient:
 
         Returns:
             True once the wait has ended: read the object again. False when the rereads are
-            spent, after logging at ERROR, without waiting: raise `error`.
+            spent, after logging at WARNING, without waiting: raise `error`.
         """
         if retry == MAX_RETRIES:
-            _log.error("%s; giving up after %d reads", error, retry + 1)
+            _log.warning("%s; giving up after %d reads", error, retry + 1)
             return False
         with self._lock:
             if self._closed.is_set() or cancel.is_set():
@@ -554,7 +554,7 @@ class FlatFileClient:
             if not isinstance(outcome, _Retryable):
                 return outcome
             if retry == MAX_RETRIES:
-                _log.error("%s; giving up after %d attempts", outcome.error, retry + 1)
+                _log.warning("%s; giving up after %d attempts", outcome.error, retry + 1)
                 raise outcome.error from outcome.cause
             wait = transient_wait(retry, _JITTER.random())
             _log.info("%s; retry %d of %d in %.2f s", outcome.error, retry + 1, MAX_RETRIES, wait)
