@@ -5,17 +5,20 @@ import functools
 import gc
 import gzip
 import io
+import itertools
 import logging
 import re
 import threading
+import time
 import tracemalloc
 import weakref
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -29,9 +32,10 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, DaySpan
+from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
 from deephaven_massive._ingest import flatfiles
@@ -39,6 +43,7 @@ from deephaven_massive._massive import Field, Source, Transport, WireType, WireU
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
@@ -63,6 +68,7 @@ class FakeS3(Protocol):
     closed_bodies: list[str]
     request_id: str
     before_answer: Callable[[str], object] | None
+    before_drop: Callable[[str], object] | None
 
     def put(self, key: str, data: bytes) -> None: ...
     def put_csv(
@@ -81,7 +87,7 @@ def keys(symbol: str | KeySpec, time: str, *, session: bool = False) -> SourceKe
     return SourceKeys(
         KeySpec(symbol) if isinstance(symbol, str) else symbol,
         KeySpec(time),
-        session=KeySpec("SessionEndDate") if session else None,
+        date=KeySpec("SessionEndDate") if session else None,
     )
 
 
@@ -138,6 +144,7 @@ FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
+    row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
     keys={
@@ -216,11 +223,18 @@ def request(symbols: object = ("AAPL",), **fields: object) -> Request:
     return Request(symbols=cast("Any", symbols), **cast("dict[str, Any]", fields))
 
 
-def rows(table: Table) -> list[dict[str, Any]]:
-    # Instants become epoch nanoseconds, so assertions keep every digit.
+def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
+    # Instants become epoch nanoseconds, so assertions keep every digit. Every row carries the
+    # instant its block was decoded, last; it is checked here and, unless asked for, left out,
+    # so an assertion compares only what the files hold.
     data = dh_arrow.to_arrow(table)
+    assert data.column_names[-1] == "TimestampInsert"
+    assert data.column("TimestampInsert").null_count == 0
     columns = [c.cast(pa.int64()) if pa.types.is_timestamp(c.type) else c for c in data.columns]
     out: list[dict[str, Any]] = pa.Table.from_arrays(columns, names=data.column_names).to_pylist()
+    if not arrival:
+        for row in out:
+            del row["TimestampInsert"]
     return out
 
 
@@ -480,10 +494,45 @@ def synthetic_catalog() -> Catalog:
     return Catalog((SYNTHETIC,), source_tables=lambda t: tables.get(t, {}))
 
 
+@pytest.mark.parametrize(("hours", "kept"), [(23, 0), (24, 1)], ids=["open", "ended"])
+def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, kept: int) -> None:
+    midnight = datetime(2025, 3, 3, 5, tzinfo=UTC)  # 00:00 in New York
+    times = TimeRange(midnight, midnight + timedelta(days=1))
+    day = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
+    bars = BarBounds(midnight, midnight + timedelta(hours=hours), StartRule.RANGE)
+    window = HistoryWindow(day, times, None, times, bars)
+    transform = flatfiles._Transform.build(
+        CATALOG,
+        STOCK_BARS,
+        prefix="us_stocks_sip/day_aggs_v1",
+        request=request(timespan=Timespan.DAY, adjusted=False),
+        window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["AAPL"],
+            "Volume": [1.0],
+            "Open": [1.0],
+            "Close": [1.0],
+            "High": [1.0],
+            "Low": [1.0],
+            "TimestampStart": [epoch_ns(midnight)],
+            "Transactions": [1],
+        }
+    )
+    assert transform.apply(batch, received=7).num_rows == kept
+
+
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
-        synthetic_catalog(), SYNTHETIC, prefix=SYNTHETIC_FILES, symbols=dm.ALL, window=window
+        synthetic_catalog(),
+        SYNTHETIC,
+        prefix=SYNTHETIC_FILES,
+        request=request(dm.ALL),
+        window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -494,7 +543,9 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
             "Conditions": [12, None],
         }
     )
-    out = transform.apply(batch).to_pydict()
+    out = transform.apply(batch, received=7).to_pydict()
+    # Every row of the block arrived together.
+    assert [int(v.value) for v in out["TimestampInsert"]] == [7, 7]
     assert [
         None if v is None else int(v.timestamp() * 10**3) for v in out["ParticipantTimestamp"]
     ] == [
@@ -578,9 +629,33 @@ def test_symbol_pushdown_keeps_only_the_requested_symbols(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    q = query(session, STOCK_TRADES, symbols=["aapl"])
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert pick(t, "Symbol", "Id") == [("AAPL", "1"), ("AAPL", "3")]
+
+
+def test_a_ticker_the_library_cannot_read_fails_the_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    every = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(
+        dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
+    ):
+        every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+
+
+def test_a_ticker_the_library_cannot_read_is_kept_under_warn(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with dm.MassiveSession(config(unknown_symbols=dm.UnknownSymbols.WARN)) as m:
+        t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
+            "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES
+        )
+        assert pick(t, "Symbol", "RawSymbol", "Id") == [(None, "BRK/B", "1"), ("AAPL", None, "2")]
 
 
 @pytest.mark.parametrize("ticker", ["NA", "NULL"])
@@ -604,13 +679,13 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 0
@@ -692,10 +767,15 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
     )
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-03", "2025-03-03")
-    assert pick(t, "Symbol", "Timestamp", "Open", "Volume", "Transactions", "Vwap") == [
-        ("AAPL", 1740978000000000000, 241.79, 47184000.0, 612403, None),
-        ("MSFT", 1740978000000000000, 398.82, 26093000.0, 402122, None),
+    # The day file stamps a bar at the 16:00 close; it runs from midnight to midnight.
+    day = 1740978000000000000
+    assert pick(
+        t, "Symbol", "Date", "TimestampStart", "TimestampEnd", "Open", "Volume", "Transactions"
+    ) == [
+        ("AAPL", "2025-03-03", day, day + 86_400 * 10**9, 241.79, 47184000.0, 612403),
+        ("MSFT", "2025-03-03", day, day + 86_400 * 10**9, 398.82, 26093000.0, 402122),
     ]
+    assert pick(t, "Vwap") == [(None,), (None,)]
     assert caplog.messages == [
         "stocks.bars history: AUTO chose FLAT_FILES (every symbol)",
         "stocks.bars history: source=S3 files=1 skipped=none",
@@ -711,18 +791,35 @@ def test_each_file_becomes_one_table(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     put(TRADES_0305, "us_stocks_sip_trades_v1_2025-03-05.csv")
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)  # several blocks per file
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-05")
     assert t.size == 6
     # The empty schema table, then one table per file, although each file has many blocks.
     assert sorted(converted) == [0, 2, 4]
+
+
+def test_every_block_carries_the_instant_it_was_decoded(
+    *,
+    session: dm.MassiveSession,
+    many_blocks: Callable[[str], int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each block's rows share the instant the block was decoded; later blocks, later instants.
+    blocks = many_blocks(TRADES_0303)
+    ticks = itertools.count(1_000)
+    monkeypatch.setattr(time, "time_ns", lambda: next(ticks))
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    arrived = [row["TimestampInsert"] for row in rows(t, arrival=True)]
+    assert len(arrived) == 4000
+    assert arrived == sorted(arrived)  # one reader reads the file's blocks in order
+    assert 1 < len(set(arrived)) <= blocks + 1
 
 
 def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
@@ -733,13 +830,13 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
 ) -> None:
     blocks = many_blocks(TRADES_0303)
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 2)
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     assert pick(t, "Id")[:3] == [("0",), ("1",), ("2",)]  # still in file order
@@ -900,6 +997,46 @@ def test_a_missing_last_date_after_a_day_is_skipped_as_a_holiday(
     ]
 
 
+def test_a_missing_weekend_file_of_a_class_that_trades_at_weekends_warns(
+    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Forex trades from Sunday evening UTC, so its weekend day is a trading day like crypto's:
+    # a missing Sunday file is reported as a possible holiday, never skipped silently.
+    transport = session._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
+    key = "global_forex/trades_v1/2025/03/2025-03-02.csv.gz"
+    sunday = flatfiles._Key(key, date(2025, 3, 2), None)
+    stocks = replace(forex, name="stocks.trades", asset_class=AssetClass.STOCKS)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        transport._skip_missing(forex, [sunday], last=date(2025, 3, 3))
+        transport._skip_missing(stocks, [sunday], last=date(2025, 3, 3))
+    assert caplog.messages == [
+        f"forex.trades: {key} does not exist; skipping 2025-03-02 (a market holiday?)"
+    ]
+
+
+def test_a_missing_forex_saturday_file_is_skipped_silently_even_as_the_last_day(
+    *,
+    session: dm.MassiveSession,
+    clock: Callable[[datetime], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Forex does not trade on a UTC Saturday, so its file need not exist: no WARNING, and no
+    # "not yet published" error while the Saturday is still within its publication grace.
+    transport = session._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
+    saturday = date(2025, 3, 1)
+    key = flatfiles._Key("global_forex/trades_v1/2025/03/2025-03-01.csv.gz", saturday, None)
+    clock(datetime(2025, 3, 2, 12, tzinfo=NEW_YORK))
+    cutoff = session._core.config.flat_file_publish_cutoff
+    assert history_source.within_publication_grace(forex, saturday, cutoff=cutoff)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        transport._skip_missing(forex, [key], last=saturday)
+    assert caplog.messages == []
+
+
 def test_crypto_trades_every_day(
     *,
     session: dm.MassiveSession,
@@ -909,7 +1046,7 @@ def test_crypto_trades_every_day(
 ) -> None:
     saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
     put(saturday, "global_crypto_trades_v1_2025-03-01.csv")
-    q = query(session, CRYPTO_TRADES, symbols=["BTC-USD"])
+    q = query(session, CRYPTO_TRADES, symbols=["X:BTCUSD"])
     t = q.history("2025-03-01", "2025-03-01", source=HistorySource.FLAT_FILES)
     assert pick(t, "Symbol", "Timestamp", "Size", "Id") == [
         ("X:BTCUSD", 1740830400000000000, 0.015, "a1")
@@ -945,7 +1082,9 @@ class RestRecorder:
         assert call > 0
         self.calls.append((spec, request, window))
         # A table in the dataset's schema, as the REST transport returns.
-        return dh_arrow.to_table(schema_of(spec).to_arrow([{"Symbol": "from REST"}]))
+        return dh_arrow.to_table(
+            schema_of(spec).to_arrow([{"Symbol": "from REST", "TimestampInsert": 1}])
+        )
 
 
 def test_auto_delegates_few_symbols_to_rest(
@@ -957,7 +1096,7 @@ def test_auto_delegates_few_symbols_to_rest(
 ) -> None:
     rest = RestRecorder()
     monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
-    q = query(session, STOCK_TRADES, symbols=["msft", "aapl"])
+    q = query(session, STOCK_TRADES, symbols=["MSFT", "AAPL"])
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-03", "2025-03-04")
     assert pick(t, "Symbol") == [("from REST",)]
@@ -985,11 +1124,11 @@ def test_futures_read_every_venue_by_default_in_venue_order(
     t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
     assert sorted(fake_s3.keys()) == sorted(FUTURES_0304.format(v) for v in VENUES)
     # Venue order within a date: CME, CBOT, NYMEX, COMEX.
-    assert pick(t, "ReportSequence", "SessionEndDate") == [
-        (0, date(2025, 3, 4)),
-        (1, date(2025, 3, 4)),
-        (2, date(2025, 3, 4)),
-        (3, date(2025, 3, 4)),
+    assert pick(t, "ReportSequence", "Date") == [
+        (0, "2025-03-04"),
+        (1, "2025-03-04"),
+        (2, "2025-03-04"),
+        (3, "2025-03-04"),
     ]
 
 
@@ -1000,10 +1139,10 @@ def test_futures_read_one_venue_when_asked(
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
     t = q.history("2025-03-04", "2025-03-04")
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
-    assert pick(t, "Symbol", "Timestamp", "SessionEndDate", "ReportSequence") == [
-        ("ESH5", 1741042800000000000, date(2025, 3, 4), 31),
-        ("ESH5", 1741100400000000000, date(2025, 3, 4), 32),
-        ("NQH5", 1741100400000000000, date(2025, 3, 4), 33),
+    assert pick(t, "Symbol", "Timestamp", "Date", "ReportSequence") == [
+        ("ESH5", 1741042800000000000, "2025-03-04", 31),
+        ("ESH5", 1741100400000000000, "2025-03-04", 32),
+        ("NQH5", 1741100400000000000, "2025-03-04", 33),
     ]
 
 
@@ -1019,9 +1158,7 @@ def test_futures_evening_instants_read_only_the_next_session(
         source=HistorySource.FLAT_FILES,
     )
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
-    assert pick(t, "Symbol", "Timestamp", "SessionEndDate") == [
-        ("ESH5", 1741042800000000000, date(2025, 3, 4))
-    ]
+    assert pick(t, "Symbol", "Timestamp", "Date") == [("ESH5", 1741042800000000000, "2025-03-04")]
 
 
 def test_futures_instants_inside_one_session_need_only_its_file(
@@ -1425,6 +1562,23 @@ def test_a_dropped_connection_is_a_massive_error(
         q.history("2025-03-03", "2025-03-03")
 
 
+_HOLD = 10.0
+"""Seconds `hold_each_drop` holds one dropped read's failure at most: short enough that a test
+whose reads build no table fails on its own assertions within the 60-second test timeout, even
+after two held drops."""
+
+
+def hold_each_drop(fake_s3: FakeS3) -> threading.Event:
+    # Holds each dropped read's failure until the returned event is set, and clears the event
+    # at every request, so a test can make each dropped read build a table first. Arrow reads
+    # a file ahead on a thread of its own and can report the drop before the reader has turned
+    # a single block into a table.
+    built = threading.Event()
+    fake_s3.before_answer = lambda _: built.clear()
+    fake_s3.before_drop = lambda _: built.wait(_HOLD)
+    return built
+
+
 def test_a_dropped_connection_is_read_again_from_the_start(
     *,
     session: dm.MassiveSession,
@@ -1436,13 +1590,15 @@ def test_a_dropped_connection_is_read_again_from_the_start(
 ) -> None:
     many_blocks(TRADES_0303)
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
+    built = hold_each_drop(fake_s3)
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        built.set()  # the read under way has built a table, so it may now fail
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 1)  # a table per block, so drops leave some
     size = len(fake_s3.data(TRADES_0303))
     fake_s3.drop(TRADES_0303, times=2, at=size // 2)
@@ -1573,11 +1729,13 @@ def test_a_dropped_reads_tables_are_freed_before_the_wait(
     fake_s3.drop(TRADES_0303, times=1, at=len(fake_s3.data(TRADES_0303)) // 2)
     partial: list[weakref.ref[Table]] = []
     convert = flatfiles._convert
+    built = hold_each_drop(fake_s3)
 
     def recorded(batches: list[pa.RecordBatch], transform: flatfiles._Transform) -> Table:
         table = convert(batches, transform)
         if len(fake_s3.keys()) == 1:  # the read that drops
             partial.append(weakref.ref(table))
+            built.set()  # it has built a table, so it may now fail
         return table
 
     alive: list[int] = []
@@ -1739,15 +1897,15 @@ def test_reader_threads_enter_the_session_context(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     seen: list[tuple[str, bool]] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
     expected = session._core.exec_ctx.j_exec_ctx
 
-    def recorded(data: pa.Table) -> Table:
+    def recorded(data: pa.Table, dates: Sequence[str]) -> Table:
         context = get_exec_ctx().j_exec_ctx.equals(expected)
         seen.append((threading.current_thread().name, context))
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", recorded)
+    monkeypatch.setattr(flatfiles, "dataset_table", recorded)
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     # The readers are named after the session and the call: the call's id is its first.
     reader = f"{session._core.thread_prefix} call-1 files_"
@@ -1759,7 +1917,7 @@ def test_history_runs_from_a_thread_without_an_execution_context(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    q = query(session, STOCK_TRADES, symbols=["aapl"])
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
     out: list[object] = []
 
     def run() -> None:  # a failure leaves `out` empty, which the assertion reports
@@ -1823,7 +1981,12 @@ def test_a_cancelled_or_closed_read_makes_no_request(
     assert isinstance(transport, flatfiles.FlatFileHistory)
     window = whole_days(STOCK_TRADES, "2025-03-03")
     transform = flatfiles._Transform.build(
-        CATALOG, STOCK_TRADES, prefix="us_stocks_sip/trades_v1", symbols=dm.ALL, window=window
+        CATALOG,
+        STOCK_TRADES,
+        prefix="us_stocks_sip/trades_v1",
+        request=request(dm.ALL),
+        window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()
@@ -1967,6 +2130,7 @@ def test_a_close_during_a_request_reports_the_close(
             query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when)
     finally:
         m.close()
+        fake_s3.before_answer = None  # the fake lives in a cycle: it must not keep the session
     # Closed by the close, then once more as the in-flight request returned, which drops any
     # connection pool that request opened.
     assert fake_s3.closes == 2
@@ -2072,15 +2236,28 @@ def test_a_session_collected_unclosed_closes_its_bucket(
 
 
 def synthetic_trades(rows: int) -> str:
-    # A trades file whose rows vary like real ones; one row in a thousand is the symbol RARE.
+    # A trades file whose rows vary like real ones; one row in 100 is the symbol RARE, so at
+    # 16 KiB blocks (about 200 rows) every block holds about two RARE rows.
     moment = 1741012200000000000
     tickers = ("AAPL", "MSFT", "SPY", "NVDA")
     lines = [
         f"12,,4,{n},{moment + n * 1000},{100 + n % 997 / 7:.4f},{n},{moment + n * 1001},"
-        f"{n % 5000 + 1},3,{'RARE' if n % 1000 == 0 else tickers[n % 4]},,\n"
+        f"{n % 5000 + 1},3,{'RARE' if n % 100 == 0 else tickers[n % 4]},,\n"
         for n in range(rows)
     ]
     return TRADE_HEADER + "".join(lines)
+
+
+class ReadMemory(NamedTuple):
+    # One read's rows and memory. The peaks are the highest Python memory (tracemalloc) and
+    # Arrow pool level above where the read started. The rises are how far those running peaks
+    # climbed from a third of the way through the file to its end, so they leave out whatever
+    # the read set up before its first block.
+    rows: int
+    python_peak: int
+    arrow_peak: int
+    python_rise: int
+    arrow_rise: int
 
 
 class MemorySampler:
@@ -2094,7 +2271,7 @@ class MemorySampler:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         batches = _massive.FlatFile.batches
-        convert = dh_arrow.to_table
+        convert = columns.dataset_table
 
         def sampled_batches(
             file: _massive.FlatFile, plan: _massive.ReadPlan
@@ -2105,39 +2282,35 @@ class MemorySampler:
                 self.taken[1] += 1
                 yield batch
 
-        def sampled_convert(data: pa.Table) -> Table:
+        def sampled_convert(data: pa.Table, dates: Sequence[str]) -> Table:
             self.sample_arrow()
-            return convert(data)
+            return convert(data, dates)
 
         monkeypatch.setattr(_massive.FlatFile, "batches", sampled_batches)
-        monkeypatch.setattr(flatfiles, "to_table", sampled_convert)
+        monkeypatch.setattr(flatfiles, "dataset_table", sampled_convert)
 
     def sample_arrow(self) -> None:
         self.arrow[self.taken[0]] = pa.total_allocated_bytes()
         self.taken[0] += 1
 
-    def measure(self, read: Callable[[], Table]) -> tuple[int, int, int]:
-        # Runs `read` and returns its rows, and the Python and Arrow peaks above the baselines.
+    def measure(self, read: Callable[[], Table]) -> ReadMemory:
+        # Runs `read` and returns its rows and what its reader's memory did.
         self.taken[:] = [0, 0]
         arrow_baseline = pa.total_allocated_bytes()
         tracemalloc.start()
         try:
-            python_baseline = tracemalloc.get_traced_memory()[0]
             rows = read().size
-            python_peak = tracemalloc.get_traced_memory()[1] - python_baseline
+            python_peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()
-        return rows, python_peak, max(self.arrow[: self.taken[0]]) - arrow_baseline
-
-    def python_rise(self) -> int:
-        # How far the running Python peak rose from a third of the blocks to the last one.
-        blocks = self.taken[1]
-        return self.python[blocks - 1] - self.python[blocks // 3]
-
-    def arrow_rise(self) -> int:
-        # How far the Arrow pool's running maximum rose from a third of the samples to the end.
-        samples = self.taken[0]
-        return max(self.arrow[:samples]) - max(self.arrow[: samples // 3])
+        blocks, samples = self.taken[1], self.taken[0]
+        return ReadMemory(
+            rows=rows,
+            python_peak=python_peak,
+            arrow_peak=max(self.arrow[:samples]) - arrow_baseline,
+            python_rise=self.python[blocks - 1] - self.python[blocks // 3],
+            arrow_rise=max(self.arrow[:samples]) - max(self.arrow[: samples // 3]),
+        )
 
 
 def test_memory_per_reader_does_not_grow_with_the_file(
@@ -2147,11 +2320,19 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     make_csv_gz: Callable[[str], bytes],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A reader holds a window of its file, not the file: about 32 blocks of Arrow's read-ahead
+    # plus at most `_TABLE_BLOCKS` blocks of gathered rows. Small blocks give a file of about
+    # 900 blocks, cheap to build and read, in which that window fills within the first third.
     block = 16 * 1024
+    window = 32 + flatfiles._TABLE_BLOCKS
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
-    text = synthetic_trades(600_000)
+    rows = 192_000
+    text = synthetic_trades(rows)
+    blocks = len(text) // block
+    assert blocks > 15 * window  # the last two thirds of the file dwarf the window
     fake_s3.put(TRADES_0303, make_csv_gz(text))
-    sampler = MemorySampler(2 * (len(text) // block) + 1000)
+    fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
+    sampler = MemorySampler(2 * blocks + 100)
     sampler.install(monkeypatch)
     m = dm.MassiveSession(config(max_concurrency=1))
 
@@ -2161,28 +2342,37 @@ def test_memory_per_reader_does_not_grow_with_the_file(
 
     try:
         # A first read creates the client: botocore parses its service model once per client.
-        fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
-        every, python_peak, arrow_peak = sampler.measure(read(dm.ALL))
-        rare, _, _ = sampler.measure(read(["RARE"]))  # the samples kept are this read's
+        every = sampler.measure(read(dm.ALL))
+        rare = sampler.measure(read(["RARE"]))
+        fake_s3.put(TRADES_0303, make_csv_gz(synthetic_trades(rows // 4)))
+        short = sampler.measure(read(["RARE"]))
     finally:
         m.close()
-    assert (every, rare) == (600_000, 600)
-    # About 32 blocks of read-ahead and 16 of gathered rows. Small test blocks inflate the peak
-    # through fixed per-block overhead (about 75 blocks with the GIL and 150 without it at
-    # 16 KiB, against about 37 at the production 1 MiB), so 250 blocks is only a loose ceiling.
-    bound = 250 * block
-    assert len(text) > 10 * bound
-    assert python_peak < bound
-    assert arrow_peak < bound
-    # The real check is the plateau: once the read-ahead has filled, the running peak must not
-    # keep rising with the file. It is measured on the rare symbol's read, whose result is one
-    # small table: with dm.ALL the result itself (a Deephaven table, and its Python wrapper,
-    # per 16 blocks) legitimately grows with the file.
-    assert sampler.python_rise() < 32 * block
-    # Arrow's pool is invisible to tracemalloc: each small batch a selective read gathers costs
-    # allocation overhead that its byte count does not show, so the batches must be merged.
-    assert sampler.arrow_rise() < 32 * block
+    assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
+    # Python's peak includes the read-ahead's decompressed text, made on Arrow's own thread,
+    # so it varies from run to run by up to about 40 blocks; a reader that kept a little Python
+    # data per block (a copy of the compressed chunks, or of the RARE rows) adds 100 or more.
+    python_slack = 64 * block
+    # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
+    # and legitimately grow it by about 17 blocks over the last two thirds of the file (about
+    # 19 between the two files), but each small batch also costs allocation overhead that its
+    # byte count does not show: kept as one batch per block instead of merged, they grow it by
+    # about 62 (70 between the files).
+    arrow_slack = 40 * block
+    # From a third of the way through the file to its end, a reader that kept each block it
+    # read would rise by about 600 blocks. When every row survives, the result itself (a
+    # Deephaven table, and its Python wrapper, per `_TABLE_BLOCKS` blocks) legitimately grows
+    # with the file, but by far less than a block per table.
+    assert every.python_rise < python_slack
+    assert every.arrow_rise < arrow_slack
+    assert rare.python_rise < python_slack
+    assert rare.arrow_rise < arrow_slack
+    # The rises leave out whatever a read sets up before its first block, such as the whole
+    # body read or decompressed up front: reading a file four times as long must peak about as
+    # high as reading the short one.
+    assert rare.python_peak - short.python_peak < python_slack
+    assert rare.arrow_peak - short.arrow_peak < arrow_slack
 
 
 def test_the_production_block_size() -> None:
@@ -2217,7 +2407,9 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
 ) -> None:
     # Converting a file's rows can fail in Arrow (out of memory, say): it is a failed read of
     # that file, named like any other.
-    def exhausted(transform: flatfiles._Transform, batch: pa.RecordBatch) -> pa.RecordBatch:
+    def exhausted(
+        transform: flatfiles._Transform, batch: pa.RecordBatch, *, received: int
+    ) -> pa.RecordBatch:
         raise pa.ArrowMemoryError("malloc of size 1048576 failed")
 
     monkeypatch.setattr(flatfiles._Transform, "apply", exhausted)
@@ -2445,7 +2637,9 @@ def test_minute_bar_files_keep_only_whole_bars_of_an_instant_range(
         datetime(2025, 3, 3, 14, 32, 30, tzinfo=UTC),
         source=HistorySource.FLAT_FILES,
     )
-    assert pick(t, "Timestamp") == [(minutes[1],)]
+    assert pick(t, "Date", "TimestampStart", "TimestampEnd") == [
+        ("2025-03-03", minutes[1], minutes[2])
+    ]
 
 
 def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
@@ -2461,3 +2655,21 @@ def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
         q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES)
     assert fake_s3.requests == []
+
+
+def test_every_row_of_a_day_shares_one_stored_date(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    string_objects: Callable[[Table, str], int],
+) -> None:
+    header = "ticker,volume,open,close,high,low,window_start,transactions\n"
+    minutes = [epoch_ns(datetime(2025, 3, 3, 15, m, tzinfo=UTC)) for m in range(20)]
+    body = "".join(f"AAPL,1,1.0,1.0,1.0,1.0,{m},1\n" for m in minutes)
+    key = "us_stocks_sip/minute_aggs_v1/2025/03/2025-03-03.csv.gz"
+    fake_s3.put(key, make_csv_gz(header + body))
+    q = query(session, STOCK_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=False)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert t.size == 20
+    assert string_objects(t, "Date") == 1

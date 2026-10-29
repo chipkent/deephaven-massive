@@ -21,6 +21,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType, required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.poll import Pollers, open_poll
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import reference
@@ -60,7 +61,9 @@ def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSessio
 def test_datasets_are_declared_by_the_namespace_package() -> None:
     assert [spec.name for spec in reference.DATASETS] == [f"reference.{n}" for n in NAMES]
     assert all(CATALOG.by_name[spec.name] is spec for spec in reference.DATASETS)
-    assert all(spec.asset_class is None and spec.kind is None for spec in reference.DATASETS)
+    assert all(
+        spec.asset_class is ClassFromPrefix.ANY and spec.kind is None for spec in reference.DATASETS
+    )
     assert all(spec.sources == ((R, spec.fetch_path),) for spec in reference.DATASETS)
 
 
@@ -86,7 +89,7 @@ def test_ticker_details_fan_out_per_symbol() -> None:
     assert spec.keys_for(R, "/v3/reference/tickers/{ticker}") == SourceKeys(KeySpec("Ticker"))
     types = _types(spec)
     assert CATALOG.dataset_schema(spec).column_names[0] == "Symbol"
-    assert types["ListDate"] is ColumnType.LOCAL_DATE
+    assert types["ListDate"] is ColumnType.STRING
     assert types["AddressCity"] is ColumnType.STRING
 
 
@@ -95,11 +98,13 @@ def test_ticker_events_take_the_symbol_from_the_request() -> None:
     assert spec.keys_for(R, "/vX/reference/tickers/{id}/events").symbol == KeySpec(
         "id", from_request=True
     )
+    # The event's `Date` is the vendor's date, not a trading day: reference rows have none.
     assert CATALOG.dataset_schema(spec).column_names == (
         "Symbol",
         "Date",
         "Type",
         "TickerChangeTicker",
+        "TimestampInsert",
     )
     assert spec.poll_keys == ("Symbol", "Date", "Type")
 
@@ -108,7 +113,7 @@ def test_related_companies_name_the_peer_and_the_company_asked_about() -> None:
     spec = reference.RELATED_COMPANIES
     keys = spec.keys_for(R, "/v1/related-companies/{ticker}")
     assert keys == SourceKeys(symbol=KeySpec("Ticker"), fanout=KeySpec("ticker", from_request=True))
-    assert CATALOG.dataset_schema(spec).column_names == ("Symbol", "Underlying")
+    assert CATALOG.dataset_schema(spec).column_names == ("Symbol", "Underlying", "TimestampInsert")
     assert spec.poll_keys == ("Underlying", "Symbol")
 
 
@@ -158,7 +163,7 @@ def test_market_status_flattens_its_maps() -> None:
 def test_market_holidays_hours_are_instants() -> None:
     types = _types(reference.MARKET_HOLIDAYS)
     assert (types["Open"], types["Close"]) == (ColumnType.INSTANT, ColumnType.INSTANT)
-    assert types["Date"] is ColumnType.LOCAL_DATE
+    assert types["Date"] is ColumnType.STRING
 
 
 def test_the_unified_snapshot_record() -> None:
@@ -196,7 +201,7 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     assert query._spec is reference.TICKERS
     assert query._request == Request(params=(("active", True),))
     full = ref.tickers(
-        symbols=["msft", "AAPL"],
+        symbols=["MSFT", "AAPL"],
         market=dm.Market.STOCKS,
         ticker_type=dm.TickerType.CS,
         exchange="XNAS",
@@ -287,7 +292,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
         limit=50,
     )
     assert ref.news()._request == Request()
-    assert ref.news(symbols=["aapl"])._request == Request(symbols=("AAPL",))
+    assert ref.news(symbols=["AAPL"])._request == Request(symbols=("AAPL",))
 
 
 def test_news_takes_one_symbol(massive_session: dm.MassiveSession) -> None:
@@ -604,7 +609,7 @@ def test_ticker_details_fetch_one_request_per_symbol(
     out = dh_to_pylist(rest_session.reference.ticker_details("AAPL", date="2024-01-02").fetch())
     assert sent(fake_rest) == [("/v3/reference/tickers/AAPL", {"date": ["2024-01-02"]})]
     assert [(r["Symbol"], r["AddressCity"], r["ListDate"]) for r in out] == [
-        ("AAPL", "Cupertino", date(1980, 12, 12))
+        ("AAPL", "Cupertino", "1980-12-12")
     ]
 
 
@@ -619,8 +624,8 @@ def test_ticker_events_fill_the_symbol_from_the_request(
     out = dh_to_pylist(rest_session.reference.ticker_events("META", types="ticker_change").fetch())
     assert sent(fake_rest) == [("/vX/reference/tickers/META/events", {"types": ["ticker_change"]})]
     assert [(r["Symbol"], r["Date"], r["Type"], r["TickerChangeTicker"]) for r in out] == [
-        ("META", date(2022, 6, 9), "ticker_change", "META"),
-        ("META", date(2012, 5, 18), "ticker_change", "FB"),
+        ("META", "2022-06-09", "ticker_change", "META"),
+        ("META", "2012-05-18", "ticker_change", "FB"),
     ]
 
 
@@ -635,7 +640,11 @@ def test_related_companies_name_the_peer_and_the_ticker_asked_about(
     out = dh_to_pylist(rest_session.reference.related_companies("AAPL").fetch())
     assert sent(fake_rest) == [("/v1/related-companies/AAPL", {})]
     assert len(out) == 10
-    assert out[0] == {"Symbol": "MSFT", "Underlying": "AAPL"}
+    assert out[0]["TimestampInsert"] is not None
+    assert {k: v for k, v in out[0].items() if k != "TimestampInsert"} == {
+        "Symbol": "MSFT",
+        "Underlying": "AAPL",
+    }
 
 
 def test_news_fetch(

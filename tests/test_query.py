@@ -18,14 +18,14 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _errors, _session
+from deephaven_massive import _session
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
-from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, PollMode, Timespan
 from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
@@ -215,13 +215,13 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
     )
     watchlist = new_table([string_col("Symbol", ["A"])])
     assert repr(trades(massive_session, watchlist)) == (
-        "<StreamHistoryLatestQuery stocks.trades symbols=<reactive table>>"
+        "<StreamHistoryLatestQuery stocks.trades symbols=<symbol table>>"
     )
     assert repr(make(massive_session, NEWS_SPEC)) == "<Query economy.inflation>"
     bars = make(
         massive_session,
         BARS_SPEC,
-        symbols=["EUR/USD"],
+        symbols=["C:EURUSD"],
         timespan=Timespan.MINUTE,
         multiplier=5,
         adjusted=False,
@@ -300,7 +300,7 @@ def _calls(caplog: pytest.LogCaptureFixture) -> list[str]:
 def test_each_static_verb_is_one_logged_call(
     massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
-    bars = make(massive_session, BARS_SPEC, symbols=["EUR/USD"], timespan=Timespan.DAY)
+    bars = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.DAY)
     assert isinstance(bars, HistoryLatestQuery)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
         news(massive_session).fetch()
@@ -359,7 +359,7 @@ def test_latest_fetch_rejects_all(massive_session: dm.MassiveSession, rest: Reco
 
 
 def test_previous_session_fetch(massive_session: dm.MassiveSession, rest: Recorder) -> None:
-    q = make(massive_session, BARS_SPEC, symbols=["EUR/USD"], timespan=Timespan.DAY)
+    q = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.DAY)
     assert isinstance(q, HistoryLatestQuery)
     q.fetch()
     assert rest.calls[0][2].symbols == ("C:EURUSD",)
@@ -419,7 +419,7 @@ def test_history_of_futures_dates_passes_sessions(
 
 
 def test_history_day_zone_per_class(massive_session: dm.MassiveSession, rest: Recorder) -> None:
-    q = make(massive_session, BARS_SPEC, symbols=["EUR/USD"], timespan=Timespan.HOUR)
+    q = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.HOUR)
     assert isinstance(q, HistoryQuery)
     q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
     assert rest.calls[0][3]["window"].times.start == datetime(2025, 3, 3, tzinfo=UTC)
@@ -534,11 +534,9 @@ def test_history_reads_a_reactive_symbol_table_once_for_every_source(
     rest: Recorder,
     flat: Recorder,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(_errors, "_logged", set())  # the invalid-row WARNING is logged once
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["msft", "aapl", "$$$"])]))
+    watchlist.add(new_table([string_col("Symbol", ["MSFT", "AAPL"])]))
     reads: list[bool] = []
     iterate = Table.iter_tuple
     expected = massive_session._core.exec_ctx.j_exec_ctx
@@ -554,27 +552,38 @@ def test_history_reads_a_reactive_symbol_table_once_for_every_source(
         q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
 
     worker = threading.Thread(target=forced_rest)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._datasets.symbols"):
-        worker.start()
-        worker.join(TIMEOUT)
+    worker.start()
+    worker.join(TIMEOUT)
     q.history("2025-03-03", "2025-03-03")
     # Each verb read the table once, inside the session's context, and every source received
-    # the same sorted canonical tuple, never the table itself.
+    # the same sorted tuple, never the table itself.
     assert reads == [True, True]
     assert rest.calls[0][2].symbols == ("AAPL", "MSFT")
     assert rest.calls[1][2].symbols == ("AAPL", "MSFT")  # AUTO: the dataset has no flat files
-    assert caplog.messages == [
-        "a symbol table holds '$$$', which is not a valid stocks symbol; such rows are ignored"
-    ]
 
 
-def test_history_rejects_a_symbol_table_without_a_valid_symbol(
+def test_history_refuses_a_symbol_table_row_that_is_not_canonical(
     *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
 ) -> None:
-    for content in ([], ["$$$"]):
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
+    for source in HistorySource:
+        with pytest.raises(
+            ValueError, match=r"^a symbol table holds 'msft' .*dm\.canonicalize_symbols"
+        ):
+            q.history("2025-03-03", "2025-03-03", source=source)
+    assert rest.calls == []
+    assert flat.calls == []
+
+
+def test_history_rejects_a_symbol_table_without_symbols(
+    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+) -> None:
+    for content in ([], [None]):
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
-            with pytest.raises(ValueError, match="the symbol table holds no valid symbols"):
+            with pytest.raises(
+                ValueError, match=r"^stocks\.trades: the symbol table holds no symbols$"
+            ):
                 q.history("2025-03-03", "2025-03-03", source=source)
     assert rest.calls == []
     assert flat.calls == []
@@ -659,16 +668,68 @@ def test_stream_verbs_build_results(
 def test_last_by_follows_a_reactive_table(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
-    watchlist = new_table([string_col("Symbol", ["AAPL"])])
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     current = trades(massive_session, watchlist).last_by()
     assert current.is_refreshing
     massive_session.release(current)
 
 
+def test_a_static_symbol_table_is_a_fixed_symbol_list(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # Read once, like fetch() reads it: every verb opens the stream an equal symbol list opens.
+    fixed = trades(massive_session, new_table([string_col("Symbol", ["MSFT", "AAPL", "AAPL"])]))
+    results = [
+        fixed.blink(),
+        fixed.append_only(),
+        fixed.ring(3),
+        fixed.last_by(),
+        fixed.last_by("Exchange"),
+        trades(massive_session, ["AAPL", "MSFT"]).blink(),
+    ]
+    assert all(r.is_refreshing for r in results)
+    assert len(fake_streams.opened) == 1
+    assert massive_session._core.diagnostics.barrier().wait(10.0)
+    [row] = dh_to_pylist(massive_session.streams())
+    assert (row["SymbolCount"], row["Symbols"]) == (2, "AAPL, MSFT")
+    for result in results:
+        massive_session.release(result)
+
+
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_a_static_symbol_table_without_symbols_opens_no_stream(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
+) -> None:
+    for content in ([], [None]):
+        q = trades(massive_session, new_table([string_col("Symbol", content)]))
+        call = getattr(q, verb)
+        with pytest.raises(
+            ValueError, match=r"^stocks\.trades: the symbol table holds no symbols$"
+        ):
+            call(3) if verb == "ring" else call()
+    assert fake_streams.opened == []
+
+
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_a_static_symbol_table_row_that_is_not_canonical_opens_no_stream(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
+) -> None:
+    # Refused, as the same text in a list is: never canonicalized and never dropped.
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    call = getattr(q, verb)
+    with pytest.raises(
+        ValueError, match=r"^a symbol table holds 'msft' .*dm\.canonicalize_symbols"
+    ):
+        call(3) if verb == "ring" else call()
+    assert fake_streams.opened == []
+
+
 def test_bar_channels_follow_the_timespan(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
-    second = make(massive_session, BARS_SPEC, symbols=["EUR/USD"], timespan=Timespan.SECOND)
+    second = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.SECOND)
     assert isinstance(second, StreamHistoryQuery)
     massive_session.release(second.blink())
     assert fake_streams.opened == [("forex.bars", "CAS")]
@@ -678,7 +739,9 @@ def test_bar_channels_follow_the_timespan(
 
 
 def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSession) -> None:
-    q = trades(massive_session)
+    # The JVM holds the listener, and so its closure, until it collects it: the closure reaches
+    # the session through lists emptied below.
+    queries = [trades(massive_session)]
     errors: list[BaseException] = []
     seen = threading.Event()
 
@@ -686,7 +749,7 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
         if seen.is_set():
             return
         try:
-            q.append_only()
+            queries[0].append_only()
         except ValueError as e:
             errors.append(e)
         seen.set()
@@ -700,6 +763,8 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
     scope.release()
     assert len(errors) == 1
     assert "update-graph thread" in str(errors[0])
+    queries.clear()
+    errors.clear()  # its traceback holds the session too
 
 
 def test_verbs_raise_while_holding_the_update_graph_lock(
@@ -786,7 +851,7 @@ def test_every_static_verb_is_described(
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
     monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
     stream_latest = trades(s3_session)
-    previous = make(s3_session, BARS_SPEC, symbols=["EUR/USD"], timespan=Timespan.DAY)
+    previous = make(s3_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.DAY)
     assert isinstance(previous, HistoryLatestQuery)
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
@@ -910,11 +975,11 @@ FOREX_SPEC = DatasetSpec(
 )
 
 
-def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
+def test_last_by_matches_the_rows_of_a_reactive_table(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams, rows_when: RowsWhen
 ) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["EUR/USD", "not a pair"])]))
+    watchlist.add(new_table([string_col("Symbol", ["C:EURUSD", "C:GBPUSD"])]))
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, StreamQuery)
     current = q.last_by()
@@ -923,10 +988,22 @@ def test_last_by_matches_non_canonical_spellings_in_a_reactive_table(
     fake_streams.publishers[1].add(dh_arrow.to_table(row))
     shown = rows_when(current, lambda rows: len(rows) == 1)
     assert [r["Symbol"] for r in shown] == ["C:EURUSD"]
-    # Removing the spelling from the watchlist evicts the canonical row.
-    watchlist.delete(new_table([string_col("Symbol", ["EUR/USD"])]))
+    # Removing the symbol from the watchlist evicts its row.
+    watchlist.delete(new_table([string_col("Symbol", ["C:EURUSD"])]))
     rows_when(current, lambda rows: not rows)
     massive_session.release(current)
+
+
+def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+) -> None:
+    watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
+    q = make(massive_session, FOREX_SPEC, symbols=watchlist)
+    assert isinstance(q, StreamQuery)
+    for verb in (q.blink, q.append_only, q.last_by):
+        with pytest.raises(ValueError, match=r"^a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"):
+            verb()
+    assert fake_streams.publishers == {}
 
 
 def test_last_by_over_groups_of_symbols_filters_before_aggregating(
@@ -966,6 +1043,18 @@ def test_ring_accepts_its_lower_bound(
     result = trades(massive_session).ring(1)
     assert result.is_refreshing
     massive_session.release(result)
+
+
+def test_an_empty_window_in_a_warn_session_has_the_raw_symbol_column() -> None:
+    # The empty result of a window no row fits in has the session's columns, RawSymbol
+    # included, as every other result of a WARN session does.
+    config = dm.MassiveConfig(api_key="test-key", unknown_symbols=dm.UnknownSymbols.WARN)
+    with dm.MassiveSession(config) as session:
+        q = trades(session)
+        empty = q._empty()
+        names = [c.name for c in empty.columns]
+        assert "RawSymbol" in names
+        assert names == [name for (name,) in q.columns().iter_tuple(cols="Name")]
 
 
 # --- column order: every dataset, every verb -------------------------------------------------
@@ -1028,7 +1117,7 @@ SAMPLE_SYMBOLS = {
     AssetClass.INDICES: "I:SPX",
     AssetClass.FOREX: "C:EURUSD",
     AssetClass.CRYPTO: "X:BTCUSD",
-    None: "AAPL",
+    ClassFromPrefix.ANY: "AAPL",
 }
 
 

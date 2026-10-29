@@ -16,8 +16,11 @@ to keep.
   `pyarrow.compute.is_in` (symbol pushdown) and to the window's `Timestamp` range (for bars,
   the starts of the bars whose whole window fits the range); only the surviving rows are
   renamed to the dataset's columns, have their condition and indicator lists parsed, and are
-  converted to the column types here. Forex and crypto 1-day bars, which `day_aggs_v1` stamps
-  at 23:59:59.999 UTC, are stamped at 00:00 UTC of their day (`timestamps.utc_day_stamps`). The
+  converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's
+  start, the 16:00 New York session close (stocks), midnight in Chicago (indices), or
+  23:59:59.999 UTC (forex and crypto), are stamped at 00:00 of their day in the class day zone
+  (`history_source.stamp_rule`). Every block's rows then get the library's time columns
+  (`row_times.TimeRule`), with `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
   columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
@@ -100,6 +103,7 @@ import contextlib
 import functools
 import logging
 import threading
+import time
 import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
@@ -109,9 +113,8 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 from deephaven import merge
-from deephaven.arrow import to_table
 
-from deephaven_massive._datasets.dates import TimeRange
+from deephaven_massive._datasets.dates import TimeRange, is_trading_day
 from deephaven_massive._datasets.history_source import (
     NOT_PUBLISHED,
     StampRule,
@@ -119,14 +122,33 @@ from deephaven_massive._datasets.history_source import (
     stamp_rule,
     within_publication_grace,
 )
-from deephaven_massive._datasets.schema import rename, required_fields, widen
+from deephaven_massive._datasets.row_times import (
+    DATE,
+    BarBounds,
+    TimeRule,
+    time_column,
+    time_rule,
+    within,
+)
+from deephaven_massive._datasets.schema import (
+    OPTION_ROOT,
+    RAW_SYMBOL,
+    rename,
+    required_fields,
+    widen,
+)
+from deephaven_massive._datasets.symbols import (
+    WireSymbols,
+    option_roots,
+    unknown_symbol_message,
+    wire_spellings,
+)
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
     to_epoch_ns_array,
-    utc_day_stamps,
 )
-from deephaven_massive._enums import AssetClass, FuturesVenue
+from deephaven_massive._enums import AssetClass, FuturesVenue, UnknownSymbols
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -143,7 +165,9 @@ from deephaven_massive._massive import (
     WireType,
     object_key,
 )
+from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.liveness import entered
+from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -156,7 +180,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
     from deephaven_massive._tables.core import SessionCore
@@ -174,7 +197,6 @@ _TABLE_BLOCKS: Final = 16
 blocks of Arrow data, and at the end of the file. Fewer, larger tables cost far less JVM heap
 than one per block (each table carries a fixed overhead), while memory stays bounded."""
 
-_SATURDAY: Final = 5
 
 ROLL_LIMIT: Final = timedelta(days=7)
 """How far past the first missing day of a futures range's end the next session file is sought.
@@ -285,21 +307,32 @@ class _Transform:
         columns: Per schema column, in order: its type, its name, and the source column that
             fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
+        date_columns: The dataset's calendar-date columns, stored one shared string per date
+            (`columns.dataset_table`).
         session_header: For futures, the header that holds the session date; None otherwise.
-        day_source: For forex and crypto 1-day bars, the prefix the bars come from, whose
-            stamps move to 00:00 UTC of their day (`timestamps.utc_day_stamps`); None
-            otherwise.
-        checked_days: True when a 1-day bar stamped elsewhere in its UTC day than its first
-            or last millisecond fails the read (crypto).
+        prefix: The prefix the files come from, for messages.
+        symbols: How the files' tickers become canonical (`WireSymbols`), and what a spelling
+            the library cannot read does.
+        times: How the rows' time columns are filled (`row_times.TimeRule`).
+        time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
+        stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
+            zone (`history_source.stamp_rule`); None otherwise.
+        bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
+            None for ticks.
     """
 
     dataset: str
     plan: ReadPlan
     columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
     arrow_schema: pa.Schema
+    date_columns: tuple[str, ...]
     session_header: str | None
-    day_source: str | None = None
-    checked_days: bool = False
+    prefix: str
+    times: TimeRule
+    time_name: str
+    symbols: WireSymbols
+    stamps: StampRule | None = None
+    bars: BarBounds | None = None
 
     @classmethod
     def build(
@@ -308,9 +341,10 @@ class _Transform:
         spec: DatasetSpec,
         *,
         prefix: str,
-        symbols: NormalizedSymbols | None,
+        request: Request,
         window: HistoryWindow,
-        stamps: StampRule = StampRule.KEEP,
+        unknown_symbols: UnknownSymbols,
+        stamps: StampRule | None = None,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -323,30 +357,41 @@ class _Transform:
             catalog: The catalog, for the generated source and the dataset's schema.
             spec: The dataset.
             prefix: The dataset's prefix for the request; a futures prefix holds `{venue}`.
-            symbols: The canonical symbols to keep, as a tuple; anything else (`dm.ALL`, or
-                None for a dataset without instruments) keeps every row.
+            request: The normalized arguments: the canonical symbols to keep, as a tuple
+                (anything else, `dm.ALL` or None for a dataset without instruments, keeps every
+                row), and the bars' timespan and multiplier. The files are filtered on every
+                spelling `symbols.canonical_from_wire` reads as one of the symbols
+                (`wire_spellings`: a forex quotes file may write `X:EUR-USD`).
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
                 every time of their files, which hold exactly the requested sessions.
-            stamps: How the bars' stamps are treated (`history_source.stamp_rule`); the
-                files hold only 1-day bars of the rules other than `KEEP`.
+            unknown_symbols: The session's rule for a ticker spelling the library cannot
+                read; `WARN` also adds the `RawSymbol` column to the schema.
+            stamps: How the bars' stamps are treated (`history_source.stamp_rule`), or None
+                to keep them; the files hold only 1-day bars of the classes that have one.
 
         Returns:
             The transform.
         """
-        schema = catalog.dataset_schema(spec)
+        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
+        # with flat files.
+        file_class = cast("AssetClass", spec.asset_class)
         source = catalog.source(Transport.FLAT_FILES, prefix)
         renamed = rename(spec, source)
         by_column = {c.column: c for c in renamed}
         # Every column of a flat-file source is a field: no key of one comes from the request.
         header = {c.column: cast("Field", c.field).wire_key for c in renamed}
         keys = spec.keys_for(Transport.FLAT_FILES, prefix)
-        session = keys.session
-        session_header = None if session is None else header[session.column]
-        time = by_column["Timestamp"]
+        # The session key is renamed to `Date`; the files' own header holds it.
+        session_header = None if keys.date is None else header[DATE]
+        time_name = time_column(spec.times)
         to_ns = functools.partial(
-            to_epoch_ns_array, f"{spec.name}.Timestamp", cast("TimeUnit", time.unit)
+            to_epoch_ns_array,
+            f"{spec.name}.{time_name}",
+            cast("TimeUnit", by_column[time_name].unit),
         )
+        symbols = request.symbols
         plan = ReadPlan(
             columns=tuple(
                 ReadColumn(
@@ -358,8 +403,15 @@ class _Transform:
                 for c in renamed
             ),
             symbol_header=header["Symbol"],
-            symbols=pa.array(symbols, pa.string()) if isinstance(symbols, tuple) else None,
-            time_header=header["Timestamp"],
+            symbols=(
+                pa.array(
+                    [w for s in symbols for w in wire_spellings(file_class, s)],
+                    pa.string(),
+                )
+                if isinstance(symbols, tuple)
+                else None
+            ),
+            time_header=header[time_name],
             window_ns=_window_ns(window),
             to_ns=to_ns,
             session=None,
@@ -371,9 +423,16 @@ class _Transform:
             plan=plan,
             columns=tuple((c.type, c.name, by_column.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
+            date_columns=schema.date_columns,
             session_header=session_header,
-            day_source=None if stamps is StampRule.KEEP else prefix,
-            checked_days=stamps is StampRule.UTC_DAY_CHECKED,
+            prefix=prefix,
+            times=time_rule(spec, request, asset_class=file_class),
+            time_name=time_name,
+            symbols=WireSymbols(
+                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+            ),
+            stamps=stamps,
+            bars=window.bars,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -389,28 +448,53 @@ class _Transform:
             return self.plan
         return replace(self.plan, session=(self.session_header, key.day))
 
-    def apply(self, batch: pa.RecordBatch) -> pa.RecordBatch:
+    def apply(self, batch: pa.RecordBatch, *, received: int) -> pa.RecordBatch:
         """Turn one batch of surviving rows into a block of the dataset's schema.
 
         Pure Arrow: the timestamp routine on every epoch `Instant`, the merge's widening of a
-        column whose source type is narrower than the dataset's, and nulls for the schema
-        columns the prefix does not carry. The lists are already parsed, the rows already
+        column whose source type is narrower than the dataset's, nulls for the schema
+        columns the prefix does not carry, and the library's time columns
+        (`row_times.TimeRule.fill`). The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
-        reader.
+        reader. A bar whose window does not lie in the window is dropped (`row_times.within`).
 
         Args:
             batch: One block's surviving rows, with the plan's columns.
+            received: When the block was decoded, epoch nanoseconds: every row's
+                `TimestampInsert`.
 
         Returns:
             The block in the dataset's schema.
 
         A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
         `timestamps.instants`.
-        A crypto 1-day bar stamped elsewhere in its UTC day than its first or last millisecond
-        raises the `MassiveError` of `timestamps.utc_day_stamps`.
+        A 1-day bar stamped at a time of day Massive is not known to use raises the
+        `MassiveError` of `timestamps.day_starts`.
+
+        Raises:
+            MassiveError: If a row's ticker is a spelling the library cannot read and the
+                session's `unknown_symbols` is `FAIL` (`symbols.unknown_symbol_message`);
+                under `WARN` the row keeps a null `Symbol` and the text in `RawSymbol`.
         """
-        arrays = [self._column(batch, column) for column in self.columns]
-        return pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
+        arrays: dict[str, pa.Array] = {}
+        raw = pa.nulls(batch.num_rows, pa.string())
+        for column in self.columns:
+            column_type, name, _ = column
+            if name == OPTION_ROOT:
+                values = option_roots(arrays["Symbol"])
+            elif name == RAW_SYMBOL:
+                values = raw
+            elif name == "Symbol":
+                read = self.symbols.read(batch["Symbol"], {})
+                if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
+                    raise MassiveError(unknown_symbol_message(self.dataset, read.unknown))
+                values, raw = read.symbols, read.raw
+            else:
+                values = self._column(batch, column)
+            arrays[name] = widen(values, column_type.arrow_type)
+        rows = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
+        filled = self.times.fill(rows, received=received)
+        return filled if self.bars is None else within(filled, self.bars)
 
     def _column(
         self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]
@@ -423,7 +507,7 @@ class _Transform:
 
         Returns:
             An Arrow array of the column's type, one value per row of `batch`. In an `Instant`
-            column other than `Timestamp`, an epoch value of `0` is null.
+            column other than the dataset's time column, an epoch value of `0` is null.
         """
         column_type, name, source = column
         if source is None:
@@ -431,18 +515,44 @@ class _Transform:
         values = batch[name]
         if source.unit is not None:
             label = f"{self.dataset}.{name}"
-            values = instants(label, source.unit, values, time_column=name == "Timestamp")
+            values = instants(label, source.unit, values, time_column=name == self.time_name)
         values = widen(values, column_type.arrow_type)
-        if name == "Timestamp" and self.day_source is not None:
-            source_label = f"the flat files {self.day_source}"
-            values = utc_day_stamps(
+        if name == self.time_name and self.stamps is not None:
+            values = self.stamps.stamp(
                 self.dataset,
                 values,
-                source=source_label,
-                checked=self.checked_days,
-                remedy="read REST with source=dm.HistorySource.REST",
+                source=f"the flat files {self.prefix}",
             )
         return values
+
+
+def _flat_file_stamps(spec: DatasetSpec, request: Request) -> StampRule | None:
+    """Return the stamp rule of a flat-file read, with the remedy its refusal names.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments.
+
+    Returns:
+        The rule (`history_source.stamp_rule`), whose remedy is reading REST, or, for `dm.ALL`
+        of a dataset without a grouped-daily path (indices), passing explicit symbols to read
+        REST; None when the bars keep their stamps.
+    """
+    rule = stamp_rule(spec, request)
+    if rule is None:
+        return None
+    every = isinstance(request.symbols, _All) and not spec.has_grouped_daily
+    remedy = _EXPLICIT_REST_REMEDY if every else _REST_REMEDY
+    return replace(rule, remedy=remedy)
+
+
+_REST_REMEDY: Final = "read REST with source=dm.HistorySource.REST"
+"""What a flat-file caller can do when a day file's stamp is refused."""
+
+_EXPLICIT_REST_REMEDY: Final = (
+    "pass explicit symbols to read REST with source=dm.HistorySource.REST"
+)
+"""The remedy for `dm.ALL` where REST has no grouped daily, so it takes explicit symbols."""
 
 
 class _CancelledError(Exception):
@@ -527,9 +637,10 @@ class FlatFileHistory:
             self._core.catalog,
             spec,
             prefix=prefix,
-            symbols=request.symbols,
+            request=request,
             window=window,
-            stamps=stamp_rule(spec, request),
+            unknown_symbols=self._core.config.unknown_symbols,
+            stamps=_flat_file_stamps(spec, request),
         )
         keys = _keys(prefix, request.venue, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
@@ -597,7 +708,8 @@ class FlatFileHistory:
             )
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
-            return merge([to_table(transform.arrow_schema.empty_table()), *tables])
+            empty = transform.arrow_schema.empty_table()
+            return merge([dataset_table(empty, transform.date_columns), *tables])
 
     def _roll_forward(
         self,
@@ -652,11 +764,13 @@ class FlatFileHistory:
                 if key not in missing:
                     break
                 run.append(key)
-            if not any(key.day.weekday() < _SATURDAY for key in run):
+            if not any(is_trading_day(spec.asset_class, key.day) for key in run):
                 continue
             name = None if venue is None else venue.value
             # The run is newest first; name its first missing weekday, the likely holiday.
-            holiday = next(key for key in reversed(run) if key.day.weekday() < _SATURDAY)
+            holiday = next(
+                key for key in reversed(run) if is_trading_day(spec.asset_class, key.day)
+            )
             day, limit = own[-1].day, run[-1].day + ROLL_LIMIT
             while True:
                 day += timedelta(days=1)
@@ -847,7 +961,7 @@ class FlatFileHistory:
                 if not reported:  # every batch of a file carries the same report
                     self._core.drift.report(transform.dataset, Transport.FLAT_FILES, drift)
                     reported = True
-                rows = transform.apply(batch)
+                rows = transform.apply(batch, received=time.time_ns())
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes
@@ -868,8 +982,10 @@ class FlatFileHistory:
     def _skip_missing(self, spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
         """Apply the missing-file rules to the files that did not exist.
 
-        A weekend file is skipped silently (except for crypto, which trades every day); a
-        weekday file is skipped with a WARNING (most likely a market holiday). The file for the
+        A file of a day without trading is skipped silently: a weekend for stocks, options,
+        indices, and futures, a Saturday for forex (`dates.is_trading_day`); crypto trades
+        every day. A trading day's file is skipped with a WARNING (most likely a market
+        holiday). The file for the
         last requested date may instead be late, so within `PUBLICATION_GRACE` (in
         `_datasets/history_source.py`) after its publication time it raises; after that it is
         skipped with a WARNING too.
@@ -886,8 +1002,7 @@ class FlatFileHistory:
         """
         cutoff = self._core.config.flat_file_publish_cutoff
         for key in missing:
-            trading = spec.asset_class is AssetClass.CRYPTO or key.day.weekday() < _SATURDAY
-            if not trading:
+            if not is_trading_day(spec.asset_class, key.day):
                 continue
             day = key.day.isoformat()
             if key.day == last and within_publication_grace(spec, key.day, cutoff=cutoff):
@@ -971,7 +1086,8 @@ def _public(error: WireError, key: _Key) -> MassiveError:
 def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:
     """Turn a file's gathered surviving rows into one static Deephaven table.
 
-    Runs on a reader thread inside the session's execution context.
+    Runs on a reader thread inside the session's execution context; every calendar-date
+    column stores one shared string per distinct date (`columns.dataset_table`).
 
     Args:
         batches: Blocks in the dataset's schema, each with at least one row.
@@ -980,7 +1096,9 @@ def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:
     Returns:
         The static table.
     """
-    return to_table(pa.Table.from_batches(batches, schema=transform.arrow_schema))
+    return dataset_table(
+        pa.Table.from_batches(batches, schema=transform.arrow_schema), transform.date_columns
+    )
 
 
 def _outcome(future: Future[list[Table] | None]) -> list[Table] | None:

@@ -109,7 +109,7 @@ def test_names_hold_only_keys_massive_names_nowhere() -> None:
     for entry in overrides.NAMES.values():
         assert entry.long_name == entry.long_name.lower()
         assert " " not in entry.long_name
-        assert naming.column_name([entry.long_name]) not in naming.KEY_COLUMNS
+        assert not naming.is_key_column(naming.column_name([entry.long_name]))
 
 
 def test_the_running_figures_of_the_websocket_aggregates_are_named() -> None:

@@ -249,9 +249,9 @@ class WsClient:
                 by cancelling the task. Tests inject one that records the wait and returns at
                 once.
             thread_prefix: The start of the client thread's name, which is
-                `"<thread_prefix> ws <host><path>"`, such as `"massive #1 ws
-                delayed.massive.com/stocks"`. The library passes its session's prefix
-                (`"massive #<session>"`), so a log line's thread names the session; the default
+                `"<thread_prefix> ws <host><path>"`, such as `"massive group #1 ws
+                delayed.massive.com/stocks"`. The library passes the label of the connection
+                group that owns the client, so a log line's thread names the group; the default
                 suits a client used alone.
 
         Raises:

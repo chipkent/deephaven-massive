@@ -19,9 +19,9 @@ names the alternative. The library runs inside an existing Deephaven server (it 
 `ExecutionContext`) and never starts one.
 
 Each public name is imported on first use (PEP 562), so `import deephaven_massive` is cheap
-and needs no JVM. `MassiveSession`, `MassiveConfig`, and `ALL` need a running Deephaven JVM:
-use them inside a Deephaven worker, or after starting `deephaven_server.Server`. The
-exceptions and enums do not.
+and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`, and the symbol converters need a
+running Deephaven JVM: use them inside a Deephaven worker, or after starting
+`deephaven_server.Server`. The exceptions and enums do not.
 
 Public API:
     - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,
@@ -30,10 +30,22 @@ Public API:
     - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
     - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions.
     - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
-    - The enums (all `StrEnum`s whose values are Massive's wire strings): `AssetClass`,
-      `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`, `Direction`, `ContractType`,
-      `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`, `Locale`, `ConditionDataType`,
-      `Sip`.
+    - The symbol converters. Every dataset takes, and every `Symbol` column holds, Massive's
+      exact REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`,
+      `C:EURUSD`, `X:BTCUSD`); these turn other spellings into it:
+      `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function
+      per class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
+      `canonical_symbol_future`, `canonical_symbol_future_spread`, `canonical_symbol_index`,
+      `canonical_symbol_forex`, `canonical_symbol_crypto`), one per stock convention
+      (`canonical_symbol_stock_yahoo`, `canonical_symbol_stock_nasdaq`,
+      `canonical_symbol_stock_cms`), and the table form `canonicalize_symbols`. In a query
+      string, import a converter by bare name for a `String` column
+      (`from deephaven_massive import canonical_symbol_forex`); called as `dm.…` it makes an
+      `Object` column unless cast, `(String) dm.canonical_symbol_forex(Pair)`.
+    - The enums (all `StrEnum`s; a value is Massive's wire string where the enum reaches the
+      wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`,
+      `Direction`, `ContractType`, `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`,
+      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError`, `UnknownSymbols`.
       Parameters take only enum members; convert text with, for example,
       `Timespan("minute")`.
     - `enable_debug_logging(output=LogOutput.STDERR)` and `LogOutput`: send the library's log,
@@ -84,14 +96,29 @@ __all__ = [
     "MassiveConfig",
     "MassiveError",
     "MassiveSession",
+    "OnError",
     "Order",
     "PollMode",
     "SeriesType",
     "Sip",
+    "SymbolConvention",
     "TickerType",
     "Timeframe",
     "Timespan",
+    "UnknownSymbols",
     "__version__",
+    "canonical_symbol",
+    "canonical_symbol_crypto",
+    "canonical_symbol_forex",
+    "canonical_symbol_future",
+    "canonical_symbol_future_spread",
+    "canonical_symbol_index",
+    "canonical_symbol_option",
+    "canonical_symbol_stock",
+    "canonical_symbol_stock_cms",
+    "canonical_symbol_stock_nasdaq",
+    "canonical_symbol_stock_yahoo",
+    "canonicalize_symbols",
     "enable_debug_logging",
 ]
 
@@ -121,6 +148,21 @@ _EXPORTS: dict[str, str] = {
     "TickerType": "deephaven_massive._enums",
     "Timeframe": "deephaven_massive._enums",
     "Timespan": "deephaven_massive._enums",
+    "canonical_symbol": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_crypto": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_forex": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_future": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_future_spread": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_index": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_option": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_stock": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_stock_cms": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_stock_nasdaq": "deephaven_massive._datasets.symbols",
+    "canonical_symbol_stock_yahoo": "deephaven_massive._datasets.symbols",
+    "canonicalize_symbols": "deephaven_massive._tables.symbols",
+    "OnError": "deephaven_massive._enums",
+    "SymbolConvention": "deephaven_massive._enums",
+    "UnknownSymbols": "deephaven_massive._enums",
     "enable_debug_logging": "deephaven_massive._debug_log",
 }
 
@@ -128,6 +170,19 @@ _EXPORTS: dict[str, str] = {
 # `__all__`; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._datasets.symbols import (
+        canonical_symbol,
+        canonical_symbol_crypto,
+        canonical_symbol_forex,
+        canonical_symbol_future,
+        canonical_symbol_future_spread,
+        canonical_symbol_index,
+        canonical_symbol_option,
+        canonical_symbol_stock,
+        canonical_symbol_stock_cms,
+        canonical_symbol_stock_nasdaq,
+        canonical_symbol_stock_yahoo,
+    )
     from deephaven_massive._debug_log import LogOutput, enable_debug_logging
     from deephaven_massive._enums import (
         AssetClass,
@@ -138,16 +193,20 @@ if TYPE_CHECKING:
         HistorySource,
         Locale,
         Market,
+        OnError,
         Order,
         PollMode,
         SeriesType,
         Sip,
+        SymbolConvention,
         TickerType,
         Timeframe,
         Timespan,
+        UnknownSymbols,
     )
     from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
     from deephaven_massive._session import MassiveSession
+    from deephaven_massive._tables.symbols import canonicalize_symbols
     from deephaven_massive._types import ALL
 else:
 

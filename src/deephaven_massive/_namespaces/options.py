@@ -10,10 +10,14 @@ namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset
 (`CATALOG` in `_session.py`). A spec names the dataset's sources and key columns, never its
 columns: those come from the generated wire schemas.
 
-Option symbols are OCC symbols. Every method accepts them with or without the `O:` prefix
-(`AAPL250117C00150000` or `O:AAPL250117C00150000`), and the `Symbol` column always holds the
-prefixed form (`normalize` in `_datasets/symbols.py`). The rows of the chain, the snapshots,
-and the contract reference data also carry the contract's underlying instrument as `Underlying`.
+Option symbols are Massive's exact tickers: `O:` and the OCC symbol (`O:AAPL250117C00150000`).
+Every method takes only that form (`check_symbol` in `_datasets/symbols.py`), and
+`dm.canonical_symbol_option` converts the bare or space-padded OCC forms. Every options dataset
+also has `OptionRoot`, the OCC root read from the symbol (`SPXW`, `AAPL1`). The rows of the
+chain, the snapshots, and the contract reference data carry the instrument Massive links the
+contract to as `Underlying`, exactly as Massive sends it: it names the linked instrument, not
+the deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100
+shares of it. Neither column is ever mapped to the other.
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
 against that cap and raise `ValueError` before subscribing a static list that would cross it.
@@ -26,16 +30,24 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
+from deephaven_massive._datasets.row_times import RowTimes
+from deephaven_massive._datasets.symbols import check_symbol, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
+    ClassFromPrefix,
     ContractType,
     Order,
     Timespan,
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import (
+    Namespace,
+    adjustment_notes,
+    build_query,
+    list_params,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -104,6 +116,17 @@ def _keys(symbol: str, time: str | None = None, *, fanout: str | None = None) ->
     )
 
 
+def _stream_bar_keys() -> SourceKeys:
+    """Build the keys of a WebSocket bars channel: its contract, window start, and end `e`.
+
+    Returns:
+        The channel's keys.
+    """
+    return SourceKeys(
+        symbol=KeySpec("Ticker"), time=KeySpec("WindowStart"), end=KeySpec("EndTimestamp")
+    )
+
+
 def _from_path(time: str) -> SourceKeys:
     """Build the keys of a source that takes the contract as its `{optionsTicker}` segment.
 
@@ -165,12 +188,13 @@ BARS: Final = DatasetSpec(
     keys={
         (_REST, _PREV): _keys("Ticker", "WindowStart"),
         (_REST, _RANGE): _from_path("WindowStart"),
-        (_WS, "options/A"): _keys("Ticker", "WindowStart"),
-        (_WS, "options/AM"): _keys("Ticker", "WindowStart"),
+        (_WS, "options/A"): _stream_bar_keys(),
+        (_WS, "options/AM"): _stream_bar_keys(),
         (_FLAT, _MINUTE_FILES): _keys("Ticker", "WindowStart"),
         (_FLAT, _DAY_FILES): _keys("Ticker", "WindowStart"),
     },
     page_size=_TICK_PAGE,
+    column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 
 FMV: Final = DatasetSpec(
@@ -229,9 +253,13 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     summary="The open, high, low, close, and volume of each options contract on one day.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_CLOSE,
-    keys={(_REST, _OPEN_CLOSE): _keys("Symbol")},
+    keys={(_REST, _OPEN_CLOSE): SourceKeys(symbol=KeySpec("Symbol"), date=KeySpec("From"))},
     # One contract a request, which makes this an instrument dataset: its `Symbol` is required.
     per_symbol=True,
+    row_times=RowTimes.DAY,
+    column_notes=adjustment_notes(
+        ("Open", "High", "Low", "Close", "PreMarket", "AfterHours"), ("Volume",)
+    ),
 )
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
@@ -248,24 +276,26 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 def _underlying(value: object) -> str:
-    """Normalize an underlying ticker to the form Massive's options endpoints take.
+    """Check an `underlying` argument: Massive's exact ticker of a stock or an index.
 
     Args:
-        value: The `underlying` argument as passed, such as `"aapl"` or `"I:SPX"`.
+        value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
 
     Returns:
-        The ticker, stripped and upper-cased.
+        The ticker, unchanged: case is kept (`KIMpL`), and nothing is converted.
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is empty or only whitespace.
+        ValueError: If `value` is the ticker of an option, a currency pair, or a crypto pair,
+            or is not canonical; `check_symbol` names the canonical form when it can.
     """
     if not isinstance(value, str):
         raise TypeError(f"underlying must be a str, not {type(value).__name__}")
-    ticker = value.strip().upper()
-    if not ticker:
-        raise ValueError("underlying must not be empty")
-    return ticker
+    if symbol_class(value) not in {AssetClass.STOCKS, AssetClass.INDICES}:
+        raise ValueError(
+            f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
+        )
+    return check_symbol(ClassFromPrefix.ANY, value)
 
 
 def _contract_type(value: object) -> ContractType | None:
@@ -323,11 +353,13 @@ class _Options(Namespace):
         """Trades of US-listed options contracts (OPRA), tick by tick.
 
         One row per trade: its price, size, exchange, condition codes, and SIP timestamp
-        (`Timestamp`). The stream verbs read the WebSocket `T` channel. `history()` reads the
-        REST trades endpoint (`/v3/trades/{optionsTicker}`, one request series per contract) or
-        the `us_options_opra/trades_v1` flat files, and `fetch()` returns each contract's last
-        trade (`/v2/last/trade/{optionsTicker}`). There is no `limit`: `history()` pages
-        internally and returns the whole range.
+        (`Timestamp`). Each row also carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the
+        New York date of `Timestamp`), and `TimestampInsert`, when the library received it. The
+        stream verbs read the WebSocket `T` channel. `history()` reads the REST trades endpoint
+        (`/v3/trades/{optionsTicker}`, one request series per contract) or the
+        `us_options_opra/trades_v1` flat files, and `fetch()` returns each contract's last trade
+        (`/v2/last/trade/{optionsTicker}`). There is no `limit`: `history()` pages internally
+        and returns the whole range.
 
         `dm.ALL` streams every contract (the `T.*` topic) and reads every contract of a day's
         flat file; `fetch()` and REST `history()` take explicit contracts and raise `ValueError`
@@ -342,7 +374,7 @@ class _Options(Namespace):
         `TypeError` if `symbols` is of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol)
                 (`"O:AAPL250117C00150000"`); one `str`, a sequence, a Deephaven table with a
                 `Symbol` column that the stream follows as rows are added and removed, or
                 `dm.ALL`.
@@ -363,12 +395,13 @@ class _Options(Namespace):
         """Quotes of US-listed options contracts (OPRA), tick by tick.
 
         One row per quote: bid and ask prices, sizes, and exchanges, and the SIP timestamp
-        (`Timestamp`). The stream verbs read the WebSocket `Q` channel. `history()` reads the
-        REST quotes endpoint (`/v3/quotes/{optionsTicker}`, one request series per contract) or
-        the `us_options_opra/quotes_v1` flat files. Massive has no last-quote endpoint for
-        options, so there is no `fetch()`: `m.options.snapshots(symbols)` gives each contract's
-        latest quote. There is no `limit`: `history()` pages internally and returns the whole
-        range.
+        (`Timestamp`). Each row also carries its trading day, `Date` (ISO `yyyy-MM-dd` text, the
+        New York date of `Timestamp`), and `TimestampInsert`, when the library received it. The
+        stream verbs read the WebSocket `Q` channel. `history()` reads the REST quotes endpoint
+        (`/v3/quotes/{optionsTicker}`, one request series per contract) or the
+        `us_options_opra/quotes_v1` flat files. Massive has no last-quote endpoint for options,
+        so there is no `fetch()`: `m.options.snapshots(symbols)` gives each contract's latest
+        quote. There is no `limit`: `history()` pages internally and returns the whole range.
 
         `dm.ALL` streams every contract (the `Q.*` topic) and reads every contract of a day's
         flat file; REST `history()` takes explicit contracts and raises `ValueError` for
@@ -383,7 +416,7 @@ class _Options(Namespace):
         `TypeError` if `symbols` is of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
 
         Returns:
@@ -433,7 +466,9 @@ class _Options(Namespace):
     ) -> HistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
-        One row per contract and bar, keyed by the bar's start (`Timestamp`). The timespan and
+        One row per contract and bar: the bar's window, from `TimestampStart` to the exclusive
+        `TimestampEnd`, its trading day `Date` (ISO `yyyy-MM-dd` text, New York time), its
+        prices and volume, and `TimestampInsert`, when the library received it. The timespan and
         multiplier decide the transports and so the query class:
 
         - `Timespan.SECOND` or `Timespan.MINUTE` with `multiplier=1`: the WebSocket `A` (one
@@ -448,7 +483,31 @@ class _Options(Namespace):
         one-minute and one-day bars with `adjusted=False`, the `us_options_opra/minute_aggs_v1`
         and `us_options_opra/day_aggs_v1` flat files. There is no `limit`: `history()` pages
         internally and returns the whole range. It returns only the bars whose whole window
-        lies inside the range and has ended, so the current day's bar never appears.
+        lies inside the range and has ended, judged by `TimestampEnd`, so the current day's bar
+        never appears.
+
+        `TimestampEnd` is the first instant at which the bar is complete, so join on it
+        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed
+        bars; it is not when Massive published the bar. An intraday bar ends its length
+        after its start. A bar of a day or longer runs from 00:00 New York time of its
+        window's first day to 00:00 after its last, whatever the source: the range and the
+        day files stamp a 1-day bar at the day's start, while `/prev` stamps it at the 16:00
+        session close (13:00 on a short trading day; 16:15 or 13:15 for index options such
+        as SPXW), which is moved to the day's start. A week runs Monday to Friday and a
+        longer period from its first to its last weekday. A bar of several days counts
+        trading days, ending as late as holidays could push it (one weekday more, and one
+        more for every five further days), since there is no holiday calendar. A longer bar
+        must be stamped at 00:00 on the day its period starts: a week on its Monday or the
+        Saturday or Sunday before, a month, quarter, or year on its 1st. Any other stamp
+        fails the call with `MassiveError` naming the source, since the bar may cover other
+        days than its label. `Date` is null for a bar that spans more than one date.
+
+        Prices and volumes are adjusted for splits of the underlying only when `adjusted` is
+        True, the default, and only REST serves adjusted bars; Massive never adjusts for cash
+        dividends. The flat files and the WebSocket are as traded, so `history()` reads the
+        flat files only with `adjusted=False`, and one `history()` never mixes the two bases:
+        every page's own `adjusted` must match the request, or the call raises `MassiveError`.
+        Live bars are never adjusted after the fact, so a live table shows a jump at a split.
 
         `dm.ALL` streams every contract and reads every contract of a day's flat file; `fetch()`
         and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`. One
@@ -465,13 +524,14 @@ class _Options(Namespace):
         of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
             timespan: The bar unit; `Timespan.MINUTE` by default. `Timespan.SESSION` is for
                 futures only.
             multiplier: How many units one bar spans, a positive `int`; 1 by default.
-            adjusted: Whether REST bars are adjusted for splits; True by default. The flat
-                files are unadjusted, so `history()` reads them only when this is False.
+            adjusted: Whether REST bars are adjusted for splits of the underlying; True by
+                default. The flat files and the streams are as traded, so `history()` reads the
+                flat files only when this is False.
 
         Returns:
             A `StreamHistoryQuery`, `HistoryLatestQuery`, or `HistoryQuery`, as listed above.
@@ -501,9 +561,11 @@ class _Options(Namespace):
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
         One row per update: the contract's fair market value and the time it was computed
-        (`Timestamp`). It streams only, over the WebSocket `FMV` channel, which Massive serves
-        on its Business plans from `business.massive.com/options`; there is no history, and
-        so no `limit`: `ring(capacity)` bounds how many rows a live table keeps.
+        (`Timestamp`), with its trading day, `Date` (ISO `yyyy-MM-dd` text, the New York date of
+        `Timestamp`), and `TimestampInsert`, when the library received it. It streams only, over
+        the WebSocket `FMV` channel, which Massive serves on its Business plans from
+        `business.massive.com/options`; there is no history, and so no `limit`: `ring(capacity)`
+        bounds how many rows a live table keeps.
 
         `dm.ALL` streams every contract (the `FMV.*` topic). One `/options` connection carries
         at most 1,000 contract topics.
@@ -517,7 +579,7 @@ class _Options(Namespace):
         `TypeError` if `symbols` is of another type.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
 
         Returns:
@@ -556,14 +618,24 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#chain,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if `underlying` is empty, `limit` is not
-        positive, a filter key is not a parameter of the endpoint or is `contract_type`, or a filter
-        value does not fit its parameter; `TypeError` if `underlying` or `sort` is not a `str`,
-        `contract_type` is not a `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an
-        `int`, or `filters` is not a mapping.
+        It raises at once, before any request: `ValueError` if `underlying` is not Massive's
+        exact stock or index ticker, `limit` is not positive, a filter key is not a parameter
+        of the endpoint or is `contract_type`, or a filter value does not fit its parameter;
+        `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
+        `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an `int`, or `filters`
+        is not a mapping.
+
+        `Underlying` is the instrument Massive links each contract to, exactly as it sends it;
+        it names that instrument, not what the contract delivers. An adjusted contract (a root
+        such as `AAPL1` after a merger or a special dividend) may deliver another number of
+        shares, cash, or other securities, and is listed here beside the standard ones. The
+        chain carries only `DetailsSharesPerContract`; `m.options.contracts` adds
+        `SharesPerContract`, `AdditionalUnderlyings`, and `Correction`, so a chain row can be
+        kept only when its contract is standard by joining them on `Symbol` (see the example).
 
         Args:
-            underlying: The underlying's ticker, such as `"AAPL"`; case does not matter.
+            underlying: The underlying's exact Massive ticker, such as `"AAPL"`, `"BRK.B"`, or
+                `"I:SPX"`; case is kept, and nothing is converted.
             contract_type: Only calls or only puts; None, the default, returns both.
             sort: The field to sort by: `"ticker"`, `"expiration_date"`, or
                 `"strike_price"`; None for the endpoint's order.
@@ -584,6 +656,16 @@ class _Options(Namespace):
                     contract_type=dm.ContractType.CALL,
                     filters={"expiration_date_lte": "2025-01-17"},
                 ).fetch()
+                # Keep the contracts that deliver 100 shares and nothing else.
+                terms = m.options.contracts(underlying="AAPL").fetch()
+                standard = near.natural_join(
+                    terms, "Symbol", "SharesPerContract, AdditionalUnderlyings"
+                ).where(
+                    [
+                        "SharesPerContract == 100",
+                        "isNull(AdditionalUnderlyings) || AdditionalUnderlyings == `[]`",
+                    ]
+                )
         """
         params: dict[str, object] = {
             "underlyingAsset": _underlying(underlying),
@@ -629,7 +711,7 @@ class _Options(Namespace):
         not an `int`, or `filters` is not a mapping.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column (read again each `poll()`
                 cycle), or `dm.ALL`.
             sort: The field to sort by (`"ticker"`); None for the endpoint's order.
@@ -685,11 +767,21 @@ class _Options(Namespace):
         row); it is not the page size. `dm.ALL` is not accepted: leave `symbols` out to list
         every contract.
 
+        The deliverable: `Underlying` is the instrument Massive links the contract to, exactly
+        as sent, not what the contract delivers. `SharesPerContract` is the number of shares
+        one contract delivers (100 for a standard contract), `AdditionalUnderlyings` the
+        JSON text of any further deliverables (other securities or cash, as Massive lists
+        them; null or `[]` when there are none), `Cfi` the contract's six-letter ISO 10962
+        classification code, and `Correction` Massive's correction number of the contract
+        record. An adjusted contract keeps its own root (`AAPL1`) and its
+        own `Symbol`; the library never maps it to `AAPL`.
+
         It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a
         symbol is not an OCC option symbol, a sequence is empty or an exhausted generator, a
-        table has no `Symbol` column, `underlying` is empty, `as_of` is a `datetime` or
-        not an ISO-8601 date, `limit` is not positive, a filter key is not a parameter of the
-        endpoints or is set by a typed argument, or a filter value does not fit its parameter;
+        table has no `Symbol` column, `underlying` is not Massive's exact stock or index
+        ticker, `as_of` is a `datetime` or not an ISO-8601 date, `limit` is not positive, a
+        filter key is not a parameter of the endpoints or is set by a typed argument, or a
+        filter value does not fit its parameter;
         `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
         `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit` is
         not an `int`, or `filters` is not a mapping.
@@ -699,11 +791,11 @@ class _Options(Namespace):
         in the web UI's column tooltips, and by `columns()`.
 
         Args:
-            symbols: The contracts to describe, as OCC symbols with or without `O:`; one
+            symbols: The contracts to describe, as Massive's tickers (`O:` and the OCC symbol); one
                 `str`, a sequence, or a Deephaven table with a `Symbol` column. None, the
                 default, lists contracts instead.
-            underlying: Only contracts of this underlying ticker, such as `"AAPL"`; None for
-                every underlying.
+            underlying: Only contracts linked to this exact Massive ticker, such as `"AAPL"`
+                or `"I:SPX"`; None for every underlying.
             contract_type: Only calls or only puts; None for both.
             as_of: The day whose contracts to list, as an ISO-8601 date or a `date` (a
                 `datetime` raises `ValueError`: it is a calendar date); None for today.
@@ -751,10 +843,11 @@ class _Options(Namespace):
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, high, low, close, and volume of each options contract on one day.
 
-        One row per contract (`Symbol`) for the day (`From`), with its pre-market and
-        after-hours prices. It reads the REST daily open/close endpoint
-        (`/v1/open-close/{optionsTicker}/{date}`), one request per contract; `poll()` re-reads
-        it each interval.
+        One row per contract (`Symbol`) for the day (`Date`, ISO `yyyy-MM-dd` text), with the
+        day's window as a 1-day bar's (`TimestampStart` and `TimestampEnd`, the New York
+        midnights around it) and its pre-market and after-hours prices. It reads the REST daily
+        open/close endpoint (`/v1/open-close/{optionsTicker}/{date}`), one request per contract;
+        `poll()` re-reads it each interval.
 
         It has no `limit`: each contract gives one row. `dm.ALL` is not accepted, because the
         endpoint takes one contract per request; `m.options.snapshots(dm.ALL)` gives every
@@ -770,12 +863,13 @@ class _Options(Namespace):
         or `date` is of another type, or `adjusted` is not a `bool`.
 
         Args:
-            symbols: The contracts, as OCC symbols with or without `O:`; one `str`, a
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column.
             date: The trading day, as an ISO-8601 date or a `date`. It is a calendar date, so a
                 `datetime` raises `ValueError`.
-            adjusted: Whether the prices are adjusted for splits of the underlying; True by
-                default.
+            adjusted: Whether the prices and volume are adjusted for splits of the underlying
+                (never for dividends); True by default. Massive does not echo the basis here,
+                so it cannot be checked.
 
         Returns:
             A query with `fetch()` and `poll()`.

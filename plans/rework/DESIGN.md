@@ -73,8 +73,12 @@ deprecation path, and no rule that rests on the chance of breaking someone.
    ([section 19.4](#194-generated-schemas)). Column names come from the generated tables
    (the lexicons and `NAMES`) and from each dataset's declared key columns, never from a field
    description. A column a class or transport does not supply is null (crypto trades have no
-   `Tape`; stock bars have no `SettlementPrice`). `Timestamp` is the primary time column on
-   every tick, bar, and value row. `Symbol` is the instrument on every instrument row.
+   `Tape`; stock bars have no `SettlementPrice`). Every tick, bar, and value row says when it
+   happened (a tick's `Timestamp`, a bar's `TimestampStart` and exclusive `TimestampEnd`), its
+   trading day (`Date`, ISO `yyyy-MM-dd` text), and when the library received it
+   (`TimestampInsert`, the last column of every dataset;
+   [section 12](#12-timestamp-units-and-day-boundaries)). Every calendar date in every table
+   is ISO text, never a `LocalDate`. `Symbol` is the instrument on every instrument row.
 2. **Shape is the user's choice; transport and host are the library's.** Verbs name the
    Deephaven table shape. No feed, host, channel, or S3 prefix appears in user code.
 3. **Tier is a property of the key.** Identical code runs on every plan. The library learns
@@ -111,8 +115,10 @@ deprecation path, and no rule that rests on the chance of breaking someone.
     The refresh records Massive's description of every field beside the generated schemas,
     and one rule picks each dataset column's description from them; fixed library text
     covers only the cases [section 19.4](#194-generated-schemas) defines (the key columns
-    `Symbol`, `Timestamp`, and `Underlying`, and a column that only other members of its kind
-    supply). The same text reaches users three ways: the column-header tooltip of every result
+    `Symbol`, `Timestamp`, and `Underlying`, the library's time columns `Date`,
+    `TimestampStart`, `TimestampEnd`, and `TimestampInsert`, a column that only other members
+    of its kind supply, and a dataset's note on a column whose meaning depends on the query,
+    such as the split adjustment of a bar's prices). The same text reaches users three ways: the column-header tooltip of every result
     in the Deephaven web UI, `columns()` in the console, and the generated pages under
     `docs/datasets/` ([section 7.4](#74-column-descriptions)). Nobody writes a column list by hand.
 
@@ -144,7 +150,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 24 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 39 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -162,7 +168,24 @@ dm.EntitlementError        # subclass of MassiveError: the plan lacks the datase
 # Sentinel
 dm.ALL                     # every symbol on the stream, in the flat file, or in the snapshot
 
-# Enums (all StrEnum; values are Massive's wire strings)
+# Symbol converters: other spellings to Massive's exact REST ticker (section 10)
+dm.canonical_symbol              # (text, asset_class, *,
+                                 #  convention=SymbolConvention.MASSIVE) -> str | None
+dm.canonical_symbol_stock        # (text) -> str | None, one per class, for query strings
+dm.canonical_symbol_option
+dm.canonical_symbol_future        # a single futures contract
+dm.canonical_symbol_future_spread # a futures spread, as Massive writes it
+dm.canonical_symbol_index
+dm.canonical_symbol_forex
+dm.canonical_symbol_crypto
+dm.canonical_symbol_stock_yahoo  # (text) -> str | None, one per stock convention
+dm.canonical_symbol_stock_nasdaq
+dm.canonical_symbol_stock_cms
+dm.canonicalize_symbols          # (table, asset_class, *, column="Symbol",
+                                 #  convention=SymbolConvention.MASSIVE,
+                                 #  on_error=OnError.RAISE) -> Table
+
+# Enums (all StrEnum; values are Massive's wire strings where the enum reaches the wire)
 dm.AssetClass
 dm.Timespan
 dm.PollMode
@@ -178,6 +201,9 @@ dm.TickerType
 dm.Locale
 dm.ConditionDataType
 dm.Sip
+dm.SymbolConvention        # the stock conventions the converters read
+dm.OnError                 # what canonicalize_symbols does with a value it cannot convert
+dm.UnknownSymbols          # what a session does with a symbol spelling it cannot read
 
 # Logging
 dm.enable_debug_logging    # enable_debug_logging(output=LogOutput.STDERR): the library's log,
@@ -222,6 +248,18 @@ Inside the private modules, a name used by other modules is bare (`QueryBase`, `
 names this document fixes with an underscore: `_All`, `_require_enum`, and the namespace classes
 (`_Stocks`, `_Partners`, ...), whose underscore keeps them out of users' completion lists.
 
+**One subject per module.** A module is named for its content and holds one subject, named in
+the first line of its docstring. New code goes in the module whose first line already names its
+subject; if none does, it gets a new module named for that subject, never a widened summary ("…,
+and X") on a neighbor. Module names are subject nouns, never pattern words such as `base`,
+`core`, `common`, `helpers` or `util`. A rule or helper has one body, in the module that owns
+its concept. An exception is defined in the module that raises it, or in the layer's errors
+module when several modules raise it, or when a module in a lower layer must name it:
+`_errors.py`, or `_massive/net/errors.py` for the wire clients. A module above about 1,000
+lines, or one whose first line lists more than two subjects, is split or says in its docstring
+why it is one subject. Review enforces these rules, not a test: checks of placement over source
+text would be brittle and costly to keep for little protection.
+
 ```
 src/deephaven_massive/
 __init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
@@ -252,9 +290,12 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
                          dataset_schema() with column descriptions (section 19.4)
   request.py             Request, StreamKey, ParamValue, HostDecision
   timestamps.py          the one timestamp routine (section 12), the FMV magnitude rule
+  row_times.py           the library's time columns: Date, TimestampStart, TimestampEnd,
+                         TimestampInsert; RowTimes and TimeRule (section 12)
   dates.py               DateLike parsing, day zones, sessions, publish_time, [start, end)
-  symbols.py             normalization, symbol_class(), the Symbol/Underlying rule
-                         (section 10)
+  symbols.py             the canonical ticker grammar, the public converters, check_symbol()
+                         and normalize(), canonical_from_wire(), wire_spellings(),
+                         WireSymbols, option_roots(), symbol_class() (section 10)
   history_source.py      partition dates, publication grace, REST capability, the AUTO choice
   column_reference.py    the column reference: render(catalog, provenance) -> {file name:
                          Markdown} (pure); sync(directory, pages) owns docs/datasets/
@@ -266,7 +307,10 @@ _tables/                 the Deephaven side: tables, liveness, library threads
   liveness.py            result and stream scopes, records, reaper queue (section 6.1)
   diagnostics.py         connections() and streams() with SchemaDrift; DriftRegistry (section 17)
   columns.py             ColumnType -> Deephaven type, column definitions; describe() (section 7.4)
-  watchlist.py           canonical_view; reactive symbol tables
+  watchlist.py           read_symbols(), SymbolWatch: the check and watch of symbol tables
+                         (section 10)
+  symbols.py             canonicalize_symbols(), the table form of the symbol converters
+                         (section 10)
   stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
                          (section 14)
 _ingest/                 the only holder of wire clients
@@ -278,6 +322,8 @@ _ingest/                 the only holder of wire clients
                          converted, 403/429 policy, drift routing, host-decision cache
                          (single-flight)
   hosts.py               host resolution from REST evidence (section 13.2)
+  futures_calendar.py    the futures schedule calendar that dates streamed futures rows by
+                         their trading session (section 12)
   poll.py                poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
   subscriptions.py       topics and the reconcile loop of one connection: wildcards,
                          watchdogs, the NO_ACK rule, the options cap's admission (section 13.3)
@@ -295,8 +341,9 @@ only code that holds wire clients. The `__init__.py` of each of the three, and o
 `_namespaces/`, holds only a docstring. [Section 4.3](#43-layers) orders these groups into
 layers.
 
-`_namespaces/` holds plain modules, one namespace class each; it is not a PEP 420 namespace
-package. Each namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
+`_namespaces/` holds plain modules, one namespace and its sub-namespaces each (`m.partners` and
+its partner sub-namespaces share a module); it is not a PEP 420 namespace package. Each
+namespace module also declares its datasets (`DATASETS: tuple[DatasetSpec, ...]`).
 `_datasets/history_source.py` decides where `history()` reads from; `_ingest/flatfiles.py` does
 flat-file I/O through `_massive` and never chooses a source.
 
@@ -377,8 +424,10 @@ others:
   ([section 19](#19-wire-clients-and-the-spec-snapshot)) and the library's layer rules
   ([section 4.3](#43-layers)), with a negative test per rule: `tests/massive/` may import any
   `_massive` module, and the rest of `tests/` only the interface.
-- `tests/test_readme.py`: runs every example of [section 21](#21-examples) in the embedded JVM
-  against the fakes. It mirrors `README.md`, not a source module.
+- `tests/test_readme.py`: runs the Python examples of `README.md` in the embedded JVM against
+  the fakes, today those of its "Split adjustment" section ([section 21](#21-examples) example
+  7), and every example of section 21 once the README carries them. It mirrors `README.md`, not
+  a source module.
 - `_` helper directories, of which there is one: `tests/_fakes/` (`__init__.py`, `rest.py`,
   `ws.py`, `s3.py`, `stream.py`, `clock.py`, `gh.py`), protocol-faithful fakes, and
   `ws_session.py`, the one streaming harness every WebSocket end-to-end test shares (a real
@@ -395,7 +444,7 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | Rank | Layer | Home | What justifies the boundary |
 |---|---|---|---|
 | 0 | wire | `_massive/` | The only network I/O, and no Deephaven ([section 19](#19-wire-clients-and-the-spec-snapshot)). |
-| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
+| 1 | vocabulary | the root `_config`, `_enums`, `_errors`, `_types`, `_log_limits` | The public value types every layer names. No I/O and no threads; Deephaven appears only as the `Table` in `Symbols`. |
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
 | 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
@@ -474,6 +523,7 @@ defined in exactly one place: the field defaults of this class.
 | `rest_base_url: str` | `https://api.massive.com` | Rarely changed. |
 | `s3_endpoint_url: str` | `https://files.massive.com` | Rarely changed. |
 | `s3_bucket: str` | `flatfiles` | Rarely changed. |
+| `unknown_symbols: UnknownSymbols` | `MASSIVE_UNKNOWN_SYMBOLS` (`fail` or `warn`, any case; other text raises `ValueError`), then `FAIL` | What a symbol Massive sends in a spelling the library cannot read does ([section 10](#10-symbols-and-all)). `FAIL` fails the request or stream that received it, naming the spelling and this switch. `WARN` keeps the row with a null `Symbol`, adds a `RawSymbol` column holding the text to every dataset that reads its symbol from rows, and logs each spelling once at WARNING (at most 100 per process). |
 
 Not configurable:
 
@@ -516,7 +566,7 @@ m.snapshots(symbols: Symbols, *, sort=None, order=None, limit=None, filters=None
 m.connections() -> Table      # live diagnostics: one row per connection and per resolved (class, family)
 m.streams() -> Table          # live diagnostics: one row per stream
 m.release(table: Table) -> None   # deterministic teardown of one result
-m.close() -> None             # closes every connection, stops every poller; live tables go static
+m.close() -> None             # stops every stream and poller now; every live table fails
 with MassiveSession() as m: ...   # __exit__ calls close(); for scripts whose results are static
 repr(m)  # "<MassiveSession #1 open>" or "<MassiveSession #1 closed>"; the label names the session in logs and errors
 repr(m.stocks)  # "<MassiveSession #1 stocks>"; vendors "<MassiveSession #1 partners.benzinga>"
@@ -533,22 +583,43 @@ The session must be created inside a Deephaven worker: an `ExecutionContext` mus
 The library captures it at construction and enters it on every library thread before any
 Deephaven call. Construction without an active context raises `MassiveError`. The context's
 query scope must also be the Python script session's own (`ScriptSessionQueryScope`), because
-library formulas such as `canonical_view`'s `update_view` call Python functions through it; a
+library formulas such as `canonicalize_symbols`'s `update` call Python functions through it; a
 context from `make_user_exec_ctx(freeze_vars=[...])` holds a frozen `StandaloneQueryScope`
 instead, so construction under it raises `MassiveError` naming the requirement. The library
 never starts a JVM.
 
-A second session with the same key in one process logs a WARNING naming the first. Individual
-plans allow one WebSocket connection per cluster per account.
+Sessions in one process that use the same API key **share their WebSocket connections**
+([section 13.1](#131-invariants)). Individual plans allow one connection per cluster per
+account, so two sessions with connections of their own would knock each other off and both
+stall in `WAITING_SLOT`. Sessions share only when the settings that shape a connection are
+equal: the API key, `ws_hosts`, `ack_timeout`, `reconnect_backoff`, `max_reconnect_backoff`,
+`flush_interval`, and `rest_base_url` (the group's futures schedule calendar reads through any
+of its sessions' REST clients, which must read the same API); they must also run on the same Deephaven update graph, because a
+connection's flush thread enters one execution context for all its streams (a worker normally
+has one graph, so this rarely matters and is not warned about). A connection carries one value
+of each, so a session whose settings differ never joins another session's connection, and the
+library never silently applies one session's settings to another session's streams. Such a session opens connections of its own,
+and its construction logs a WARNING naming the other session and the settings that differ,
+because on an individual plan the two then compete for the slot. A second session with equal
+settings logs nothing. Sharing is per process: a session in another process that uses the key
+still takes the slot, and each affected stream's `Error` then says so
+([section 17](#17-diagnostics)).
 
 After `close()`: `close()` itself is idempotent; verbs, `m.connections()`, and `m.streams()`
 raise `MassiveError("MassiveSession #1 is closed")`; `m.release(table)` keeps working, and so
-does garbage-collection release of results; building queries and reaching namespaces never fail;
-live results stop updating and keep their rows. A verb that passed the closed check just before
-`close()` ran also raises `MassiveError`: the stream registry is checked again under
-`registry_lock`, so a closed stream is never reused. The diagnostics tables are the exception: their
-scope is released, so a `connections()` or `streams()` table obtained before `close()` becomes
-unusable unless the caller holds it in a liveness scope of their own.
+does garbage-collection release of results; building queries and reaching namespaces never fail.
+Every live table of the session, and every table derived from one, **fails** with
+`MassiveError("MassiveSession #1 was closed; this table no longer updates")`, so a closed
+session never leaves a table that looks live but never changes. A failed table keeps its rows:
+`t.snapshot()`, `deephaven.pandas.to_pandas(t)`, and `deephaven.arrow.to_arrow(t)` still return
+them, and `t.snapshot()` is the way to keep working with the data after `close()`. A new
+operation derived from a failed table (`t.where(...)`, `t.update(...)`) raises Deephaven's
+"Can not listen to failed table". A verb that passed the closed check just before `close()` ran
+also raises `MassiveError`: the stream registry is checked again under `registry_lock`, and the
+verb checks once more after it has tracked its result, so it never returns a table whose
+failure would land a cycle later. A `connections()` or `streams()` table obtained before
+`close()` keeps working and shows the final rows, `CLOSED` included
+([section 17](#17-diagnostics)).
 
 Every verb raises `ValueError` when called on a UG thread (for example from inside a table
 listener), checked before anything else, so also on a closed session; `close()` likewise. The
@@ -556,17 +627,28 @@ closed check comes next, still before any argument is validated, so `q.ring(0)` 
 session raises `MassiveError`. Verbs create tables and take the registry lock; both are
 forbidden on the UG thread ([section 18](#18-concurrency-model)).
 
-A session that is garbage-collected without `close()` is cleaned up by a finalizer on its core
-(not run at interpreter exit). The finalizer takes no lock and makes no Deephaven call: it hands
-the registered closers (connections, pollers) to the reaper, which logs a WARNING ("MassiveSession
-#1 was garbage-collected without close(); closing its connections and pollers") and runs them,
-and stops the diagnostics writer. The reaper keeps running while results are still tracked (a
-result whose release path does not hold the core, such as a `poll()` table, can outlive its
-session) and stops once the last one has been collected and released. `close()` empties the closer list, so a closed
-session's closers never run twice. A closer must not refer to the core strongly, or the core
-could never be collected. Even so, an unclosed session's core is collected by the cyclic garbage
-collector, not promptly by reference counting: each result record's `on_released` callback (a
-`functools.partial` of the core's release method) refers back to the core.
+**How long a session lives.** The rule: a live table keeps alive everything it needs, and
+nothing else keeps anything alive. A session lives while the user holds it (`m`, a query, a
+namespace), and while it has a running stream, a running `poll()` table, or a diagnostics table
+someone holds ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). Only those hold
+the session strongly; nothing else in the library does, and the library forms no reference
+cycle through it, so an unused session is freed by reference counting, even with
+`gc.disable()`. (A caller can still form one: an exception raised out of a call keeps the
+frames of that call, and with them the session they had in hand, until the cyclic collector
+breaks the cycle between the exception and its traceback; that is ordinary Python.) So
+`t = dm.MassiveSession().stocks.trades("AAPL").append_only().where("Price > 100")` keeps
+ticking for as long as `t` is in use, although the session object and the intermediate result
+were dropped at once.
+
+A session freed without `close()` is cleaned up by a finalizer on its core (not run at
+interpreter exit). By the rule above it has no live table left. The finalizer takes no lock
+and makes no Deephaven call: it hands the registered closers (connections, pollers) to the
+reaper, which logs a WARNING ("MassiveSession #1 was garbage-collected without close(); closing
+its connections and pollers") and runs them, and then queues the diagnostics writer's stop
+behind them, so the rows they write are applied. The reaper keeps running while results are
+still tracked and stops once the last one has been collected and released. `close()` empties
+the closer list, so a closed session's closers never run twice. A closer must not refer to the
+core strongly, or the core could never be freed.
 
 ### 6.1 How a live table is kept alive and released
 
@@ -628,8 +710,10 @@ return result
   released twice and never leaked, within the best-effort boundary below (see **Opening a stream**).
 - **Collection finalizer.** A `weakref.finalize` on the result fires when the Python wrapper
   is collected. It holds the result registry and the record strongly, and through them the
-  reaper and the session core, for exactly as long as the result lives, so a result that
-  outlives every reference to its session and query is still released. The finalizer takes
+  reaper, for exactly as long as the result lives. The record's `on_released` callback holds
+  the session core only weakly, so no cycle runs from the core through its results back to
+  itself; while the record is unreleased its hold keeps the core in the live set (below), so
+  the callback always finds it. The finalizer takes
   no lock and makes no Java call: it only puts a job on the reaper queue (`queue.SimpleQueue`).
   Garbage collection can run it on any thread, including one that holds another library lock,
   so taking `registry_lock` there could deadlock. The reaper job then flips the record's
@@ -638,8 +722,24 @@ return result
 - **Reaper thread.** One daemon thread per session. It takes records off the queue, calls
   `scope.release()`, decrements the stream's held-result count, and at zero releases the stream
   scope. Each job runs inside `try`/`except Exception`; a failure is logged at ERROR and the
-  thread continues. The reaper does nothing else, except run the closers of a session collected
-  without `close()` ([section 6](#6-massivesession-and-lifecycle)).
+  thread continues. It also runs the closers of a session freed without `close()`
+  ([section 6](#6-massivesession-and-lifecycle)), the jobs the shutdown callback and a failed
+  watchlist queue (below), and the final release of a session that leaves the live set.
+- **The live set.** A module-level dictionary of session cores, under its own leaf lock (taken
+  only under `registry_lock`, never the other way round). A core is in it exactly while its
+  stream registry, its `poll()` registry, or its count of held diagnostics tables is non-empty;
+  every method that changes one of them updates the set in the same `registry_lock` section.
+  The set is what keeps a session with a running stream or poll alive after the user dropped
+  every reference to it: nothing else in the library holds a core strongly (connections,
+  flushers, stream sinks, pollers, and the clients hold it weakly). A sink can outlive its
+  stream's record in a container cleaned up later (the routes of a connection a verdict moved
+  the stream off, which its flush thread clears when it ends), so a strong reference there
+  would keep a finished session alive; a sink whose core is gone reports nothing. A core that leaves the set is handed
+  to the reaper as a job argument, so its last reference is not dropped under the lock. The
+  thread that took it out still holds it while it returns, so the final release may also land
+  there, on whatever thread that is; that is safe because a core's finalizer only queues work
+  (its closers and the diagnostics writer's stop go to the reaper) and never blocks or calls
+  Java.
 - **Opening a stream.** The session mints the stream id (a process-wide counter) and
   registers the stream's record, `OPENING`, with one hold for the opener, before it calls
   `StreamTransport.open_stream(..., stream_id=)`; so a failure or a shutdown the transport
@@ -671,12 +771,27 @@ return result
   showing its row count and a late failure, even for a released stream a derived table keeps
   alive. Its key maps to it only while it is opening or held, not failed, and not shut down,
   so no verb ever reuses a dead table.
-- **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread or a
-  gRPC thread if the UI held the last reference. It does exactly two things:
+- **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread, a
+  gRPC thread if the UI held the last reference, or Deephaven's liveness-cleanup thread when
+  the JVM collected the last derived table. It does exactly two things:
   `SessionCore.stream_shut_down(stream_id)`, which under `registry_lock` unmaps the stream's
   key and deletes its record if no hold is left, or marks it shut down so that the last hold
-  deletes it, and `loop.call_soon_threadsafe(...)` to the connection's loop so the topic
-  reference counts are decremented there. Never a send, never a Deephaven call.
+  deletes it (and queues the stop of a reactive stream's watchlist listener on the reaper), and
+  `loop.call_soon_threadsafe(...)` to the connection's loop so the topic reference counts are
+  decremented there. Never a send, never a Deephaven call. It may drop the last reference to
+  a core, whose finalizer only queues work on the reaper.
+  The JVM holds the callback until it collects the publisher, so the callback reaches the
+  session's connections only through a weak reference, as a watchlist listener's callbacks
+  reach the stream: a strong one would form a cycle across Python and Java that neither
+  collector can break, keeping a finished session in memory until a JVM collection.
+- **Reactive watchlists.** The stream's record holds its `SymbolWatch` strongly until the
+  stream shuts down. Deephaven keeps a table's listeners only weakly; the blink table that
+  manages the watch keeps it reachable today, but the stream's correctness does not rest on
+  how a liveness manager holds its referents, because a lost listener would silently stop the
+  stream following its watchlist. The listener's `on_error`, which runs on a UG
+  thread, queues the stream's failure on the reaper: a watchlist that fails fails its stream,
+  with a `MassiveError` naming the watchlist's error, instead of leaving a stream that no
+  longer follows its symbols.
 - **`m.release(table)`** delegates to `m._core.results.release(table)`, which looks up
   `id(table)` in the registry, verifies that the weakref resolves to
   that exact object (so a recycled id cannot match), flips the `released` flag under the lock,
@@ -685,27 +800,66 @@ return result
   releasing the result scope raised. It is
   deterministic: the table keeps ticking only while other holders (derived tables, open panels)
   exist.
-- **`m.close()`** closes every connection and poller and releases the session-owned diagnostics
-  scope. Publishers are not failed; live tables go static. Before the release, the streams
-  table flips every stream still in the registry to `State=CLOSED`, including a released
-  stream that a derived table or panel still keeps alive (a stream leaves the registry only
-  once its holds are released and its blink table has shut down), and one message is logged:
-  "session closed; N live tables are now static", at WARNING when N > 0 and at INFO when N
-  is 0.
+- **`m.close()`** stops everything the session runs and fails every live table:
+  1. On a UG thread it raises `ValueError`.
+  2. Under `registry_lock` it only collects: it sets the closed flag, takes the closers, marks
+     every stream and `poll()` record `CLOSED` with the error text below (a released stream
+     that a derived table or panel still keeps alive included), gathers the streams and polls
+     whose tables have not shut down, and wakes the verbs waiting for an open.
+  3. Outside every lock it fails each gathered table with
+     `MassiveError("MassiveSession #1 was closed; this table no longer updates")`: a stream
+     through its sink, under the stream's publish lock and once only, so a connection failure
+     queued meanwhile cannot replace `CLOSED`; a poll by stopping its poller first and then
+     failing its publisher. `SessionCore.fail_stream` never changes a `CLOSED` row's state.
+  4. It runs the closers: the session's own streams leave their connections, and every
+     connection no other session leases is closed and joined for a bounded time; the pollers
+     stop.
+  5. It writes the final rows, then releases the diagnostics scope, and returns once the
+     update cycle that applied the rows has ended (it takes the shared update-graph lock once),
+     so a held `m.streams()` view, which updates later in that cycle, shows them.
+  6. It logs "MassiveSession #1 closed; N live tables failed", at WARNING when N > 0 and at
+     INFO when N is 0. N counts the tables that are failed once the close is done, including
+     one a racing failure failed first; the tables are not logged one by one.
 
-Two documented behaviours that users will notice:
+  The failures shut the blink tables down on the next update cycle, whose callbacks then
+  release the records; a session whose failed tables are still held stays in the live set
+  until they are dropped, holding nothing but its registries. No `add` or `publish_failure`
+  ever runs under `registry_lock`: the publisher calls the shutdown callback inside its own
+  synchronized block, and the callback takes `registry_lock`.
+- **Library thread death.** If the reaper, the diagnostics writer, or a connection's flush
+  thread dies on an exception it does not handle (a `KeyboardInterrupt` or `SystemExit` raised
+  inside it), it fails the live tables it served before it ends, naming the thread: otherwise
+  those tables would be frozen without an error. A dead reaper can no longer release results,
+  so its session stays in the live set until the process ends; that leak is accepted, because
+  only an interrupt raised inside the reaper kills it, and its tables are failed, never left
+  looking live. The WebSocket client thread reports any internal failure as `FAILED`, which fails
+  the connection's streams ([section 13.3](#133-connection-and-subscription-protocol)).
 
-1. `del t` in the console releases the result at the end of the same console command. The script
-   session reconciles its variable snapshot when the command finishes, so the wrapper is
-   collected then, not at the next command.
-2. A table open in a UI panel is exported and stays live until the panel closes, regardless of
+Three documented behaviours that users will notice:
+
+1. `del t` in the console releases a library result at the end of the same console command.
+   The script session reconciles its variable snapshot when the command finishes, so the
+   wrapper is collected then, not at the next command.
+2. A table derived in the console (`t = q.append_only().where(...)`) is held by the console's
+   query scope only weakly. After `del t` its stream keeps running until the JVM next collects
+   the derived table: usually seconds, but unbounded on an idle heap. Until then `m.streams()`
+   shows the stream `RELEASED` with `RowsPublished` still rising; then the connection closes
+   `IDLE_GRACE` after its last stream and the session cleans up. The library never calls
+   `System.gc()` to shorten the delay, because a collection pauses every query in the worker;
+   `m.release(t)` before deriving in a script, or `m.close()`, stops it at once. The same holds
+   for a `poll()` table derived in the console, which until then keeps making its REST requests:
+   on the Basic tier those come out of the five a minute that every session of the account
+   shares.
+3. A table open in a UI panel is exported and stays live until the panel closes, regardless of
    `del`.
 
-`poll()` results use the same record, scope, and reaper path. Releasing a `poll()` result stops
-its poller.
+`poll()` results use the same record, scope, and reaper path, and the same rule as streams: a
+poll keeps polling while its table is in use, by the result or anything derived from it.
+Releasing the result marks its row `RELEASED`; the poller stops when the poll's blink table
+shuts down, because nothing uses the table any more.
 
 There is no `stop()` on queries. Release is automatic (garbage collection) or explicit
-(`m.release`, `m.close`).
+(`m.release`); `m.close()` stops anything, whatever still holds it.
 
 ## 7. Query classes and verbs
 
@@ -713,7 +867,7 @@ Six classes, defined in `_query.py`. Nothing touches the network until a verb is
 are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
 arguments that differ from their defaults, for example
 `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
-reactive table as `<reactive table>`. Queries have no other attributes: the verbs and `columns()`
+symbol table, static or refreshing, as `<symbol table>`. Queries have no other attributes: the verbs and `columns()`
 are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
 “`columns()` on every query”).
 
@@ -789,7 +943,8 @@ def columns(self) -> Table:
     Returns:
         A static table with one row per column, in result column order:
         `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
-        `int`, `double`, `boolean`, `String`, `Instant`, `LocalDate`, or `int[]`);
+        `int`, `double`, `boolean`, `String`, `Instant`, or `int[]`; every calendar date,
+        such as `Date`, is ISO `yyyy-MM-dd` text, a `String`);
         `Description` (String), what the column holds, empty when Massive gives no
         description; and `SuppliedBy` (String), the transports whose sources fill the
         column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
@@ -913,12 +1068,11 @@ empty table without any request; two equal dates are that one day. A bar is retu
 its whole window lies inside the range and has ended, so the current day's, week's, or month's
 bar never appears. The full rules are in [section 12](#12-timestamp-units-and-day-boundaries).
 There is no `limit`: the library pages internally. (The aggregates endpoint's `limit` counts
-base aggregates, not rows, so it cannot serve as a row cap.) A reactive `Table` passed as
-`symbols` is read once, when the verb is called, on the caller thread inside the session's
-execution context: its valid rows become the sorted canonical symbol tuple that every source
-receives (`REST`, `FLAT_FILES`, and the `AUTO` choice), rows that are not valid symbols of the
-class are ignored (logged once per process per class, at WARNING), and a table with no valid
-symbol raises `ValueError`, as an empty symbol list does.
+base aggregates, not rows, so it cannot serve as a row cap.) A `Table` passed as `symbols`,
+static or refreshing, is read once, when the verb is called, on the caller thread inside the
+session's execution context: its rows become the sorted symbol tuple that every source
+receives (`REST`, `FLAT_FILES`, and the `AUTO` choice). A row that is not Massive's exact
+ticker raises `ValueError`, and so does a table with no symbol, as an empty symbol list does.
 
 **Backfill plus live.** There is no seeding verb. The documented recipe is:
 
@@ -1172,13 +1326,15 @@ Notation:
   `detail_path`, `fetch_paths_by_class`, `history_path`, `grouped_daily_path`, `extra_paths`),
   and declares the key columns of each
   source it reads as `KeySpec`s ([section 19.4](#194-generated-schemas), "Keys are declared
-  per source"): the `symbol`, `time`, and instrument `fanout` keys become `Symbol`,
-  `Timestamp`, and `Underlying`, and a non-instrument `fanout` key keeps its column. A
-  `time` key is always an instant, so `Timestamp` is an `Instant`. Every axis below that is
-  a calendar date (all but the instants `published_utc`, `published`, and the indicators'
-  `timestamp`: the dividends, splits, IPOs, short interest and volume, financial statements,
-  filings, futures schedules, economy, and TMX axes) keeps its `LocalDate` column under its
-  own name, such as `Date` or `ExDividendDate`, and declares no `time` key. Datasets whose
+  per source"): the `symbol`, `time`, `end`, instrument `fanout`, and `date` keys become
+  `Symbol`, `Timestamp` (a bar's `TimestampStart`), `TimestampEnd`, `Underlying`, and `Date`,
+  and a non-instrument `fanout` key keeps its column. A `time` or `end` key is always an
+  instant, so those columns are `Instant`s. Every axis below that is a calendar date (all but
+  the instants `published_utc`, `published`, and the indicators' `timestamp`: the dividends,
+  splits, IPOs, short interest and volume, financial statements, filings, futures schedules,
+  economy, and TMX axes) keeps its date column, ISO text, under its own name, such as `Date`
+  or `ExDividendDate`, and declares no `time` key; such a dataset has no time columns of the
+  library's but `TimestampInsert`, so its vendor `Date` is its own. Datasets whose
   rows each list several tickers (a JSON `tickers` field) describe a filing, a company, or
   an article, not one instrument: the three financial statements,
   `filings.initial_insider_ownership` and `filings.insider_transactions` (Forms 3 and 4),
@@ -1228,6 +1384,18 @@ Notation:
 | `contracts(*, symbols=None, underlying: str \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool \| None = None, …F)`; `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts`; with `symbols`: `/v3/reference/options/contracts/{o}` per contract | |
 | `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/{o}/{date}` per contract | |
 
+Every options dataset has `OptionRoot`, the OCC root read from `Symbol` (`SPXW`, `AAPL1`;
+[section 19.4](#194-generated-schemas)). `underlying=` takes Massive's exact stock or index
+ticker (`AAPL`, `BRK.B`, `I:SPX`), case kept, and is sent as given. `Underlying` is exactly the
+field Massive sends: it names the instrument Massive links the contract to, not the
+deliverable, and is never derived from or mapped to the root (`AAPL1` is never `AAPL`). The
+contracts dataset exposes the raw deliverable fields with their vendor descriptions:
+`SharesPerContract`, `AdditionalUnderlyings` (JSON text of further deliverables), `Cfi`, and
+`Correction`. There is no derived "standard deliverable" flag until a live check settles the
+fields' meaning ([section 23](#23-open-verification-items)); the chain's docstring gives the
+recipe that keeps standard contracts (`natural_join` with `contracts` on `Symbol`, keep
+`SharesPerContract == 100` and an empty `AdditionalUnderlyings`).
+
 ### 8.3 `m.futures`
 
 Streams always use the `/futures` cluster path. `venue` exists on the three factory methods
@@ -1238,7 +1406,7 @@ below and selects the flat-file prefix only: it is not part of the stream key
 |---|---|---|---|---|
 | `trades(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (dates: one request series per weekday session, `session_end_date=<date>`; datetimes: the exact `timestamp` range; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
 | `quotes(symbols, *, venue: FuturesVenue \| None = None)` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (as `trades`) | `us_futures_{venue}/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns; dates: from the first session's open less 4 days to 18:00 CT on the last date, kept by `SessionEndDate`, and bars of a session or longer with `multiplier` above 1 refused with `ValueError`; datetimes: the exact `window_start` range, bars kept by their own window; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venue: FuturesVenue \| None = None)` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns; dates: from the first session's open less 4 days to 18:00 CT on the last date, kept by their session label (`Date`), a bar of several units only when it fits under both readings of its label; datetimes: the exact `window_start` range, bars kept by their own window; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
 | `snapshots(symbols, *, product_code: str \| Sequence[str] \| None = None, …F)`; `ALL` with `product_code` is every contract of the products; `Symbol` is the contract's top-level `ticker`, where both vendor samples send it, though the OpenAPI schema nests it as `details.ticker` (a `KEY_FIXES` entry; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
 | `contracts(*, product_code: str \| Sequence[str] \| None = None, …F)`, `products(*, product_code: str \| Sequence[str] \| None = None, …F)`, `exchanges(*, limit: int \| None = None)`, `market_status(*, product_code: str \| Sequence[str] \| None = None, limit: int \| None = None)` (neither path has a filter beyond the typed arguments, nor `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
 | `schedules(*, product_code: str \| Sequence[str] \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
@@ -1272,7 +1440,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
 | `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}`; history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, stamped 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp raises `MassiveError`, [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
 | `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
@@ -1284,7 +1452,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 |---|---|---|---|---|
 | `trades(symbols)` | StreamHistoryLatestQuery | `XT` | fetch `/v1/last/crypto/{from}/{to}`; history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, stamped 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source; `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source; `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
 | `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
@@ -1341,9 +1509,22 @@ are not rows of the table, so the library always sends `expand_underlying=false`
 served by the `{cryptoTicker}` templates, chosen per symbol through
 `DatasetSpec.fetch_paths_by_class` ([section 13.4](#134-rest)). Those templates have no
 `adjusted` parameter, so `adjusted` defaults to None, which sends nothing and leaves Massive's
-default in force. An explicit `True` or `False` is sent where the chosen path declares
+default in force, which is split-adjusted, the same basis as the stock and option bars'
+default `adjusted=True`. An explicit `True` or `False` is sent where the chosen path declares
 `adjusted`, and raises `ValueError` for a symbol whose path does not (a crypto symbol), rather
-than being dropped silently.
+than being dropped silently. The indicator responses echo no `adjusted`, so their basis cannot
+be checked ([section 12](#12-timestamp-units-and-day-boundaries), "Price adjustment").
+
+Each row is one indicator value at one bar (`DatasetSpec.row_times` is `BAR`): `Date`,
+`TimestampStart`, and `TimestampEnd` follow the bar rule of the query's timespan, in the day
+zone of the symbol's class (UTC for forex and crypto, New York otherwise), and `poll()` keys on
+`Symbol` and `TimestampStart`. A value is computed over the aggregates range's bars and carries
+the stamp of its bar: Massive's samples show the underlying aggregates at 00:00 New York time
+for stocks and 01:00 for indices. So a value of a day or longer is checked by the range's rule
+for its symbols' class (`history_source.stamp_rule` with the class): 00:00 in the day zone, or
+the indices' 01:00, on its period's first day. Any other stamp raises `MassiveError` naming the
+dataset, the path, the stamp, and the way out (compute the indicator from `bars().history()` of
+the same timespan); [section 23](#23-open-verification-items) item 61 checks it live.
 
 ### 8.9 `m.economy`
 
@@ -1380,7 +1561,7 @@ columns that is unique per row, checked against the generated fields of its path
 250 tickers per request, any mix of asset classes. Rows are the union schema of the unified
 snapshot. `ALL` is not accepted here (the endpoint requires tickers). Its catalog record is
 named `reference.snapshots` and is declared in `_namespaces/reference.py` with
-`asset_class=None` (each ticker's prefix selects its class,
+`asset_class=ClassFromPrefix.ANY` (each ticker's prefix selects its class,
 § 10), so it is in the catalog (`CATALOG` in `_session.py`); `m.streams()` and messages show
 that name.
 
@@ -1579,34 +1760,180 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   is accepted by stream verbs (the `<channel>.*` topic), by every per-class `snapshots(ALL)`
   (full market, all pairs, all contracts), and by `history()` when a flat file or a grouped-daily
   REST path exists. Everywhere else `ALL` raises `ValueError` naming the alternative.
-- Input forms are normalized: `"EUR/USD"` and `"C:EURUSD"`; `"AAPL250117C00150000"` and
-  `"O:AAPL250117C00150000"`; `"BTC-USD"` and `"X:BTCUSD"`; `"I:SPX"` and `"SPX"` (an index
-  symbol without its prefix gets `I:`); `"ESZ5"`. The `Symbol` column always holds the canonical
-  Massive form. A crypto pair must end in a known quote currency, so its WebSocket form
-  (`BTC-USD`) can always be recovered; others raise `ValueError` at construction. A forex
-  currency is three letters (`EU1/USD` raises; crypto codes such as `1INCH` keep their
-  digits). An option symbol's `YYMMDD` expiry must be a real date (`AAPL250132C...` raises).
-  A prefix with nothing after it (`"I:"`, `"O:"`, `"C:"`, `"X:"`) raises `ValueError`.
-  WebSocket topics spell a forex pair `{from}-{to}` (`C.EUR-USD`), as Massive's WebSocket
-  documentation gives every forex channel's `ticker` parameter; forex quote and aggregate
-  frames spell it `EUR/USD` and FMV frames `C:EURUSD`, and every spelling maps back to
-  `C:EURUSD`, so frames reach their streams. A symbol
-  with another class's prefix raises `ValueError` saying which prefix, if any, the class uses
-  (`'X:BTCUSD' carries the prefix of another asset class; stocks symbols have no prefix`).
-- **Datasets that span asset classes** (indicators, reference data, the unified
-  `m.snapshots()`) declare no asset class. Each symbol's prefix then selects its class (`O:`
-  options, `I:` indices, `C:` forex, `X:` crypto), a symbol without one is a stock, and that
-  class's rules apply unchanged: `["X:BTCUSD", "i:spx", "aapl"]` normalizes to
-  `("AAPL", "I:SPX", "X:BTCUSD")`. A WebSocket dataset always declares its class.
-- A `Table` must have a `Symbol` column. Streams listen to it and subscribe or unsubscribe as
-  rows are added or removed. Polls re-read it each cycle. Its rows may use any accepted input
-  form: every consumer reads the table through one canonicalized view
-  (`canonical_view` in `_tables/watchlist.py`), so `last_by()`'s `where_in` filter and the subscribed topics
-  agree on `C:EURUSD` whether the row says `EUR/USD` or `C:EURUSD`. A row that is not a valid
-  symbol for the class matches nothing and is logged once at WARNING.
+- **Canonical only.** Every symbol a dataset takes (`symbols=`, `underlying=`, every row of a
+  symbol table) must be Massive's exact REST ticker, case kept: `AAPL`, `BRK.B`, `KIMpL` (Kimco's
+  series L preferred: the lower-case `p` is meaningful), `O:BRKB250117C00400000`, `ESZ5`,
+  `I:SPX`, `C:EURUSD`, `X:BTCUSD`. Anything else raises `ValueError` when the query is built
+  (`check_symbol` in `_datasets/symbols.py`); the message names the canonical form when the
+  class's converter gives one (`'EUR/USD' is not Massive's ticker; use 'C:EURUSD' (... and
+  dm.canonical_symbol_forex converts)`). A canonical ticker of another class says which class
+  the dataset takes (`'I:SPX' is an index ticker; this dataset takes stock tickers`). Every
+  `Symbol` column holds exactly that form.
+- **The grammar** of each class: a stock is an upper-case root of letters and digits followed
+  by the CQS suffixes Massive keeps, `.X` (a class or another dotted suffix, `BRK.B`,
+  `NTEST.Q`), `p` and an optional series (`KIMpL`), and the markers `r` and `w`; an option is
+  `O:` and an OCC symbol whose root is 1 to 6 letters or digits (no dot) and whose `YYMMDD`
+  expiry is a real date; a single futures contract is upper-case letters and digits with at
+  least one letter (`ESZ5`, `6CH5`, `0NGH39`; a year is never rewritten, and `ESZ25` is not
+  `ESZ5`); a futures spread is one of the spellings Massive's samples show, exactly as
+  written (below); a futures dataset takes any ticker as Massive writes it (not empty, no
+  surrounding whitespace, no control character, no class prefix), so a combo form not yet
+  listed can be passed back as `symbols`, while the two converters check their own grammar; an index is `I:` and letters and digits, as Massive's WebSocket pattern
+  `^(I:[a-zA-Z0-9]+)$` writes it, with dotted parts allowed; a forex pair is `C:` and two
+  three-letter ISO 4217 codes; a crypto pair is `X:` and the two codes joined, whatever the
+  quote. A stream needs the WebSocket form (`BTC-USD`), and two REST paths take the pair as
+  two codes (`/v1/last/crypto/{from}/{to}` and `/v1/open-close/crypto/{from}/{to}/{date}`), so
+  the library splits a pair, never by a guess: the joined ticker does not say where its quote
+  starts (`X:DOTUSD` could be `DOT-USD` or `DO-TUSD`; `X:ETHWBTC` ends in `BTC` but quotes in
+  `WBTC`), so every split comes from Massive's list of crypto tickers
+  (`/v3/reference/tickers?market=crypto`, every page, read with `active=true` and again with
+  `active=false`, since the endpoint lists only traded tickers by default and a past date of a
+  delisted pair needs its split too; a ticker in both keeps its listed row; each row's
+  `base_currency_symbol` and `currency_symbol`, whose join must be the ticker); the library
+  keeps no list of quote currencies of its own. The session reads that list once, on first
+  need, through its REST client, and keeps it for its life; a failed read is not kept, so the
+  next need reads it again. A stream needs it when it starts or when a symbol table adds a
+  crypto ticker (on the session's `crypto pairs` worker, section 18.1). A failed read refuses the
+  stream with the read's `MassiveError`, and a ticker the list does not hold, or whose
+  currencies do not join to it, refuses it with a `MassiveError` naming the ticker; nothing
+  falls back to a guess. On the two REST paths the same refusal raises from `fetch()`, and
+  fails a `poll()` table, since every later cycle would read the same list. Every other REST
+  path and every flat file needs no split: a flat-file filter looks for a crypto pair split
+  at every point. Every grammar is
+  matched against the whole text, so a trailing newline never passes. A dataset that spans classes
+  (indicators, reference data, the unified `m.snapshots()`) declares the internal
+  `ClassFromPrefix.ANY` in place of an `AssetClass`, never None: the prefix selects the
+  grammar (`O:`, `I:`, `C:`, `X:`), a symbol without one is a stock, and its days are New
+  York days. The symbol rules (`is_canonical`, `check_symbol`, `canonical_from_wire`,
+  `wire_spellings`) and the day rules take `AssetClass | ClassFromPrefix`; `ClassFromPrefix`
+  is not exported, since no public signature takes it.
+- **Futures spreads.** Massive documents no spread grammar (its contracts and products carry
+  only `type: 'combo'`), so the spellings taken are those its vendored samples show, each
+  exactly as written: a calendar spread of two contracts (`GCQ6-GCZ6`, `10YN6-10YQ6`,
+  `6AU7-6AU6`; `flat-files/futures/minute-aggregates/comex.md`, `cbot.md`,
+  `session-aggregates/cme.md`), a CBOT inter-commodity spread (`BOB 02-01 U6`, `TEX 07-05 U6`;
+  `minute-aggregates/cbot.md`, `session-aggregates/cbot.md`), a NYMEX strategy of one or two
+  products over months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`;
+  `minute-aggregates/nymex.md`, `session-aggregates/nymex.md`), and a CME currency cross
+  (`6A:XF:AUDUSD:Q6`; `session-aggregates/cme.md`). Every futures dataset takes any ticker as
+  Massive writes it as `symbols` and keeps any on its rows, so input equals output; only the
+  converters check the grammar of a contract or a spread. No function builds a spread ticker from its legs: Massive's
+  grammar is unverified, so a builder waits for a live check
+  ([section 23](#23-open-verification-items)).
+- **The converters** are the public way to another spelling. `dm.canonical_symbol(text,
+  asset_class, *, convention=SymbolConvention.MASSIVE)` takes a required `AssetClass`: the class is never guessed,
+  so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes any
+  ticker as Massive writes it. One function per class
+  (`canonical_symbol_stock`, `_option`, `_future`, `_index`, `_forex`, `_crypto`), the spread
+  function `canonical_symbol_future_spread`, and one per
+  stock convention (`canonical_symbol_stock_yahoo`, `_nasdaq`, `_cms`) take only the text, for
+  Deephaven query strings: a formula cannot pass a keyword argument, and imported by bare name
+  (`from deephaven_massive import canonical_symbol_forex`) they make a `String` column and are
+  vectorized; called through the module (`dm.canonical_symbol_forex(Pair)`) Deephaven types the
+  column `Object`, so the docstrings say to cast `(String)`. Each maps None to None, returns
+  canonical text unchanged, converts its spellings (options: no `O:`, the space-padded OSI form,
+  any case; indices: no `I:`; forex: `EUR/USD`, `EUR-USD`, `EURUSD`, with or without `C:`, any
+  case; crypto: `BTC-USD`, `BTC/USD`, `BTCUSD`, with or without `X:`, any case, any quote;
+  futures: nothing), and raises `ValueError` with a hint for anything else.
+  `canonical_symbol_future` refuses a spread naming `canonical_symbol_future_spread`, and the
+  other way round. A ticker with another class's prefix names that class's function (`'C:EURUSD'
+  is a forex ticker (prefix C:), not a crypto one; call dm.canonical_symbol_forex`). Stock,
+  index, and futures text is never re-cased, and nothing is guessed: `aapl` raises saying that
+  tickers are case-sensitive, with an upper-case root and possibly a lower-case suffix. The
+  converters are pure and thread-safe.
+- **Stock conventions.** `SymbolConvention.MASSIVE`, the default of every `convention`
+  parameter and the only member every class takes, is Massive's own spelling: canonical text
+  passes unchanged and a class's unambiguous spellings convert (`EUR/USD`, `SPX` for the
+  indices class). A stock spelling converts only from a named stock convention (`YAHOO`,
+  `NASDAQ`, `CMS`), because `-` means a class in Yahoo's and a preferred in Nasdaq's; under
+  `MASSIVE`, `-`, `/`, and a space raise a hint naming the conventions, and a stock convention
+  for another class raises `ValueError`. No `convention` parameter takes None. Each converts exactly its plain tickers, share
+  classes, and preferreds, and refuses the rest, since Massive documents no spelling for
+  warrants, units, rights, when-issued, when-distributed, called, or test issues:
+
+  | Kind | `YAHOO` | `NASDAQ` (Integrated Platform) | `CMS` | Massive |
+  |---|---|---|---|---|
+  | Class | `BRK-B` | `BRK.B` | `BRK B` | `BRK.B` |
+  | Preferred with a series | `BAC-PL` | `BAC-L` | `BAC PRL` | `BACpL` |
+  | Preferred without a series | refused (`-P` also reads as class P) | `DCOM-` | `DCOM PR` | `DCOMp` |
+  | Plain | `AAPL` | `AAPL` | `AAPL` | `AAPL` |
+
+  Under a convention only its grammar applies: text that happens to be a Massive ticker is not
+  passed through, since the convention may mean something else by it. A Yahoo ticker with a
+  dot (`VOD.L`, `SHOP.TO`) is refused as a listing outside the US, and Nasdaq's `ABC.U` (class
+  U) is refused rather than read as Massive's unit `ABC.U`. Class `U` is refused in every
+  convention (CQS and CMS write units as `U`). CQS is not a member: it is Massive's own
+  spelling of classes and preferreds. Nasdaq's ACT symbology is not
+  supported: it writes `.W` for warrants and `.V` for both a class and when-issued.
+- **`dm.canonicalize_symbols(table, asset_class, *, column="Symbol",
+  convention=dm.SymbolConvention.MASSIVE, on_error=dm.OnError.RAISE)`**, in
+  `_tables/symbols.py`, is the table form and the only lenient path. The table's
+  current rows are converted in Python first (one call per distinct value), static or
+  refreshing, so `RAISE` gives a clean `ValueError` listing up to five values; every table is
+  then converted by `update`, so under `RAISE` a later bad row of a refreshing table fails the
+  table. `OnError.NULL`
+  writes a null symbol and logs each bad value once at WARNING, at most 20 per table. The
+  result keeps every other column.
+- **A symbol table** must have a `Symbol` column, and every non-null row must be canonical.
+  A refreshing table is reactive: streams listen to it and subscribe or unsubscribe as rows are
+  added or removed; polls re-read it each cycle; `fetch()` and `history()` read it once. A
+  static (non-refreshing) table is a fixed symbol list for the stream verbs: read once when the
+  verb is called, as `fetch()` and `history()` read any table, it opens the same stream as the
+  equal symbol list, and one holding no symbol raises `ValueError`. `poll()` re-reads it each
+  cycle, which for a static table returns the same symbols every time. Every verb reads the
+  table's current rows first (`read_symbols` in `_tables/watchlist.py`) and raises
+  `ValueError` for a row that is not canonical; a static verb also raises for a table without
+  symbols. A null row is
+  ignored. A **later** row that is not canonical is never subscribed or requested: it fails
+  that result (the stream through its session's reaper, a `poll()` table with `SymbolRowError`),
+  with a message that names the row, the reason, and
+  `dm.canonicalize_symbols(table, dm.AssetClass.<CLASS>, on_error=dm.OnError.NULL)` (for a
+  dataset that spans classes, `dm.canonical_symbol` per row with each row's class). A stream
+  also refuses a row whose topic cannot be built. A symbol table that **fails** (a
+  `canonicalize_symbols` table under `RAISE` that met a bad row) fails the result too: the
+  watch's error callback queues the stream's failure on the reaper, and `read_symbols` refuses a failed table, so a
+  `poll()` table fails on its next cycle. `last_by()` filters with `where_in` against the table
+  itself.
+- **Datasets kept as written.** A dataset whose symbols are a third party's global tickers
+  rather than Massive's US-market ones declares `DatasetSpec.symbols_as_written`: its
+  `symbols`, the rows of its symbol table, and its rows' symbols are taken exactly as Massive
+  writes them (not empty, no surrounding whitespace, no control character, no class prefix).
+  Only `partners.tmx.corporate_events` does: it is Wall Street Horizon's global events calendar,
+  whose events name their venue's MIC and an ISIN (`rest/partners/tmx/corporate-events.md`).
+  Benzinga covers US-listed companies and ETF Global US-listed ETFs, so both keep the stock
+  grammar; ETF Global's `ConstituentTicker`, which may name a foreign holding, is not a key and
+  is never checked.
+- **Wire spellings.** Massive writes some symbols differently per transport: `EUR/USD` in
+  WebSocket forex frames, `EUR-USD` in forex topics, `BTC-USD` in crypto frames, `X:BTC-USD`
+  in FMV frames, `X:EUR-USD` in the forex quotes flat-file sample. `canonical_from_wire` reads
+  every spelling the library knows, without folding case, any crypto quote included; a futures
+  row keeps its ticker as written; topics use `ws_symbol`
+  (`C.EUR-USD`, as the WebSocket documentation gives every forex channel's `ticker`
+  parameter). A flat-file filter holds every spelling of each requested symbol
+  (`wire_spellings`): Massive's knowledge base says the crypto and forex files write
+  `X:BTC-USD` and `C:EUR-USD`
+  (https://massive.com/knowledge-base/article/why-doesnt-a-bar-from-the-rest-api-match-the-flat-files),
+  and the forex quotes sample shows `X:EUR-USD`, so a request for `X:BTCUSD` or `C:EURUSD`
+  matches those rows, which hold the canonical ticker; a crypto pair is looked for split at
+  every point, since its joined ticker does not say where its quote starts.
+- **The index prefix comes from the endpoint, never from the name.** A ticker without `I:` on
+  a dataset of the indices class is read as `I:` and the ticker; on any other dataset it is a
+  stock. No conversion looks a name up (`SPX` is never recognized as an index by its name).
+  Which index endpoints send the bare form is a live check ([section 23](#23-open-verification-items)).
+- **Unknown wire spellings.** A symbol Massive sends that `canonical_from_wire` cannot read
+  fails by default, naming the spelling (`MassiveConfig.unknown_symbols = UnknownSymbols.FAIL`):
+  a REST request raises `RowDataError` (a `poll()` table fails), a flat-file read raises
+  `MassiveError`, and a WebSocket row fails every stream of the dataset on the channel (it
+  cannot be routed to one, so no symbol stream may starve on it silently). `UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`) keeps
+  the row with a null `Symbol` and the text in an added `RawSymbol` column, and logs each
+  spelling once at WARNING. A `poll()` table keyed on `Symbol` then keys on `Symbol` and
+  `RawSymbol` together, so each unreadable spelling is its own row: it neither fails the
+  null-key check nor merges with another, and `REPLACE` removes it when it leaves.
 - `Symbol` is always the instrument the row describes. When the fan-out key is a different
-  instrument, it is `Underlying` on every options row (from `underlying_ticker` or
-  `underlying_asset.ticker`) and on `related_companies` rows. A non-instrument fan-out key
+  instrument, it is `Underlying`, exactly as Massive sends it: on the options rows that carry
+  one (the chain and the snapshots from `underlying_asset.ticker`, the contracts from
+  `underlying_ticker`; WebSocket and flat-file options rows carry none) and on
+  `related_companies` rows. A non-instrument fan-out key
   keeps the generated column the dataset declares as its `fanout` key (`filer_cik` becomes
   `FilerCik`), declared with `KeySpec(..., instrument=False)`
   ([section 19.4](#194-generated-schemas)). Where a source does not carry the instrument in its rows (it takes the symbol
@@ -1627,7 +1954,9 @@ the free-threaded 3.14t job runs with `PYTHON_GIL=0` and is required. 3.14t is t
 free-threaded target: pyarrow, numpy, and pandas no longer publish cp313t wheels.
 
 **Criterion.** Every closed set of values in a public signature is a `StrEnum` whose values are
-Massive's wire strings. Signatures take only the enum. There are no string `Literal`
+Massive's wire strings; an enum of a library setting that never reaches the wire
+(`HistorySource`, `SymbolConvention`, `OnError`, `UnknownSymbols`) takes its member names in
+lower case. Signatures take only the enum. There are no string `Literal`
 categoricals and no `Enum | Literal` unions. Open sets (`sort`, `form_type`) are
 `str`. The one spelling per value gives tab completion in every IDE, including the Deephaven web
 console, and typo safety at both type-check time and run time.
@@ -1656,6 +1985,9 @@ has the same value set as that parameter.
 | `Locale` | US, GLOBAL | `us`, `global` | `reference.ticker_types`, `reference.exchanges` |
 | `ConditionDataType` | TRADE, BBO, NBBO | `trade`, `bbo`, `nbbo` | `reference.conditions` |
 | `Sip` | CTA, UTP, OPRA | `CTA`, `UTP`, `OPRA` | `reference.conditions` |
+| `SymbolConvention` | MASSIVE, YAHOO, NASDAQ, CMS | `massive`, `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
+| `OnError` | RAISE, NULL | `raise`, `null` | `canonicalize_symbols` (`on_error`) |
+| `UnknownSymbols` | FAIL, WARN | `fail`, `warn` | `MassiveConfig.unknown_symbols` and `MASSIVE_UNKNOWN_SYMBOLS` |
 
 Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}` and `ChannelFamily {TICK, FMV}`.
 `Transport {REST, WS, FLAT_FILES}` is defined once, in `_massive.spec.types`, and used on both
@@ -1682,7 +2014,8 @@ representation rules ([section 19.4](#194-generated-schemas)) decide which field
 **Column types.** Every column's type comes from the type lattice of
 [section 19.4](#194-generated-schemas): each generated field has a `WireType`, the merge joins
 the `WireType`s of one column across a kind's sources, and `_datasets/schema.py` maps the result to a
-Deephaven column type (`long`, `double`, `boolean`, `String`, `LocalDate`, `Instant`, `int[]`).
+Deephaven column type (`long`, `double`, `boolean`, `String`, `Instant`, `int[]`; a calendar
+date is ISO `yyyy-MM-dd` text, a `String`).
 Sizes come out as `double` wherever any source says `number`; condition codes come out as
 `int[]`; exchange and tape ids come out as `long`.
 
@@ -1736,8 +2069,21 @@ FMV `t`, the magnitude rule above picks the unit per value first, then the routi
 
 **Examples of generated time column names:** `Timestamp`, `ParticipantTimestamp`,
 `TrfTimestamp`, `BidTimestamp`, `AskTimestamp` (futures quotes), `ReceivedTimestamp` (crypto
-trades and quotes), `EndTimestamp` (bars), `LastUpdated` (snapshots). Calendar dates such as
-the futures `SessionEndDate` are `LocalDate`.
+trades and quotes), `LastUpdated` (snapshots). A dataset's declared keys rename the vendor's
+primary times into the library's own columns ("Time columns" below), so the bars' `s`, `t`,
+and `window_start` become `TimestampStart` and the WebSocket bars' `e` becomes `TimestampEnd`.
+Every calendar date, the vendor's (`ExDividendDate`, the economy `Date`) and the library's
+(`Date`), is ISO `yyyy-MM-dd` text, a `String`, so a date compares and joins as text. The
+library stores one shared `String` per distinct date. The Arrow conversion makes one Java
+`String` per row, so every dataset table is built through `_tables/columns.py` `dataset_table`:
+the other columns convert from Arrow, and each date column is built from a process-wide pool of
+one `String` per date, run by run (a copy and doublings per run of rows of one date), and joins
+them as an in-memory column source, with no Deephaven `update()`, whose fixed cost of a few
+milliseconds would fall on every stream flush. A column of interleaved dates (more than 4,096
+runs) is interned by a formula instead. A million rows of five dates hold five `String`s, a
+reference per row; the fixed cost per table is under a millisecond, and large batches build
+faster than a plain Arrow conversion; nothing else may build a dataset table, and only date
+columns, a small set, go into the pool.
 
 **`history(start, end=None)` bounds.** A range has two kinds of bounds, and one call never mixes
 them:
@@ -1762,62 +2108,296 @@ ordered correctly. `dates.bounds` normalizes the bounds to a `DaySpan` (dates) o
 partition dates, and the instants a REST request covers (`HistoryWindow`).
 
 **Bars: whole windows.** A bar, of any timespan and multiplier, is returned only when its whole
-window lies inside the range. The windows:
+window lies inside the range and has ended. One rule decides both, the bar's own `TimestampEnd`
+("Time columns" below): a bar is kept only when its `TimestampStart` is no earlier than the
+range's start and its `TimestampEnd` is no later than the earlier of now and the range's end.
+The window carries these as `HistoryWindow.bars`, a `row_times.BarBounds` whose `start_rule` is
+explicit: `StartRule.RANGE` checks the start, and `StartRule.LABEL`, for futures named by dates,
+keeps bars by their session label instead, since a folded session opens before its date. Ticks
+have no bar window (`bars` is None). A range of dates ends where its last day's bar would
+(`dates.day_end`: the next midnight in the class day zone; 01:00 New York time for indices;
+17:00 Chicago on the last session's date for futures); a range of datetimes at its end. The
+transports drop a later bar once its time columns are filled (`row_times.within`), so selection
+and the join key can never disagree: wherever the end is conservative, so is the selection. The
+windows:
 
 - An intraday bar (second, minute, hour) spans `multiplier` units from its `Timestamp`, on whole
   units of UTC time (whole hours in every zone the library uses).
-- A 1-day bar is its calendar day in the class day zone; a bar of `multiplier` days spans that
-  many days. Datetime bounds therefore keep only whole calendar days of 1-day bars: Monday
-  09:30 to Friday 16:00 New York time returns Tuesday to Thursday, so daily bars are asked
-  for with dates.
+- A 1-day bar is its calendar day in the class day zone (to 01:00 New York time after it for
+  indices). A bar of `multiplier` days spans that many trading days for stocks, options, and
+  indices, and calendar days for forex and crypto. Whether Massive counts calendar or trading
+  days is not documented, and trading days end later whenever a holiday falls inside the bar;
+  with no holiday calendar, the bar ends after the latest day its days can reach,
+  `dates.last_trading_day`: `n - 1` weekdays after its first day plus one weekday, and one more
+  for every five further days (`add_weekdays(first, n + (n - 1) // 5)`). That allowance covers
+  every run of the NYSE and CME calendars of 2024 to 2026 (a test checks every start date), the
+  tightest being six sessions over eight weekdays from 2024-12-24. Datetime bounds therefore
+  keep only whole calendar days of 1-day bars: Monday 09:30 to Friday 16:00 New York time
+  returns Tuesday to Thursday, so daily bars are asked for with dates.
 - For stocks, options, and indices, which do not trade at weekends, a week runs Monday to
   Friday, and a bar Massive stamps on the Saturday or Sunday before a week names that week;
-  months, quarters, and years are calendar periods less their leading and trailing weekend
-  days, so March 2024 runs from Friday the 1st to Friday the 29th. Forex (which trades from
-  Sunday evening UTC) and crypto (every day) keep their weekends: Monday-to-Sunday weeks and
-  whole calendar months, quarters, and years. A forex week is the calendar week until the
-  live check of Massive's forex week bucket ([section 23](#23-open-verification-items))
-  settles where it starts. A bar of `multiplier` periods spans that many.
-- A futures bar named by session dates is kept by its `SessionEndDate`: an intraday bar when
-  its session lies in the range; a session, week, month, quarter, or year bar when the whole
-  period of session dates its `SessionEndDate` belongs to (Monday to Friday for a week; months
-  less their weekend days) lies in the range. A futures bar of a session or longer with
-  `multiplier` above 1 named by dates raises `ValueError` ("pass datetimes, or
-  multiplier=1"): whether Massive labels it with its first or its last session is not
-  verified ([section 23](#23-open-verification-items)), and either choice keeps the wrong
-  bars under the other. A futures bar named by datetimes follows the intraday rule, or for
-  longer bars the sessions of the period, from the regular 17:00 Chicago open of its first
-  session to that of the session after its last.
+  months, quarters, and years are calendar periods less their leading and trailing weekend days,
+  so March 2024 runs from Friday the 1st to Friday the 29th. An index's period is named the same
+  way, but since an index can update around the clock (`I:AAVE100`), its window is the whole
+  calendar period, at its start and its end: an index week runs Monday to Sunday and ends an
+  hour after the next Monday begins, so a range must reach that Sunday to keep it, and an index
+  month of June 2024 starts on Saturday the 1st, so a range from Monday the 3rd leaves it out.
+  An index week stamped on the Saturday or Sunday before its Monday starts on that day, the
+  earlier reading, since it may hold it. Forex (which trades from Sunday evening UTC) and crypto
+  (every day) keep their weekends: Monday-to-Sunday weeks and whole calendar months, quarters,
+  and years. A forex week is the calendar week until the live check of Massive's forex week
+  bucket ([section 23](#23-open-verification-items)) settles where it starts. A bar of
+  `multiplier` periods spans that many.
+- A futures bar named by session dates is kept by its session label, Massive's
+  `session_end_date` (the row's `Date` before a bar of several units has it set to null): an
+  intraday bar when its session lies in the range; a session, week, month, quarter, or year bar
+  when the whole period of session dates its label belongs to (Monday to Friday for a week;
+  months less their weekend days) lies in the range. Whether Massive labels a bar of several
+  units (`multiplier` above 1) with its first or its last period's session is not verified
+  ([section 23](#23-open-verification-items) item 40), so such a bar is kept only when it fits
+  under both readings: its label's period with the `multiplier - 1` periods after it, and with
+  the `multiplier - 1` periods before it, all lie in the range (`dates.bar_sessions`). Sessions
+  count as weekdays (there is no holiday calendar). The bar must also have ended by its
+  `TimestampEnd`, which for several sessions carries the same holiday allowance as the days
+  above, so a range of 2025-02-03 to 02-07 keeps the 2-session bars opening Monday and Tuesday
+  evening, but not the one opening Wednesday evening. A futures bar named by datetimes follows
+  the intraday rule, or for longer bars the sessions of the period, from the regular 17:00
+  Chicago open of its first session to that of the session after its last; its `window_start` is
+  its true start whatever its label, so that rule needs no reading of the label.
 
 A bar whose window has not ended yet is never returned, so the current day, week, month,
 quarter, or year is left out whatever `end` says (a forex month that ends on a Sunday is
-unfinished until that Sunday ends); for futures named by date, only finished sessions count
-(the sessions before the one the current instant belongs to). There is no holiday calendar:
-a holiday is a weekday like any other, so a week whose Friday is a holiday still runs Monday
-to Friday, and monthly stock bars for March 2024 need a range through Good Friday, 03-29.
-The REST aggregates' `{from}` is the first instant that belongs to the first bar that fits
-(the Saturday before a Monday-to-Friday week, the 1st of a month even when that is a
-weekend), the start of the kept range: whether Massive selects bars by their stamp or builds
-them from `{from}`, the first whole period's bar is returned, and a partial bucket begun
-before it is dropped. `{to}` is the last whole millisecond before the range's end. Rows outside
-the window are then dropped.
+unfinished until that Sunday ends, and an index day bar until 01:00 New York time the next day);
+for futures named by date, only finished sessions count (the sessions before the one the current
+instant belongs to). There is no holiday calendar: a holiday is a weekday like any other, so a
+week whose Friday is a holiday still runs Monday to Friday, and monthly stock bars for March
+2024 need a range through Good Friday, 03-29. The REST aggregates' `{from}` is the first instant
+that belongs to the first bar that fits (the Saturday before a Monday-to-Friday week, the 1st of
+a month even when that is a weekend), the start of the kept range: whether Massive selects bars
+by their stamp or builds them from `{from}`, the first whole period's bar is returned, and a
+partial bucket begun before it is dropped. `{to}` is the last whole millisecond before the
+range's end. Rows outside the window are then dropped.
 
-**Day labels.** A stock, option, or index 1-day bar is its New York date. A futures bar is its
-`SessionEndDate`. A forex or crypto 1-day bar means the UTC day on every source, and is stamped
-at 00:00 UTC of that day (`history_source.stamp_rule`, `timestamps.utc_day_stamps`): the
-forex range already is, and the forex grouped daily and `/prev` (23:59:59.999 UTC in the
-samples) and the `day_aggs_v1` flat files (23:59:59.999 UTC) are moved to the day's start.
-Crypto's day cut is not verified: the documented range and `/prev` samples sit at midnight New
-York time and the grouped-daily samples at times such as 20:48 UTC, no day boundary at all.
-So a crypto 1-day bar stamped anywhere in its UTC day but its first or last millisecond, and a
-crypto REST bar of several days or longer not stamped at 00:00 UTC
-(`timestamps.check_utc_midnights`), raises `MassiveError` naming the dataset, the source, and
-the other source to try; it is never relabelled, since it would cover other days than its
-label. If live REST data follows those samples, crypto daily REST history, `dm.ALL` grouped
-daily, and `/prev` all raise until the owner decides after the live check
-([section 23](#23-open-verification-items) item 1). `AUTO` picks the source as for every other
-dataset ([section 16](#16-historysourceauto)): the check, not a fixed source, keeps both
-sources on the same UTC days.
+**Day labels and stamps.** A futures bar's `TimestampStart` is Massive's `window_start`,
+unchanged, and its session is its `session_end_date`. Every other bar of a day or longer, of
+any multiplier, from every source (the aggregates range, grouped daily, `/prev`, and the
+`day_aggs_v1` flat files), has its stamp checked and moved to 00:00, in the class day zone, of
+the day it falls on, so New York midnight for stocks, options, and indices and UTC midnight for
+forex and crypto (`history_source.stamp_rule`, `timestamps.day_starts`); its time columns are
+then computed from that day ("Time columns" below). The classes stamped are exactly
+those of `dates.DAY_ZONES`. One call then returns the same rows whichever source answers it.
+Massive stamps the same bar differently by source, so each stamp it is known to use is moved
+back to 00:00 of the day it falls on, and any other stamp raises `MassiveError` naming the
+dataset, the source, the stamp, the accepted stamps, and what the caller can do instead: it is
+never relabelled, since such a bar may cover other days than its label. The known times are
+wall-clock times of day in the day zone, compared to the millisecond, so a New York session
+close is 16:00 in winter and in summer; the zone's offsets come from `zoneinfo`, one
+conversion per distinct stamp, not from Arrow's time-zone database. A week, month, quarter, or
+year bar must also be stamped on the day its period starts, since the whole-window rule above
+places a bar by its stamp's day:
+
+| Class | 1-day bars (`multiplier` 1) | Longer bars: time (REST range only) | Week bars: day | Month, quarter, year bars: day |
+|---|---|---|---|---|
+| Stocks | 00:00 (range); 16:00, the session close (grouped daily, `/prev`, `day_aggs_v1`); 13:00, a short day's close | 00:00 | Saturday, Sunday, or Monday | the 1st |
+| Options | 00:00 (range, `day_aggs_v1`); 16:00 (`/prev`); 13:00; 16:15 and 13:15, the closes of index options such as SPXW | 00:00 | Saturday, Sunday, or Monday | the 1st |
+| Indices | 00:00; 01:00, which is midnight in Chicago (range, `day_aggs_v1`); 16:00 (`/prev`); 13:00 | 00:00; 01:00 | Saturday, Sunday, or Monday | the 1st |
+| Forex | 00:00 (range); 23:59:59.999, the day's last millisecond (grouped daily, `/prev`, `day_aggs_v1`) | 00:00 | Monday | the 1st |
+| Crypto | 00:00; 23:59:59.999 (`day_aggs_v1`) | 00:00 | Monday | the 1st |
+
+The 1st is of a month for month bars, of January, April, July, or October for quarter bars,
+and of January for year bars. A bar of several days may start on any day. A time known for one
+class is not accepted for another, and every class's times apply to every source, since each
+class accepts 00:00 anyway. Some times are presumed rather than sampled, and the live checks
+of [section 23](#23-open-verification-items) items 50 to 52 confirm them:
+
+- The indices longer bars' 01:00 follows the range's 1-day bars; no sample shows one.
+- 13:00 for stocks, options, and indices is the close of a short trading day (the day after
+  Thanksgiving, Christmas Eve, July 3). A source that stamps a day at its close may stamp such
+  a day there, so the check accepts it rather than fail real data on every short day.
+- 16:15 and 13:15 for options are the closes of index options on full and short days, where
+  `/prev` may stamp such a contract.
+- The week days follow the whole-window rule: a stock, option, or index week's Saturday and
+  Sunday belong to it, while a forex or crypto week is a calendar week from its Monday, so a
+  forex or crypto week bar stamped on a Sunday raises until the live check of items 33 to 35
+  settles where Massive starts those weeks.
+
+Every accepted time lies inside its own day in the zone, so none of them, on any date, changes
+which day a bar is labelled with, and the whole-window rule keeps or drops a bar stamped at its
+day's end exactly as it does the same bar stamped at the start. Crypto's day cut is not
+verified: the documented range and `/prev` samples sit at midnight New York time and the
+grouped-daily samples at times such as 20:48 UTC, no day boundary at all, so crypto daily REST
+history, `dm.ALL` grouped daily, and `/prev` all raise if live REST data follows those samples,
+until the owner decides after the live check ([section 23](#23-open-verification-items) item
+1). `AUTO` picks the source as for every other dataset ([section 16](#16-historysourceauto)):
+the check, not a fixed source, keeps both sources on the same days.
+
+The refusal ends with what the caller can do instead, which each verb supplies: REST `history()`
+of 1-day bars names `source=dm.HistorySource.FLAT_FILES`, and for adjusted bars
+(`adjusted=True`, the stocks' and options' default) adds `adjusted=False`, since the files hold
+only as-traded prices and an explicit flat-file source refuses an adjusted request; REST
+`history()` of longer or multiplied bars, which no flat file holds, says to request 1-day bars;
+`fetch()` and `poll()` of `/prev` say to use `history()` for that day; an indicator says to
+compute it from `bars().history()` of the same timespan; the flat files name
+`source=dm.HistorySource.REST`, or, for `dm.ALL` of a dataset without a grouped-daily path
+(indices), passing explicit symbols to read REST. It asks for the stamp to be reported at the
+project's issue tracker.
+
+**Time columns.** Every market-data row says when it happened, which trading day it belongs to,
+and when the library received it (`_datasets/row_times.py`). `DatasetSpec.row_times`
+(`RowTimes`) says which columns a dataset has: `TICK` for every non-bar dataset in a kind
+(trades, quotes, index values, FMV, LULD, imbalances), `BAR` for the bars and the indicators,
+`DAY` for the daily open-close summaries, and `NONE` for the rest (snapshots, movers, reference,
+partner, and economy data). A declaration's default is the explicit member `BY_KIND`, which
+`DatasetSpec.times` resolves from the dataset's kind to one of the others. The columns come
+first, in the order `Symbol`, `Date`, `Timestamp` or `TimestampStart`, `TimestampEnd`, except
+`TimestampInsert`, which is last.
+
+- **`Timestamp`** is a tick's event time, Massive's own. A `NONE` dataset keeps a `Timestamp`
+  only where it declares a time key (`futures.schedules` and `futures.market_status` declare
+  their vendor `timestamp` as one, since the name is the library's).
+- **`TimestampStart`** is where a bar's window begins and **`TimestampEnd`** its exclusive end:
+  the first instant at which the window is closed. Joins key on the end
+  (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`), so an as-of join never attaches a
+  bar whose window is still open. The end is when the window closes, not when Massive published
+  the bar, and Massive may correct a bar afterwards. Bars have no plain `Timestamp`.
+- **`Date`** is the trading day, ISO `yyyy-MM-dd` text, stored as a column (not computed on
+  view): on every tick, bar, and daily-summary table, null on any bar that spans more than one
+  date. A `NONE` dataset has no library `Date` (snapshots included); a vendor field named
+  `date` there keeps its own column.
+- **`TimestampInsert`** is the local clock (`time.time_ns()`) when the REST page, flat-file
+  block, or WebSocket frame that carried the row arrived, the same for every row of one, on
+  every dataset and every transport. It is not monotonic and is not Massive's `ReceivedTimestamp`;
+  on `history()` rows it is the download time, and in a keyed `poll()` table the latest poll's.
+  It is never part of a row's identity.
+
+| Rows | `TimestampStart` | `TimestampEnd` | `Date` |
+|---|---|---|---|
+| Tick | (none: `Timestamp`) | (none) | the day zone's date of `Timestamp`; futures: `session_end_date` from REST and flat files, the WebSocket rule below on streams |
+| Intraday bar, n seconds, minutes, or hours | Massive's start | start + n units; a futures one-second WebSocket bar: the later of that and Massive's `e` | the start's date, null when the bar ends on a later date (it crosses midnight); futures: as ticks, null when the bar crosses 17:00 Chicago time |
+| 1-day bar | 00:00 of the day | 00:00 of the next day; indices 01:00 New York time (`dates.day_end`) | the day |
+| n-day, week, month, quarter, year bar | 00:00 of the window's first day: a week's Monday; for stocks and options a month's, quarter's, or year's first weekday; for indices its first calendar day | the end of the window's last day: n days count as trading days with the holiday allowance (`dates.last_trading_day`) for stocks, options, and indices; a stock or option period's last weekday; an index period's last calendar day, as an index can update around the clock; indices one hour later | null |
+| Futures session bar | Massive's `window_start` | 17:00 Chicago time on its session date | `session_end_date` |
+| Futures bar of several sessions | `window_start` | 17:00 Chicago time on the latest day its sessions can end on, counted from its start's session date plus one session (a folded first session opens before its holiday), with the holiday allowance (`dates.last_trading_day`), or on its label if that is later | null |
+| Futures week, month, quarter, year bar | `window_start` | 17:00 Chicago time on the last weekday of the latest period its label allows | null |
+| Daily open-close | 00:00 of its date | as a 1-day bar | its date (`from`, crypto `day`) |
+| Indicator value | the bar rule of the query's timespan, in the day zone of the symbol's class; a value of a day or longer is stamp-checked as that class's range bars | the same | the same |
+
+The ends of the index bars and of the futures bars of several periods are conservative: an index
+day bar is stamped at midnight in Chicago, and whether it covers the New York or the Chicago day
+is not verified ([section 23](#23-open-verification-items) item 52); Massive does not document
+whether a futures bar of several sessions, or a week or longer, is labelled with its first or
+its last session (item 40), so its end is the later of the two readings, and a holiday can move
+a session later. A 1-day index bar keeps its `Date` although its end is an hour into the next
+day. A stock, option, or index bar of several days counts trading days with the holiday
+allowance: whether Massive counts calendar or trading days is not documented ([section
+23](#23-open-verification-items) item 63), and trading days end later, so a 2-day bar from a
+Friday ends at 00:00 on Wednesday, after the Tuesday a Monday holiday would carry it into. A
+futures bar of several sessions counts its sessions the same way, from the session date of its
+`window_start`, plus one session: a first session a holiday folded opens on the evening before
+the holiday, so that date is the holiday itself (Christmas 2024 and 2025 for 5-session bars from
+12-26). The fixed four-day margin it replaces fell a full session short for a 17-session bar
+across Christmas, New Year, and Martin Luther King Day. An index week, month, quarter, or year
+ends after the calendar period's last day, since an index such as `I:AAVE100` updates at
+weekends too. The next midnight is always the calendar's next midnight in the zone, never 24
+hours later, so a day across a daylight-saving change keeps its true length. The library
+computes day boundaries with `zoneinfo`, once per distinct UTC day of a batch, and applies them
+with Arrow; Arrow's own time-zone database is not used.
+
+The vendor's own time fields feed these columns and are not kept beside them: the bar start
+(`t`, `s`, `window_start`) becomes `TimestampStart` (the `time` key), the WebSocket bars' `e`
+becomes `TimestampEnd` (the `end` key, recomputed), and the futures `session_end_date` and the
+open-close `from` and `day` become `Date` (the `date` key). Grouped daily's `{date}` needs no
+column: a 1-day bar's `Date` is the day its stamp falls on, which is that date.
+
+Joins on `Date`: a daily bar joined to another daily bar on `Date`, across symbols
+(`aapl.natural_join(spy, on=["Date"], joins=["SpyClose=Close"])`), is sound. Joining an
+intraday row to the same day's daily bar attaches values not known until that day ended
+(`minute.natural_join(daily, on=["Symbol", "Date"], joins=["DayClose=Close"])` is lookahead).
+A null `Date` matches another null in a join, so longer bars join on `TimestampEnd`. The
+descriptions of `Date` and `TimestampEnd` say so.
+
+**Futures dates on the WebSocket.** Massive's REST and flat-file futures rows carry their
+session; WebSocket futures messages carry none. The flush dates each streamed futures row by the
+rule the library uses everywhere, the session that ends at the next 17:00 Chicago time
+(`dates.futures_session` and `dates.weekday_on_or_after`, one constant, `FUTURES_SESSION_ROLL`,
+which the column form in `row_times` applies too, and a test checks the two agree; a Saturday's
+or Sunday's moves to Monday), and corrects it with the futures schedule calendar
+(`_ingest/futures_calendar.py`, `FuturesCalendar`, which reads the paths of the
+`futures.contracts` and `futures.schedules` datasets), since the rule is wrong after a holiday,
+which folds its trading into the next session and opens it days early, and for a product whose
+pre-open starts before 17:00 Chicago time (16:45 on CBOT). The calendar looks up each contract's
+product (`/futures/v1/contracts`, `ticker.any_of`) and each product's sessions from a week back
+to ten days ahead (`/futures/v1/schedules`, on every futures plan, records from 2025-03-17): one
+session per `session_end_date`, open from its first event (a pre-open or the open) to its last
+(the close). A row inside the session the rule gave it keeps it; a row the schedules place in
+another session moves there; a row between a close and the next session's first event keeps the
+rule's date. The calendar belongs to the connection group, since its connections serve every
+session of the group: it is created with the group's first futures connection and lives until
+the group's last session leaves. One worker thread makes every request, through the REST client
+of any session of the group still open (the contracts and schedules are the same for every
+session of the key), when a futures stream opens with explicit symbols, when a reactive table adds some, and
+when an unknown contract first streams (a `dm.ALL` stream's contracts are looked up as they
+arrive); the flush never waits on it. Only a single contract ticker is looked up, by the futures
+grammar of the symbols module (`symbols.is_futures_contract`); a spread or combination
+(`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`, `6A:XF:AUDUSD:Q6` in the vendor's files) is
+never looked up, since the contracts endpoint lists none and Massive documents no grammar that
+names their legs. Its rows keep the rule's date, which a holiday fold can make wrong, so the
+first rows of each spread log one WARNING. What is still loading keeps the rule's date silently
+for up to a minute (`LOAD_PATIENCE`), so a stream's start shows no error; a contract or product
+still not loaded a minute after it was first asked for (a stalled or rate-limited lookup) is a
+miss, "its schedule was not loaded after 60 s". A row the loaded schedules cannot place (past
+the last loaded session, a contract Massive's contracts do not list, a failed lookup) is a
+**miss** too: it keeps the rule's date, the miss is logged at ERROR once per product (or
+contract) and date, and the `Error` of every stream that receives the contract shows it in
+`m.streams()` until a later batch of the stream's rows all place; the stream keeps running. An
+answer the calendar cannot read, or any other failure of a lookup, is a miss of its contracts'
+rows too, and the worker carries on. A miss past the loaded sessions asks for a reload of its
+product, at most once per 10 minutes (`RELOAD_SPACING`, so a stream of misses never spends a
+Basic key's 5 requests a minute), and a product's sessions are reloaded once a day as the dates
+move on. Subscribing never waits on the calendar and never refuses a product it lacks.
+
+**Price adjustment.** Massive adjusts stock and option prices and volumes for splits (forward
+and reverse; whether it also adjusts for `stock_dividend` events is
+[section 23](#23-open-verification-items) item 56) when a request says `adjusted=true`, and never
+for cash dividends. Its flat files are "unadjusted… not adjusted for stock splits, dividends,
+or other corporate actions" (`vendor/massive/flat-files/stocks/overview.md`) and carry no
+factor; its WebSocket bars are as traded and never re-adjusted. Index, forex, crypto, and
+futures bars have no corporate actions and take no `adjusted`.
+
+- **One basis per `history()`.** With `adjusted=True`, the default of the stock and option bars
+  and daily open-close, a call is split-adjusted, as Massive stands at the time of the call,
+  and served by REST only: `AUTO` never chooses flat files for adjusted bars
+  (`_flat_file_problems`), and an explicit `FLAT_FILES` raises. With `adjusted=False` it is as
+  traded, from REST or the flat files. One call never splits its range across sources
+  ([section 16](#16-historysourceauto)).
+- **Every page is checked.** The aggregates (range, grouped daily, `/prev`) echo
+  `adjusted` on every response, `next_url` pages included (`Page.adjusted`). A page whose echo
+  differs from the request raises `MassiveError` naming both; a page without one logs a
+  WARNING once per dataset, path, and session. The indicators and daily open-close echo
+  nothing, so their basis cannot be checked; the indicators' `adjusted=None` default sends
+  nothing, and Massive's default is adjusted.
+- **What stays open, documented in every place below.** `bars(dm.ALL, MINUTE).history()` with
+  the default `adjusted=True` raises, since the flat files serve only `adjusted=False` and REST
+  needs explicit symbols; pass `adjusted=False`. A download of many requests that runs while
+  Massive applies a split overnight can mix bases, which nothing can detect. Live bars are as
+  traded, so `merge([history, live])` of adjusted history joins its live part seamlessly until
+  the next split's execution date (pre-market included: "on the execution date, all trading is
+  already adjusted"), and from then on the history is on the old basis: build it again after a
+  split. The jump at a split in a live table, or in such a merge, is the data, not an error.
+- **Adjusting as-traded data yourself.** The splits dataset gives each split's cumulative
+  `HistoricalAdjustmentFactor`; Massive's rule is "for a price on date D, find the first split
+  whose `execution_date` is after date D and multiply the unadjusted price by the
+  `historical_adjustment_factor`". Since `Date` and `ExecutionDate` are both ISO text, a
+  reverse as-of join does it: `bars.raj(splits, on=["Symbol", "Date<ExecutionDate"],
+  joins=["F=HistoricalAdjustmentFactor"])`, then `Close * F` and `Volume / F`, a null `F` (no
+  later split) meaning 1. A bar with a null `Date` (several days or longer) finds no match.
+- **Where it is documented.** `bars()` of stocks and options says all of it, and the other
+  classes' `bars()` say they are never adjusted; the `adjusted` argument; `history()` (the
+  guarantee and what stays open); the stream verbs (the jumps at splits); `splits()` (the
+  recipe); the description of every price and volume column of `stocks.bars`, `options.bars`,
+  and both daily open-close datasets, through a library note (`DatasetSpec.column_notes`), so
+  `columns()`, the tooltips, and the column reference show it; and the README's "Split
+  adjustment" section, whose examples run in `tests/test_readme.py`.
 
 **One-day parameters.** A dataset parameter that names one calendar day (`daily_open_close`'s
 `date`, `options.contracts`' `as_of`, `reference.tickers`' and `ticker_details`' `date`)
@@ -1865,7 +2445,7 @@ mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New Yor
     `ValueError`.
   - **Bars named by dates** are requested on `window_start` from the first session's regular
     open less `FUTURES_HOLIDAY_MARGIN` (4 days: the longest known fold, Good Friday's, opens
-    three days early) to 18:00 CT on the last session date, and kept by `SessionEndDate` as
+    three days early) to 18:00 CT on the last session date, and kept by their label as
     above. There is no probe for earlier sessions.
   - **Datetimes** are exact: `timestamp.gte`/`.lt` for trades and quotes, `window_start.gte`/
     `.lt` for bars, with the bars kept by their own window afterwards, since Massive may
@@ -1887,7 +2467,9 @@ mention, so `m.reference.news(symbols="X:BTCUSD", start=...)` asks for a New Yor
     table.
 
 **Long downloads.** Grouped daily (`dm.ALL` 1-day bars over REST) makes one request per day,
-skipping Saturdays and Sundays for stocks, options, and indices (forex and crypto keep them).
+skipping the days without trading (`dates.is_trading_day`): Saturdays and Sundays for stocks,
+options, and indices, Saturdays for forex, which trades from Sunday evening to Friday evening
+UTC; crypto keeps every day.
 A per-session or grouped-daily download of more than five requests first logs one INFO line
 with the number of requests and the minutes a Basic key's 5 requests a minute make it last
 (the first five go at once). A per-session download counts at least one request per session
@@ -1897,9 +2479,27 @@ and symbol, more where a session spans several pages, so its line says "at least
 
 ### 13.1 Invariants
 
-1. One connection per `wss://host/path` per session. A class may therefore have up to two
-   connections: one for the TICK family and one for the FMV family. (Business accounts have
-   three connection slots per cluster; individual plans have no FMV.)
+1. One connection per `wss://host/path` per API key and connection settings in a process,
+   shared by every session that has them ([section 6](#6-massivesession-and-lifecycle)). A
+   class may therefore have up to two connections: one for the TICK family and one for the
+   FMV family. (Business accounts have three connection slots per cluster; individual plans
+   have no FMV.) A shared connection is reference-counted by the streams of every session on
+   it: closing one session releases only that session's streams and never closes a connection
+   another session leases. Three consequences are by design:
+   - The options cap of [section 15](#15-options-contract-cap) is the connection's, so the
+     sessions on one `/options` connection share its 1,000 topics, and a static symbol list
+     can raise `ValueError` because of another session's streams; the message counts the
+     topics in use.
+   - A refusal or a fatal failure acts on the connection, not on a session: a refused topic
+     fails every stream that wants it, in every session, and a rejected key or a fatal
+     handshake error fails every stream on the connection, in every session.
+   - The server's real-time verdict moves the connection with every session's streams, and is
+     recorded in each such session's host decisions. The group keeps it by (class, family), so
+     a session of the group that never leased the moved connection takes the delayed host for
+     its first stream of the class too, records the verdict then, and never asks the
+     real-time host again.
+   Diagnostics stay per session: each session's `m.connections()` shows the rows of the
+   connections its streams use, and its `m.streams()` only its own streams.
 2. The host of a (class, family) is decided before its first connection, from configuration or
    REST evidence, and cached. The single exception is the explicit-verdict rule of
    [section 13.3](#133-connection-and-subscription-protocol), which acts on a server statement,
@@ -2049,9 +2649,9 @@ long-form column of the channel's `symbol` key (`None` when it declares none). T
 both across generations and hands them to the decoder, so a row missing one of those keys is a
 `Reject` carrying the row's raw symbol, while any other absent field becomes null. A channel
 with no entry has no required keys and no symbol. Wire symbols are never rewritten in
-`_massive`: `_ingest/ws.py` maps the raw values of rows and rejects to canonical symbols with
-`_datasets/symbols.py` when it routes them, and topics use the wire's own form, as the subscribe frames
-do. It
+`_massive`: the flush thread reads the rows' symbols with `WireSymbols` and `_ingest/ws.py`
+reads a reject's with `canonical_from_wire` (both in `_datasets/symbols.py`) when they route
+them, and topics use the wire's own form, as the subscribe frames do. It
 then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
 call order, at most 1,000 topics per frame (the frame-size limit is **UNVERIFIED**; the chunk
@@ -2092,7 +2692,7 @@ Responsibilities:
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
 | Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with `WireError(status=<http>)`, which the library turns into a `MassiveError` naming the HTTP status and the host |
 | Decode frames against `ws.json`; report rows, rejects, and drift | client |
-| Map raw wire symbols to canonical symbols (`_datasets/symbols.py`) when routing rows and rejects | library |
+| Read raw wire symbols as canonical symbols (`canonical_from_wire`, `WireSymbols` in `_datasets/symbols.py`) when routing rows and rejects; fail or keep an unreadable one (`unknown_symbols`) | library |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
@@ -2139,8 +2739,8 @@ Status(MAX_CONNECTIONS) after authentication
 no acknowledgement within ack_timeout, the topic still in S and W, same generation
    -> client.subscribe(generation, [topic]): that topic alone, once
 still none after another ack_timeout, same check
-   -> topic state NO_ACK; ERROR logged; the first NO_ACK of this topic in the session calls
-      client.reconnect(), so the backoff rules apply; a later NO_ACK of the same topic only
+   -> topic state NO_ACK; ERROR logged; the first NO_ACK of this topic on the cluster's
+      connections calls client.reconnect(), so the backoff rules apply; a later NO_ACK of the same topic only
       logs at ERROR and counts in NoAckTopics. The topic stays desired; streams never fail
       on it
 watchdog fires but its topic left S or W, or its generation is no longer current
@@ -2169,7 +2769,23 @@ server that goes silent before `auth_success` is cut off by the handshake timeou
 thread and does not wait: it cancels the client's task on its loop, which interrupts a backoff
 wait, a handshake, or a receive at once, and the socket, if open, is closed with code 1000. The
 client thread is a daemon; `m.close()` joins it with a bounded timeout and logs a WARNING if it
-has not ended.
+has not ended. `m.close()` closes only the connections no other session leases; on a shared
+one it removes the session's streams (their routes at once, their topics through the loop) and
+leaves the connection to the other sessions. Removing the routes also breaks the cycle between
+Python and Java that a stream's publisher, its shutdown callback, and the connection's routes
+would otherwise form. A connection's loop-confined state is never touched from another thread:
+the client's terminal state (`CLOSED` or `FAILED`), its last callback on the loop, clears the
+connection's streams, and a call posted after it is dropped or ignored, so a post that lands
+just before the loop closes cannot leave a stream behind. The flush thread clears the routes
+when it ends, after its final flush, which also lets go of the streams a verdict moved off the
+connection.
+
+**Waiting for a slot.** While a connection is `WAITING_SLOT`, every stream on it shows in its
+`Error`: "waiting for a WebSocket slot on <host><path>: another connection with this API key,
+perhaps from another process, holds it; the plan allows one connection per cluster". Sessions
+in one process share connections, so the other holder is another process, or a session whose
+connection settings differ. The text is cleared, and an options-cap warning shown again, once
+the connection authenticates.
 
 **Explicit-verdict rule.** When a `Status(REFUSED)` with no topic arrives on a `socket.` TICK
 connection with `realtime_verdict` set (its message contains "real-time", case-insensitive; the exact text is
@@ -2185,8 +2801,11 @@ Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` 
 decision of the pair and rewrites its `Transport=REST` row; log a WARNING; move the connection's
 streams to the delayed host's connection, which starts after the backoff; close the old one;
 and do not fail the streams. The streams' `m.streams()` rows show the new host. Since the pair
-then resolves to `DELAYED`, this happens at most once per (class, family) per session. In every other case the verdict is an
-`EntitlementError` for that step's streams.
+then resolves to `DELAYED`, this happens at most once per (class, family) per session. A step can
+be refused more than once: a step of more than 1,000 topics goes out in several subscribe frames,
+and each frame may be refused. A later verdict for a step whose connection is already moving is
+part of that move: it neither starts another move nor fails the streams. In every other case the
+verdict is an `EntitlementError` for that step's streams.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
 `error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
@@ -2220,9 +2839,17 @@ sees:
 - **A missing result key** in an envelope whose `status` is `OK` or `DELAYED` is an empty page
   (Massive omits `results` when a range has no data); with any other `status` it is an error, as
   above.
-- **Fan-out.** In a per-symbol `fetch()` or `poll()` cycle (`ticker_details`,
-  `daily_open_close` on a holiday, `/prev`, the "last" endpoints), an HTTP 404 for one symbol
-  drops that symbol, with one WARNING per symbol; every other error fails the call.
+- **Fan-out and missing symbols.** A symbol with no data returns no rows, never an error and
+  never an option: in a per-symbol request series (`ticker_details`, `daily_open_close` on a
+  holiday, `/prev`, the "last" endpoints, a symbol's `history()`), HTTP 404 on the first
+  request of a request series drops that series, with one WARNING per symbol and session (the
+  aggregates and tick endpoints answer an unknown ticker with an empty 200 instead, and a flat
+  file simply has no rows for it). "First request" means each series's own: futures trades and
+  quotes named by dates are one series per symbol and session, so a 404 on a later session,
+  after earlier sessions returned rows, drops only that session, with its own WARNING ("ESH5
+  has no data for the session 2025-01-22"), since a session can have no data. HTTP 404 on a
+  later page of one series means its data was cut short and raises `MassiveError` naming the
+  symbol, the path, and the pages received. Every other error fails the call.
 - **`poll()` cycles.** A cycle that raises `EntitlementError` or `AuthenticationError`, hits
   a data failure of [section 19.5](#195-runtime-drift) (a missing required key, an
   unconvertible value, a timestamp out of bounds, or a null or NaN `poll_keys` value, in every
@@ -2240,7 +2867,14 @@ sees:
 - **`adjusted`.** The bars `adjusted` flag travels in its own typed field, `Request.adjusted`,
   which the REST transport sends, when not None, as the `adjusted` query parameter (`true` or
   `false`); `params` never holds `adjusted` (`build_query` rejects it there), so a request for
-  unadjusted bars cannot silently fall back to Massive's adjusted default.
+  unadjusted bars cannot silently fall back to Massive's adjusted default. Each page of bars
+  sent with an explicit `adjusted` must echo it: a different echo raises `MassiveError`, and a
+  page without one logs a WARNING once per dataset, path, and session
+  ([section 12](#12-timestamp-units-and-day-boundaries), "Price adjustment").
+- **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`),
+  with `TimestampInsert` the instant the page arrived, after the stamps are checked and the rows
+  outside the window dropped. The day zone of each call follows its own symbols' class, so a
+  crypto indicator's `Date` is a UTC date and a stock indicator's a New York date.
 - Every error message names the HTTP status, the path, and the response's `request_id`, and is
   logged at ERROR with the same text; the API key never appears in a message or a log.
 
@@ -2298,16 +2932,18 @@ How a request is built from a `DatasetSpec` and a `Request`:
   instant pair `window_start.gte`/`window_start.lt` instead.
 - **Futures sessions.** Futures trades and quotes named by session dates are requested one
   weekday session at a time, `session_end_date=<date>` with no time window; futures bars named
-  by session dates are requested on `window_start` and kept by `SessionEndDate`
+  by session dates are requested on `window_start` and kept by their session label
   ([section 12](#12-timestamp-units-and-day-boundaries)). Grouped daily skips weekends for the
   classes that do not trade then. A per-session or grouped-daily download of more than five
   requests logs its request count (for sessions, "at least") and estimated minutes at a Basic
   key's 5 requests a minute, once, at INFO, before the first request.
-- **1-day stamps.** Forex and crypto 1-day bars, from `/prev`, the range, and grouped daily,
-  are stamped at 00:00 UTC of their day; a crypto 1-day stamp elsewhere in its UTC day than
-  its first or last millisecond, or a crypto bar of several days or longer not stamped at
-  00:00 UTC, raises `MassiveError` naming the path and `source=dm.HistorySource.FLAT_FILES`
-  ([section 12](#12-timestamp-units-and-day-boundaries)).
+- **Day stamps.** Bars of a day or longer from `/prev`, the range, and grouped daily, of every
+  class but futures, start at 00:00 of their day in the class day zone: each stamp
+  Massive is known to use for the class is moved there, and any other raises `MassiveError`
+  naming the path and the verb's way out (`source=dm.HistorySource.FLAT_FILES` for 1-day
+  `history()`, requesting 1-day bars for longer ones, `history()` for `fetch()` and `poll()`;
+  [section 12](#12-timestamp-units-and-day-boundaries)). Bars are stamped before `_keep` drops
+  the rows outside the window, so an unknown stamp outside it still raises.
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
   (250 on the unified snapshot, the indices snapshot, and the stocks, forex, and crypto
@@ -2331,8 +2967,10 @@ How a request is built from a `DatasetSpec` and a `Request`:
   detail path once per symbol when symbols are given and the list path when they are not. The choice follows from the spec's role
   paths, never from the dataset's name.
 - **Row symbols are canonical.** A `symbol` key read from the rows, not from the request,
-  goes through `canonical(spec.asset_class, value)`, exactly as WebSocket rows do, so forex
-  conversion's `AUD/USD` becomes `C:AUDUSD` and matches the symbol the caller passed.
+  goes through `WireSymbols` (`canonical_from_wire(spec.asset_class, value)`), exactly as
+  WebSocket rows do, so forex conversion's `AUD/USD` becomes `C:AUDUSD` and matches the symbol
+  the caller passed; a spelling it cannot read follows `unknown_symbols`
+  ([section 10](#10-symbols-and-all)).
 - **Error rows in multi-ticker snapshots.** A snapshot of several tickers answers a ticker it
   cannot serve (`NOT_FOUND`, `NOT_ENTITLED`) with a row carrying `error` and `message`.
   `snapshots()` keeps such rows, with their `Error` and `Message` columns, and logs each
@@ -2345,7 +2983,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   of canonical symbols, `ALL`, or `id(table)` for a reactive table. A second verb on the same
   query, or an equal query, reuses the stream: `m.stocks.quotes(s).last_by()` twice costs one
   publisher and two derived tables. A futures `venue` is not part of the key.
-- **Reactive symbol tables** are held strongly by the stream and managed in the stream scope.
+- **Reactive symbol tables** are held strongly by the stream and managed in the stream scope;
+  the stream's record also holds the watchlist listener strongly until the stream shuts down,
+  and a failed watchlist fails its stream ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)).
   Two Python wrappers of one Java table have different ids and do not share a stream.
 - **Library threads never create refreshing tables outside an explicit scope.** Refreshing
   tables are created only on the caller thread inside a result scope or a stream scope, and in
@@ -2365,8 +3005,12 @@ How a request is built from a `DatasetSpec` and a `Request`:
   ([section 7.4](#74-column-descriptions)).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
   row buffer once. The rows arrive keyed by long-form column; the flush renames them
-  (`rename` in `_datasets/schema.py`), converts them (`_datasets/timestamps.py`), and builds one Arrow batch in the dataset
-  schema. The timestamp bound is applied as a vectorized mask: rows that fail it fail only the
+  (`rename` in `_datasets/schema.py`), converts them (`_datasets/timestamps.py`), builds one
+  Arrow batch in the dataset schema, and fills its time columns (`row_times.TimeRule`), each
+  row's `TimestampInsert` the instant its frame arrived (each frame is buffered with that
+  instant) and a futures row's `Date` corrected by the connection group's schedule calendar
+  ([section 12](#12-timestamp-units-and-day-boundaries)); a schedule miss sets the `Error` of
+  the streams that receive the contract and fails nothing. The timestamp bound is applied as a vectorized mask: rows that fail it fail only the
   streams that would have received them ([section 19.5](#195-runtime-drift)) and are dropped
   from the batch. Rejected rows never enter a buffer. The batch is converted once with
   `deephaven.arrow.to_table`: one Python-to-Arrow-to-Java conversion per channel per flush.
@@ -2387,7 +3031,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - `TablePublisher.add` is safe from the flush thread: the Java side snapshots the static batch
   and guarantees non-interleaved adds. `on_flush_callback` is not used (it blocks the update
   cycle).
-- After its `add` calls, each flush reports to the session once:
+- After its `add` calls, each flush reports once to each session whose streams it published:
   `SessionCore.update_streams({stream_id: StreamUpdate(rows_published=..., ...)})`, where
   `StreamUpdate` is a frozen keyword-only record whose fields left as None keep their values.
   One short critical section under `registry_lock`, about 20 times a second per connection at
@@ -2395,7 +3039,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   (writing a row only once the stream has opened), ignores ids that have left it, and never
   changes `State` (only `fail_stream` does). An `error` there is a warning, and
   `StreamUpdate(clear_error=True)` sets `Error` back to null, for example once the options
-  contract cap no longer defers anything. `poll()` rows take their `StreamId` from the same
+  contract cap no longer defers anything. Neither touches the `Error` of a `FAILED` or `CLOSED`
+  row: the cause of a stop is final, so a flush or a poll cycle that races `close()` or a
+  failure never replaces it. `poll()` rows take their `StreamId` from the same
   allocator, `SessionCore.next_stream_id()`, so the two kinds never collide.
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
   whole URL on an entitlement error. A failed stream's key is unregistered at once
@@ -2414,16 +3060,19 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `blink_to_append_only(blink)`, fed only the rows whose identity (`poll_keys`, then
   `revision_keys`) the poller has not appended yet ([section 7](#7-query-classes-and-verbs)); the
   poller thread alone owns that set of identities, so it needs no lock, and adds a cycle's
-  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`, or
-`blink.select_distinct(poll_keys)` when they are every column (a `last_by` with nothing to
-aggregate is refused, and the distinct rows are what it would keep); `REPLACE`
+  identities only once the cycle is published; `UPSERT` is `blink.last_by(poll_keys)`, which
+  always has a column to aggregate, since every schema ends with `TimestampInsert` and no
+  dataset keys on it (so `reference.related_companies`, keyed on every vendor column, keeps
+  each distinct row with the time of the latest poll that returned it); `REPLACE`
   is that `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone
   row for every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`,
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
   every key ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a
   churning key set (an options chain, the day's movers) grows with the keys it has held. The
-  `poll()` docstring says so. The poller holds the session core only weakly, so a `poll()` table
-  never keeps an unclosed session alive.
+  `poll()` docstring says so. The poller holds the session core only weakly; the poll's record
+  in the session's registry keeps the session alive while the poll runs. The poller runs until
+  the poll's blink table shuts down (nothing uses the table any more), it fails, or the session
+  closes, which fails the table.
 
 ## 15. Options contract cap
 
@@ -2481,13 +3130,14 @@ flat-file only.
 The choice covers the whole range: one unpublished partition sends all of it to REST, and
 nothing is split between the sources. The partition dates are those of the rows the call keeps
 ([section 12](#12-timestamp-units-and-day-boundaries)): for bars, the days of the bars whose
-whole window fits, so the unfinished current day never needs a file. Crypto and forex 1-day bars
-follow the same rule as every other dataset: the two sources may serve one call or the next
-by symbol count or publication, and the loud UTC-cut check of
-[section 12](#12-timestamp-units-and-day-boundaries) keeps their data on the same UTC days. If
-live REST crypto bars turn out to be cut at midnight New York time, every REST crypto daily
-call raises loudly (the morning before yesterday's file is published included), and the
-owner decides the source rule after that live check ([section 23](#23-open-verification-items)
+whole window fits, so the unfinished current day never needs a file. Bars of a day or longer
+follow the same rule as every other dataset: the two sources may serve one call or the next by
+symbol count or publication, and the stamp check of
+[section 12](#12-timestamp-units-and-day-boundaries) stamps their bars alike and fails loudly on
+a stamp it does not know, so the choice never changes which day a bar is labelled with. If live
+REST crypto bars turn out to be cut at midnight New York time, every REST crypto daily call
+raises loudly (the morning before yesterday's file is published included), and the owner
+decides the source rule after that live check ([section 23](#23-open-verification-items)
 item 1). `source=` selects either source explicitly. A dataset without instruments counts as `ALL`.
 `HistoryQuery.history()` makes the choice (`choose_source` in `_datasets/history_source.py`) and then calls one
 transport; the transports only do I/O. The REST predicate depends only on the dataset's REST
@@ -2498,34 +3148,34 @@ An `AUTO` call logs its choice and the reason once, for example
 `stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`. Each
 transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>`
 (`skipped=none` when nothing was missing), the REST transport `source=REST requests=<n>`.
-Missing keys on non-trading dates are skipped. A missing weekday key logs a WARNING. The
-source choice has already required every partition to be past its `publish_time`, so a missing
-key for the last requested date is either late or a market holiday (there is no holiday
-calendar). Within one day after its `publish_time` it raises
-`MassiveError("<dataset>: <key> does not exist: <date> is not yet published (flat files land
-~11:00 ET next day), or was a market holiday")`. After that window it is treated as a holiday:
-a WARNING, and the date is skipped like any other missing weekday, so the rest of the range is
-returned. A futures range named by datetimes that ends on a holiday reads the next session's
-file, or raises, as [section 12](#12-timestamp-units-and-day-boundaries) describes. No data is
-no data: a range in which no file exists, whatever the reason (a weekend, a holiday, a range
-before the dataset's first file), returns an empty table with every column, and its missing
-weekdays log their WARNINGs as above. A missing file is a 404 whose body is S3's XML error
-with the code `NoSuchKey`. Any other 404 (another S3 code, no code, or a body that is not S3's,
-such as the HTML "Massive 404 Not Found" page Massive's front end serves for a path it does
-not route, which is what a wrong `s3_bucket` meets) raises `MassiveError` naming
-`s3://<bucket>/<key> at <endpoint>` and adding "check MassiveConfig s3_bucket and
-s3_endpoint_url": `cannot read s3://flatfile/<key> at https://files.massive.com: HTTP 404 (404:
-Not Found); check MassiveConfig s3_bucket and s3_endpoint_url`. A connection that drops
-part-way through a file's body makes the read start that file again from its first byte, at
-most `MAX_RETRIES` (3) more times, after the waits of the shared retry schedule (0.5, 1, 2 s
-plus jitter). The rows already read from that file are discarded, and freed before the wait,
-which is safe because no row leaves a file's read before the file ends. The last failure
-raises `MassiveError` naming the file. Futures
-`venue=None` reads four prefixes per date; a 403 on any prefix raises
-`EntitlementError` naming the venue and the `venue=` parameter. A 403 whose S3 error code says
-the credentials themselves are wrong (`InvalidAccessKeyId`, `SignatureDoesNotMatch`) raises
-`AuthenticationError` instead, for every asset class, naming `s3_access_key_id` and
-`s3_secret_access_key`.
+Missing keys on non-trading dates are skipped. A trading date is a weekday, a forex Sunday, or
+any crypto day, by the one test `dates.is_trading_day` that
+the REST transport's weekend skipping uses too. A missing key on a trading date logs a WARNING.
+The source choice has already required every partition to be past its `publish_time`, so a
+missing key for the last requested date is either late or a market holiday (there is no holiday
+calendar). Within one day after its `publish_time` it raises `MassiveError("<dataset>: <key>
+does not exist: <date> is not yet published (flat files land ~11:00 ET next day), or was a
+market holiday")`. After that window it is treated as a holiday: a WARNING, and the date is
+skipped like any other missing weekday, so the rest of the range is returned. A futures range
+named by datetimes that ends on a holiday reads the next session's file, or raises, as [section
+12](#12-timestamp-units-and-day-boundaries) describes. No data is no data: a range in which no
+file exists, whatever the reason (a weekend, a holiday, a range before the dataset's first
+file), returns an empty table with every column, and its missing weekdays log their WARNINGs as
+above. A missing file is a 404 whose body is S3's XML error with the code `NoSuchKey`. Any other
+404 (another S3 code, no code, or a body that is not S3's, such as the HTML "Massive 404 Not
+Found" page Massive's front end serves for a path it does not route, which is what a wrong
+`s3_bucket` meets) raises `MassiveError` naming `s3://<bucket>/<key> at <endpoint>` and adding
+"check MassiveConfig s3_bucket and s3_endpoint_url": `cannot read s3://flatfile/<key> at
+https://files.massive.com: HTTP 404 (404: Not Found); check MassiveConfig s3_bucket and
+s3_endpoint_url`. A connection that drops part-way through a file's body makes the read start
+that file again from its first byte, at most `MAX_RETRIES` (3) more times, after the waits of
+the shared retry schedule (0.5, 1, 2 s plus jitter). The rows already read from that file are
+discarded, and freed before the wait, which is safe because no row leaves a file's read before
+the file ends. The last failure raises `MassiveError` naming the file. Futures `venue=None`
+reads four prefixes per date; a 403 on any prefix raises `EntitlementError` naming the venue and
+the `venue=` parameter. A 403 whose S3 error code says the credentials themselves are wrong
+(`InvalidAccessKeyId`, `SignatureDoesNotMatch`) raises `AuthenticationError` instead, for every
+asset class, naming `s3_access_key_id` and `s3_secret_access_key`.
 
 Flat files are read through `_massive.FlatFileClient` and `FlatFile`
 ([section 19.3](#193-the-flat-file-client)); `_ingest/flatfiles.py` builds each file's `ReadPlan`.
@@ -2545,8 +3195,9 @@ to nanoseconds (for bars, the starts of the bars whose whole window fits; not ap
 futures trades, quotes, and session bars named by date, whose files hold exactly the requested
 sessions), and, on the surviving rows only, the rename to long-form names and
 parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
-`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine, and moves forex
-and crypto 1-day bar stamps to 00:00 UTC (`timestamps.utc_day_stamps`). No block is converted
+`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine, and moves each
+1-day bar's stamp to 00:00 of its day in the class day zone, refusing a stamp it does not know
+(`timestamps.day_starts`). No block is converted
 to Python objects. A
 file's surviving rows become one static Deephaven table per 16 blocks of data and at the end of
 the file (usually one table per file, since each table carries a fixed JVM-heap cost), and the
@@ -2570,7 +3221,10 @@ whatever that request returned.
 ## 17. Diagnostics
 
 Both tables are keyed `input_table`s. They live in one session-owned `LivenessScope` that
-`m.close()` releases. They are written by one diagnostics writer thread per session, which
+`m.close()` releases. `m.connections()` and `m.streams()` each return a new view of one of
+them, built in its own result scope and tracked like any live result: while the view is held it
+keeps the session alive and current, and after `close()` it keeps showing the final rows. They
+are written by one diagnostics writer thread per session, which
 applies immutable row snapshots from a queue in order; other threads only enqueue, never wait on
 the update graph for diagnostics, and never write from UG callbacks. Each time it wakes, the
 writer takes everything queued, keeps the latest row per key, and applies it with one `add` per
@@ -2588,9 +3242,10 @@ table, so the queue stays bounded however fast rows arrive.
 | `Recency` | `REALTIME`, `DELAYED`, `UNKNOWN` |
 | `Evidence` | the evidence string of [section 13.2](#132-host-decision) |
 | `State` | `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`, `FAILED`, `CLOSED` |
-| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts |
+| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts; rewritten after every frame of acknowledgements and refusals and every `NO_ACK`, also while a subscription step is in flight |
+| `BufferedRows` | WebSocket connections only (0 on `REST` rows): rows received that no flush of the connection has taken yet; every family row of a connection shows the same count. The row is rewritten at least once a second while the count is above zero. Rows are never dropped; above `BACKLOG_WARNING_ROWS` (1,000,000) a WARNING says the flushes are falling behind, logged again only after the backlog has fallen below half of it |
 | `Reconnects` | count |
-| `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
+| `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
 | `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra) and `channel:field-` (missing), sorted, truncated at 200 characters |
 
@@ -2599,9 +3254,8 @@ every change until the stream leaves the registry (its holds released and its bl
 down), so a released stream still kept alive by a derived table keeps reporting
 `RowsPublished` and a late failure; its last row (`RELEASED`, or `FAILED` if the stream failed)
 stays in the table while the session is open. At `m.close()` every stream
-still in the registry is written `CLOSED` and then
-the diagnostics scope is released, so those `CLOSED` rows are readable only through a table the
-caller kept alive in a liveness scope of their own.
+still in the registry is written `CLOSED`, with the close's error text, and then
+the diagnostics scope is released; a view obtained before the close keeps showing those rows.
 
 | Column | Meaning |
 |---|---|
@@ -2614,13 +3268,26 @@ caller kept alive in a liveness scope of their own.
 | `RowsPublished` | count |
 | `RequestsPerCycle` | `poll()` fan-out |
 | `State` | `RUNNING`, `FAILED`, `RELEASED`, `CLOSED` |
-| `Error` | text |
+| `Error` | text; also a futures stream's schedule miss, a warning that leaves it `RUNNING` ([section 12](#12-timestamp-units-and-day-boundaries)) |
 | `CreatedAt` | `Instant` |
 | `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra) and `transport:field-` (missing), sorted, truncated at 200 characters |
 
 `RELEASED` means "no library-held results; still publishing until the blink table dies"
 ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). `FAILED` can follow `RUNNING`
-or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released.
+or `RELEASED`; a failed stream's row keeps `FAILED` when its last result is released. `CLOSED`
+is final: no later failure replaces it.
+
+`Error` also carries warnings that do not fail the stream: the options cap's deferral
+([section 15](#15-options-contract-cap)) and the wait for a WebSocket slot
+([section 13.3](#133-connection-and-subscription-protocol)).
+
+Two symbol failures show in `Error` with their own text: a later row of a stream's or poll's
+symbol table that is not Massive's exact ticker (`a symbol table holds 'msft' (...). Fix the
+row, or pass the table through dm.canonicalize_symbols(table, dm.AssetClass.STOCKS,
+on_error=dm.OnError.NULL), ...`), and, under `UnknownSymbols.FAIL`, a symbol Massive sent in a
+spelling the library cannot read (`stocks.trades: Massive sent the symbol 'BRK/B', ... Set
+MASSIVE_UNKNOWN_SYMBOLS=warn, ...`). Under `WARN` an unreadable spelling is logged once at
+WARNING and never shown here.
 
 `SchemaDrift` is separate from `Error` and `LastError`, so drift never overwrites a failure. The
 session's `DriftRegistry` collects it ([section 19.5](#195-runtime-drift)). Static verbs
@@ -2670,14 +3337,17 @@ format is `%(asctime)sZ %(levelname)s [%(threadName)s] %(name)s: %(message)s` wi
 still see every record; Deephaven installs no root handler, so nothing is printed twice. There
 is no queue, rotation, JSON, custom field, or context variable: each line costs one locked write.
 
-**Correlation.** Every library thread is named `massive #<session> <role>`: `reaper`,
-`diagnostics`, `ws <host>/<cluster>`, `flush <host>/<cluster>`, `start <host>/<cluster>`,
-`move <host>/<cluster>`, `poll-<stream id>` and its pool `poll-<stream id> rest_<n>`. Each static
+**Correlation.** Every library thread is named after what owns it. A session's own threads are
+`massive #<session> <role>`: `reaper`, `diagnostics`, `poll-<stream id>` and its pool
+`poll-<stream id> rest_<n>`, `crypto pairs`, and the call pools below. The threads of a
+connection group, which serve every session sharing its connections, are
+`massive group #<group> <role>`: `ws <host>/<cluster>`, `flush <host>/<cluster>`,
+`start <host>/<cluster>`, `move <host>/<cluster>`, and `futures schedules`. Each static
 verb (`fetch()`, `history()`) is one call: it takes an id from the stream-id counter, so call
 ids never collide with the `StreamId`s of `m.streams()`, logs `call <id> start: <query>.<verb>`
 and then `call <id> done: <rows> rows in <s> s` or `call <id> failed after <s> s: <error>` at
 DEBUG, and its worker threads are `call-<id> rest_<n>` or `call-<id> files_<n>`. The wire
-clients cannot see the session, so `WsClient` takes the prefix as a constructor argument.
+clients cannot see the group, so `WsClient` takes the prefix as a constructor argument.
 
 **The environment line.** Each time the log is turned on, by a variable or by the function,
 it logs one INFO line describing the process: the library's version; Python's, with whether
@@ -2732,22 +3402,25 @@ without the GIL.
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every lock) | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
-| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
+| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under the connection group's lock; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
+| futures schedules, one per connection group with a futures stream (`FuturesCalendar`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the REST client of any session of the group still open; swaps in each new map whole under its leaf lock; closed when the group's last session leaves | call Deephaven; hold its lock while it waits on the network |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |
+| reaper, one per session | library | `scope.release()`; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
-| UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker | Deephaven table operations; blocking I/O; waiting on library threads |
-| Java-originated (shutdown callback, UI export release) | Deephaven | `SessionCore.stream_shut_down` (under the registry lock: unmaps the key; deletes the record, or marks it for the last hold to delete); `call_soon_threadsafe` | sends; JVM calls; blocking |
+| crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (a REST request, once per session) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
+| UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
+| Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.poll_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
-Every thread and pool the library creates is named `massive #<session> <role>`, so each log line
-names its session and its call or stream ([section 17.1](#171-the-log)); `tests/test_layout.py`
+Every thread and pool the library creates is named `massive #<session> <role>`, or
+`massive group #<group> <role>` for a connection group's, so each log line names its session or
+group and its call or stream ([section 17.1](#171-the-log)); `tests/test_layout.py`
 checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor` a prefix.
 
 ### 18.2 Shared state and ownership
 
-- `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry: streams
-  by key, results by id, connections by URL, topic reference counts. It is a
+- `SessionCore.registry_lock` (a `threading.RLock`) guards every mutable registry of a
+  session: streams by key, results by id, polls, diagnostics holds. It is a
   **leaf lock**: no Deephaven call, no network call, no blocking wait, and no wait on a
   `call_soon_threadsafe` result while holding it. Per-stream state is a frozen dataclass replaced
   atomically under the lock; readers copy references out and release the lock before working.
@@ -2756,11 +3429,21 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
   - each connection's **flush lock** serializes its flushes (the flush thread's, and any a test
     calls); a flush calls Deephaven under it;
   - each stream's **publish lock** serializes `publisher.add` and `publish_failure` for the
-    stream, which two flush threads can briefly share when a connection moves, and the caller
-    thread when a stream's connection failed while it opened. Failing a stream takes
+    stream, which two flush threads can briefly share when a connection moves, the caller
+    thread when a stream's connection failed while it opened, the closing thread at
+    `m.close()`, and the reaper when a stream's watchlist failed. Failing a stream takes
     `registry_lock` under it (`SessionCore.fail_stream`).
+- The WebSocket connections shared by the sessions of one API key and settings have their own
+  lock (a `threading.RLock`, one per group of sessions), which guards the connections by URL,
+  the connection of each stream, each connection's leases and sessions, its failure, and its
+  options-cap bookkeeping. It is a leaf lock like `registry_lock`, and the two are never held
+  together.
 - The other locks are leaf locks too, each guarding one thing and making no Deephaven,
   network, or blocking call while held:
+  - the live set of session cores ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)),
+    taken only under `registry_lock`;
+  - the process's registry of shared connection groups, taken to find or create a group when
+    a session opens its first stream and to drop it when its last session leaves;
   - the REST transport's host-decision cache, which holds one future per (class, family);
     callers wait on a future outside every lock (§ 13.2);
   - `FlatFileClient`'s lock, one per session, which guards the creation and the close of the
@@ -2772,7 +3455,12 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
   - the `_massive.spec` loaders, which load each generated file once;
   - `RestClient`'s not-before instant (section 19.1);
   - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;
-  - the `dataset_schema` cache of the `Catalog`.
+  - the `dataset_schema` cache of the `Catalog`;
+  - the futures schedule calendar's lock, one per connection group, which guards its immutable maps of
+    contracts to products and products to sessions, replaced whole by its worker; the flush
+    thread and the update-graph thread of a watchlist change only read them and queue work.
+    A condition on the same lock counts the lookups served, for `wait_idle`, which tests call
+    and no flush or update-graph thread ever does.
 - Per-connection mutable state (desired, acknowledged, and pending sets; the in-flight step;
   watchdogs; the `WsClient` and its socket) is **loop-confined**: only the connection's client
   thread touches it. Other threads reach it through `loop.call_soon_threadsafe` with plain data
@@ -2787,8 +3475,9 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
 - Row buffers are one `queue.SimpleQueue` per (connection, channel). The WS thread is the only
   producer; the flush thread is the only consumer.
 - The reaper queue is a `queue.SimpleQueue`. The producers are the result finalizers,
-  `m.release`, and the collection finalizer of an unclosed session (`_collect_session`);
-  `m.close` runs its closers on the calling thread and queues nothing.
+  `m.release`, the collection finalizer of an unclosed session (`_collect_session`), the
+  shutdown callbacks (a watchlist listener's stop), a failed watchlist listener, and the live
+  set (a core's final release); `m.close` runs its closers on the calling thread.
 - No code relies on the atomicity of `dict`, `set`, or `list` operations. Every shared container
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
@@ -2812,11 +3501,27 @@ The WebSocket flush adds two locks above `registry_lock`: a connection's **flush
 stream's **publish lock**, then `registry_lock`. Nothing takes the flush or the publish lock
 while holding `registry_lock` or the UG lock, so the order has no cycle.
 
+Two leaf locks complete the order. The **live set's lock** is taken only under
+`registry_lock`, never the other way round. A **connection group's lock** (the registries of
+the WebSocket connections that sessions with one key share) is a leaf of its own: a watchlist
+listener takes it on a UG thread, so the order there is UG lock, then the group's lock; it is
+never held together with `registry_lock`, and nothing blocks, sends, or calls Deephaven under
+it.
+
+`m.close()` takes the shared UG lock once, last, after every closer has run and the diagnostics
+are released, with no library lock held, so a held `m.streams()` view reads the final rows as
+it returns. It never runs on a UG thread or under the UG lock (it raises `ValueError` there).
+The wait lasts as long as the current update cycle, without bound if a cycle hangs; a caller
+holding a lock of its own that a listener needs waits as it would on any auto-locking
+`t.snapshot()`.
+
 ### 18.4 Free-threaded specifics
 
 `PYTHON_GIL=0` jobs run the full suite, including the Deephaven integration tests (the embedded
 JVM starts in `pytest_configure`). Stress tests exercise concurrent subscribe and unsubscribe
-from 16 threads against a fake server, concurrent `release()` and verb calls, and 16 threads
+from 16 threads against a fake server, concurrent `release()` and verb calls, 16 threads
+opening and releasing results of two sessions on one shared connection while one of them
+closes, and 16 threads
 paging through one `RestClient` against the fake REST server (including a 429 with
 `Retry-After` and a reset in the middle of paging). The only free-threaded target is 3.14t,
 because pyarrow, numpy, and pandas no longer publish cp313t wheels. Wheel availability on 3.14t:
@@ -2828,6 +3533,21 @@ the standard-library codec is the default. `PythonDeephavenSession.setVariable` 
 comment "relying on the GIL being kind to us"; the library never mutates script globals, so this
 does not affect it, but it is why the Deephaven integration tests must run on the free-threaded
 builds rather than unit tests alone.
+
+**Deferred frees across threads.** A free-threaded build counts references with biased
+reference counting: a reference dropped on a thread other than the one that created the
+referencing object's count is queued to that object's creating thread, which merges it only
+when it next runs Python code, or when a cyclic collection runs. The creating thread is often
+the user's (the core), but can be a library or a Java thread (a record version the reaper or a
+shutdown callback made). So when the last reference to a core goes on another thread, the core
+is freed, and its connections, clients, and threads close, only once that creating thread next
+runs Python code, or at the next cyclic collection, whichever comes first; in a console whose
+commands run on the thread that created the session, that is the next command. A thread
+blocked in a C call such as `Thread.join()` or `Event.wait()` merges nothing. This is a
+property of the runtime, not a race: nothing is lost, only delayed, and `m.close()` stays
+immediate. The library keeps the delay short by holding a core strongly only from the live
+set and the user's objects. Tests that wait for a session to be freed therefore poll in Python,
+never inside one C-level wait.
 
 ## 19. Wire clients and the spec snapshot
 
@@ -3414,7 +4134,8 @@ verification, never a column list.
 joins: `long ⊔ double = double`; `long ⊔ int-array = int-array` (a scalar becomes a
 one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. Any other pair is a
 **type conflict** (the `type-agreement` gate). `_datasets/schema.py` maps `long` to `long`, `double` to
-`double`, `bool` to `boolean`, `string` and `json-text` to `String`, `date` to `LocalDate`, `epoch` and
+`double`, `bool` to `boolean`, `string`, `json-text`, and `date` to `String` (a date as ISO
+`yyyy-MM-dd` text), `epoch` and
 `iso-instant` to `Instant`, and `int-array` to `int[]`. An `iso-instant` is ISO-8601
 date-time text with seconds and an offset (`Z` or `±HH:MM`), decoded to exact integer
 nanoseconds since the epoch; text without an offset, or an instant outside the signed
@@ -3462,10 +4183,15 @@ per-column exceptions:
    snapshot's `min` is the object `/v3/snapshot` and the futures snapshot call `last_minute`),
    `lastQuote.P` → `LastQuoteAskPrice`.
 5. **Dataset keys.** The only renames on top of rules 1–4 are each dataset's declared key
-   columns, `Symbol`, `Timestamp`, and `Underlying`, made by the run-time key rename. A vendor
-   field literally named `symbol` (the open-close and conversion paths) is generated as
-   `Symbol`, its own name, and the key rename uses it as is; `NAMES` may never coin a key column
-   (the `column-collision` gate). There are no `Ticker` or `Pair` stand-ins.
+   columns, `Symbol`, `Timestamp` (a bar's `TimestampStart`), `TimestampEnd`, `Underlying`, and
+   `Date`, made by the run-time key rename. A vendor field literally named `symbol` (the
+   open-close and conversion paths) is generated as `Symbol`, its own name, and the key rename
+   uses it as is. The library owns `Timestamp`, every `Timestamp<Qualifier>`, and, on tick, bar,
+   and daily-summary datasets, `Date`: `NAMES` may never coin one (the `column-collision` gate,
+   `naming.is_key_column`), and a catalog test requires every such column of a dataset to come
+   from a declared key or from the library's time columns, never from a vendor field that merely
+   carries the name. The test lives with the catalog because the roles are declared in
+   `_datasets`, which `_massive` cannot import. There are no `Ticker` or `Pair` stand-ins.
 6. **Order.** Columns keep the vendor's natural order, recorded explicitly in each generated
    file's field lists. Massive's REST documentation lists every object's fields
    alphabetically (the specification's keys, its pages' response-attribute tables, and their
@@ -3501,7 +4227,8 @@ description for the reviewer. Every gate has a descriptive name, which is how th
 - **`short-key`:** a short key (three characters or fewer, no underscore) with no lexicon,
   identity, or `NAMES` entry;
 - **`column-collision`:** two keys of one source producing one column, or a `NAMES` entry
-  coining a dataset key column (`Symbol`, `Timestamp`, `Underlying`);
+  coining a library column (`Symbol`, `Underlying`, `Date`, `Timestamp`, or any
+  `Timestamp<Qualifier>`);
 - **`timestamp-unit`:** a timestamp-like field left to a default. It runs on the snake case of
   the long name, after the lexicon and `NAMES` (so `serverTime` is `server_time`): a field is
   timestamp-like when it has a unit tag, a doc type of `timestamp - integer`, or a long name
@@ -3743,7 +4470,7 @@ text, so `1`, `1.0`, and `true` are three samples.
 **Keys are declared per source.** For each source it uses, a `DatasetSpec` declares its key
 columns as `KeySpec(column, from_request=False, instrument=True, required=True)`, grouped
 per source in a
-`SourceKeys`, one optional declaration per role (`symbol`, `time`, `fanout`, `session`):
+`SourceKeys`, one optional declaration per role (`symbol`, `time`, `end`, `fanout`, `date`):
 
 - every source of a dataset in a kind declares `symbol` and `time`;
 - every source of any other instrument dataset declares `symbol`. A dataset is an instrument
@@ -3761,9 +4488,16 @@ per source in a
   and `benzinga.firms` declare none, and `economy.*` declares none either: it keeps its `Date`
   column (its axis is `time_axis` on `date`);
 - a `time` key is an instant: its field (after the projection) is an `epoch` or an
-  `iso-instant`, so `Timestamp` is always an `Instant`. A dataset whose row time is a
-  calendar date keeps that `LocalDate` column under its own name and declares no `time` key;
-- `fanout` and (futures) `session` are declared only on the sources that carry them;
+  `iso-instant`, so `Timestamp` (a bar's `TimestampStart`) is always an `Instant`; so is an
+  `end` key, the WebSocket bars' `e`, which becomes `TimestampEnd`. A dataset whose row time is a
+  calendar date keeps that date column, ISO text, under its own name and declares no `time`
+  key;
+- a `date` key is a `date` field, the row's trading day as the source sends it (the futures
+  `session_end_date`, the open-close `from` and crypto `day`), and becomes `Date`; only a
+  dataset whose rows have a `Date` (`row_times` other than `NONE`) declares one, and a daily
+  summary (`DAY`) declares one on every source;
+- `fanout`, `date`, and `end` are declared only on the sources that carry them; only a bars
+  dataset declares `end`;
 - `instrument` says whether a `fanout` key names an instrument: True, the default, renames it
   to `Underlying` (the options underlying, the related company asked about); False keeps its
   generated column (`filer_cik` stays `FilerCik`). Only a `fanout` key may set it False, and
@@ -3774,8 +4508,8 @@ per source in a
   `ratings`, `bulls_bears_say`, `guidance`, and `earnings` (whose only documented
   analyst-insights row has no `ticker`): a row without it keeps a null `Symbol` instead of
   failing the request as a missing required key. Only a `symbol` key read from a REST path's rows may set it
-  False; flat files and streams filter and route rows by symbol, and the `time`, `fanout`,
-  and `session` keys are always required. A dataset with an optional symbol key cannot put
+  False; flat files and streams filter and route rows by symbol, and the `time`, `end`,
+  `fanout`, and `date` keys are always required. A dataset with an optional symbol key cannot put
   `Symbol` in its `poll_keys`, whatever its mode (`DatasetSpec` refuses it): a row without a
   symbol would have a null poll key, which fails the `poll()` table in every mode, so such a
   dataset declares other `poll_keys`.
@@ -3809,7 +4543,7 @@ a description right for it when the rules below pick one. Each field's descripti
 rules is the one for the dataset's asset class, `Field.description_for(spec.asset_class)`: a
 source that serves several classes may carry a per-class correction (`options.snapshots`
 shows the options text of the unified snapshot's last trade, as `options.chain` does), and
-a dataset with no asset class takes the field's own description.
+a dataset of `ClassFromPrefix.ANY` takes the field's own description.
 
 1. **A column the dataset's own sources supply** takes the first non-empty description among
    them, trying the transports in the order REST, flat files, WebSocket and, within one
@@ -3819,11 +4553,19 @@ a dataset with no asset class takes the field's own description.
    supplies, gets generated library text naming the members that do, in member order:
    `` Always null for `crypto.trades`; supplied by `stocks.trades`. `` (crypto's
    `ParticipantTimestamp` and `Tape`, for example).
-3. **`Symbol`, `Timestamp`, and `Underlying`**, when they are declared key columns of the
-   dataset, get a fixed library sentence ("The instrument,
-   in the library's canonical symbol form.", "The row's primary time, as an Instant.", "The
-   underlying instrument, in the library's canonical symbol form."), followed by one sentence
-   that starts "From" and lists, per transport in the order of rule 1 and spelled as in
+3. **The library's own columns**: `Symbol`, `Timestamp`, and `Underlying` when they are
+   declared key columns of the dataset, and the time columns the library fills (`Date`,
+   `TimestampStart`, `TimestampEnd`, `TimestampInsert`), get a library sentence ("The
+   instrument, in the library's canonical symbol form.", "The row's primary time, as an
+   Instant.", "The instrument Massive links the row to, exactly as Massive sends it; for an
+   option, the linked instrument, not what the contract delivers."; a bar's
+   `TimestampStart` "The start of the bar's window, as an Instant." and, for every class with a
+   day zone, where a bar of a day or longer starts, since the library's start is not the
+   end-of-day stamp some sources' descriptions quote; `TimestampEnd`, `Date`, and
+   `TimestampInsert` what [section 12](#12-timestamp-units-and-day-boundaries) says of them for
+   the dataset's row times and class, the join caveats included). The key columns, `Date`, and
+   `TimestampStart` go on with one
+   sentence that starts "From" and lists, per transport in the order of rule 1 and spelled as in
    [section 7.4](#74-column-descriptions), the wire key each source renames and its quoted
    field description (`` REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp…" ``)
    or, for a key filled from the request, the request parameter it came from
@@ -3833,9 +4575,25 @@ a dataset with no asset class takes the field's own description.
    `` The instrument, in the library's canonical symbol form. From REST `T`: "…"; flat files
    `ticker`: "…"; WebSocket `sym`: "The ticker symbol for the given stock." ``
 
-A column whose sources carry no description gets `""`, and nothing fails. The sentences of
-rules 2 and 3 are the library's statements about its own columns, not hand input about Massive,
-so they live in `_datasets/schema.py`, not in `refresh/`. Every outlet of
+A library column lists every transport of the dataset in `supplied_by`, since the library
+fills it on each. A dataset's note on a column (`DatasetSpec.column_notes`) follows the
+description chosen by these rules: the split-adjustment note of every price and volume column
+of `stocks.bars`, `options.bars`, and both daily open-close datasets
+([section 12](#12-timestamp-units-and-day-boundaries), "Price adjustment"), since the same column
+holds either basis depending on the query and no vendor text says so. A column whose sources
+carry no description gets `""`, and nothing fails. The sentences of rules 2 and 3 and the notes
+are the library's statements about its own columns, not hand input about Massive,
+so they live in `_datasets/schema.py`, not in `refresh/`.
+
+**Derived columns.** Two columns no source carries are computed by every transport from the
+symbols it reads, and follow the leading key columns with the library's own description and
+the transports and wire keys of `Symbol`: `OptionRoot`, on every options dataset with a
+`Symbol`, is the symbol without `O:` and its last 15 characters (`symbols.option_roots`, after
+the OCC grammar check); `RawSymbol`, only in a session whose `unknown_symbols` is `WARN` and
+only on a dataset that reads its symbol from rows, holds the text of a symbol the library could
+not read and is null elsewhere. `Catalog.dataset_schema(spec, raw_symbol=...)` caches each
+shape, and `SessionCore.dataset_schema` picks the session's, so a result, its `columns()`, and
+every transport plan agree. Every outlet of
 [section 7.4](#74-column-descriptions) reads these `Column`s and nothing else.
 
 **Catalog gates** (`tests/datasets/test_catalog.py`, with negative tests on synthetic `DatasetSpec`s):
@@ -3896,6 +4654,7 @@ routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/strea
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
+| **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `UnknownSymbols.FAIL`, the default, a loud failure whose message names the switch; under `WARN`, the row is kept with a null `Symbol` and the text in `RawSymbol`, WARNING once per spelling (at most 100). |
 
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
 `MassiveError` through `from_wire`; `poll()` fails its table through `publish_failure`; a
@@ -3984,8 +4743,33 @@ refresh gate and the catalog gates. What each change does:
 
 ## 20. Quality gates
 
-Every change must pass `scripts/check.sh full`, and every CI job including the free-threaded
-3.14t job. The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
+Every change must pass `scripts/check.sh full`, and every CI job the change selects, the
+free-threaded 3.14t job included whenever the tests run; `ci-ok` is the required check that
+enforces it. A pull request into `main` runs only the CI jobs its changed files can affect, read
+from the diff between `main` and GitHub's merge of the pull request (a renamed file counts under
+both paths):
+
+- **Always:** the lint job, which lists the changed files and decides, and `ci-ok`, the single
+  required check. `ci-ok` passes only when the lint job passed, each decision is exactly true or
+  false, every job the change selected passed, and every other job was skipped.
+- **Lint** (ruff, mypy, pyright): a file under `src/`, `tests/`, or `scripts/`, or
+  `pyproject.toml`.
+- **Tests** (the whole matrix, 3.14t and the lowest-direct job included): a file under `src/`,
+  `tests/`, `scripts/`, `vendor/`, or `docs/datasets/`, or `pyproject.toml` or `.gitattributes`.
+- **Build** (the sdist, the wheel, and the installed-wheel check): a file under `src/`,
+  `tests/`, or `docs/datasets/`, or `scripts/check_wheel.py`, `pyproject.toml`, `README.md`,
+  `LICENSE`, `.gitattributes`, or `.gitignore`.
+- **Nothing beyond the decision:** files no job reads: `plans/`, `docs/dev/`,
+  `docs/live-tests.md`, `AGENTS.md`, `.claude/`, the pull request and issue templates,
+  `.github/dependabot.yml`, and `.pre-commit-config.yaml`.
+- **Everything:** a change under `.github/workflows/` or `.github/actions/`; any changed path
+  that matches none of the lists above, so a new input (a tool's configuration file at the
+  root, a new directory, a name git must quote) fails closed until a rule covers it; a pull
+  request into a branch other than `main`; every push to `main`; and a weekly scheduled run, so
+  a dependency release that breaks the library is caught within a week even when nothing
+  reaches `main`.
+
+The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
 
 - **Coverage:** 100% statement and branch coverage. `pragma: no cover` needs a written reason
   and owner approval.
@@ -3994,7 +4778,8 @@ Every change must pass `scripts/check.sh full`, and every CI job including the f
 - **Mypy:** `strict` plus `warn_unreachable` and the extra error codes; the only override is
   `ignore_missing_imports` for `pyarrow.*`. Pyright runs as a non-gating second checker.
 - **Pytest 9:** `strict = true`, `filterwarnings = ["error"]`, `--import-mode=importlib`,
-  deadlock detection through `faulthandler_timeout` and `pytest-timeout`.
+  deadlock detection through `faulthandler_timeout` and `pytest-timeout`, and parallel
+  workers (pytest-xdist) in the local full check.
 - **Layout:** `tests/test_layout.py` passes: the mirror rule and naming of
   [section 4.2](#42-test-layout), the library's layers of [section 4.3](#43-layers), and the
   `_massive` boundary and layers of [section 19](#19-wire-clients-and-the-spec-snapshot).
@@ -4077,8 +4862,18 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   `addopts = ["-ra", "--import-mode=importlib"]`, `pythonpath = ["."]` (test code imports
   helpers as `tests._fakes…`, so `tests/massive/` never shadows a top-level `massive`),
   `faulthandler_timeout = 120` with
-  `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Coverage is not in
-  `addopts`, so single-test runs and debuggers work.
+  `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Neither coverage
+  nor `-n` is in `addopts`, so single-test runs and debuggers work in one process.
+- **Parallel workers.** `scripts/check.sh full` runs pytest with `-n auto --maxprocesses=4`
+  (pytest-xdist): each worker is its own process with its own embedded JVM, and the controller
+  that hands out the tests starts none. pytest-cov combines the workers' coverage, so the 100%
+  gate is unchanged. A run that only collects or lists fixtures collects in the main process,
+  as xdist does, so that process starts a JVM; `-n` together with a `-m` expression that
+  selects live tests is a usage error, since they share rate limits and one evidence log: the
+  check tries `integration` with every combination of the markers only live tests carry
+  (`integration_limits`, `integration_smoke`, `needs`, `settles`, `requests`), so `-m needs` is
+  refused too. CI runs the suite in one process: its standard runners have 2 CPUs, where two
+  workers gained nothing once their startup was paid.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
   "@(typing\\.)?overload"]`, each with a reason.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in
@@ -4087,8 +4882,8 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
 - **One entry point.** `scripts/check.sh [fast|full] [--no-fix]`. Both tiers first run
   `uv sync --upgrade`, so they use the newest versions; offline, a local run warns and keeps
   what is installed, and CI fails. The fast tier then runs ruff fix, ruff format, and mypy; the
-  full tier adds pytest with coverage. Local hooks and CI call the same script; CI passes
-  `--output-format github` to ruff.
+  full tier adds pytest with coverage, on up to four worker processes. Local hooks and CI call
+  the same script; CI passes `--output-format github` to ruff.
 - **Agent hooks** (committed `.claude/settings.json`). After an agent edits a `.py` file, ruff
   fixes and formats it and reports remaining diagnostics to the agent. Before an agent ends its
   turn, `scripts/check.sh fast --no-fix` runs. Bare `python`, `pytest`, `ruff`, `mypy`, and `pip`
@@ -4168,7 +4963,7 @@ chain = m.options.chain("NVDA", contract_type=dm.ContractType.CALL,
 otrades = m.options.trades(chain.where("Delta > 0.4")).blink()   # reactive; over 1,000 contracts
                                                                  # -> deferred, never fails
 es = m.futures.trades(["ESZ5"]).last_by()                   # /futures on every plan
-fx = m.forex.quotes(["EUR/USD", "USD/JPY"]).last_by()       # socket.massive.com/forex, no REST call
+fx = m.forex.quotes(["C:EURUSD", "C:USDJPY"]).last_by()     # socket.massive.com/forex, no REST call
 ```
 
 **3. Business key.**
@@ -4182,7 +4977,7 @@ bars = m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()
     # TICK family: a base Business key -> business.massive.com with a WARNING (UNVERIFIED host).
     # With a Full Market expansion the snapshot carries last_trade.timeframe=REAL-TIME
     # -> socket.massive.com.
-xfmv = m.crypto.fmv(["BTC-USD", "ETH-USD"]).append_only()   # business.massive.com/crypto
+xfmv = m.crypto.fmv(["X:BTCUSD", "X:ETHUSD"]).append_only() # business.massive.com/crypto
 es = m.futures.quotes(["ESZ5"]).last_by()                   # /futures; per-venue plans receive
                                                             # their venue on the same path
 
@@ -4235,6 +5030,31 @@ from deephaven import merge
 m = dm.MassiveSession()
 q = m.stocks.trades(["AAPL"])
 t = merge([q.history("2026-10-20", "2026-10-23"), q.append_only()])
+```
+
+**7. Split adjustment.** The README's "Split adjustment" section explains the bases
+([section 12](#12-timestamp-units-and-day-boundaries), "Price adjustment") and holds these
+examples; `tests/test_readme.py` runs every Python block of that section, in order, against the
+fake REST server.
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+adjusted = m.stocks.bars("NVDA", dm.Timespan.DAY).history("2024-06-03", "2024-06-14")
+traded = m.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
+    "2024-06-03", "2024-06-14"
+)
+splits = m.stocks.splits("NVDA").fetch()
+mine = traded.raj(
+    splits, on=["Symbol", "Date<ExecutionDate"], joins=["Factor=HistoricalAdjustmentFactor"]
+).update(
+    [
+        "Factor = isNull(Factor) ? 1.0 : Factor",
+        "AdjustedClose = Close * Factor",
+        "AdjustedVolume = Volume / Factor",
+    ]
+)
 ```
 
 ## 22. Decisions
@@ -4489,7 +5309,108 @@ document already reflects them.
     listed the stocks, forex, crypto, and indices unified-snapshot pages). A dataset of one
     asset class links only that class's page of a shared source; the footer keeps the fetch
     date ([section 7.4](#74-column-descriptions)).
-56. **A debug log good enough to fix a bug from** (2026-10-28). Standard `logging` only, off
+56. **Every bar of a day or longer is stamped at its window's start** (2026-10-28). One
+    `history()` call returns the same rows whichever source answers it, so a bar of a day or
+    longer of every class but futures, from every source, is stamped at 00:00 of the day it
+    starts on in the class day zone: New York for stocks, options, and indices, UTC for forex
+    and crypto. This extends decision 52's UTC stamping of forex and crypto 1-day bars to
+    stocks, options, and indices, whose grouped daily, `/prev`, and stock `day_aggs_v1` bars
+    Massive stamps at the 16:00 New York session close while the range stamps the day's start.
+    Only the stamps the vendored samples show for a class, the 13:00 close of a short trading
+    day for stocks, options, and indices, and the 16:15 and 13:15 closes of index options are
+    moved (the table of [section 12](#12-timestamp-units-and-day-boundaries)): each lies
+    inside its own New York day, so no calendar check is needed and a known close never fails
+    real data. A week, month, quarter, or year bar must also be stamped on the day its period
+    starts (a stock, option, or index week on its Saturday, Sunday, or Monday, a forex or
+    crypto week on its Monday, a longer period on its 1st), so the whole-window rule never
+    places it in another period. Any other stamp, forex included, raises `MassiveError` as
+    decision 52's crypto check does, instead of being relabelled, and ends with the way out of
+    the verb that read it: the flat files for 1-day `history()` (with `adjusted=False` for an
+    adjusted request), 1-day bars for longer ones, `history()` for `fetch()`, bars for an
+    indicator, explicit symbols for index `dm.ALL` from the files. Indicator values of a day or
+    longer are checked by their symbols' class's range rule, since they carry the stamps of the
+    range bars they are computed over. Futures bars keep Massive's `window_start` and their
+    `session_end_date` label. The checked and moved stamp is a bar's `TimestampStart` (decision
+    57).
+57. **Every row says when it happened, its trading day, and when it arrived; one `history()`
+    has one split basis** (2026-10-28). Ticks keep `Timestamp`; bars, indicator values, and
+    daily open-close summaries have `TimestampStart` and an exclusive `TimestampEnd`, the join
+    key, and no plain `Timestamp`; `Date`, the trading day, is on every tick and bar table,
+    stored as ISO `yyyy-MM-dd` text and null on any bar that spans more than one date; and
+    `TimestampInsert`, the local clock when the page, file block, or frame arrived, is the last
+    column of every dataset on every transport, snapshots included (which have no `Date`). Every
+    calendar date the library produces, vendor dates included, is ISO text, and the library
+    stores one shared string per distinct date, so a date costs a reference per row; one type
+    lets every date join and compare. Forex and crypto use Massive's UTC day; futures use
+    `session_end_date`, or on the WebSocket the 17:00 Chicago rule corrected by
+    `/futures/v1/schedules`, a row the schedules cannot place keeping the rule's date with an
+    ERROR shown in `m.streams()`, never failing the stream and never refusing a subscription; a
+    contract or product still loading a minute after it was asked for is such a miss, and a
+    spread is never looked up. The ends are conservative where Massive's labels are not
+    verified: an index bar of a day or longer ends at 01:00 New York time, and an index week or
+    longer after its calendar period, weekend included; a bar of several trading days (stocks,
+    options, indices) or futures sessions ends after the latest day they can reach with one
+    holiday allowed, and one more per five further days (`dates.last_trading_day`, which holds
+    for every run of the NYSE and CME calendars of 2024 to 2026); a futures week or longer at
+    17:00 Chicago on the last weekday of the latest period its label allows; a futures
+    one-second WebSocket bar at the later of its length and Massive's `e`. `history()` keeps a
+    bar only when its start lies in the range and its `TimestampEnd` is no later than the
+    range's end (for dates, the last day's end) or now, so selection and the join key apply the
+    same conservative end; a futures label must also fit the range under both readings, so the
+    refusal of futures bars of several sessions named by dates is gone. A symbol with no data
+    returns no rows; HTTP 404 after the first page of a request series is an error, and a
+    futures session with no data is that session's. `adjusted=True` stays the default of stock
+    and option bars and open-close, `None` (Massive's default, adjusted) that of the indicators;
+    one `history()` never mixes bases, every aggregates page's `adjusted` echo is checked, and
+    the jumps at splits in live tables are the data, documented with the factors to adjust
+    as-traded data. `Timestamp`, `Timestamp<Qualifier>`, and `Date` are the library's names
+    ([section 12](#12-timestamp-units-and-day-boundaries), [section 13.4](#134-rest), [section
+    19.4](#194-generated-schemas)).
+
+58. **Canonical symbols only, converters for the rest** (2026-10-28). Every symbol a dataset
+    takes and every `Symbol` column is Massive's exact REST ticker, case kept (`KIMpL`); the
+    old normalization (upper-casing, `EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX` on input) is
+    gone, and a non-canonical symbol raises `ValueError` naming the canonical form. Conversion
+    is explicit and public: `canonical_symbol` with a required `AssetClass`, one function per
+    class and per stock convention for query strings, and `canonicalize_symbols`, the only
+    lenient path (`OnError.NULL`). Stock separators convert only from a named
+    `SymbolConvention` (`YAHOO`, `NASDAQ`, `CMS`), each exactly for plain tickers, classes,
+    and preferreds; `SymbolConvention.MASSIVE`, Massive's own spelling, is the default, and
+    no convention parameter takes None. A later watchlist row that is not canonical fails that result, naming
+    `canonicalize_symbols(..., on_error=OnError.NULL)`. A symbol Massive sends in a spelling the
+    library cannot read fails by default; `MassiveConfig.unknown_symbols` (`MASSIVE_UNKNOWN_SYMBOLS`)
+    set to `WARN` keeps the row with a null `Symbol` and the text in `RawSymbol`. The index
+    prefix is added only from an endpoint of the indices class, never from a name. Every
+    options dataset gets `OptionRoot`; the contracts dataset exposes the raw deliverable fields
+    and no derived flag; no security identifiers are added, since Massive has no universal one
+    ([section 10](#10-symbols-and-all)). After review: futures spreads are Massive's tickers as
+    written, with their own converter `canonical_symbol_future_spread` and no builder from legs;
+    a futures dataset takes any ticker as written; a dataset of global third-party tickers
+    (TMX) keeps them as written; under a convention only that convention's grammar applies;
+    any `X:` ticker is canonical, and wherever a pair must be split (a stream, the last-trade
+    and daily open/close paths) its base and quote come only from Massive's crypto ticker
+    list, read once per session, and a ticker the list does not hold is refused rather than
+    guessed; under `WARN` a keyed `poll()` adds `RawSymbol` to its key, so an unreadable row
+    is kept by its text; a failed symbol table fails the result; an unreadable WebSocket
+    spelling fails every stream of the channel.
+
+59. **Live tables keep their session running, and `close()` fails them** (2026-10-28). A live
+    table keeps alive everything it needs (its stream or poller, the connection, and the
+    session), and nothing else keeps anything alive, so an inline session's derived table keeps
+    ticking and an unused session is freed at once. `m.close()` fails every live table and
+    everything derived from it with "MassiveSession #1 was closed; this table no longer
+    updates", instead of leaving tables that look live but never change; a failed table keeps
+    its rows for `snapshot()`, `to_pandas`, and `to_arrow`. Sessions with one API key and equal
+    connection settings share their WebSocket connections, reference-counted, so a console
+    session and a long-running job no longer knock each other off the one slot an individual
+    plan allows; sessions whose settings differ never share and are warned about, because a
+    connection can carry only one value of each setting. A stream waiting for its slot says so
+    in its `Error`. The library never calls `System.gc()`: a console-derived table stops after
+    the JVM's next collection, and `m.close()` stops everything at once
+    ([section 6](#6-massivesession-and-lifecycle),
+    [section 6.1](#61-how-a-live-table-is-kept-alive-and-released),
+    [section 13.1](#131-invariants)).
+60. **A debug log good enough to fix a bug from** (2026-10-28). Standard `logging` only, off
     by default; `DEEPHAVEN_MASSIVE_LOG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`), read at the first
     session, and `dm.enable_debug_logging()` turn it on; stderr by default and a file
     only when asked for. Log too much rather than too little: offending values, whole rows, and
@@ -4510,7 +5431,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 
 | # | Item | Conservative handling | Fixture test | Live integration test |
 |---|---|---|---|---|
-| 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source. `AUTO` picks the source as for every dataset, so the check alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time raise | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `Timestamp` and whether the OHLCV agree |
+| 1 | Day cut of crypto 1-day bars on every source, checked first: the documented REST samples stamp a daily bar at midnight New York time (the aggregates range, `/prev`) or at no day boundary at all (grouped daily, at 19:18, 20:08, and 20:48 UTC), while the `global_crypto/day_aggs_v1` sample stamps it at 23:59:59.999 UTC of its day, and both pages' prose says UTC | A 1-day bar means the UTC day: a stamp at the first or last millisecond of a UTC day is moved to its 00:00 UTC, and any other stamp, or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source. `AUTO` picks the source as for every dataset, so the check alone keeps both sources on the same UTC days. If live REST follows the samples, crypto daily REST history, `dm.ALL` grouped daily, and `/prev` all raise, and the owner decides the source rule then | `tests/namespaces/test_crypto.py`, `tests/ingest/test_rest.py`: both cuts map to 00:00 UTC on every source; the documented samples and a two-day bar at midnight New York time raise | `tests/namespaces/test_crypto_integration.py`: one 1-day bar of `X:BTCUSD` from `/prev`, the range, grouped daily, and `day_aggs_v1` for one day; record each `TimestampStart` and whether the OHLCV agree |
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
@@ -4537,18 +5458,40 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 25 | Whether rows of the stocks `filings.index`, `filings.sections_10k`, `filings.text_8k`, and `filings.risk_factors` always carry `ticker`: no filings response schema marks it required, and the index documents it as present only "if available" | Each of the four declares its symbol key `KeySpec("Ticker", required=False)`: a row without `ticker` keeps a null `Symbol` instead of failing the request, and none keys a `poll()` on `Symbol`, in any mode | `tests/ingest/test_rest.py`: a row without its optional symbol keeps a null `Symbol`; `tests/datasets/test_catalog.py`: only a symbol key from REST rows may be optional; `tests/namespaces/test_stocks.py`: a row without `ticker` of each of the four keeps a null `Symbol` | `tests/namespaces/test_stocks_integration.py`: one request over a month of each of the four; record how many rows lack `ticker` |
 | 26 | Whether Massive reads a percent-encoded colon in a path segment (`/v2/aggs/ticker/I%3ASPX/prev`) as `I:SPX` | Every path value is percent-encoded whole; a value containing `/` is refused before sending, since Massive answers 404 for `%2F` | `tests/massive/rest/test_query.py`: `I:SPX` becomes `I%3ASPX`; a `/` raises | `tests/namespaces/test_indices_integration.py`: one `I:SPX` `/prev` call returns a row for `I:SPX` |
 | 27 | Spelling of an explicit forex pair topic: the WebSocket documentation gives `{from}-{to}` (`C.EUR-USD`), while quote and aggregate frames spell the pair `EUR/USD` | Topics use `EUR-USD`; frames of any spelling map back to `C:EURUSD` | `tests/datasets/test_symbols.py`, `tests/ingest/test_ws.py`: `C.EUR-USD` is subscribed and an `EUR/USD` frame reaches its stream | `tests/namespaces/test_forex_integration.py`: subscribe `C.EUR-USD` and `CA.EUR-USD`; record the acknowledgement and that frames arrive |
-| 28 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The reader assumes the canonical form: symbol pushdown compares the file's `ticker` column with canonical symbols, and `Symbol` holds the column as written. Were the files to write `X:EUR-USD`, a symbol request would match no row; that outcome becomes an owner decision | `tests/ingest/test_flatfiles.py`: symbol pushdown keeps the rows whose ticker equals a requested canonical symbol | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
-| 29 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on `SessionEndDate`; bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: minute bars of ES around the 2026-01-20 session, and `YEAR` candles from a year start and from mid-year; record the first bar's time and whether the candles arrive |
+| 28 | Ticker form in the forex quotes flat files: the vendor sample shows `X:EUR-USD`, while REST uses `C:EURUSD` | The filter holds every spelling of each requested pair (`wire_spellings`), and each row's ticker is read with `canonical_from_wire`, so `X:EUR-USD` rows hold `C:EURUSD`; any other spelling follows `unknown_symbols` | `tests/namespaces/test_forex.py`: a file written `X:EUR-USD` matches `C:EURUSD` and every row holds the canonical pair; `tests/ingest/test_flatfiles.py`: an unreadable ticker fails the read, or is kept in `RawSymbol` under `WARN` | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): read one forex quotes file and record the ticker form |
+| 29 | Futures holiday sessions and candle snapping: whether a session after a holiday (2025-01-21 after Martin Luther King Day) opens at the previous regular open or earlier, whether 4 days of margin cover every holiday run of bars named by date, whether 7 days cover every flat-file roll-forward, and whether `window_start` filters on session, week, month, and year candles snap to the candle's start | Trades and quotes named by date are requested by `session_end_date`, which needs no margin; bars named by date are requested from the session's regular open less 4 days and post-filtered on their `session_end_date` (`Date`); bars named by instants are filtered locally on their own window; an instant range whose trailing missing files hold a weekday rolls forward up to 7 days and raises `MassiveError` if the next file is unpublished or absent | `tests/ingest/test_rest.py`, `tests/ingest/test_flatfiles.py`: the 2025-01-21 session's Sunday-evening rows and Good Friday 2024's rows are kept, and an unpublished or absent next file raises | `tests/namespaces/test_futures_integration.py`: minute bars of ES around the 2026-01-20 session, and `YEAR` candles from a year start and from mid-year; record the first bar's time and whether the candles arrive |
 | 30 | Whether `/v3/reference/tickers` returns one row per ticker with `active=false`, when delisted listings may reuse a ticker | `reference.tickers` polls keyed by `Symbol`; were several rows to share a ticker, a `poll()` table would keep one of them while `fetch()` shows all | `tests/namespaces/test_reference.py`: the vendor sample decodes with one row per ticker | `tests/namespaces/test_reference_integration.py`: one `tickers(active=False)` request over a letter range; record any ticker on several rows |
 | 31 | Whether `(asset_class, id)` identifies one row of `/v3/reference/exchanges` | `reference.exchanges` polls keyed by `AssetClass` and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `exchanges()` request; record any repeated key |
 | 32 | Whether `(asset_class, type, id)` identifies one row of `/v3/reference/conditions` | `reference.conditions` polls keyed by `AssetClass`, `Type`, and `Id` | `tests/namespaces/test_reference.py`: the poll keys are columns of the schema | `tests/namespaces/test_reference_integration.py`: one `conditions()` request; record any repeated key |
-| 33 | The day a week bar starts on, for stocks, forex, and crypto: Monday, or the Sunday before (forex trades from Sunday evening UTC) | Stock weeks run Monday to Friday, and a bar stamped on the Saturday or Sunday before a week names that week; the REST `{from}` is that Saturday. Forex and crypto weeks are calendar weeks, Monday to Sunday; were the forex bucket to start on Sunday, its week would become the Sunday-to-Friday trading week | `tests/datasets/test_dates.py`, `tests/ingest/test_rest.py`: Sunday- and Monday-stamped stock week bars are kept for their week; forex and crypto weeks are calendar weeks | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: two weeks of week bars each; record each `Timestamp` and the first and last trade each bar holds |
-| 34 | Whether the aggregates range returns a partial bar for a period `{from}` falls inside | `{from}` is the first instant that belongs to the first bar that fits wholly (the Saturday before a stock week, the 1st of a month), so a partial bucket begun before it is dropped whatever it is stamped | `tests/ingest/test_rest.py`: the week and month requests start where the first whole period begins | `tests/namespaces/test_stocks_integration.py`: month bars with `{from}` in mid-month; record the first bar's stamp and volume against the whole month's |
-| 35 | How bars of `multiplier` above 1 are aligned: to clock and calendar boundaries, or to `{from}` | Aligned to boundaries (whole UTC units for intraday bars, period starts for longer ones); a bar spans `multiplier` units from its own start | `tests/datasets/test_dates.py`: five-minute and two-week bars fit by their full span | `tests/namespaces/test_stocks_integration.py`: five-minute and two-week bars from an odd `{from}`; record their stamps |
+| 33 | The day a week bar starts on, for stocks, options, indices, forex, and crypto: Monday, or the Sunday before (forex trades from Sunday evening UTC) | Stock, option, and index weeks run Monday to Friday, and a bar stamped on the Saturday, Sunday, or Monday of a week names that week; the REST `{from}` is that Saturday. Forex and crypto weeks are calendar weeks, Monday to Sunday, and a forex or crypto week bar stamped on any other day than its Monday raises `MassiveError`; were the bucket to start on Sunday, the owner decides whether its week becomes the Sunday-to-Saturday week | `tests/datasets/test_dates.py`, `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_indices.py`: Sunday- and Monday-stamped index week bars are kept for their week; a Sunday-stamped crypto week raises | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: two weeks of week bars each; record each `TimestampStart` and the first and last trade each bar holds |
+| 34 | Whether the aggregates range returns a partial bar for a period `{from}` falls inside, and on which day a month bar is stamped | `{from}` is the first instant that belongs to the first bar that fits wholly (the Saturday before a stock week, the 1st of a month), so a partial bucket begun before it is dropped whatever it is stamped; a month, quarter, or year bar stamped on another day than its 1st raises `MassiveError` | `tests/ingest/test_rest.py`: the week and month requests start where the first whole period begins; a crypto month bar stamped on the 2nd raises | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: month bars with `{from}` in mid-month; record the first bar's stamp and volume against the whole month's |
+| 35 | How bars of `multiplier` above 1 are aligned: to clock and calendar boundaries, or to `{from}` | Aligned to boundaries (whole UTC units for intraday bars, period starts for longer ones); a bar spans `multiplier` units from its own start, and a multi-week or multi-month bar must still be stamped on a day its period starts | `tests/datasets/test_dates.py`: five-minute and two-week bars fit by their full span | `tests/namespaces/test_stocks_integration.py`, `test_forex_integration.py`, `test_crypto_integration.py`: five-minute and two-week bars from an odd `{from}`; record their stamps |
 | 36 | Whether a futures session can end on a Saturday or Sunday | Sessions are requested on weekdays only; Saturday and Sunday dates are skipped without a request | `tests/ingest/test_rest.py`: a range over a weekend requests only its weekday sessions | `tests/namespaces/test_futures_integration.py`: `schedules` over a month; record every `session_end_date`'s weekday |
-| 37 | The stamp of forex 1-day bars on every source: the range (00:00 UTC in the samples), grouped daily, `/prev`, and `global_forex/day_aggs_v1` | Every stamp is moved to 00:00 UTC of its UTC day, unchecked | `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`: range and grouped stamps map to 00:00 UTC | `tests/namespaces/test_forex_integration.py`: one 1-day bar of `C:EURUSD` from each source for one day; record each `Timestamp` and whether the OHLCV agree |
-| 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars |
+| 37 | The stamp of forex 1-day bars on every source: the range (00:00 UTC in the samples), grouped daily, `/prev`, and `global_forex/day_aggs_v1` | A stamp at 00:00 or 23:59:59.999 UTC is moved to 00:00 UTC of its day; any other stamp raises `MassiveError` naming the dataset, the source, and the other source | `tests/datasets/test_timestamps.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_forex.py`: range, grouped, `/prev`, and flat-file stamps map to 00:00 UTC; a stamp at midnight New York time raises | `tests/namespaces/test_forex_integration.py`: one 1-day bar of `C:EURUSD` from each source for one day, and two weeks of its week bars from the range; record each `TimestampStart`, the week bars' weekday, and whether the OHLCV agree |
+| 38 | Whether crypto range and `/prev` 1-day bars cover the UTC day: compare them with the same day rebuilt from 1-minute bars | Item 1's loud check: a stamp elsewhere than a UTC day boundary fails | `tests/namespaces/test_crypto.py`: as item 1 | `tests/namespaces/test_crypto_integration.py`: rebuild one day of `X:BTCUSD` from `minute_aggs_v1` over the UTC day and over the New York day; record which matches the range and `/prev` bars, and the weekday of two weeks of `X:BTCUSD` week bars |
 | 39 | Whether grouped daily and `day_aggs_v1` hold the same pairs on a day, for forex and crypto | `AUTO` keeps one source for crypto 1-day bars; nothing assumes the sets match | `tests/datasets/test_history_source.py`: crypto 1-day bars keep one source whatever the symbol count | `tests/namespaces/test_forex_integration.py`, `tests/namespaces/test_crypto_integration.py`: one day of `dm.ALL` 1-day bars from both sources; record the pairs only one holds |
-| 40 | Which session a futures bar of several sessions or longer is labelled with (`SessionEndDate` of its first or last session), and how such bars are aligned | Futures bars of a session or longer with `multiplier` above 1 named by dates raise `ValueError` ("pass datetimes, or multiplier=1"); named by datetimes, they are kept by their own window | `tests/datasets/test_history_source.py`, `tests/namespaces/test_futures.py`: the refusal for 2-session, 2-week, and 2-month bars | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `Timestamp` and `SessionEndDate` |
+| 40 | Which session a futures bar of several sessions or longer is labelled with (`session_end_date` of its first or last session), and how such bars are aligned | Named by dates, such a bar is kept only when it fits the range under both readings of its label, and its `Date` is null; its `TimestampEnd` is the later of the two readings (17:00 Chicago on the latest day its sessions can end on, counted from the session date of `window_start`, plus one session for a fold, with one holiday allowed and one more per five further sessions, or on its label if later; for a week or longer, the last weekday of the latest period its label allows), and a bar is kept only when that end is no later than the range's end and now | `tests/datasets/test_dates.py`, `tests/datasets/test_row_times.py`, `tests/namespaces/test_futures.py`: 2-session, 2-week, and 2-month bars kept under both readings, with their conservative ends; the allowance holds for every start date of the CME calendar of 2024 to 2026; a 2-session bar that could still be open is left out | `tests/namespaces/test_futures_integration.py`: 2-session and 2-month bars of ES over a quarter; record each bar's `TimestampStart`, its label, and the first and last minute bar it holds |
 | 41 | Whether Massive keeps an IPO's `issuer_name` unchanged while the offering moves through its statuses (rumor or pending, new, history, postponed, withdrawn); the vendor documents it only as "Name of issuer" | `stocks.ipos` upserts by `Symbol` and `IssuerName`, so two issuers of one ticker stay apart; were Massive to revise a name, the row under the old name would stay beside the new one, since `UPSERT` never deletes | `tests/namespaces/test_stocks.py`: two issuers of one ticker poll as two rows | `tests/namespaces/test_stocks_integration.py`: a year of IPOs; record every ticker whose rows carry more than one `issuer_name` |
 | 42 | Whether `IssuerCik` and `TransactionDate` identify one row of the insider activity, and `IssuerCik` and `OwnerCik` one row of the insider holdings; the vendor documents one row per issuer and transaction date, and one per reporting owner per issuer, but marks none of the four fields required | Both datasets replace their `poll()` table keyed by those columns; a null key fails the table, and two rows sharing a key would keep only one | `tests/namespaces/test_stocks.py`: each key column is needed to tell the fixture's rows apart | `tests/namespaces/test_stocks_integration.py`: a year of NVDA's activity and NVDA's holdings; record and refuse any key shared by two rows |
+| 43 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | The canonical grammar is an upper-case root and the CQS suffixes `.X`, `pX`, `r`, and `w`; the conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unknown_symbols` (fails by default) | `tests/datasets/test_symbols.py`: the grammar, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling outside the grammar |
+| 44 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
+| 45 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
+| 46 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
+| 47 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 48 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |
+| 48 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
+| 49 | Whether Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, read with `active=true` and with `active=false`) holds every pair, delisted ones included, its WebSocket channels and the last-trade and daily open/close paths serve, with a `base_currency_symbol` and `currency_symbol` that join to the ticker | Any `X:` ticker is canonical; wherever a pair must be split (a stream, `/v1/last/crypto/{from}/{to}`, `/v1/open-close/crypto/{from}/{to}/{date}`) the split comes only from that list, both reads once per session (a ticker in both keeps its listed row), and a pair the list does not hold, or whose currencies do not join to it, is refused there; every other path serves it | `tests/ingest/test_ws.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_crypto.py`: `X:DOTUSD`, `X:SHIBUSD`, `X:USDTUSD`, `X:BTCPYUSD`, and `X:ETHWBTC` subscribe the topic the list gives, `X:BTCXYZ`, unlisted, is refused, and a delisted `X:FTTUSD` splits from the delisted read | `tests/namespaces/test_crypto_integration.py`: both reads of the list; record every row whose currencies do not join to its ticker, and stream a sample of pairs to confirm their topics |
+| 50 | The stamps of stock 1-day and longer bars on every source: the range (00:00 New York time in the samples), grouped daily, `/prev`, and `us_stocks_sip/day_aggs_v1` (16:00 New York time, the session close, in the samples), on a full day and on a day that closes early at 13:00 (2024-11-29), and of week and month bars from the range | A 1-day stamp at 00:00, 13:00 (a short day's close, presumed), or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar must be stamped 00:00 New York time on the day its period starts, and any other stamp raises `MassiveError` naming the dataset, the source, and the verb's way out | `tests/datasets/test_history_source.py`, `tests/datasets/test_timestamps.py`, `tests/namespaces/test_stocks.py`: the documented stamps of every source and a 13:00 close map to 00:00 New York time; 14:30 raises | `tests/namespaces/test_stocks_integration.py`: one 1-day bar of AAPL for 2024-11-27 and 2024-11-29 from each of the four sources, and two weeks and two months of AAPL bars from the range; record each `TimestampStart` and whether the OHLCV agree |
+| 51 | The stamps of option 1-day and longer bars on every source: the range and `us_options_opra/day_aggs_v1` (00:00 New York time in the samples) and `/prev` (16:00 New York time); and whether `/prev` stamps an index option (SPXW) at its own 16:15 close, or 13:15 on a short day | As item 50, for options, with 16:15 and 13:15 also accepted for 1-day bars (presumed) | `tests/datasets/test_history_source.py`, `tests/namespaces/test_options.py`: the documented stamps and a 13:00 close map to 00:00 New York time; another stamp raises, naming `history()` as the way out of `fetch()` | `tests/namespaces/test_options_integration.py`: one 1-day bar of a listed SPY contract and of a listed SPXW contract from the range, `/prev`, and `day_aggs_v1` for 2024-11-27 and 2024-11-29, and their week bars from the range; record each `TimestampStart` |
+| 52 | The stamps of index 1-day and longer bars on every source: the range and `us_indices/day_aggs_v1` (01:00 New York time, midnight in Chicago, in the samples) and `/prev` (16:00 New York time), on a full day and on a short day (2024-11-29); whether a bar stamped 01:00 New York time covers the New York day, the Chicago day, or the trading session; whether longer bars are stamped 01:00 too; and whether an index that updates around the clock has weekend values in its week bars | A 1-day stamp at 00:00, 01:00, 13:00 (presumed), or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar stamped 00:00 or 01:00 New York time on the day its period starts to 00:00, and any other stamp raises `MassiveError` naming the dataset, the source, and the verb's way out (explicit symbols for `dm.ALL` from the files); an index week, month, quarter, or year ends an hour after its calendar period, weekend included | `tests/namespaces/test_indices.py`: the documented stamps of every source map to 00:00 New York time; another stamp raises; a week ends an hour after the next Monday begins | `tests/namespaces/test_indices_integration.py`: one 1-day bar of `I:SPX` and of `I:AAVE100` (which updates around the clock) from the range, `/prev`, and `day_aggs_v1` for 2024-11-27 and 2024-11-29, rebuilt from minute bars over the New York and the Chicago day, and two weeks of week bars; record each `TimestampStart` and which day the OHLC match |
+| 53 | Split adjustment of stock bars across a split: NVDA's 10-for-1 split executed on 2024-06-10 | `adjusted=True` is REST only and each page's `adjusted` echo is checked; flat files and `adjusted=False` are as traded | `tests/ingest/test_rest.py`, `tests/namespaces/test_stocks.py`: a mismatched echo raises; flat files refuse `adjusted=True` | `tests/namespaces/test_stocks_integration.py`: NVDA's 2024-06-07 day bar from `day_aggs_v1` and REST `adjusted=false` (about 1208) and REST `adjusted=true` (about 120.9, volume about 10 times), and 2024-06-10 as the control, on which all three agree |
+| 54 | Whether every page echoes `adjusted`, `next_url` pages and each grouped-daily day included | A page without the echo logs a WARNING once per dataset, path, and session; a different echo raises | `tests/ingest/test_rest.py`: absent and mismatched echoes, on a second page too | `tests/namespaces/test_stocks_integration.py`: a multi-page minute download and a grouped-daily download; record each page's `adjusted` |
+| 55 | That Massive never adjusts for cash dividends: COST's special dividend (ex-date 2023-12-27) | The documentation says splits only; nothing adjusts for dividends | none (documentation) | `tests/namespaces/test_stocks_integration.py`: COST day bars around 2023-12-27 with `adjusted=true` and `adjusted=false`; record whether any price differs |
+| 56 | Whether `adjusted=true` applies `stock_dividend` events of the splits dataset | Documented as unknown: the README's recipe applies every factor the splits dataset lists | none (documentation) | `tests/namespaces/test_stocks_integration.py`: one ticker with a `stock_dividend` event; compare both bases across its execution date |
+| 57 | Whether option bars are adjusted for splits of the underlying in full (`adjusted=true`) | Options take `adjusted` like stocks, with the same guarantee | `tests/namespaces/test_options.py`: the parameter is sent and its echo checked | `tests/namespaces/test_options_integration.py`: a contract of NVDA across 2024-06-10 under both bases; record the prices |
+| 58 | Futures session labels and the roll: whether REST and flat-file `session_end_date` match the 17:00 Chicago rule outside holidays, which session a 16:45 CBOT pre-open row belongs to, and when the schedules of the next session are published | WebSocket rows take the 17:00 Chicago rule corrected by `/futures/v1/schedules`; a row the schedules cannot place keeps the rule's date with an ERROR in `m.streams()` | `tests/ingest/test_futures_sessions.py`, `tests/tables/test_stream.py`: holiday folds, the pre-open, gaps, and misses | `tests/namespaces/test_futures_integration.py`: one day of ZC and ES trades from REST and the stream across 16:00 to 17:30 Chicago, and Good Friday 2024; record each row's `Date` against the schedules |
+| 59 | Whether Massive's futures one-second WebSocket bars span 60 seconds (`e - s` in the documented sample) | `TimestampEnd` is the later of `s` plus one second and `e`, and a disagreement is logged once | `tests/datasets/test_row_times.py`: both ends | `tests/namespaces/test_futures_integration.py`: one minute of ES `A` bars; record `s` and `e` |
+| 60 | The index day zone: whether an index bar of a day or longer covers the New York or the Chicago day (item 52) | Its `TimestampEnd` is 01:00 New York time, an hour after the New York day, and its `Date` the New York day; `history()` returns it only from 01:00, and a range of dates ends at 01:00 after its last day | `tests/datasets/test_row_times.py`, `tests/namespaces/test_indices.py`: the extra hour; at 00:30 the previous day's bar is left out, at 01:00 kept | `tests/namespaces/test_indices_integration.py` (item 52's evidence) |
+| 61 | The stamps of indicator values of a day or longer: at which time of day, and in which zone, Massive stamps them per class | Checked as the class's range bars, whose stamps the samples' underlying aggregates show (00:00 New York time for stocks, 01:00 for indices, 00:00 UTC for forex and crypto, on the period's first day); any other stamp raises `MassiveError` naming the way out, computing the indicator from bars | `tests/datasets/test_history_source.py`, `tests/namespaces/test_indicators.py`, `tests/ingest/test_rest.py`: realistic stamps labelled by their class's day; a day value at 22:00 New York time and a week value on a Wednesday raise | `tests/namespaces/test_stocks_integration.py`, `test_crypto_integration.py`: one week of daily SMA for AAPL and `X:BTCUSD`; record each `TimestampStart` |
+| 62 | What an unknown ticker gets: HTTP 404 or an empty 200, per endpoint, and whether a 404 can follow a good first page | A symbol with no data returns no rows; a 404 after the first page of a request series raises `MassiveError`; a futures session is its own series, so a 404 on a later session drops that session with its own WARNING | `tests/ingest/test_rest.py`: a first-page 404 drops the symbol; a later 404 raises; a later futures session's 404 is left out with a per-session WARNING | `tests/namespaces/test_stocks_integration.py`: an invalid ticker on `/prev`, the range, `/v3/trades`, and `ticker_details`; record each status |
+| 63 | Whether a stock, option, or index bar of several days (`multiplier` above 1) counts calendar days or trading days | Its days count as trading days, the later reading: with no holiday calendar it ends after the latest day they can reach, one weekday more and one more per five further days (`dates.last_trading_day`), and `history()` keeps it only when that end lies in the range; a forex or crypto bar counts calendar days | `tests/datasets/test_row_times.py`, `tests/datasets/test_dates.py`: a 2-day bar from a Friday ends at 00:00 on Wednesday; the allowance holds for every start date of the NYSE calendar of 2024 to 2026 | `tests/namespaces/test_stocks_integration.py`: AAPL's 2-day bars over two weeks beside its 1-day bars; record which days each bar's volume sums |
+| 64 | Whether Massive publishes forex flat files for a Saturday and a Sunday (forex trades from Sunday evening to Friday evening UTC) | A forex Saturday is a day without trading (`dates.is_trading_day`): its missing file is skipped silently and never raises "not yet published", and REST grouped daily does not request it; a missing Sunday file warns like a missing weekday | `tests/datasets/test_dates.py`, `tests/ingest/test_flatfiles.py`, `tests/ingest/test_rest.py`: a missing Saturday file is silent even within its publication grace, a Sunday's warns, and grouped daily skips the Saturday | `tests/namespaces/test_forex_integration.py`: `global_forex/day_aggs_v1` for a Saturday and a Sunday; record whether each file exists and its row count |
