@@ -17,7 +17,7 @@ The module also numbers sessions (`MassiveSession #1`, a per-process counter, us
 `repr`, in error messages, and in the same-key WARNING, and `massive #1` at the start of every
 library thread's name) and keeps the weak registry of open sessions that warns when a second
 open session uses the same API key. Creating a session applies the logging environment
-variables once per process (`_logging.configure_from_environment`) and logs, at INFO, one line
+variables once per process (`_debug_log.configure_from_environment`) and logs, at INFO, one line
 describing the environment: the versions that matter, the configuration without its secrets,
 and whether a proxy or a CA bundle is set, so a log attached to a bug report says what ran.
 """
@@ -40,9 +40,9 @@ from deephaven.table import Table
 from deephaven_massive import _massive
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
+from deephaven_massive._debug_log import configure_from_environment
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest.clients import SessionClients
-from deephaven_massive._logging import configure_from_environment
 from deephaven_massive._namespaces import (
     crypto,
     economy,

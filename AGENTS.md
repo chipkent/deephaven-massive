@@ -179,25 +179,9 @@ nothing is kept or shimmed for compatibility.
     big-picture Summary from which a reader with no context could explain the whole PR, the
     required sections in order with the engineering detail in How it works, nothing the reader
     must decode, and rewritten to the final state on every push that changes the PR.
-18. **Every change logs what it decides.** A log from a failing run, with the issue text, must
-    be enough for an agent to reproduce and fix the bug.
-    - A decision is a branch on configuration, server data, or input that changes what is
-      requested, routed, or returned. Each decision logs at DEBUG with its inputs and outcome.
-    - A failure logs at ERROR, and a degradation at WARNING. Each names what an agent needs to
-      reproduce it: the offending field and value, the dataset, the endpoint or channel, the
-      symbol, and the call or stream id. Every layer logs what it knows. Log too much rather
-      than too little.
-    - Log nothing per row or per frame except a failure.
-    - Never pass the API key, the S3 secret, a header, or the auth frame to a log call. A client
-      cleans what it receives of its own secret (`net.secrets`) before anything reads it.
-    - Use `%` arguments. Name every new thread or pool `massive #<session> <role>`. Never log
-      while holding `registry_lock` or any other leaf lock.
-
-    Ruff's `G` and `LOG` rules (on through `ALL`), the logging rules of `tests/test_layout.py`
-    (no secret name in a logging call, every thread and pool named, no logging call under a
-    leaf lock), and the planted-secret test (`tests/massive/net/test_secrets.py`) check what
-    tools can. Reviewers check the rest: that each new decision and failure logs, with its
-    values. Ask: could an agent fix this from the log alone?
+18. **Every change logs what it decides.** Decisions at DEBUG with their inputs and outcome,
+    failures at ERROR with the offending values and context; never log a secret. The full rules
+    and the checks that enforce them are in the `_debug_log` module docstring.
 
 ## Layers
 

@@ -205,6 +205,47 @@ def test_an_ipo_keeps_its_issuer_name(
 
 
 @pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("42")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_insider_activity_and_holdings_keys_name_one_row_each(
+    live_session: dm.MassiveSession,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether the `poll()` keys of the insider activity and holdings identify one row each.
+
+    Reads a year of NVDA's insider activity (2025) and NVDA's current insider holdings, and
+    records the rows and any key shared by two rows: `IssuerCik` and `TransactionDate` for
+    the activity, `IssuerCik` and `OwnerCik` for the holdings. Reading it: no shared key
+    means a `poll()` table keeps every row Massive sends; a shared key means `poll()` would
+    keep only one of those rows, and the key needs another column.
+    """
+    filings = live_session.stocks.filings
+    queries = {
+        "filings.insider_activity": (
+            filings.insider_activity("NVDA", start=date(2025, 1, 1), end=date(2025, 12, 31)),
+            ("IssuerCik", "TransactionDate"),
+        ),
+        "filings.insider_holdings": (filings.insider_holdings("NVDA"), ("IssuerCik", "OwnerCik")),
+    }
+    shared: dict[str, list[tuple[object, ...]]] = {}
+    for name, (query, keys) in queries.items():
+        rows = table_rows(query.fetch())
+        seen: dict[tuple[object, ...], int] = {}
+        for row in rows:
+            key = tuple(row[k] for k in keys)
+            seen[key] = seen.get(key, 0) + 1
+        shared[name] = [key for key, count in seen.items() if count > 1]
+        evidence(f"{name} NVDA: {len(rows)} rows, {len(shared[name])} keys shared by two rows")
+        for key in shared[name][:5]:
+            evidence(f"    e.g. {dict(zip(keys, key, strict=True))}")
+        assert rows, name
+    assert shared == {name: [] for name in queries}
+
+
+@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)

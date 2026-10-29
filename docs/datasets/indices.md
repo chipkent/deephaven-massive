@@ -75,13 +75,13 @@ The current state of each index: its level, its session so far, and its status.
 | `MarketStatus` | String | The market status for the market that trades this ticker. | REST | `market_status` |
 | `Message` | String | The error message while looking for this ticker. | REST | `message` |
 | `Name` | String | Name of Index. | REST | `name` |
-| `SessionChange` | double | The value of the change for the index from the previous trading day. | REST | `session.change` |
-| `SessionChangePercent` | double | The percent of the change for the index from the previous trading day. | REST | `session.change_percent` |
-| `SessionClose` | double | The closing value for the index of the day. | REST | `session.close` |
-| `SessionHigh` | double | The highest value for the index of the day. | REST | `session.high` |
-| `SessionLow` | double | The lowest value for the index of the day. | REST | `session.low` |
-| `SessionOpen` | double | The open value for the index of the day. | REST | `session.open` |
-| `SessionPreviousClose` | double | The closing value for the index of previous trading day. | REST | `session.previous_close` |
+| `SessionChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.change` |
+| `SessionChangePercent` | double | The percent of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.change_percent` |
+| `SessionClose` | double | The closing value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.close` |
+| `SessionHigh` | double | The highest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.high` |
+| `SessionLow` | double | The lowest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.low` |
+| `SessionOpen` | double | The open value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.open` |
+| `SessionPreviousClose` | double | The closing value for the index of previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.previous_close` |
 | `Timeframe` | String | The time relevance of the data. | REST | `timeframe` |
 | `Type` | String | The indices market. | REST | `type` |
 | `Value` | double | Value of Index. | REST | `value` |

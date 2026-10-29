@@ -137,33 +137,33 @@ The current state of crypto pairs: today's, the last minute's, and yesterday's b
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
-| `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
-| `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. | REST | `day.o` |
-| `DayVolume` | double | The trading volume of the symbol in the given time period. | REST | `day.v` |
-| `DayVwap` | double | The volume weighted average price. | REST | `day.vw` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
+| `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
+| `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.l` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.o` |
+| `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.v` |
+| `DayVwap` | double | The volume weighted average price. From the `day` object: The most recent daily bar for this ticker. | REST | `day.vw` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastTradeConditions` | int[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. | REST | `lastTrade.c` |
-| `LastTradeId` | String | The Trade ID which uniquely identifies a trade on the exchange that the trade happened on. | REST | `lastTrade.i` |
-| `LastTradePrice` | double | The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD). | REST | `lastTrade.p` |
-| `LastTradeSize` | double | The size (volume) of the trade. | REST | `lastTrade.s` |
-| `LastTradeParticipantTimestamp` | Instant | The millisecond accuracy timestamp. This is the timestamp of when the trade was generated at the exchange. | REST | `lastTrade.t` |
-| `LastTradeExchange` | long | The exchange that this crypto trade happened on. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a mapping of exchanges to IDs. | REST | `lastTrade.x` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. | REST | `min.c` |
-| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. | REST | `min.h` |
-| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. | REST | `min.o` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. | REST | `min.t` |
-| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. | REST | `min.v` |
-| `LastMinuteVwap` | double | The volume weighted average price. | REST | `min.vw` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. | REST | `prevDay.c` |
-| `PrevDayHigh` | double | The highest price for the symbol in the given time period. | REST | `prevDay.h` |
-| `PrevDayLow` | double | The lowest price for the symbol in the given time period. | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. | REST | `prevDay.o` |
-| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. | REST | `prevDay.v` |
-| `PrevDayVwap` | double | The volume weighted average price. | REST | `prevDay.vw` |
+| `LastTradeConditions` | int[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.c` |
+| `LastTradeId` | String | The Trade ID which uniquely identifies a trade on the exchange that the trade happened on. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.i` |
+| `LastTradePrice` | double | The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD). From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.p` |
+| `LastTradeSize` | double | The size (volume) of the trade. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.s` |
+| `LastTradeParticipantTimestamp` | Instant | The millisecond accuracy timestamp. This is the timestamp of when the trade was generated at the exchange. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.t` |
+| `LastTradeExchange` | long | The exchange that this crypto trade happened on. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a mapping of exchanges to IDs. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.x` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
+| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
+| `LastMinuteVwap` | double | The volume weighted average price. From the `min` object: The most recent minute bar for this ticker. | REST | `min.vw` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.c` |
+| `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.h` |
+| `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.l` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.o` |
+| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.v` |
+| `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
@@ -181,33 +181,33 @@ The 20 crypto pairs that gained or lost the most since the previous day's close.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. | REST | `day.c` |
-| `DayHigh` | double | The highest price for the symbol in the given time period. | REST | `day.h` |
-| `DayLow` | double | The lowest price for the symbol in the given time period. | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. | REST | `day.o` |
-| `DayVolume` | double | The trading volume of the symbol in the given time period. | REST | `day.v` |
-| `DayVwap` | double | The volume weighted average price. | REST | `day.vw` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
+| `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
+| `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.l` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.o` |
+| `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.v` |
+| `DayVwap` | double | The volume weighted average price. From the `day` object: The most recent daily bar for this ticker. | REST | `day.vw` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastTradeConditions` | int[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. | REST | `lastTrade.c` |
-| `LastTradeId` | String | The Trade ID which uniquely identifies a trade on the exchange that the trade happened on. | REST | `lastTrade.i` |
-| `LastTradePrice` | double | The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD). | REST | `lastTrade.p` |
-| `LastTradeSize` | double | The size (volume) of the trade. | REST | `lastTrade.s` |
-| `LastTradeParticipantTimestamp` | Instant | The millisecond accuracy timestamp. This is the timestamp of when the trade was generated at the exchange. | REST | `lastTrade.t` |
-| `LastTradeExchange` | long | The exchange that this crypto trade happened on. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a mapping of exchanges to IDs. | REST | `lastTrade.x` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. | REST | `min.c` |
-| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. | REST | `min.h` |
-| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. | REST | `min.o` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. | REST | `min.t` |
-| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. | REST | `min.v` |
-| `LastMinuteVwap` | double | The volume weighted average price. | REST | `min.vw` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. | REST | `prevDay.c` |
-| `PrevDayHigh` | double | The highest price for the symbol in the given time period. | REST | `prevDay.h` |
-| `PrevDayLow` | double | The lowest price for the symbol in the given time period. | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. | REST | `prevDay.o` |
-| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. | REST | `prevDay.v` |
-| `PrevDayVwap` | double | The volume weighted average price. | REST | `prevDay.vw` |
+| `LastTradeConditions` | int[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.c` |
+| `LastTradeId` | String | The Trade ID which uniquely identifies a trade on the exchange that the trade happened on. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.i` |
+| `LastTradePrice` | double | The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD). From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.p` |
+| `LastTradeSize` | double | The size (volume) of the trade. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.s` |
+| `LastTradeParticipantTimestamp` | Instant | The millisecond accuracy timestamp. This is the timestamp of when the trade was generated at the exchange. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.t` |
+| `LastTradeExchange` | long | The exchange that this crypto trade happened on. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a mapping of exchanges to IDs. From the `lastTrade` object: The most recent trade for this ticker. | REST | `lastTrade.x` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
+| `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
+| `LastMinuteVwap` | double | The volume weighted average price. From the `min` object: The most recent minute bar for this ticker. | REST | `min.vw` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.c` |
+| `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.h` |
+| `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.l` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.o` |
+| `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.v` |
+| `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker. | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
