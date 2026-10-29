@@ -1651,8 +1651,13 @@ def looked_up(harness: Harness, *tickers: str) -> None:
 
 def test_a_futures_stream_looks_up_its_contracts_as_it_opens(harness: Harness) -> None:
     result = harness.query(FUTURES, ["ESZ5", "GCQ6-GCJ7"]).blink()
-    looked_up(harness, "ESZ5", "GCQ6")
-    assert harness.connections.futures_sessions() is harness.connections.futures_sessions()
+    looked_up(harness, "ESZ5")
+    calendar = harness.connections.futures_sessions()
+    assert calendar is harness.connections.futures_sessions()
+    assert calendar.wait_idle(15.0)
+    # A spread is not a contract: it is never looked up.
+    sent = [q["ticker.any_of"] for path, q in harness.fetched if path == "/futures/v1/contracts"]
+    assert sent == [("ESZ5",)]
     harness.session.release(result)
 
 
