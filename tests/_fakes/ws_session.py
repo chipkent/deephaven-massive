@@ -223,8 +223,12 @@ class WsSession:
         with self.cond:
             return self._opens
 
-    def _fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+    def _fetch_rows(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: object
+    ) -> list[dict[str, object]]:
         """Answer a futures schedule calendar lookup from `rows`, recording it.
+
+        The rate governor's `bucket` and `cancel` are not used: the fake makes no request.
 
         Returns:
             The rows listed for the path, or none.
