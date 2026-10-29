@@ -236,13 +236,30 @@ def test_the_flat_file_client_never_shows_the_s3_secret(
     _assert_no_secret(every_logger_at_debug, info.value)
 
 
-def test_an_s3_message_echoing_the_secret_is_cleaned(fake_s3: FakeS3) -> None:
-    # S3 never quotes the secret, but its words are the server's, so they are cleaned anyway.
-    fake_s3.refuse("us_", status=403, code="AccessDenied", message=f"denied {PLANTED_S3}")
+@pytest.mark.parametrize(("status", "code"), [(403, "AccessDenied"), (503, "SlowDown")])
+def test_an_s3_message_echoing_the_secret_is_cleaned(
+    *, status: int, code: str, fake_s3: FakeS3, every_logger_at_debug: pytest.LogCaptureFixture
+) -> None:
+    # S3 never quotes the secret, but its words are the server's, so they are cleaned anyway,
+    # in the error and in its whole traceback, after the retries of a transient status too.
+    fake_s3.refuse("us_", status=status, code=code, message=f"denied {PLANTED_S3}")
+    client = _flat_files()
+    try:
+        with pytest.raises(WireError) as info:
+            client.open(_FILE)
+    finally:
+        client.close()
+    assert info.value.message.endswith(f"({code}: denied {REDACTED})")
+    assert info.value.__cause__ is None  # botocore's error quotes the secret: not chained
+    _assert_no_secret(every_logger_at_debug, info.value)
+
+
+def test_an_s3_error_without_the_secret_keeps_its_cause(fake_s3: FakeS3) -> None:
+    fake_s3.refuse("us_", status=403, code="AccessDenied", message="Access Denied")
     client = _flat_files()
     try:
         with pytest.raises(WireEntitlementError) as info:
             client.open(_FILE)
     finally:
         client.close()
-    assert info.value.message.endswith(f"(AccessDenied: denied {REDACTED})")
+    assert info.value.__cause__ is not None
