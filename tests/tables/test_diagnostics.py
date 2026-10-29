@@ -71,6 +71,7 @@ def test_column_sets() -> None:
         "AckedTopics",
         "PendingTopics",
         "NoAckTopics",
+        "BufferedRows",
         "Reconnects",
         "LastMessageAt",
         "NextReconnectAt",
@@ -365,7 +366,14 @@ def test_fresh_rows_start_at_zero() -> None:
             transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
         )
     )
-    counts = ("Topics", "AckedTopics", "PendingTopics", "NoAckTopics", "Reconnects")
+    counts = (
+        "Topics",
+        "AckedTopics",
+        "PendingTopics",
+        "NoAckTopics",
+        "BufferedRows",
+        "Reconnects",
+    )
     assert {name: connection[name] for name in counts} == dict.fromkeys(counts, 0)
     assert connection["State"] == "RESOLVING"
     stream = as_row(STREAM)

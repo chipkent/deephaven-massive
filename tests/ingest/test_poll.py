@@ -19,6 +19,7 @@ from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
 from deephaven.execution_context import ExecutionContext
+from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 
 import deephaven_massive as dm
@@ -368,6 +369,38 @@ def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
     assert (row["State"], row["Error"]) == ("FAILED", "HTTP 403 from GET /stocks/v1/dividends")
     massive_session.release(table)
     assert stream_rows()[0]["State"] == "FAILED"  # a failed row keeps its state
+
+
+def test_a_failure_is_recorded_before_the_table_fails(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Whoever sees the table failed must find the failure already recorded, as for a stream.
+    order: list[str] = []
+    core = massive_session._core
+    record, publish = core.fail_stream, TablePublisher.publish_failure
+
+    def recording(stream_id: int, error: str) -> None:
+        order.append("recorded")
+        record(stream_id, error)
+
+    def failing(publisher: TablePublisher, error: Exception) -> None:
+        order.append("table failed")
+        publish(publisher, error)
+
+    monkeypatch.setattr(core, "fail_stream", recording)
+    monkeypatch.setattr(TablePublisher, "publish_failure", failing)
+    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    poller = poller_of(pollers)
+    poller.thread.join(TIMEOUT)
+    assert not poller.thread.is_alive()  # the poller is done with `order`
+    assert order == ["recorded", "table failed"]
+    massive_session.release(table)
 
 
 @pytest.mark.parametrize(

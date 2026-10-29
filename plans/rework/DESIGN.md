@@ -827,7 +827,7 @@ Six classes, defined in `_query.py`. Nothing touches the network until a verb is
 are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
 arguments that differ from their defaults, for example
 `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
-reactive table as `<reactive table>`. Queries have no other attributes: the verbs and `columns()`
+symbol table, static or refreshing, as `<symbol table>`. Queries have no other attributes: the verbs and `columns()`
 are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
 “`columns()` on every query”).
 
@@ -1027,12 +1027,11 @@ empty table without any request; two equal dates are that one day. A bar is retu
 its whole window lies inside the range and has ended, so the current day's, week's, or month's
 bar never appears. The full rules are in [section 12](#12-timestamp-units-and-day-boundaries).
 There is no `limit`: the library pages internally. (The aggregates endpoint's `limit` counts
-base aggregates, not rows, so it cannot serve as a row cap.) A reactive `Table` passed as
-`symbols` is read once, when the verb is called, on the caller thread inside the session's
-execution context: its valid rows become the sorted canonical symbol tuple that every source
-receives (`REST`, `FLAT_FILES`, and the `AUTO` choice), rows that are not valid symbols of the
-class are ignored (logged once per process per class, at WARNING), and a table with no valid
-symbol raises `ValueError`, as an empty symbol list does.
+base aggregates, not rows, so it cannot serve as a row cap.) A `Table` passed as `symbols`,
+static or refreshing, is read once, when the verb is called, on the caller thread inside the
+session's execution context: its rows become the sorted symbol tuple that every source
+receives (`REST`, `FLAT_FILES`, and the `AUTO` choice). A row that is not Massive's exact
+ticker raises `ValueError`, and so does a table with no symbol, as an empty symbol list does.
 
 **Backfill plus live.** There is no seeding verb. The documented recipe is:
 
@@ -1820,10 +1819,15 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   writes a null symbol and logs each bad value once at WARNING, at most 20 per table. The
   result keeps every other column.
 - **A symbol table** must have a `Symbol` column, and every non-null row must be canonical.
-  Streams listen to it and subscribe or unsubscribe as rows are added or removed; polls re-read
-  it each cycle; `fetch()` and `history()` read it once. Every verb reads the table's current
-  rows first (`read_symbols` in `_tables/watchlist.py`) and raises `ValueError` for a row that
-  is not canonical; a static verb also raises for a table without symbols. A null row is
+  A refreshing table is reactive: streams listen to it and subscribe or unsubscribe as rows are
+  added or removed; polls re-read it each cycle; `fetch()` and `history()` read it once. A
+  static (non-refreshing) table is a fixed symbol list for the stream verbs: read once when the
+  verb is called, as `fetch()` and `history()` read any table, it opens the same stream as the
+  equal symbol list, and one holding no symbol raises `ValueError`. `poll()` re-reads it each
+  cycle, which for a static table returns the same symbols every time. Every verb reads the
+  table's current rows first (`read_symbols` in `_tables/watchlist.py`) and raises
+  `ValueError` for a row that is not canonical; a static verb also raises for a table without
+  symbols. A null row is
   ignored. A **later** row that is not canonical is never subscribed or requested: it fails
   that result (the stream through its session's reaper, a `poll()` table with `SymbolRowError`),
   with a message that names the row, the reason, and
@@ -2485,8 +2489,11 @@ Then: record `HostDecision(delayed host, DELAYED, "server verdict: <message>")` 
 decision of the pair and rewrites its `Transport=REST` row; log a WARNING; move the connection's
 streams to the delayed host's connection, which starts after the backoff; close the old one;
 and do not fail the streams. The streams' `m.streams()` rows show the new host. Since the pair
-then resolves to `DELAYED`, this happens at most once per (class, family) per session. In every other case the verdict is an
-`EntitlementError` for that step's streams.
+then resolves to `DELAYED`, this happens at most once per (class, family) per session. A step can
+be refused more than once: a step of more than 1,000 topics goes out in several subscribe frames,
+and each frame may be refused. A later verdict for a step whose connection is already moving is
+part of that move: it neither starts another move nor fails the streams. In every other case the
+verdict is an `EntitlementError` for that step's streams.
 
 `publish_failure` is used only for `AuthenticationError`, `EntitlementError` (an explicit server
 `error` for the stream's topic, or REST 403 for `poll()`), a fatal WebSocket handshake error
@@ -2899,9 +2906,10 @@ table, so the queue stays bounded however fast rows arrive.
 | `Recency` | `REALTIME`, `DELAYED`, `UNKNOWN` |
 | `Evidence` | the evidence string of [section 13.2](#132-host-decision) |
 | `State` | `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`, `FAILED`, `CLOSED` |
-| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts |
+| `Topics`, `AckedTopics`, `PendingTopics`, `NoAckTopics` | counts; rewritten after every frame of acknowledgements and refusals and every `NO_ACK`, also while a subscription step is in flight |
+| `BufferedRows` | WebSocket connections only (0 on `REST` rows): rows received that no flush of the connection has taken yet; every family row of a connection shows the same count. The row is rewritten at least once a second while the count is above zero. Rows are never dropped; above `BACKLOG_WARNING_ROWS` (1,000,000) a WARNING says the flushes are falling behind, logged again only after the backlog has fallen below half of it |
 | `Reconnects` | count |
-| `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant` |
+| `LastMessageAt`, `NextReconnectAt`, `UpdatedAt` | `Instant`; `NextReconnectAt` is set only while the connection waits for its next attempt (`RECONNECTING`, `WAITING_SLOT`) |
 | `LastError` | text; for a REST failure it names the HTTP status, the path, and the `request_id` |
 | `SchemaDrift` | text; WebSocket connections only: the drift seen on the connection, as `channel:field+` (extra) and `channel:field-` (missing), sorted, truncated at 200 characters |
 
@@ -2970,7 +2978,7 @@ without the GIL.
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| reaper, one per session | library | `scope.release()`; stream held-result counts; the closers of a session freed unclosed; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
+| reaper, one per session | library | `scope.release()`; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (a REST request, once per session) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table, time_table
+from deephaven import dtypes, input_table, new_table, time_table
 from deephaven.column import string_col
 from deephaven.dherror import DHError
 from deephaven.stream import blink_to_append_only
@@ -54,6 +54,7 @@ from deephaven_massive._tables.liveness import (
     make_result,
     new_scope,
 )
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
@@ -712,43 +713,37 @@ def test_an_interrupt_while_acquire_returns_a_new_stream_leaks_no_hold(
     assert core._streams == {}
 
 
-def test_an_interrupt_while_a_reactive_key_is_hashed_leaves_no_record(
+def test_an_interrupt_while_a_reactive_key_is_stored_leaves_no_record(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Storing a reactive key hashes its SymbolTable box in Python code, an interruptible
-    # checkpoint inside _claim's stores on Pythons that do not cache a tuple's hash (3.11,
-    # 3.13). The interrupt must leave neither an OPENING record nor a key behind.
+    # A reactive key holds a SymbolTable box, whose dataclass __hash__ is Python code, so the
+    # key store in _claim is an interruptible checkpoint wherever the key's tuple hash is not
+    # already cached (CPython before 3.14 caches no tuple hash). The store raises here on
+    # every Python, as an interrupt inside that hash would, before anything is stored: the
+    # interrupt must leave neither an OPENING record nor a key behind.
     core = massive_session._core
-    real_hash = SymbolTable.__hash__
-    real_mint = _core._next_stream_id
-    minted: list[bool] = []
-    fired: list[bool] = []
+    stored: list[object] = []
 
-    def minting() -> int:
-        minted.append(True)
-        return real_mint()
+    class InterruptedStore(dict[tuple[object, ...], int]):
+        @override
+        def __setitem__(self, key: tuple[object, ...], value: int) -> None:
+            if not stored:  # the first store only: _claim's, before the record is stored
+                stored.append(key[2])
+                raise KeyboardInterrupt
+            super().__setitem__(key, value)
 
-    def hashing(self: SymbolTable) -> int:
-        if minted and not fired:  # the first hash after the id is minted: inside the stores
-            fired.append(True)
-            raise KeyboardInterrupt
-        return real_hash(self)
-
-    monkeypatch.setattr(_core, "_next_stream_id", minting)
-    monkeypatch.setattr(SymbolTable, "__hash__", hashing)
-    reactive = stream_query(massive_session, new_table([string_col("Symbol", ["AAPL"])]))
-    with contextlib.suppress(KeyboardInterrupt):
-        massive_session.release(reactive.blink())
-    monkeypatch.setattr(SymbolTable, "__hash__", real_hash)
-    if not fired:
-        # Only 3.14+ caches the tuple's hash; on 3.11 and 3.13 the hash must fire, so a refactor
-        # that stops minting through _next_stream_id fails there instead of skipping everywhere.
-        assert sys.version_info >= (3, 14)
-        pytest.skip("this Python caches the key tuple's hash: no Python code runs in the stores")
+    monkeypatch.setattr(core, "_stream_ids", InterruptedStore())
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    with pytest.raises(KeyboardInterrupt):
+        stream_query(massive_session, watchlist).blink()
+    assert len(stored) == 1
+    assert isinstance(stored[0], SymbolTable)  # a refreshing table keeps the key reactive
     assert core._streams == {}
     assert core._stream_ids == {}
+    assert fake_streams.opened == []
 
 
 def test_an_interrupt_after_make_result_releases_the_result_scope(

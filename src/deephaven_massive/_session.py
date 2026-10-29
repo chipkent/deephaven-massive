@@ -390,12 +390,14 @@ class MassiveSession:
         """Return the live diagnostics table of connections and host decisions.
 
         One row per WebSocket connection plus one `Transport=REST` row per resolved (asset
-        class, channel family), with the host, recency, evidence, state, topic counts, the
-        last error, and `SchemaDrift`: the fields a connection's frames had beyond the
-        documented schema (`channel:field+`) or lacked (`channel:field-`). A connection shared
-        with another session of the same API key shows in both. Each call returns a new view,
-        a live result like any other: while it is held it keeps the session running and
-        current, and after `close()` it keeps showing the final rows.
+        class, channel family), with the host, recency, evidence, state, topic counts,
+        `BufferedRows` (rows a connection received that no flush has taken yet; a WARNING is
+        logged when they pass 1,000,000), the last error, and `SchemaDrift`: the fields a
+        connection's frames had beyond the documented schema (`channel:field+`) or lacked
+        (`channel:field-`). A connection shared with another session of the same API key shows
+        in both. Each call returns a new view, a live result like any other: while it is held it
+        keeps the session running and current, and after `close()` it keeps showing the final
+        rows. After `close()` this raises `MassiveError` (see `SessionCore.diagnostics_view`).
 
         Returns:
             A view of the `connections` table, keyed by `Transport`, `AssetClass`, and
