@@ -3886,14 +3886,23 @@ refresh gate and the catalog gates. What each change does:
 ## 20. Quality gates
 
 Every change must pass `scripts/check.sh full`, and every CI job including the free-threaded
-3.14t job. A pull request runs only the CI jobs its changed files can affect. The whole test
-matrix, 3.14t and the lowest-direct job included, runs when a file changes under `src/`,
-`tests/`, `scripts/`, `vendor/`, or `docs/datasets/`, or when `pyproject.toml` or
-`.gitattributes` changes. A change to a workflow runs every job, and so does every push to
-`main`; a change to documents alone (plans, the rest of `docs/`, `AGENTS.md`, `.claude/`) runs
-none. The single required check, `ci-ok`, passes only when every job the change selected passed
-and every other job was skipped.
-The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
+3.14t job. A pull request runs only the CI jobs its changed files can affect:
+
+- **Always:** the lint job, which lists the changed files and decides, and `ci-ok`, the single
+  required check. `ci-ok` passes only when the lint job passed, every job the change selected
+  passed, and every other job was skipped.
+- **Lint** (ruff, mypy, pyright): a file under `src/`, `tests/`, or `scripts/`, or
+  `pyproject.toml`.
+- **Tests** (the whole matrix, 3.14t and the lowest-direct job included): a file under `src/`,
+  `tests/`, `scripts/`, `vendor/`, or `docs/datasets/`, or `pyproject.toml` or `.gitattributes`.
+- **Build** (the sdist, the wheel, and the installed-wheel check): a file under `src/`,
+  `tests/`, or `docs/datasets/`, or `scripts/check_wheel.py`, `pyproject.toml`, `README.md`,
+  `LICENSE`, `.gitattributes`, or `.gitignore`.
+- **Everything:** a change to a workflow, a pull request with more files than GitHub lists,
+  and every push to `main`.
+
+A change to documents alone (plans, the rest of `docs/`, `AGENTS.md`, `.claude/`) runs only the
+decision and `ci-ok`. The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact configuration):
 
 - **Coverage:** 100% statement and branch coverage. `pragma: no cover` needs a written reason
   and owner approval.
