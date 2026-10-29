@@ -265,8 +265,10 @@ class QueryBase:
         Returns:
             What `run` returns.
 
-        Whatever `run` raises propagates after a `call <id> failed` line.
+        Whatever `run` raises propagates after a `call <id> failed` line. A call on an
+        update-graph thread raises `ValueError` before it takes an id, so it logs nothing.
         """
+        self._core.require_verb_thread()
         call = self._core.next_stream_id()
         logger.debug("call %d start: %r.%s", call, self, verb)
         started = time.monotonic()
@@ -275,7 +277,12 @@ class QueryBase:
         except BaseException as error:
             elapsed = time.monotonic() - started
             logger.debug(
-                "call %d failed after %.3f s: %s: %s", call, elapsed, type(error).__name__, error
+                "call %d failed after %.3f s: %s: %s",
+                call,
+                elapsed,
+                type(error).__name__,
+                error,
+                exc_info=True,
             )
             raise
         if logger.isEnabledFor(logging.DEBUG):
@@ -294,7 +301,6 @@ class QueryBase:
 
         Symbols of `dm.ALL` raise the `ValueError` of `_require_explicit_symbols`.
         """
-        self._core.require_verb_thread()
         _require_explicit_symbols(self._spec, self._request)
         return self._described(
             self._core.rest_transport().fetch(self._spec, self._static_request(), call=call)
@@ -356,7 +362,6 @@ class Query(QueryBase):
         Returns:
             The static table.
         """
-        self._core.require_verb_thread()
         return self._described(
             self._core.rest_transport().fetch(self._spec, self._static_request(), call=call)
         )
@@ -739,7 +744,6 @@ class HistoryQuery(QueryBase):
         Returns:
             The static table.
         """
-        self._core.require_verb_thread()
         chosen = _require_enum(source, HistorySource, "source")
         first = parse_date_like(start, "start")
         last = None if end is None else parse_date_like(end, "end")

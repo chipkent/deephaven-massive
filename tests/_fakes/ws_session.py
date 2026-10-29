@@ -57,6 +57,7 @@ class SpyClient(_massive.WsClient):
         sources: Sequence[Source],
         callbacks: dict[str, Callable[..., None]],
         backoff: float,
+        thread_prefix: str,
     ) -> None:
         super().__init__(
             url,
@@ -68,6 +69,7 @@ class SpyClient(_massive.WsClient):
             on_state=callbacks["on_state"],
             reconnect_backoff=backoff,
             max_reconnect_backoff=backoff * 2,
+            thread_prefix=thread_prefix,
         )
         self._record = record
 
@@ -252,6 +254,7 @@ class WsSession:
             sources=sources,
             callbacks=callbacks,
             backoff=self.backoff,
+            thread_prefix=self.session._core.thread_prefix,
         )
 
     def _called(self, call: tuple[object, ...]) -> None:

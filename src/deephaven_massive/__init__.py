@@ -36,10 +36,11 @@ Public API:
       `Sip`.
       Parameters take only enum members; convert text with, for example,
       `Timespan("minute")`.
-    - `enable_debug_logging(path=None)`: send the library's log, DEBUG and up, to stderr (which
-      Deephaven shows in its log panel) or to a file; the environment variable
-      `DEEPHAVEN_MASSIVE_LOG=DEBUG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`) does the same when the
-      first session is created. Attach that log to a bug report. It never holds a secret.
+    - `enable_debug_logging(output=LogOutput.STDERR)` and `LogOutput`: send the library's log,
+      DEBUG and up, to stderr (which Deephaven shows in its log panel) or to a file; the
+      environment variable `DEEPHAVEN_MASSIVE_LOG=DEBUG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`)
+      does the same when the first session is created. Attach that log to a bug report. It
+      never holds a secret.
 
 Status:
     The library is under active development. The public surface, configuration, session
@@ -78,6 +79,7 @@ __all__ = [
     "FuturesVenue",
     "HistorySource",
     "Locale",
+    "LogOutput",
     "Market",
     "MassiveConfig",
     "MassiveError",
@@ -107,6 +109,7 @@ _EXPORTS: dict[str, str] = {
     "FuturesVenue": "deephaven_massive._enums",
     "HistorySource": "deephaven_massive._enums",
     "Locale": "deephaven_massive._enums",
+    "LogOutput": "deephaven_massive._debug_log",
     "Market": "deephaven_massive._enums",
     "MassiveConfig": "deephaven_massive._config",
     "MassiveError": "deephaven_massive._errors",
@@ -125,7 +128,7 @@ _EXPORTS: dict[str, str] = {
 # `__all__`; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
-    from deephaven_massive._debug_log import enable_debug_logging
+    from deephaven_massive._debug_log import LogOutput, enable_debug_logging
     from deephaven_massive._enums import (
         AssetClass,
         ConditionDataType,

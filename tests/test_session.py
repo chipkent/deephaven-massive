@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import importlib.metadata
 import json
 import logging
 import pkgutil
@@ -27,7 +26,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest.clients import SessionClients
-from deephaven_massive._massive import Transport, provenance, sources
+from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
@@ -149,42 +148,22 @@ def test_the_first_session_applies_the_logging_variables(
 
 
 @pytest.mark.parametrize("s3", [False, True])
-def test_creating_a_session_logs_the_environment(
-    *, s3: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_creating_a_session_logs_its_configuration_without_secrets(
+    *, s3: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
-    for name in ("HTTPS_PROXY", "https_proxy", "SSL_CERT_FILE"):
-        monkeypatch.delenv(name, raising=False)
-    if s3:
-        monkeypatch.setenv("HTTPS_PROXY", "http://user:proxy-password@proxy:3128")
-        monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/bundle.pem")
     config = dm.MassiveConfig(
         api_key="api-hidden",
         s3_access_key_id="AKIDLOG" if s3 else None,
         s3_secret_access_key="s3-hidden" if s3 else None,
     )
-
     with caplog.at_level(logging.INFO, logger="deephaven_massive._session"):
         m = dm.MassiveSession(config)
     m.close()
-    [line] = [r.getMessage() for r in caplog.records if "deephaven-massive " in r.getMessage()]
-    assert line.startswith(f"{label(m)}: deephaven-massive {dm.__version__}, Python ")
-    for part in (
-        f"(GIL {'on' if getattr(sys, '_is_gil_enabled', lambda: True)() else 'off'})",
-        f"pyarrow {importlib.metadata.version('pyarrow')}",
-        "websockets ",
-        "orjson ",
-        f"Massive spec snapshot of {provenance().fetched}",
-        repr(config),
-        f"api_key set, s3_secret_access_key {'set' if s3 else 'unset'}",
-        f"HTTPS_PROXY {'set' if s3 else 'unset'}, SSL_CERT_FILE {'set' if s3 else 'unset'}",
-    ):
-        assert part in line
-    for hidden in ("api-hidden", "s3-hidden", "proxy-password", "bundle.pem"):
-        assert hidden not in line
-
-
-def test_a_missing_distribution_is_named_not_installed() -> None:
-    assert _session._version("no-such-distribution-of-this-name") == "not installed"
+    [line] = [r.getMessage() for r in caplog.records if "with api_key set" in r.getMessage()]
+    secret = "set" if s3 else "unset"
+    assert line == f"{label(m)}: {config!r} with api_key set, s3_secret_access_key {secret}"
+    assert "api-hidden" not in line
+    assert "s3-hidden" not in line
 
 
 def test_config_must_be_a_massive_config() -> None:

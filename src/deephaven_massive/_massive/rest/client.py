@@ -33,6 +33,7 @@ import urllib3
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.net.http import https_proxy, proxy_credentials, ssl_context
+from deephaven_massive._massive.net.redaction import clean_received
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     MAX_RETRY_AFTER,
@@ -44,7 +45,6 @@ from deephaven_massive._massive.net.retry import (
     retry_after_seconds,
     transient_wait,
 )
-from deephaven_massive._massive.net.secrets import redact_bytes
 from deephaven_massive._massive.rest.query import (
     next_target,
     origin_of,
@@ -172,7 +172,7 @@ class RestClient:
     The session creates one on first use, with plain arguments, and closes it when the
     session closes. Every request is a GET with `Authorization: Bearer <key>`; the key never
     appears in a URL or a log, and a response body that echoes it has it replaced with `***`
-    before it is decoded (`net.secrets`), so no row, error, or log line can quote it.
+    before it is decoded (`net.redaction`), so no row, error, or log line can quote it.
     Requests go to the base URL's host only: a `next_url` that points elsewhere is refused.
     Failures are retried per `net.retry` and then raised as `WireError`, `WireAuthError`, or
     `WireEntitlementError`; no urllib3 or JSON exception escapes.
@@ -232,7 +232,7 @@ class RestClient:
         self._base = f"{origin[0]}://{urlsplit(base_url).netloc}"
         self._host = origin[1]
         self._clock = clock
-        # Kept only to clean every response body of a key the server echoes (`net.secrets`).
+        # Kept only to clean every response body of a key the server echoes (`net.redaction`).
         self._api_key = api_key
         self._headers = {
             "Authorization": f"Bearer {api_key}",
@@ -473,7 +473,7 @@ class RestClient:
             )
         elapsed = self._clock.monotonic() - started
         # Cleaned before anything reads it, so no row, error, or log line can quote the key.
-        data = redact_bytes(response.data, self._api_key)
+        data = clean_received(response.data, self._api_key)
         if response.status == HTTPStatus.OK:
             page = decode_page(data, rest_path, request)
             _log.debug(

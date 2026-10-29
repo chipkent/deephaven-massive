@@ -711,6 +711,20 @@ def test_verbs_raise_while_holding_the_update_graph_lock(
         q.fetch()
 
 
+def test_a_static_verb_on_the_update_graph_logs_nothing(
+    massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The thread check comes first: a refused verb takes no call id and logs no call line.
+    q = trades(massive_session)
+    update_graph = massive_session._core.exec_ctx.update_graph
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"), shared_lock(update_graph):
+        for verb in (q.fetch, lambda: q.history("2025-03-03", source=HistorySource.REST)):
+            with pytest.raises(ValueError, match="update-graph lock"):
+                verb()
+    assert [r.getMessage() for r in caplog.records if r.levelno < logging.WARNING] == []
+    assert rest.call_ids == []
+
+
 def test_verbs_raise_after_close(massive_session: dm.MassiveSession) -> None:
     q = trades(massive_session)
     massive_session.close()

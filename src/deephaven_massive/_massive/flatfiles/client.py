@@ -81,6 +81,7 @@ from urllib3.exceptions import ReadTimeoutError as ResponseReadTimeoutError
 from deephaven_massive._massive.flatfiles.reader import FlatFile
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._massive.net.http import ca_file, https_proxy, proxy_credentials
+from deephaven_massive._massive.net.redaction import redact
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     SYSTEM_CLOCK,
@@ -89,7 +90,6 @@ from deephaven_massive._massive.net.retry import (
     is_tls_failure,
     transient_wait,
 )
-from deephaven_massive._massive.net.secrets import redact
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
