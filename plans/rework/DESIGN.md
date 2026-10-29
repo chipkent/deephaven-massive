@@ -3801,6 +3801,13 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   client retries itself), a 10 s connect and 30 s read timeout, `maxsize` at least
   `max_concurrency` so fan-out never discards connections, and `Accept-Encoding: gzip`
   (urllib3 decodes it). `User-Agent: deephaven-massive/<version>` (`net.USER_AGENT`).
+  The body is streamed (`preload_content=False`) and decoded in 1 MiB reads, and a body that
+  decodes to more than `MAX_BODY_BYTES` (256 MiB, a module constant, not a setting; Massive's
+  largest pages are tens of MB) raises `WireError` with the response's status at once, never
+  retried, so a gzip bomb from a broken or hostile server or proxy cannot exhaust memory. A
+  body read in full returns its connection to the pool; one abandoned part way (the cap, a
+  reset, a decode error) closes it first. A body that breaks off or fails to decode is a
+  transient failure, retried like a reset.
 - **Authentication.** `Authorization: Bearer <key>` on every request. The key never appears in
   a URL: an `apiKey` parameter in a `next_url` is removed before the request. A key that is
   empty or holds anything but visible ASCII (a trailing newline from a key file) raises

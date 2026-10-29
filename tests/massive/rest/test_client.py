@@ -200,6 +200,57 @@ def test_a_gzip_body_is_decoded(client: RestClient, fake_rest: FakeRestServer) -
     assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 2}]
 
 
+def test_a_gzip_bomb_is_refused_at_the_cap_and_never_retried(
+    *,
+    client: RestClient,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", 1024 * 1024)
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 64 * 1024)
+    bomb = Reply(b"\0" * (64 * 1024 * 1024), gzip=True)  # 64 MiB in about 64 KiB of gzip
+    assert len(bomb.payload()) < 128 * 1024
+    fake_rest.reply("/v3/trades/AAPL", bomb, _ok())
+    with pytest.raises(WireError) as caught:
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    error = caught.value
+    assert error.status == 200
+    assert (error.host, error.path) == ("127.0.0.1", "/v3/trades/AAPL")
+    assert "more than 1048576 bytes" in error.message
+    assert _KEY not in str(error)
+    assert clock.waits == []  # never retried
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    # The next request is answered at its first attempt: the bomb's unread rest never
+    # stands in for its response.
+    assert len(fake_rest.requests) == 2
+    assert clock.waits == []
+
+
+def test_a_body_of_exactly_the_cap_is_read(
+    client: RestClient, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reply = Reply(envelope([{"i": 3}]), gzip=True)
+    size = len(Reply(envelope([{"i": 3}])).payload())
+    monkeypatch.setattr(client_module, "_READ_CHUNK", 7)
+    fake_rest.reply("/v3/trades/AAPL", reply)
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", size)
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 3}]
+    monkeypatch.setattr(client_module, "MAX_BODY_BYTES", size - 1)
+    with pytest.raises(WireError, match=f"more than {size - 1} bytes"):
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+
+
+def test_a_body_that_does_not_decompress_is_retried(
+    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    corrupt = Reply(b"not gzip at all", headers={"Content-Encoding": "gzip"})
+    fake_rest.reply("/v3/trades/AAPL", corrupt, _ok())
+    assert client.get(_TRADES, _AAPL, {}, bucket="stocks").rows == [{"i": 1}]
+    assert clock.waits == pytest.approx([0.55])
+    assert len(fake_rest.requests) == 2
+
+
 def test_get_returns_the_page_with_its_envelope(
     client: RestClient, fake_rest: FakeRestServer
 ) -> None:
