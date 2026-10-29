@@ -1643,4 +1643,4 @@ def test_a_thread_of_a_freed_session_dies_quietly() -> None:
         pass
 
     ref = weakref.ref(_Gone())  # already dead
-    _core._thread_died(cast("weakref.ref[SessionCore]", ref), "reaper", _Fatal())
+    _core.SessionCore._thread_died(cast("weakref.ref[SessionCore]", ref), "reaper", _Fatal())

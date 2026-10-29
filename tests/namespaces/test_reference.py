@@ -21,6 +21,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType, required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.poll import Pollers, open_poll
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import reference
@@ -60,7 +61,9 @@ def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSessio
 def test_datasets_are_declared_by_the_namespace_package() -> None:
     assert [spec.name for spec in reference.DATASETS] == [f"reference.{n}" for n in NAMES]
     assert all(CATALOG.by_name[spec.name] is spec for spec in reference.DATASETS)
-    assert all(spec.asset_class is None and spec.kind is None for spec in reference.DATASETS)
+    assert all(
+        spec.asset_class is ClassFromPrefix.ANY and spec.kind is None for spec in reference.DATASETS
+    )
     assert all(spec.sources == ((R, spec.fetch_path),) for spec in reference.DATASETS)
 
 
@@ -196,7 +199,7 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     assert query._spec is reference.TICKERS
     assert query._request == Request(params=(("active", True),))
     full = ref.tickers(
-        symbols=["msft", "AAPL"],
+        symbols=["MSFT", "AAPL"],
         market=dm.Market.STOCKS,
         ticker_type=dm.TickerType.CS,
         exchange="XNAS",
@@ -287,7 +290,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
         limit=50,
     )
     assert ref.news()._request == Request()
-    assert ref.news(symbols=["aapl"])._request == Request(symbols=("AAPL",))
+    assert ref.news(symbols=["AAPL"])._request == Request(symbols=("AAPL",))
 
 
 def test_news_takes_one_symbol(massive_session: dm.MassiveSession) -> None:

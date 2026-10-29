@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.reference.tickers`, `m.reference.ticker_details`, `m.reference.related_companies`, and `m.snapshots` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+
 <a id="tickers"></a>
 
 ## `m.reference.tickers`
@@ -128,7 +130,7 @@ The companies Massive relates to a ticker, from news and returns data, one row e
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "A ticker related to the requested ticker." | REST | `ticker` |
-| `Underlying` | String | The underlying instrument, in the library's canonical symbol form. From REST: the request's `ticker` parameter. | REST | request |
+| `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST: the request's `ticker` parameter. | REST | request |
 
 Massive's documentation of this dataset:
 

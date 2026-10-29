@@ -353,9 +353,9 @@ class MassiveSession:
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            symbols: The tickers, in any accepted form of their classes (`AAPL`,
-                `O:SPY251219C00600000`, `EUR/USD`, `X:BTCUSD`, `I:SPX`), or a Deephaven table
-                with a `Symbol` column; each prefix selects the class.
+            symbols: Massive's exact tickers of any class (`AAPL`, `O:SPY251219C00600000`,
+                `C:EURUSD`, `X:BTCUSD`, `I:SPX`), or a Deephaven table with a `Symbol` column;
+                each prefix selects the class, and a ticker without one is a stock.
             sort: The field to sort by (`"ticker"`); None for the endpoint's default. With
                 more than 250 tickers it orders the rows within each request of 250, not
                 across them.

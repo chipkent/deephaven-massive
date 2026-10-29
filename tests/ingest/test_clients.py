@@ -220,8 +220,14 @@ def test_racing_first_stream_calls_keep_one_set_of_connections(
         *,
         resolve_host: Callable[..., HostDecision],
         record_verdict: Callable[..., None],
+        crypto_pair: Callable[[str], tuple[str, str]],
     ) -> ws.WsConnections:
-        connections = real(core, resolve_host=resolve_host, record_verdict=record_verdict)
+        connections = real(
+            core,
+            resolve_host=resolve_host,
+            record_verdict=record_verdict,
+            crypto_pair=crypto_pair,
+        )
         built.append(connections)
         if len(built) == 1:  # the other call installs its connections first
             session._core.stream_transport()

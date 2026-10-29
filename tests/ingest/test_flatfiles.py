@@ -483,7 +483,12 @@ def synthetic_catalog() -> Catalog:
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
-        synthetic_catalog(), SYNTHETIC, prefix=SYNTHETIC_FILES, symbols=dm.ALL, window=window
+        synthetic_catalog(),
+        SYNTHETIC,
+        prefix=SYNTHETIC_FILES,
+        symbols=dm.ALL,
+        window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -578,9 +583,33 @@ def test_symbol_pushdown_keeps_only_the_requested_symbols(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    q = query(session, STOCK_TRADES, symbols=["aapl"])
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert pick(t, "Symbol", "Id") == [("AAPL", "1"), ("AAPL", "3")]
+
+
+def test_a_ticker_the_library_cannot_read_fails_the_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    every = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(
+        dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
+    ):
+        every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+
+
+def test_a_ticker_the_library_cannot_read_is_kept_under_warn(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with dm.MassiveSession(config(unknown_symbols=dm.UnknownSymbols.WARN)) as m:
+        t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
+            "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES
+        )
+        assert pick(t, "Symbol", "RawSymbol", "Id") == [(None, "BRK/B", "1"), ("AAPL", None, "2")]
 
 
 @pytest.mark.parametrize("ticker", ["NA", "NULL"])
@@ -909,7 +938,7 @@ def test_crypto_trades_every_day(
 ) -> None:
     saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
     put(saturday, "global_crypto_trades_v1_2025-03-01.csv")
-    q = query(session, CRYPTO_TRADES, symbols=["BTC-USD"])
+    q = query(session, CRYPTO_TRADES, symbols=["X:BTCUSD"])
     t = q.history("2025-03-01", "2025-03-01", source=HistorySource.FLAT_FILES)
     assert pick(t, "Symbol", "Timestamp", "Size", "Id") == [
         ("X:BTCUSD", 1740830400000000000, 0.015, "a1")
@@ -954,7 +983,7 @@ def test_auto_delegates_few_symbols_to_rest(
 ) -> None:
     rest = RestRecorder()
     monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
-    q = query(session, STOCK_TRADES, symbols=["msft", "aapl"])
+    q = query(session, STOCK_TRADES, symbols=["MSFT", "AAPL"])
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-03", "2025-03-04")
     assert pick(t, "Symbol") == [("from REST",)]
@@ -1755,7 +1784,7 @@ def test_history_runs_from_a_thread_without_an_execution_context(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    q = query(session, STOCK_TRADES, symbols=["aapl"])
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
     out: list[object] = []
 
     def run() -> None:  # a failure leaves `out` empty, which the assertion reports
@@ -1819,7 +1848,12 @@ def test_a_cancelled_or_closed_read_makes_no_request(
     assert isinstance(transport, flatfiles.FlatFileHistory)
     window = whole_days(STOCK_TRADES, "2025-03-03")
     transform = flatfiles._Transform.build(
-        CATALOG, STOCK_TRADES, prefix="us_stocks_sip/trades_v1", symbols=dm.ALL, window=window
+        CATALOG,
+        STOCK_TRADES,
+        prefix="us_stocks_sip/trades_v1",
+        symbols=dm.ALL,
+        window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()

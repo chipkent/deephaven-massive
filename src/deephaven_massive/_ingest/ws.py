@@ -69,12 +69,13 @@ import threading
 import time
 import weakref
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
 from deephaven_massive._datasets.request import HostDecision
-from deephaven_massive._datasets.symbols import SymbolTable, canonical
+from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
 from deephaven_massive._ingest.subscriptions import (
@@ -95,11 +96,12 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
 )
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
+from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Collection, Hashable, Sequence
+    from collections.abc import Callable, Collection, Hashable, Iterable, Sequence
 
     from deephaven.execution_context import ExecutionContext
 
@@ -533,7 +535,10 @@ class Connection:
             self._unknown(stream_id, self.change_symbols, (added, removed))
             return
         symbols = (cast("frozenset[str]", stream.symbols) | added) - removed
-        topics = stream_topics(self.asset_class, stream.channel, symbols)
+        # The stream's session resolved every added crypto pair before posting the change.
+        with self._lock:
+            pairs = dict(self._group.pairs)
+        topics = stream_topics(self.asset_class, stream.channel, symbols, pairs=pairs)
         self.subscriptions.add(topics - stream.topics)
         self.subscriptions.remove(stream.topics - topics)
         stream.symbols, stream.topics = symbols, topics
@@ -778,12 +783,9 @@ class Connection:
             channel: The row's channel.
             reject: The rejected row, with its raw wire symbol.
         """
-        symbol = None
-        if reject.symbol is not None:
-            try:
-                symbol = canonical(self.asset_class, reject.symbol)
-            except ValueError:
-                symbol = None
+        symbol = (
+            None if reject.symbol is None else canonical_from_wire(self.asset_class, reject.symbol)
+        )
         if symbol is None:
             logger.error(
                 "%s%s: a %s row has no valid symbol; failing the channel's ALL streams: %s",
@@ -1059,7 +1061,11 @@ def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -
 
 
 def _wanted(
-    asset_class: AssetClass, channel: str, symbols: NormalizedSymbols
+    asset_class: AssetClass,
+    channel: str,
+    symbols: NormalizedSymbols,
+    *,
+    pairs: Mapping[str, tuple[str, str]],
 ) -> tuple[frozenset[str] | None, frozenset[str]]:
     """Return what a new stream wants: its symbols and its topics at the start.
 
@@ -1067,6 +1073,7 @@ def _wanted(
         asset_class: The stream's class.
         channel: Its channel.
         symbols: Its normalized symbols.
+        pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list.
 
     Returns:
         `(symbols, topics)`: for `dm.ALL`, None and the channel's wildcard; for a symbol
@@ -1077,7 +1084,7 @@ def _wanted(
         return None, frozenset({wildcard(channel)})
     if isinstance(symbols, SymbolTable):
         return frozenset(), frozenset()
-    return frozenset(symbols), stream_topics(asset_class, channel, symbols)
+    return frozenset(symbols), stream_topics(asset_class, channel, symbols, pairs=pairs)
 
 
 class WsTransport:
@@ -1169,11 +1176,12 @@ class ConnectionGroup:
     stream (`attach`) and detaches when the session closes or is freed (`detach`); the group
     leaves the process's registry with its last session. The group owns what belongs to the
     connections rather than to a session: the connections by URL, the connection and the
-    session of each stream, the record of `NO_ACK` topics, and the server's real-time verdict
-    (`reroute`), which moves a connection with every session's streams. It holds no session
-    core. Its lock, a leaf lock (`lock`), guards all of it and each connection's leases, users,
-    failure, and options-cap bookkeeping; no Deephaven call, network call, or wait happens
-    under it, and a session's `registry_lock` is never taken with it.
+    session of each stream, the record of `NO_ACK` topics, the crypto pairs its sessions
+    looked up, and the server's real-time verdict (`reroute`), which moves a connection with
+    every session's streams. It holds no session core. Its lock, a leaf lock (`lock`), guards
+    all of it and each connection's leases, users, failure, and options-cap bookkeeping; no
+    Deephaven call, network call, or wait happens under it, and a session's `registry_lock` is
+    never taken with it.
 
     Example:
         ::
@@ -1217,6 +1225,9 @@ class ConnectionGroup:
         self.owners: dict[int, WsConnections] = {}
         self.sessions: set[WsConnections] = set()
         self._no_acked: set[tuple[str, str]] = set()
+        # The base and quote of each crypto symbol a session looked up: vendor facts, the same
+        # for every session of the key, which the connections' topics are built from.
+        self.pairs: dict[str, tuple[str, str]] = {}
 
     @classmethod
     def attach(
@@ -1464,6 +1475,7 @@ class WsConnections:
         *,
         resolve_host: Callable[[AssetClass, ChannelFamily], HostDecision],
         record_verdict: Callable[[AssetClass, ChannelFamily, HostDecision], None],
+        crypto_pair: Callable[[str], tuple[str, str]],
         client_factory: ClientFactory | None = None,
     ) -> None:
         """Join the session's connection group; no connection is opened.
@@ -1474,6 +1486,9 @@ class WsConnections:
                 transport's `resolve_host`, which may make one REST request.
             record_verdict: Replaces the cached decision of a (class, family) with the one the
                 server's real-time verdict implies; the REST transport's `record_verdict`.
+            crypto_pair: Returns the base and quote of a crypto ticker from Massive's crypto
+                ticker list, which the session reads once; the REST
+                transport's `crypto_pair`, which may make one REST request.
             client_factory: Creates each connection's client; by default a `WsClient` with the
                 session's key and backoffs. Sessions share connections only with the same
                 factory.
@@ -1482,6 +1497,7 @@ class WsConnections:
         self._label = core.label
         self._resolve = resolve_host
         self.record_verdict = record_verdict
+        self._crypto_pair = crypto_pair
         self.group: Final = ConnectionGroup.attach(
             self, config=core.config, exec_ctx=core.exec_ctx, client_factory=client_factory
         )
@@ -1490,6 +1506,9 @@ class WsConnections:
         self._mine: set[int] = set()
         self._row_owners: dict[tuple[AssetClass, ChannelFamily], Connection] = {}
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
+        # One worker, started on the first crypto watchlist change: a pair is looked up off
+        # the update-graph thread, and no change of a stream overtakes another.
+        self._lookups: Final = ThreadPoolExecutor(1, f"{core.label} crypto pairs")
         self._closed = False
 
     @property
@@ -1538,12 +1557,19 @@ class WsConnections:
         Static options symbols that would put more than `OPTIONS_CAP` explicit topics on the
         `/options` connection (counting every session's topics on it) raise the `ValueError`
         of `_check_cap`, and a closed session the `MassiveError` of `_check_open`; host
-        resolution raises the `EntitlementError` or `MassiveError` of `resolve_host`.
+        resolution raises the `EntitlementError` or `MassiveError` of `resolve_host`; a crypto
+        ticker Massive's crypto ticker list does not split raises the `MassiveError` of
+        `resolve_pairs`.
         """
         asset_class = cast("AssetClass", spec.asset_class)
         plan = self._plan(core, spec, channel)
         symbols = request.symbol_key()
-        wanted, topics = _wanted(asset_class, channel, symbols)
+        if asset_class is AssetClass.CRYPTO:
+            if isinstance(symbols, SymbolTable):
+                self.resolve_pairs(read_symbols(spec, symbols.table))
+            elif isinstance(symbols, tuple):
+                self.resolve_pairs(symbols)
+        wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
         decision = self._resolve(asset_class, spec.family)
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
@@ -1551,7 +1577,7 @@ class WsConnections:
                 connection.start()
             opened = open_stream_tables(
                 plan,
-                core.catalog.dataset_schema(spec),
+                core.dataset_schema(spec),
                 symbols,
                 core=core,
                 stream_id=stream_id,
@@ -1593,7 +1619,9 @@ class WsConnections:
         with self._lock:
             plan = self._plans.get((spec, channel))
         if plan is None:
-            built = ChannelPlan.build(core.catalog, spec, channel)
+            built = ChannelPlan.build(
+                core.catalog, spec, channel, unknown_symbols=core.config.unknown_symbols
+            )
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)
         return plan
@@ -1811,8 +1839,85 @@ class WsConnections:
         """
         with self._lock:
             connection = self.group.streams.get(stream_id)
-        if connection is not None:
+        if connection is None:
+            return
+        if connection.asset_class is not AssetClass.CRYPTO:
             connection.post(connection.change_symbols, stream_id, added, removed)
+            return
+        try:
+            self._lookups.submit(self._change_pairs, stream_id, added, removed)
+        except RuntimeError:
+            return  # close() shut the worker down meanwhile: the stream is gone with it
+
+    def _change_pairs(self, stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
+        """Resolve a crypto stream's added pairs, then post the change; fail it if one fails.
+
+        Runs on the lookup worker, which makes no Deephaven call: a failed lookup goes to the
+        flush thread (`Flusher.fail`), and the change to the connection's loop thread.
+
+        Args:
+            stream_id: The stream.
+            added: Canonical symbols the table now holds.
+            removed: Canonical symbols it no longer holds.
+        """
+        try:
+            self.resolve_pairs(added)
+        except MassiveError as error:
+            failure: MassiveError | None = error
+        except Exception as error:  # a defect: logged with its trace, and it fails the stream
+            logger.exception("%s: looking up crypto pairs failed", self._label)
+            failure = MassiveError(f"looking up the crypto pairs {sorted(added)} failed: {error!r}")
+        else:
+            failure = None
+        with self._lock:
+            connection = self.group.streams.get(stream_id)
+        if connection is None:
+            return
+        if failure is not None:
+            connection.flusher.fail([stream_id], failure)
+        else:
+            connection.post(connection.change_symbols, stream_id, added, removed)
+
+    def resolve_pairs(self, symbols: Iterable[str]) -> None:
+        """Look up, once per group, the base and quote of each crypto symbol.
+
+        A joined ticker does not say where its quote starts (`X:DOTUSD` could be `DOT-USD` or
+        `DO-TUSD`), so each takes its base and quote from Massive's crypto ticker list, which
+        the session reads once; a topic is never built from a guess. May block the calling thread
+        for that read, with no lock held, so it runs on the caller thread before a stream
+        starts, or on the lookup worker.
+
+        Args:
+            symbols: Canonical crypto symbols.
+
+        A failed lookup, or a ticker Massive does not list, raises the `MassiveError` (or its
+        `AuthenticationError` or `EntitlementError`) of `crypto_pair`, its message prefixed
+        with `cannot stream '<ticker>'`.
+        """
+        for symbol in sorted(symbols):
+            with self._lock:
+                known = symbol in self.group.pairs
+            if known:
+                continue
+            try:
+                pair = self._crypto_pair(symbol)
+            except MassiveError as error:
+                raise type(error)(
+                    f"cannot stream {symbol!r}: {error}",
+                    status=error.status,
+                    request_id=error.request_id,
+                ) from error
+            with self._lock:
+                self.group.pairs[symbol] = pair
+
+    def pairs(self) -> Mapping[str, tuple[str, str]]:
+        """Return a copy of the crypto splits looked up so far, for building topics.
+
+        Returns:
+            The base and quote of each crypto symbol looked up, by symbol.
+        """
+        with self._lock:
+            return dict(self.group.pairs)
 
     # --- rows (connections call these) ----------------------------------------------------------
 
@@ -1863,6 +1968,7 @@ class WsConnections:
                 return
             self._closed = True
             mine, closing = self._leave()
+        self._lookups.shutdown(wait=False, cancel_futures=True)
         for stream_id, connection in mine:
             connection.flusher.routes.remove(stream_id)
             if connection not in closing and not connection.post(

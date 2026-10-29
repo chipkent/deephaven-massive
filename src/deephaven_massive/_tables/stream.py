@@ -68,10 +68,23 @@ from deephaven.arrow import to_table
 from deephaven.column import string_col
 from deephaven.stream.table_publisher import table_publisher
 
-from deephaven_massive._datasets.schema import key_column, rename, required_fields, widen
-from deephaven_massive._datasets.symbols import SymbolTable, canonical
+from deephaven_massive._datasets.schema import (
+    OPTION_ROOT,
+    RAW_SYMBOL,
+    key_column,
+    rename,
+    required_fields,
+    widen,
+)
+from deephaven_massive._datasets.symbols import (
+    SymbolTable,
+    WireSymbols,
+    option_roots,
+    unknown_symbol_message,
+)
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
-from deephaven_massive._errors import MassiveError, log_once
+from deephaven_massive._enums import UnknownSymbols
+from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.diagnostics import StreamUpdate
@@ -134,10 +147,14 @@ class RowFailure:
         symbol: The row's canonical symbol, or None when the row has none that is valid; then
             only the channel's `dm.ALL` streams would have received it.
         message: Why, naming the dataset, the column, the unit, and the value.
+        every_stream: True for a row whose symbol is a spelling the library cannot read:
+            since it cannot tell which symbol stream the row was meant for, it fails every
+            stream of the dataset on the channel, so none starves silently.
     """
 
     symbol: str | None
     message: str
+    every_stream: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +184,9 @@ class ChannelPlan:
 
     Attributes:
         dataset: The dataset name, such as `"stocks.trades"`.
-        asset_class: The dataset's class, whose symbol rules map the wire's symbols.
+        asset_class: The dataset's class.
+        symbols: How the wire's symbols become canonical (`WireSymbols`), and what a spelling
+            the library cannot read does.
         channel: The channel, such as `"T"`.
         wire_schema: The Arrow schema of the decoded rows: one field per column of the
             channel's source that the dataset keeps, named by its long-form column.
@@ -182,6 +201,7 @@ class ChannelPlan:
 
     dataset: str
     asset_class: AssetClass
+    symbols: WireSymbols
     channel: str
     wire_schema: pa.Schema
     columns: tuple[tuple[ColumnType, str, str | None, TimeUnit | None], ...]
@@ -190,13 +210,22 @@ class ChannelPlan:
     required: frozenset[str]
 
     @classmethod
-    def build(cls, catalog: Catalog, spec: DatasetSpec, channel: str) -> ChannelPlan:
+    def build(
+        cls,
+        catalog: Catalog,
+        spec: DatasetSpec,
+        channel: str,
+        *,
+        unknown_symbols: UnknownSymbols,
+    ) -> ChannelPlan:
         """Prepare the reading of a channel's rows for a dataset.
 
         Args:
             catalog: The catalog, for the generated source and the dataset's merged schema.
             spec: A WebSocket dataset (with channels, so with an asset class).
             channel: One of its channels.
+            unknown_symbols: The session's rule for a symbol spelling the library cannot
+                read; `WARN` also adds the `RawSymbol` column to the schema.
 
         Returns:
             The plan.
@@ -217,11 +246,12 @@ class ChannelPlan:
             raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key")
         # A WebSocket source has no key filled from a request: every column has its field.
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
-        schema = catalog.dataset_schema(spec)
+        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
         _, symbol_field = fields[key_column("symbol", symbol)]
         return cls(
             dataset=spec.name,
             asset_class=asset_class,
+            symbols=WireSymbols(spec.name, asset_class, unknown_symbols, spec.symbols_as_written),
             channel=channel,
             wire_schema=pa.schema(
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
@@ -243,16 +273,20 @@ class ChannelPlan:
         """Turn one flush's rows of the channel into a batch of the dataset's schema.
 
         Pure Arrow apart from the symbol map: the rows become one Arrow table at once, each
-        distinct raw symbol is mapped to its canonical form once (and remembered in
-        `symbols`), every epoch column runs through the masked timestamp routine, and every
-        column is widened to its dataset type. A row with a timestamp that overflows or lies
-        outside 1990 to 2100 is dropped and reported; a raw symbol that is not valid for the
-        class becomes a null `Symbol` and is logged once.
+        distinct raw symbol is read once (`WireSymbols.read`, remembered in `symbols`), every
+        epoch column runs through the masked timestamp routine, every column is widened to its
+        dataset type, and the derived columns (`OptionRoot`, `RawSymbol`) are computed. A row
+        with a timestamp that overflows or lies outside 1990 to 2100 is dropped and reported.
+        A row whose symbol is a spelling the library cannot read is dropped and reported too,
+        failing every stream of the dataset on the channel (it cannot be routed to one), when
+        the session's `unknown_symbols` is `FAIL`; under `WARN` it is kept with a null
+        `Symbol` and the text in `RawSymbol`.
 
         Args:
             rows: The decoded rows, keyed by long-form column.
-            symbols: The caller's map from raw to canonical symbol, read and extended here;
-                one per flush thread and plan, so it needs no lock.
+            symbols: The caller's map from raw to canonical symbol (None for an unreadable
+                spelling), read and extended here; one per flush thread and plan, so it needs
+                no lock.
 
         Returns:
             The batch without the failing rows, one `RowFailure` per failing row in row order,
@@ -261,32 +295,35 @@ class ChannelPlan:
         wire = pa.Table.from_pylist(list(rows), schema=self.wire_schema)
         count = wire.num_rows
         failed: pa.Array | None = None
-        failures: list[tuple[int, str]] = []
-        arrays = []
+        failures: list[tuple[int, str, bool]] = []
+        arrays: dict[str, pa.Array] = {}
+        raw = pa.nulls(count, pa.string())
         for column_type, name, field, unit in self.columns:
-            if field is None:
-                arrays.append(pa.nulls(count, column_type.arrow_type))
-                continue
-            values = wire.column(field).combine_chunks()
-            if name == _SYMBOL:
-                values = self._canonical(values, symbols)
+            bad = None
+            if name == OPTION_ROOT:
+                values = option_roots(arrays[_SYMBOL])
+            elif name == RAW_SYMBOL:
+                values = raw
+            elif field is None:
+                values = pa.nulls(count, column_type.arrow_type)
+            elif name == _SYMBOL:
+                values, raw, bad = self._read_symbols(
+                    wire.column(field), symbols, failures=failures
+                )
             elif unit is not None:
-                nanos, bad = masked_instants(unit, values, time_column=name == _TIMESTAMP)
-                if pc.call_function("any", [bad]).as_py():
-                    label = f"{self.dataset}.{name}"
-                    for index in pc.call_function("indices_nonzero", [bad]).to_pylist():
-                        sent = values[index].as_py()
-                        failures.append((index, mismatch_message(label, unit, sent)))
-                    failed = bad if failed is None else pc.call_function("or", [failed, bad])
-                values = nanos
-            arrays.append(widen(values, column_type.arrow_type))
-        batch = pa.Table.from_arrays(arrays, schema=self.arrow_schema)
+                values, bad = self._instants(name, unit, wire.column(field), failures=failures)
+            else:
+                values = wire.column(field).combine_chunks()
+            if bad is not None:
+                failed = bad if failed is None else pc.call_function("or", [failed, bad])
+            arrays[name] = widen(values, column_type.arrow_type)
+        batch = pa.Table.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         rejected: list[RowFailure] = []
         if failed is not None:
             canonical_symbols = batch.column(_SYMBOL)
             rejected = [
-                RowFailure(canonical_symbols[index].as_py(), message)
-                for index, message in sorted(failures)
+                RowFailure(canonical_symbols[index].as_py(), message, every)
+                for index, message, every in sorted(failures)
             ]
             batch = batch.filter(pc.call_function("invert", [failed]))
         distinct = pc.call_function("unique", [batch.column(_SYMBOL)]).to_pylist()
@@ -297,52 +334,64 @@ class ChannelPlan:
             null_symbols=None in distinct,
         )
 
-    def _canonical(self, raw: pa.Array, symbols: dict[str, str | None]) -> pa.Array:
-        """Map a column of wire symbols to canonical symbols, one Python call per new symbol.
+    def _read_symbols(
+        self,
+        column: pa.ChunkedArray,
+        symbols: dict[str, str | None],
+        *,
+        failures: list[tuple[int, str, bool]],
+    ) -> tuple[pa.Array, pa.Array, pa.Array | None]:
+        """Read the rows' wire symbols; under `FAIL`, report the rows of unreadable ones.
 
         Args:
-            raw: The rows' symbols as the wire spells them.
-            symbols: The raw-to-canonical map, extended with the symbols not seen before.
+            column: The rows' symbols as sent.
+            symbols: The flush thread's raw-to-canonical map (`convert`).
+            failures: Extended with `(row, message, True)` for each row whose spelling the
+                library cannot read, when the session's `unknown_symbols` is `FAIL`: such a
+                row fails every stream of the channel (`RowFailure.every_stream`).
 
         Returns:
-            The canonical symbols; null where a symbol is not valid for the class.
+            The canonical symbols, the `RawSymbol` values, and the mask of the rows to drop
+            (None when no row fails).
         """
-        distinct = pc.call_function("unique", [raw])
-        for value in distinct.to_pylist():
-            if value is not None and value not in symbols:
-                symbols[value] = _canonical_or_none(self.asset_class, value, self.channel)
-        mapped = pa.array(
-            [symbols.get(v) if v is not None else None for v in distinct.to_pylist()], pa.string()
+        read = self.symbols.read(column.combine_chunks(), symbols)
+        if not read.unknown or self.symbols.unknown is UnknownSymbols.WARN:
+            return read.symbols, read.raw, None
+        bad = pc.call_function("is_valid", [read.raw])
+        message = unknown_symbol_message(self.dataset, read.unknown)
+        indices = pc.call_function("indices_nonzero", [bad]).to_pylist()
+        failures.extend((index, message, True) for index in indices)
+        return read.symbols, read.raw, bad
+
+    def _instants(
+        self,
+        name: str,
+        unit: TimeUnit,
+        column: pa.ChunkedArray,
+        *,
+        failures: list[tuple[int, str, bool]],
+    ) -> tuple[pa.Array, pa.Array | None]:
+        """Convert an epoch column, reporting the rows whose value fails the bound.
+
+        Args:
+            name: The column.
+            unit: The epoch's unit.
+            column: The rows' raw values.
+            failures: Extended with `(row, message, False)` for each failing row.
+
+        Returns:
+            The values as nanoseconds, and the mask of the rows to drop (None when none fails).
+        """
+        values = column.combine_chunks()
+        nanos, bad = masked_instants(unit, values, time_column=name == _TIMESTAMP)
+        if not pc.call_function("any", [bad]).as_py():
+            return nanos, None
+        label = f"{self.dataset}.{name}"
+        indices = pc.call_function("indices_nonzero", [bad]).to_pylist()
+        failures.extend(
+            (i, mismatch_message(label, unit, values[i].as_py()), False) for i in indices
         )
-        return pc.take(
-            mapped, pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
-        )
-
-
-def _canonical_or_none(asset_class: AssetClass, raw: str, channel: str) -> str | None:
-    """Return the canonical form of a wire symbol, or None (logged once) if it has none.
-
-    Args:
-        asset_class: The class whose symbol rules apply.
-        raw: The symbol as the wire spells it.
-        channel: The channel it arrived on, for the log.
-
-    Returns:
-        The canonical symbol, or None.
-    """
-    try:
-        return canonical(asset_class, raw)
-    except ValueError:
-        log_once(
-            logger,
-            f"invalid-wire-symbol:{asset_class.value}/{channel}",
-            "%s channel %s sent %r, which is not a valid symbol; such rows have a null Symbol",
-            asset_class.value,
-            channel,
-            raw,
-            level=logging.WARNING,
-        )
-        return None
+        return nanos, bad
 
 
 class StreamSink:
@@ -526,20 +575,19 @@ class StreamSink:
             self.failed = True
             return True
 
-    def fail_later(self, error: Exception) -> None:
-        """Queue the stream's failure on its session's reaper, because its watchlist failed.
+    def fail_later(self, message: str) -> None:
+        """Queue the stream's failure on its session's reaper: its watchlist cannot be followed.
 
-        The watchlist listener reports its error on an update-graph thread, where failing a
-        table (a Deephaven call that takes the publish lock) is not allowed, so the failure is
-        only queued here; it never blocks.
+        The watchlist's listener reports a row that is not canonical, or the failure of the
+        watchlist itself, on an update-graph thread, where failing a table (a Deephaven call
+        that takes the publish lock) is not allowed, so the failure is only queued here; it
+        never blocks. The reaper, unlike a connection's flush thread, runs as long as the
+        session, also after the server's real-time verdict moved the stream.
 
         Args:
-            error: What the watchlist's listener reported.
+            message: Why the stream cannot follow its watchlist, naming the fix.
         """
-        failure = MassiveError(
-            f"{self.plan.dataset} stream {self.stream_id}: its symbol table failed, so the "
-            f"stream can no longer follow it: {error}"
-        )
+        failure = MassiveError(message)
 
         def fail() -> None:
             self.fail(failure)
@@ -893,7 +941,7 @@ class Flusher:
         for failure in converted.failures:
             error = MassiveError(failure.message)
             for sink in readers:
-                if sink.receives(failure.symbol):
+                if failure.every_stream or sink.receives(failure.symbol):
                     sink.fail(error)
         if not converted.batch.num_rows:
             return
@@ -916,8 +964,8 @@ class Flusher:
             sink.core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
 
 
-def _fail_later(sink_ref: weakref.ref[StreamSink], error: Exception) -> None:
-    """A watchlist listener's `on_error`: queue its stream's failure, if the stream still exists.
+def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
+    """A watch's `on_invalid`: queue its stream's failure, if the stream still exists.
 
     The listener's callbacks are held from Java until the JVM collects the listener, so they
     hold the sink, and through it the session, only weakly: a strong reference there would
@@ -925,11 +973,11 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], error: Exception) -> None:
 
     Args:
         sink_ref: The stream's sink, weakly.
-        error: What the listener reported.
+        message: Why the stream cannot follow its watchlist.
     """
     sink = sink_ref()
     if sink is not None:
-        sink.fail_later(error)
+        sink.fail_later(message)
 
 
 def _drain(source: queue.SimpleQueue[_T]) -> list[_T]:
@@ -985,8 +1033,9 @@ def open_stream_tables(
     the `SymbolWatch` is created in the stream scope and tied to the blink table's liveness
     (`SymbolWatch.keep_alive_with`), so it follows the watchlist for as long as anything keeps
     the stream alive, and the handle holds it until the session's record of the stream goes;
-    the caller starts it once the stream's topics can receive its changes. A watch that fails
-    queues the stream's failure (`StreamSink.fail_later`). If anything raises, even
+    the caller starts it once the stream's topics can receive its changes. A watchlist row that
+    is not canonical, or a failure of the watchlist itself, queues the stream's failure
+    (`StreamSink.fail_later`). If anything raises, even
     `KeyboardInterrupt`, the scope is released (which shuts the blink table down and runs
     `on_shutdown`) and the exception propagates.
 
@@ -1028,7 +1077,7 @@ def open_stream_tables(
                     plan.asset_class,
                     symbols.table,
                     on_symbols,
-                    on_error=functools.partial(_fail_later, weakref.ref(sink)),
+                    on_invalid=functools.partial(_fail_later, weakref.ref(sink)),
                 )
                 watch.keep_alive_with(blink)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak

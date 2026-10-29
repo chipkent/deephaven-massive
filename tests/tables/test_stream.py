@@ -23,11 +23,12 @@ from deephaven.arrow import to_table
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
+from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._enums import AssetClass, UnknownSymbols
+from deephaven_massive._errors import BoundedWarnings, MassiveError
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.stream import (
@@ -106,7 +107,9 @@ def wait_for(condition: Callable[[], bool]) -> None:
 
 
 def test_a_plan_reads_the_channel_for_the_dataset(massive_session: dm.MassiveSession) -> None:
-    plan = ChannelPlan.build(massive_session._core.catalog, TRADES, "T")
+    plan = ChannelPlan.build(
+        massive_session._core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL
+    )
     assert plan.symbol_field == "Ticker"
     assert plan.required == frozenset({"Ticker", "SipTimestamp"})
     assert plan.wire_schema.field("SipTimestamp").type == pa.int64()
@@ -122,46 +125,77 @@ def test_a_plan_needs_a_symbol_key(massive_session: dm.MassiveSession) -> None:
         channels={None: "T"},
     )
     with pytest.raises(ValueError, match="stocks/T declares no symbol key"):
-        ChannelPlan.build(massive_session._core.catalog, keyless, "T")
+        ChannelPlan.build(
+            massive_session._core.catalog, keyless, "T", unknown_symbols=UnknownSymbols.FAIL
+        )
 
 
-def test_conversion_maps_symbols_and_converts_every_column(
-    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+FOREX_ROWS = [
+    {
+        "Ticker": "EUR/USD",
+        "AskPrice": 1.1,
+        "BidPrice": 1.0,
+        "ParticipantTimestamp": 1_700_000_000_000,
+        "Exchange": 1,
+    },
+    {
+        "Ticker": "nonsense pair",
+        "AskPrice": 1.1,
+        "BidPrice": 1.0,
+        "ParticipantTimestamp": 1_700_000_000_000,
+        "Exchange": 1,
+    },
+]
+
+
+def test_conversion_keeps_unreadable_symbols_in_raw_symbol_under_warn(
+    massive_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan = ChannelPlan.build(massive_session._core.catalog, FOREX, "C")
+    monkeypatch.setattr(
+        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger("t"), limit=5)
+    )
+    plan = ChannelPlan.build(
+        massive_session._core.catalog, FOREX, "C", unknown_symbols=UnknownSymbols.WARN
+    )
     cache: dict[str, str | None] = {}
-    rows = [
-        {
-            "Ticker": "EUR/USD",
-            "AskPrice": 1.1,
-            "BidPrice": 1.0,
-            "ParticipantTimestamp": 1_700_000_000_000,
-            "Exchange": 1,
-        },
-        {
-            "Ticker": "nonsense pair",
-            "AskPrice": 1.1,
-            "BidPrice": 1.0,
-            "ParticipantTimestamp": 1_700_000_000_000,
-            "Exchange": 1,
-        },
-    ]
     with caplog.at_level(logging.WARNING):
-        converted = plan.convert(rows, cache)
-        plan.convert(rows, cache)  # cached: no second warning
+        converted = plan.convert(FOREX_ROWS, cache)
+        plan.convert(FOREX_ROWS, cache)  # cached: no second warning
     assert converted.failures == []
     batch = converted.batch
+    assert batch.column_names[:3] == ["Symbol", "Timestamp", "RawSymbol"]
     assert batch.column("Symbol").to_pylist() == ["C:EURUSD", None]
+    assert batch.column("RawSymbol").to_pylist() == [None, "nonsense pair"]
     assert (converted.symbols, converted.null_symbols) == (frozenset({"C:EURUSD"}), True)
     assert batch.column("Timestamp").type == pa.timestamp("ns", tz="UTC")
     assert cache == {"EUR/USD": "C:EURUSD", "nonsense pair": None}
-    assert caplog.text.count("which is not a valid symbol") == 1
+    assert caplog.text.count("Massive sent the symbol 'nonsense pair'") == 1
+
+
+def test_conversion_fails_the_rows_of_unreadable_symbols_under_fail(
+    massive_session: dm.MassiveSession,
+) -> None:
+    plan = ChannelPlan.build(
+        massive_session._core.catalog, FOREX, "C", unknown_symbols=UnknownSymbols.FAIL
+    )
+    converted = plan.convert(FOREX_ROWS, {})
+    assert "RawSymbol" not in converted.batch.column_names
+    assert converted.batch.column("Symbol").to_pylist() == ["C:EURUSD"]
+    assert [f.symbol for f in converted.failures] == [None]
+    message = converted.failures[0].message
+    assert "test.forex: Massive sent the symbol 'nonsense pair'" in message
+    assert "MASSIVE_UNKNOWN_SYMBOLS=warn" in message
+    assert converted.null_symbols is False
 
 
 def test_conversion_drops_and_reports_rows_with_bad_timestamps(
     massive_session: dm.MassiveSession,
 ) -> None:
-    plan = ChannelPlan.build(massive_session._core.catalog, TRADES, "T")
+    plan = ChannelPlan.build(
+        massive_session._core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL
+    )
     rows = [
         trade("AAPL"),
         trade("MSFT", SipTimestamp=5),
@@ -187,7 +221,9 @@ def test_conversion_drops_and_reports_rows_with_bad_timestamps(
 
 def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) -> None:
     # A dataset in a kind has the kind's columns, some of which another member's source carries.
-    plan = ChannelPlan.build(massive_session._core.catalog, TRADES, "T")
+    plan = ChannelPlan.build(
+        massive_session._core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL
+    )
     wider = replace(
         plan,
         columns=(*plan.columns, (ColumnType.STRING, "Venue", None, None)),
@@ -201,7 +237,7 @@ def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) 
 
 
 def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink, Table]:
-    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
     opened = open_stream_tables(
         plan,
         core.catalog.dataset_schema(TRADES),
@@ -218,7 +254,7 @@ def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink
 
 def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.MassiveSession) -> None:
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
     converted = plan.convert([trade("AAPL"), trade("MSFT")], {})
     batch = to_table(converted.batch)
     every, _ = make_sink(core, ALL)
@@ -253,7 +289,7 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     massive_session: dm.MassiveSession,
 ) -> None:
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
     converted = plan.convert([trade("AAPL")], {})
     batch = to_table(converted.batch)
     sink, _ = make_sink(core, ALL)
@@ -278,7 +314,7 @@ def test_open_stream_tables_releases_its_scope_on_failure(
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     with pytest.raises(RuntimeError, match="no watch"):
         open_stream_tables(
-            ChannelPlan.build(core.catalog, TRADES, "T"),
+            ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL),
             core.catalog.dataset_schema(TRADES),
             SymbolTable(watchlist),
             core=core,
@@ -312,16 +348,11 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
         assert gate.wait(TIMEOUT)
 
     core.defer(hold)
-    sink.fail_later(RuntimeError("the watchlist broke"))
+    sink.fail_later("the symbol table failed, so the result can no longer follow it")
     assert not sink.failed  # nothing failed on the reporting thread
     gate.set()
     drain()
-    assert failures == [
-        (
-            "test.trades stream 1: its symbol table failed, so the stream can no longer follow "
-            "it: the watchlist broke"
-        )
-    ]
+    assert failures == ["the symbol table failed, so the result can no longer follow it"]
 
 
 def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -619,7 +650,7 @@ def test_benchmark_fan_out(
     # Records, never gates: the flush's shared batch against grouping the rows per stream in
     # one Python pass (one conversion and one table per stream).
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
     symbols = [f"S{i}" for i in range(streams)]
     rows = [trade(symbols[i % streams], float(i)) for i in range(rows_per_flush)]
     sinks = [make_sink(core, (symbol,))[0] for symbol in symbols]
@@ -653,4 +684,4 @@ def test_a_failed_watchlist_of_a_finished_stream_does_nothing() -> None:
         pass
 
     gone = weakref.ref(_Gone())
-    stream._fail_later(cast("weakref.ref[StreamSink]", gone), RuntimeError("late"))
+    stream._fail_later(cast("weakref.ref[StreamSink]", gone), "late")

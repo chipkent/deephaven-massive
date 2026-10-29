@@ -158,7 +158,10 @@ class SessionClients:
         if connections is None:
             # Outside the lock: joining a group takes the group's lock, never held with it.
             candidate = WsConnections(
-                core, resolve_host=self._resolve_host, record_verdict=self._record_verdict
+                core,
+                resolve_host=self._resolve_host,
+                record_verdict=self._record_verdict,
+                crypto_pair=self._crypto_pair,
             )
             with core.registry_lock:
                 connections = self._streams
@@ -182,6 +185,17 @@ class SessionClients:
             The decision, cached for the session by the REST transport.
         """
         return self.rest().resolve_host(asset_class, family)
+
+    def _crypto_pair(self, symbol: str) -> tuple[str, str]:
+        """Return a crypto ticker's base and quote through the session's REST transport.
+
+        Args:
+            symbol: A canonical crypto ticker.
+
+        Returns:
+            `(base, quote)`, cached for the session by the REST transport.
+        """
+        return self.rest().crypto_pair(symbol)
 
     def _record_verdict(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
