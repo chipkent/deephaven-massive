@@ -37,7 +37,7 @@ import pyarrow as pa
 import pytest
 from deephaven_server import Server
 
-from deephaven_massive._errors import EntitlementError
+from deephaven_massive._errors import EntitlementError, MassiveError
 from deephaven_massive._massive import (
     FlatFileClient,
     ReadColumn,
@@ -1818,3 +1818,251 @@ def half_day_report(
         return lines
 
     return report
+
+
+_STAMP_DAYS = (date(2024, 11, 27), date(2024, 11, 29))
+"""A full US trading day and the half day after it (Black Friday 2024, closing at 13:00 New
+York time), whose 1-day bars the day-stamp checks read from every source."""
+
+_SAME_BAR = 1e-6
+"""The relative error within which two sources' open, high, low, close, or volume agree; a
+flat file's text and a JSON number of the same price can differ in the last digits."""
+
+StampedBar = tuple[int, tuple[float | None, ...]]
+"""One source's bar: its stamp in epoch milliseconds and its open, high, low, close, and
+volume (None where the source has none, such as an index's volume)."""
+
+
+def _raw_ohlcv(bar: Mapping[str, Any]) -> tuple[float | None, ...]:
+    """Return a raw REST bar's open, high, low, close, and volume.
+
+    Args:
+        bar: The bar as Massive sent it (`o`, `h`, `l`, `c`, `v`).
+
+    Returns:
+        The five values, None where the bar lacks one.
+    """
+    return tuple(None if bar.get(k) is None else float(bar[k]) for k in ("o", "h", "l", "c", "v"))
+
+
+def _same_bar(left: tuple[float | None, ...], right: tuple[float | None, ...]) -> bool:
+    """Return whether two OHLCV tuples describe the same bar.
+
+    Open, high, low, and close must be present on both and agree within `_SAME_BAR`; the
+    volume is compared only when both sides have one.
+
+    Args:
+        left: One bar's values.
+        right: The other's.
+
+    Returns:
+        True when they agree.
+    """
+    for index, (a, b) in enumerate(zip(left, right, strict=True)):
+        if a is None or b is None:
+            if index < 4:
+                return False
+            continue
+        if abs(a - b) > _SAME_BAR * max(abs(a), abs(b), 1e-12):
+            return False
+    return True
+
+
+def _range_bars(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+    ticker_param: str,
+    ticker: str,
+    *,
+    span: str,
+    bounds: tuple[date, date],
+) -> list[dict[str, Any]]:
+    """Read one ticker's raw bars of one unit from the aggregates range endpoint, unfiltered.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+        ticker_param: The class's path placeholder, such as `"stocksTicker"`.
+        ticker: The ticker.
+        span: The unit: `"minute"`, `"day"`, `"week"`, or `"month"`.
+        bounds: The first and last day, inclusive.
+
+    Returns:
+        The bars as Massive sent them, oldest first.
+    """
+    path = f"/v2/aggs/ticker/{{{ticker_param}}}/range/{{multiplier}}/{{timespan}}/{{from}}/{{to}}"
+    params = {ticker_param: ticker, "multiplier": 1, "timespan": span}
+    params |= {"from": bounds[0], "to": bounds[1]}
+    return rest_rows(path, params, {"sort": "asc", "limit": 50_000})
+
+
+def _bar_text(bar: Mapping[str, Any]) -> str:
+    """Describe a raw REST bar: its stamp in UTC and New York time, and its values.
+
+    Args:
+        bar: The bar as Massive sent it.
+
+    Returns:
+        Such as `"t=2024-11-27T05:00:00Z = 00:00 New York (midnight) ohlcv=(...)"`.
+    """
+    return f"t={_wall_clock(int(bar['t']))} ohlcv={_raw_ohlcv(bar)}"
+
+
+@pytest.fixture
+def day_bar_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+) -> Callable[[str, str, Mapping[str, Mapping[date, list[StampedBar]]]], tuple[list[str], int]]:
+    """Return a function that compares one ticker's 1-day bars of a full and a half day.
+
+    For 2024-11-27 (a full trading day) and 2024-11-29 (a half day, closing at 13:00 New York
+    time) it reads the ticker's 1-day bars from the aggregates range endpoint, unfiltered, and
+    reports each bar's stamp (UTC and New York time) and values. Beside each it reports the
+    same day's bar from every other source the caller read (grouped daily, a day flat file),
+    with its stamp and whether its open, high, low, close, and volume agree with the range bar
+    (within a relative 1e-6; a volume only when both have one).
+
+    Args:
+        rest_rows: Reads raw REST rows.
+
+    Returns:
+        A function `(ticker_param, ticker, others)`: the class's path placeholder (such as
+        `"stocksTicker"`), the ticker, and the other sources' bars, by source name and day,
+        each a `(stamp_ms, ohlcv)` pair. It returns the evidence lines and how many range
+        bars it read.
+    """
+
+    def report(
+        ticker_param: str, ticker: str, others: Mapping[str, Mapping[date, list[StampedBar]]]
+    ) -> tuple[list[str], int]:
+        lines: list[str] = []
+        read = 0
+        for day in _STAMP_DAYS:
+            bars = _range_bars(rest_rows, ticker_param, ticker, span="day", bounds=(day, day))
+            read += len(bars)
+            if not bars:
+                lines.append(f"{ticker} {day} range: no 1-day bar")
+            lines.extend(f"{ticker} {day} range 1-day bar: {_bar_text(bar)}" for bar in bars)
+            for name, by_day in others.items():
+                found = by_day.get(day, [])
+                if not found:
+                    lines.append(f"{ticker} {day} {name}: no bar")
+                for stamp_ms, values in found:
+                    agree = [_same_bar(values, _raw_ohlcv(bar)) for bar in bars]
+                    lines.append(
+                        f"{ticker} {day} {name}: t={_wall_clock(stamp_ms)} ohlcv={values}; "
+                        f"agrees with the range bar: {agree}"
+                    )
+        return lines, read
+
+    return report
+
+
+@pytest.fixture
+def prev_bar_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+) -> Callable[[str, str], tuple[list[str], int]]:
+    """Return a function that compares `/prev` with the range bar of the same day.
+
+    `/prev` serves only the most recent completed trading day, so its stamp is checked on
+    whatever day that is when the test runs. For one ticker it reads the raw `/prev` bar,
+    takes its New York calendar day, reads the range endpoint's 1-day bars of that day, and
+    reports both stamps (UTC and New York time) and whether their open, high, low, close, and
+    volume agree.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+
+    Returns:
+        A function `(ticker_param, ticker)`: the class's path placeholder (such as
+        `"optionsTicker"`) and the ticker. It returns the evidence lines and how many `/prev`
+        bars it read.
+    """
+
+    def report(ticker_param: str, ticker: str) -> tuple[list[str], int]:
+        prevs = rest_rows(f"/v2/aggs/ticker/{{{ticker_param}}}/prev", {ticker_param: ticker}, {})
+        if not prevs:
+            return [f"{ticker} /prev: no bar"], 0
+        lines: list[str] = []
+        for prev in prevs:
+            day = datetime.fromtimestamp(int(prev["t"]) / 1000, UTC).astimezone(_NEW_YORK).date()
+            lines.append(f"{ticker} /prev ({day}): {_bar_text(prev)}")
+            ranged = _range_bars(rest_rows, ticker_param, ticker, span="day", bounds=(day, day))
+            if not ranged:
+                lines.append(f"{ticker} {day} range: no 1-day bar")
+            lines.extend(
+                f"{ticker} {day} range 1-day bar: {_bar_text(bar)}; agrees with /prev: "
+                f"{_same_bar(_raw_ohlcv(prev), _raw_ohlcv(bar))}"
+                for bar in ranged
+            )
+        return lines, len(prevs)
+
+    return report
+
+
+@pytest.fixture
+def period_bar_report(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+) -> Callable[[str, str, Mapping[str, tuple[date, date]]], tuple[list[str], int]]:
+    """Return a function that shows the stamps of one ticker's week or month bars.
+
+    For each unit asked for it reads the bars over a range of days from the aggregates range
+    endpoint, unfiltered, and reports each stamp in UTC and New York time with its values.
+    Reading it: a bar stamped 00:00 New York time (01:00 for an index) on its period's first
+    day, or on the Saturday or Sunday before a week's Monday, is one the library accepts.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+
+    Returns:
+        A function `(ticker_param, ticker, spans)`: the class's path placeholder, the ticker,
+        and the first and last day to read of each unit (`"week"`, `"month"`). It returns the
+        evidence lines and the fewest bars read of any unit.
+    """
+
+    def report(
+        ticker_param: str, ticker: str, spans: Mapping[str, tuple[date, date]]
+    ) -> tuple[list[str], int]:
+        lines: list[str] = []
+        counts: list[int] = []
+        for span, bounds in spans.items():
+            bars = _range_bars(rest_rows, ticker_param, ticker, span=span, bounds=bounds)
+            counts.append(len(bars))
+            lines.append(f"{ticker} {span} bars {bounds[0]} to {bounds[1]}: {len(bars)}")
+            lines.extend(f"{ticker} {span} bar: {_bar_text(bar)}" for bar in bars)
+        return lines, min(counts, default=0)
+
+    return report
+
+
+@pytest.fixture
+def library_stamps(
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[Callable[[], Table]], str]:
+    """Return a function that runs one library bar call and describes the bars' windows.
+
+    A refusal is not an outcome to record: the returned function lets `EntitlementError`
+    propagate, so the test fails (its declared plan covers the data) rather than reporting it.
+
+    Args:
+        table_rows: Snapshots a table into rows.
+
+    Returns:
+        A function taking the call (such as `lambda: q.history(day, day)`). It returns each
+        row's `Symbol`, `Date`, `TimestampStart`, and `TimestampEnd` (as UTC instants), or the
+        text of the `MassiveError` the call raised.
+    """
+
+    def describe(call: Callable[[], Table]) -> str:
+        try:
+            rows = table_rows(call())
+        except EntitlementError:
+            raise
+        except MassiveError as error:
+            return f"MassiveError: {error}"
+        if not rows:
+            return "no rows"
+        return "; ".join(
+            f"{r['Symbol']} Date={r['Date']} TimestampStart={_instant_text(r['TimestampStart'])} "
+            f"TimestampEnd={_instant_text(r['TimestampEnd'])}"
+            for r in rows
+        )
+
+    return describe
