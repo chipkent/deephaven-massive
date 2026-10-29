@@ -77,7 +77,6 @@ text), so it is checked both against the real tree and against a synthetic tree 
 """
 
 import ast
-import functools
 import json
 import re
 import subprocess
@@ -894,22 +893,6 @@ def _outside_rules(
     return found
 
 
-@functools.cache
-def _parse(source: str) -> ast.Module:
-    """Return the syntax tree of a module's text, parsed once per run for the same text.
-
-    The wire-boundary and layer checks both read every module under `src/`; caching by text
-    lets them share one parse. The checks only read the tree, never change it.
-
-    Args:
-        source: The module's text.
-
-    Returns:
-        The parsed module.
-    """
-    return ast.parse(source)
-
-
 def boundary_violations(path: PurePosixPath, source: str, interface: frozenset[str]) -> list[str]:
     """Return every break of the wire package's boundary and layers in one file.
 
@@ -922,7 +905,7 @@ def boundary_violations(path: PurePosixPath, source: str, interface: frozenset[s
     Returns:
         One `"<path>:<line>: <rule>"` message per violation, empty for a clean file.
     """
-    tree = _parse(source)
+    tree = ast.parse(source)
     module, package = _module_of(path)
     where = str(path)
     if _inside(module, _WIRE):
@@ -1779,7 +1762,7 @@ def layer_violations(path: PurePosixPath, source: str) -> list[str]:
     layer = layer_of_file(PurePosixPath(*path.parts[2:]))
     if layer is None:
         return [f"{where}:1: not in a known layer"]
-    tree = _parse(source)
+    tree = ast.parse(source)
     module, package = _module_of(path)
     type_only = _type_checking_lines(tree)
     references = [*_imports(tree, package), *_module_strings(tree)]
@@ -2307,7 +2290,7 @@ def _pytest_settings() -> dict[str, object]:
 def test_the_default_run_deselects_the_live_tests() -> None:
     addopts = _pytest_settings()["addopts"]
     assert isinstance(addopts, list)
-    assert addopts[-2:] == ["-m", "not integration and not benchmark"]
+    assert addopts[-2:] == ["-m", "not integration and not benchmark(sweep=True)"]
 
 
 def test_both_live_markers_are_registered() -> None:

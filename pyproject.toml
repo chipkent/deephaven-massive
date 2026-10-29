@@ -209,11 +209,11 @@ typeCheckingMode = "standard"
 [tool.pytest]
 strict = true
 filterwarnings = ["error"]
-# `-m "not integration and not benchmark"` keeps the live tests and the benchmark sweep out of
-# every default run, CI's included; a later `-m` on the command line replaces it, so
+# The `-m` expression keeps the live tests and the extra points of the benchmark sweep out of
+# every default run, CI's included. A later `-m` on the command line replaces it, so
 # `uv run pytest -m integration` runs only the live tests (each also skips itself without
-# `MASSIVE_API_KEY`), and `-m benchmark` only the sweep.
-addopts = ["-ra", "--import-mode=importlib", "-m", "not integration and not benchmark"]
+# `MASSIVE_API_KEY`), and `-m benchmark` every point of the sweep.
+addopts = ["-ra", "--import-mode=importlib", "-m", "not integration and not benchmark(sweep=True)"]
 markers = [
     "integration: a live test against Massive (tests/**/test_*_integration.py); deselected by default, run with -m integration and MASSIVE_API_KEY set",
     "integration_limits: deliberately exceeds Massive's subscription and connection limits; also marked integration, and run only with -m integration_limits",
@@ -221,7 +221,7 @@ markers = [
     "needs(*plans): the plans a live test needs, each <class>:<plan>, s3, or some:basic; it skips unless MASSIVE_LIVE_PLANS declares them",
     "settles(*items): the open verification items a live test settles, for the run's summary",
     "requests(count): the REST requests a live test makes, which scale its timeout when its class is on Basic",
-    "benchmark: the rest of a sweep that records timings and never asserts; deselected by default, run with -m benchmark",
+    "benchmark(sweep=False): a test that records rates and never asserts; the points marked sweep=True are deselected by default, and -m benchmark runs every point",
 ]
 testpaths = ["tests"]
 # Puts the repository root on sys.path, which --import-mode=importlib does not do itself, so

@@ -116,12 +116,13 @@ def envelope(
     return body
 
 
-class _LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
     """A `ThreadingHTTPServer` that binds without a reverse DNS lookup of its address.
 
     `HTTPServer.server_bind` names the server with `socket.getfqdn(host)`, a reverse lookup that
-    costs a millisecond or more per server, and much more where DNS is slow. Nothing reads that
-    name here, so the address itself stands in for it.
+    costs a millisecond or more per server, and much more where DNS is slow. No test reads that
+    name, so the address itself stands in for it. `FakeRestServer` and any test that needs a
+    plain HTTP server on 127.0.0.1 use this class.
     """
 
     @override
@@ -150,7 +151,7 @@ class FakeRestServer:
         self._received: list[Received] = []
         self._on_request: Callable[[Received], None] | None = None
         self._tunnel_status: int | None = None
-        self._server = _LoopbackHTTPServer(("127.0.0.1", 0), self._handler())
+        self._server = LoopbackHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._scheme = "http"
         if tls is not None:
