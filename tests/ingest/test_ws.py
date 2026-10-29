@@ -2304,6 +2304,34 @@ def test_no_calendar_outlives_a_closed_transport(
     assert len(created) == 1
 
 
+def test_the_calendar_never_reads_through_a_freed_session(ws_session: WsSession) -> None:
+    # A session freed without close() stays in its group until its closer runs on the reaper;
+    # its REST client may be closing, so the calendar does not read through it.
+    reads: list[str] = []
+
+    class _Freed:
+        closed = False
+
+        @staticmethod
+        def core() -> None:
+            return None
+
+        @staticmethod
+        def fetch_rows(path: str, _query: object) -> list[dict[str, object]]:
+            reads.append(path)
+            return []
+
+    group = ws_session.connections.group
+    real = group.sessions
+    group.sessions = cast("set[ws.WsConnections]", {_Freed()})
+    try:
+        with pytest.raises(dm.MassiveError, match="connection group has closed"):
+            group._fetch_rows("/futures/v1/contracts", {})
+    finally:
+        group.sessions = real  # before the session's close leaves the group
+    assert reads == []
+
+
 def test_the_calendar_outlives_the_session_that_made_it(ws_session: WsSession) -> None:
     # A shared futures connection keeps dating the other session's rows: the calendar is the
     # group's, and reads through whichever session is still open.
