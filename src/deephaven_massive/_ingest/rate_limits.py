@@ -23,8 +23,8 @@ long each read waits, and what the user is told:
 - **Buckets.** A request is charged to its dataset's subscription (`bucket_of`); reference
   data and the other datasets Massive assigns to no subscription go to `OTHER`, which is paced
   once a refusal names the per-minute limit, like a subscription, but cannot be declared.
-- **Patience.** Each read decides how long it waits out a pause (`give_up_at`): `READ_PATIENCE`
-  (10 minutes), or `CONSOLE_PATIENCE` (90 s) for a read made while its thread holds the
+- **Patience.** Each read decides how long it waits out pauses (`read_patience`): `READ_PATIENCE`
+  (10 minutes of pauses), or `CONSOLE_PATIENCE` (90 s) for a read made while its thread holds the
   Deephaven update graph's lock, as a console command does, since every table of the process
   stops updating meanwhile. A read that gives up fails alone; the bucket keeps pausing and
   probing for every other read.
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
     from deephaven.execution_context import ExecutionContext
 
-    from deephaven_massive._massive import RequestGovernor, WireError
+    from deephaven_massive._massive import Patience, RequestGovernor, WireError
 
 __all__ = [
     "BUCKETS",
@@ -82,9 +82,9 @@ __all__ = [
     "RateLimitWarnings",
     "announce",
     "bucket_of",
-    "give_up_at",
     "rate_limit_pull",
     "rate_limit_rows",
+    "read_patience",
 ]
 
 logger = logging.getLogger(__name__)
@@ -151,27 +151,25 @@ def _real_clock_governor() -> RequestGovernor:
     return _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, labels=LABELS)
 
 
-def give_up_at(governor: RequestGovernor, exec_ctx: ExecutionContext) -> float:
-    """Return when a read starting now stops waiting for its bucket's pauses.
+def read_patience(exec_ctx: ExecutionContext) -> Patience:
+    """Return the patience of a read starting now: how long it waits out its buckets' pauses.
 
-    A read waits out a pause for `READ_PATIENCE` (10 minutes), or for `CONSOLE_PATIENCE`
-    (90 s) when its thread holds the Deephaven update graph's lock, as a console command does:
-    no table of the process updates meanwhile. Call it on the read's own thread, outside every
-    library lock, since it asks Deephaven (a Java call).
+    A read waits out `READ_PATIENCE` (10 minutes) of pauses, or `CONSOLE_PATIENCE` (90 s)
+    when its thread holds the Deephaven update graph's lock, as a console command does: no
+    table of the process updates meanwhile. Only pauses count; waiting for a paced slot never
+    does. Call it on the read's own thread, before any fan-out and outside every library lock,
+    since it asks Deephaven (a Java call); pass the result to every request of the read.
 
     Args:
-        governor: The governor the read's requests wait on.
         exec_ctx: The session's execution context, whose update graph is asked.
 
     Returns:
-        The time, on the governor's clock, to pass as the read's `give_up_at`.
+        A new `Patience` for the read.
     """
     console = on_update_graph(exec_ctx)
-    patience = CONSOLE_PATIENCE if console else READ_PATIENCE
-    logger.debug(
-        "a read waits out pauses for %.0f s (update-graph lock held: %s)", patience, console
-    )
-    return governor.clock.monotonic() + patience
+    seconds = CONSOLE_PATIENCE if console else READ_PATIENCE
+    logger.debug("a read waits out %.0f s of pauses (update-graph lock held: %s)", seconds, console)
+    return _massive.Patience(seconds)
 
 
 def bucket_of(subscription: Subscription | None) -> str:

@@ -1415,6 +1415,7 @@ _WIRE_CLIENTS = frozenset(
         "RATE_WINDOW",
         "RestClient",
         "Page",
+        "Patience",
         "to_batch",
         "WsClient",
         "WsState",

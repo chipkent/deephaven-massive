@@ -24,7 +24,13 @@ from deephaven_massive._massive.net.errors import (
 )
 from deephaven_massive._massive.rest import client as client_module
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.rest.governor import Admission, Permit, RequestGovernor
+from deephaven_massive._massive.rest.governor import (
+    UNLIMITED,
+    Admission,
+    Patience,
+    Permit,
+    RequestGovernor,
+)
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
@@ -557,18 +563,19 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     )
     fake_rest.reply("/v3/trades/AAPL", refusal)
     with pytest.raises(WireError) as caught:
-        client.get(_TRADES, _AAPL, {}, bucket="stocks", give_up_at=600.0)
-    assert str(caught.value) == (
-        "Massive is refusing stocks requests with HTTP 429; they resume at "
-        "2027-01-15T08:10:01+00:00, later than this request waits (latest refusal: HTTP 429 "
-        "from GET /v3/trades/AAPL on 127.0.0.1 (request_id r): quota)"
+        client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(600.0))
+    assert str(caught.value).startswith(
+        "Massive is refusing stocks requests with HTTP 429 (latest refusal: HTTP 429 from GET "
+        "/v3/trades/AAPL on 127.0.0.1 (request_id r): quota). Its next request, a probe, goes at "
+        "2027-01-15T08:10:01+00:00 ("
     )
+    assert "waits out at most 600 s of pauses and has waited 0 s" in str(caught.value)
     assert caught.value.status == 429
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
     # Another call with the same patience fails at once, without being sent.
     fake_rest.reply("/v3/trades/MSFT", _ok())
-    with pytest.raises(WireError, match="they resume at") as again:
-        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", give_up_at=600.0)
+    with pytest.raises(WireError, match="Its next request, a probe, goes at") as again:
+        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", patience=Patience(600.0))
     assert (again.value.status, again.value.path) == (429, "/v3/trades/MSFT")
     assert len(fake_rest.requests) == 1
     assert clock.waits == []
@@ -1163,7 +1170,7 @@ def test_a_retry_after_of_now_pauses_on_the_schedule_and_gives_up_in_time(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers))
     with pytest.raises(WireError) as caught:
-        client.get(_TRADES, _AAPL, {}, bucket="stocks", give_up_at=600.0)
+        client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(600.0))
     # Never a resend at once: 15, 30, then 60 s, until a pause would end past the patience.
     assert caught.value.status == 429
     assert clock.waits[:3] == [15.0, 30.0, 60.0]
@@ -1198,9 +1205,11 @@ class _RecordingGovernor(RequestGovernor):
         self.lanes: list[object] = []
 
     @override
-    def admission(self, bucket: str, *, lane: Hashable, give_up_at: float = math.inf) -> Admission:
+    def admission(
+        self, bucket: str, *, lane: Hashable, patience: Patience = UNLIMITED
+    ) -> Admission:
         self.lanes.append(lane)
-        return super().admission(bucket, lane=lane, give_up_at=give_up_at)
+        return super().admission(bucket, lane=lane, patience=patience)
 
 
 def test_a_call_without_a_token_is_a_lane_of_its_own_and_a_token_shares_one(

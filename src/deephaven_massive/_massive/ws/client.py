@@ -235,9 +235,9 @@ class WsClient:
                 library passes its configuration's value (at least 15 s); tests pass less.
             max_reconnect_backoff: Seconds the doubling backoff stops at; at least
                 `reconnect_backoff`. It also caps an HTTP 429's `Retry-After`, so every wait
-                lies within `[reconnect_backoff, max_reconnect_backoff]`. The REST client
-                instead gives up on a `Retry-After` above 60 s, because a caller is blocked on
-                that request; this client never gives up, so honouring an unbounded
+                lies within `[reconnect_backoff, max_reconnect_backoff]`. A REST read instead
+                gives up once a pause outlasts its patience, because a caller is blocked on
+                that read; this client never gives up, so honouring an unbounded
                 `Retry-After` would leave its streams silent for as long as the server named,
                 while a capped wait only retries sooner and meets another 429 at worst.
             clock: The time source the wire clients share (`net.retry.Clock`). Its

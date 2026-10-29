@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import math
 import random
 import re
 from dataclasses import dataclass, replace
@@ -56,7 +55,7 @@ from deephaven_massive._massive.net.retry import (
     retry_after_seconds,
     transient_wait,
 )
-from deephaven_massive._massive.rest.governor import is_basic_refusal
+from deephaven_massive._massive.rest.governor import UNLIMITED, is_basic_refusal
 from deephaven_massive._massive.rest.query import next_target, request_target
 from deephaven_massive._massive.rest.response import Request, decode_page, http_error
 
@@ -66,7 +65,12 @@ if TYPE_CHECKING:
     from urllib3 import BaseHTTPResponse
 
     from deephaven_massive._massive.net.origins import Origin
-    from deephaven_massive._massive.rest.governor import Admission, Permit, RequestGovernor
+    from deephaven_massive._massive.rest.governor import (
+        Admission,
+        Patience,
+        Permit,
+        RequestGovernor,
+    )
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec.types import RestPath
 
@@ -194,13 +198,13 @@ class _Job:
         rest_path: The path, for decoding.
         bucket: The governor's bucket every attempt is charged to.
         cancel: The caller's cancellation, or None.
-        give_up_at: When the call stops waiting for a pause, on the governor's clock.
+        patience: The patience of the call's read, charged by its waits for a pause.
     """
 
     rest_path: RestPath
     bucket: str
     cancel: Cancel | None
-    give_up_at: float
+    patience: Patience
 
 
 _REFUSED: Final = object()
@@ -330,17 +334,17 @@ class RestClient:
         *,
         bucket: str,
         cancel: Cancel | None = None,
-        give_up_at: float = math.inf,
+        patience: Patience = UNLIMITED,
     ) -> Page:
         """Request one page of a REST path.
 
         Blocks the calling thread for the request and its waits: for the governor's permit
-        (a paced bucket's slot, or a pause after a 429, unless the pause ends past
-        `give_up_at`), and for up to three retries of a 5xx or connection failure, 0.5 to
+        (a paced bucket's slot, or a pause after a 429, unless `patience` cannot cover the
+        pause), and for up to three retries of a 5xx or connection failure, 0.5 to
         2.4 s each. A 429 is not a retry: the attempt is made again once the governor allows.
 
         Errors: `WireError` when the request fails after its retries, its bucket is paused
-        past `give_up_at` (status 429, saying when the bucket's requests resume), TLS
+        for longer than `patience` covers (status 429, saying when its next request goes), TLS
         verification fails, the proxy
         refuses its credentials (status 407, never retried), the body is not a valid page,
         the client is closed, or `cancel` is set; `WireAuthError` for 401;
@@ -357,15 +361,15 @@ class RestClient:
             bucket: The governor's bucket the request is charged to: its subscription.
             cancel: Ends every wait of the request when set (the request then raises
                 `WireError`); None when only `close()` should.
-            give_up_at: The monotonic time, on the governor's clock, past which the request
-                does not wait for a pause (`RequestGovernor.admission`); `math.inf`, the
+            patience: The patience of the request's read, shared by its requests: the most
+                time they wait out pauses (`RequestGovernor.admission`). `UNLIMITED`, the
                 default, waits however long.
 
         Returns:
             The decoded page.
         """
         target = request_target(rest_path, path_params, query_params)
-        return self._fetch(_Job(rest_path, bucket, cancel, give_up_at), target)
+        return self._fetch(_Job(rest_path, bucket, cancel, patience), target)
 
     def pages(
         self,
@@ -375,7 +379,7 @@ class RestClient:
         *,
         bucket: str,
         cancel: Cancel | None = None,
-        give_up_at: float = math.inf,
+        patience: Patience = UNLIMITED,
         limit: int | None = None,
     ) -> Iterator[Page]:
         """Request a REST path and follow its `next_url` pages, one page at a time.
@@ -393,7 +397,7 @@ class RestClient:
                 the query in their `next_url`.
             bucket: The governor's bucket every page is charged to: its subscription.
             cancel: Ends every wait of every page when set; None when only `close()` should.
-            give_up_at: When every page stops waiting for a pause, as for `get`.
+            patience: The patience every page's pause waits are charged to, as for `get`.
             limit: The most rows to yield in total, or `None` for every page. Paging stops
                 once that many rows are yielded, and the last page is cut to fit.
 
@@ -410,7 +414,7 @@ class RestClient:
         if limit is not None and limit < 1:
             raise ValueError(f"limit must be at least 1, not {limit}")
         target = request_target(rest_path, path_params, query_params)
-        return self._pages(_Job(rest_path, bucket, cancel, give_up_at), target, limit)
+        return self._pages(_Job(rest_path, bucket, cancel, patience), target, limit)
 
     @property
     def governor(self) -> RequestGovernor:
@@ -522,15 +526,13 @@ class RestClient:
         A failure that is not retryable raises `WireError`: a status that is neither 200, 429,
         nor a transient 5xx (`http_error` chooses the subclass), and from `_permit`,
         `_unanswered`, and `_refused` a closed client or a cancelled caller, a failed TLS
-        verification, a proxy that refused its credentials (HTTP 407), or a bucket Massive
-        kept refusing for longer than the governor waits (status 429).
+        verification, a proxy that refused its credentials (HTTP 407), or a pause longer than
+        the call's patience still covers (status 429).
         """
         lane = job if job.cancel is None else job.cancel
         # The claim is open before anything is granted, and its exit reports the permit if
         # nothing else did, so no interrupt can leave the permit unreported.
-        with self._governor.admission(
-            job.bucket, lane=lane, give_up_at=job.give_up_at
-        ) as admission:
+        with self._governor.admission(job.bucket, lane=lane, patience=job.patience) as admission:
             permit = self._permit(request, admission, stop)
             if stop.is_set():  # cancelled just as it was admitted: it is never sent
                 self._governor.release(permit)
@@ -609,8 +611,9 @@ class RestClient:
         Raises:
             WireError: If `stop` is set before or during the wait: "the REST client is
                 closed" when the client closed, "cancelled" otherwise (`_attempt` releases a
-                permit granted just as `stop` was set). With status 429 when the bucket has
-                given up on a run of refusals, quoting the latest refusal.
+                permit granted just as `stop` was set). With status 429 when the bucket is
+                paused for longer than the call's patience still covers, quoting the latest
+                refusal.
         """
         if stop.is_set():
             raise self._stopped(request)
@@ -693,7 +696,7 @@ class RestClient:
         The governor hears of the refusal even when the hook or the log raises (an interrupt
         while the WARNING is written), so the bucket pauses and the permit is reported. The
         attempt is then made again once the governor allows; the next permit fails instead,
-        with status 429, if the pause ends past the call's `give_up_at`.
+        with status 429, if the call's patience cannot cover the pause.
         """
         basic = is_basic_refusal(failure.message)
         try:

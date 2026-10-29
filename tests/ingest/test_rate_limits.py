@@ -9,6 +9,7 @@ import threading
 from typing import TYPE_CHECKING
 
 import pytest
+from deephaven.update_graph import exclusive_lock
 
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
@@ -25,8 +26,8 @@ from deephaven_massive._ingest.rate_limits import (
     ReadShape,
     announce,
     bucket_of,
-    give_up_at,
     rate_limit_rows,
+    read_patience,
 )
 from deephaven_massive._tables.diagnostics import LimitSource, RateLimitState
 from tests._fakes.clock import FakeClock
@@ -427,23 +428,23 @@ def test_the_default_registry_names_the_other_buckets_requests() -> None:
     permit = governor.admission(OTHER, lane=object()).acquire(_massive.Cancel())
     governor.refused(permit, retry_after=700.0, message="busy")
     with pytest.raises(_massive.WireError, match="refusing requests outside Massive's"):
-        governor.admission(OTHER, lane=object(), give_up_at=0.0).acquire(_massive.Cancel())
+        governor.admission(OTHER, lane=object(), patience=_massive.Patience(0.0)).acquire(
+            _massive.Cancel()
+        )
     # The other bucket cannot be declared, but a Basic-worded refusal paces it.
     with pytest.raises(ValueError, match=r"\['other'\] cannot be declared Basic"):
         governor.declare({OTHER})
     lease.release()
 
 
-def test_a_read_waits_ten_minutes_or_ninety_seconds_while_its_thread_holds_the_lock(
-    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+def test_a_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock(
+    dh_exec_ctx: ExecutionContext,
 ) -> None:
-    clock = FakeClock()
-    clock.advance(100.0)
-    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=clock)
-    assert give_up_at(governor, dh_exec_ctx) == 100.0 + READ_PATIENCE == 700.0
-    # A console command holds the update graph's lock: the read gives up sooner.
-    monkeypatch.setattr(rate_limits, "on_update_graph", lambda _ctx: True)
-    assert give_up_at(governor, dh_exec_ctx) == 100.0 + CONSOLE_PATIENCE == 190.0
+    assert read_patience(dh_exec_ctx).seconds == READ_PATIENCE == 600.0
+    # A console command holds the update graph's exclusive lock: the read gives up sooner.
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        assert read_patience(dh_exec_ctx).seconds == CONSOLE_PATIENCE == 90.0
+    assert read_patience(dh_exec_ctx) is not read_patience(dh_exec_ctx)  # one per read
 
 
 def test_the_pace_warning_counts_each_slot_for_61_seconds(
