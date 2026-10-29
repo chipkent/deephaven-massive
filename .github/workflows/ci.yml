@@ -64,6 +64,33 @@ jobs:
         # covers it.
         run: |
           set -euo pipefail
+          # Ruff and mypy check src/, tests/, and scripts/, configured by pyproject.toml.
+          lint='^(src|tests|scripts)/|^pyproject\.toml$'
+          # The suite also reads the vendored snapshot under vendor/ and the committed column
+          # reference under docs/datasets/, whose line endings .gitattributes fixes, and it runs
+          # scripts/spec-drift-issue.sh.
+          test='^(src|tests|scripts|vendor)/|^docs/datasets/|^(pyproject\.toml|\.gitattributes)$'
+          # The sdist carries src/, tests/, and docs/datasets/; the package metadata takes
+          # README.md and LICENSE; hatchling leaves out what .gitignore lists; and the wheel
+          # check compares the installed wheel with docs/datasets/.
+          build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore)$'
+          # Files no job reads: the plans, the developer and live-test guides, the agent
+          # instructions and skills, the pull request and issue templates, and the settings of
+          # Dependabot and of the local git hooks, which CI does not run.
+          unread='^(plans/|docs/dev/|docs/live-tests\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.pre-commit-config\.yaml$)'
+          # A change to a workflow or a composite action runs everything.
+          workflows='^\.github/(workflows|actions)/'
+          # grep exits 1 for no match and 2 or more for an error, such as an invalid pattern. An
+          # error must never read as "no match", which would skip jobs, so every pattern is
+          # checked on every event, and every match below fails the step on an error.
+          for pattern in "$lint" "$test" "$build" "$unread" "$workflows"; do
+            status=0
+            grep -qE "$pattern" <<< "" || status=$?
+            if [ "$status" -gt 1 ]; then
+              echo "::error::invalid pattern: $pattern"
+              exit 1
+            fi
+          done
           everything() {
             echo "Every job runs: $1."
             printf '%s=true\n' lint test build >> "$GITHUB_OUTPUT"
@@ -79,37 +106,30 @@ jobs:
             exit 0
           fi
           paths=$(cat "$RUNNER_TEMP/changed-files.txt")
-          # Ruff and mypy check src/, tests/, and scripts/, configured by pyproject.toml.
-          lint='^(src|tests|scripts)/|^pyproject\.toml$'
-          # The suite also reads the vendored snapshot under vendor/ and the committed column
-          # reference under docs/datasets/, whose line endings .gitattributes fixes, and it runs
-          # scripts/spec-drift-issue.sh.
-          test='^(src|tests|scripts|vendor)/|^docs/datasets/|^(pyproject\.toml|\.gitattributes)$'
-          # The sdist carries src/, tests/, and docs/datasets/; the package metadata takes
-          # README.md and LICENSE; hatchling leaves out what .gitignore lists; and the wheel
-          # check compares the installed wheel with docs/datasets/.
-          build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore)$'
-          # Files no job reads: the plans, the developer and live-test guides, the agent
-          # instructions and skills, the pull request and issue templates, and the settings of
-          # Dependabot and of the local git hooks, which CI does not run.
-          unread='^(plans/|docs/dev/|docs/live-tests\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.pre-commit-config\.yaml$)'
-          if grep -qE '^\.github/(workflows|actions)/' <<< "$paths"; then
+          if grep -qE "$workflows" <<< "$paths"; then
             everything "a workflow changed, and every job must exercise a workflow change"
             exit 0
           fi
-          uncovered=$(grep -vE "$lint|$test|$build|$unread" <<< "$paths" || true)
+          uncovered=$(grep -vE "$lint|$test|$build|$unread" <<< "$paths" || [ $? -eq 1 ])
           if [ -n "$uncovered" ]; then
             everything "no rule covers $(head -n 3 <<< "$uncovered" | paste -sd ' ' -)"
             exit 0
           fi
           decide() {
-            if grep -qE "$2" <<< "$paths"; then echo "$1=true"; else echo "$1=false"; fi
+            status=0
+            grep -qE "$2" <<< "$paths" || status=$?
+            case "$status" in
+              0) echo "$1=true" ;;
+              1) echo "$1=false" ;;
+              *)
+                echo "::error::matching the $1 pattern failed with grep status $status" >&2
+                exit 1
+                ;;
+            esac
           }
-          {
-            decide lint "$lint"
-            decide test "$test"
-            decide build "$build"
-          } | tee -a "$GITHUB_OUTPUT"
+          # Every decision is made before any is written, so a failure leaves no partial output.
+          decisions=$(decide lint "$lint" && decide test "$test" && decide build "$build")
+          tee -a "$GITHUB_OUTPUT" <<< "$decisions"
       - name: Install uv
         if: steps.decide.outputs.lint == 'true'
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
