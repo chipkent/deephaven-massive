@@ -34,9 +34,10 @@ table, and `SchemaDrift` from each page's drift.
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, `RowDataError` (a
 row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
 rows), `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks
-a parameter the caller set), or `UnlistedPairError` (a crypto pair whose currencies Massive's
-reference data does not give) fails the table through `publish_failure`, marks the row `FAILED`
-(`SessionCore.fail_stream`), and ends the poller. Any other error, also one while publishing,
+a parameter the caller set), or a `PermanentError` (such as `_ingest/rest.py`'s
+`UnlistedPairError`, a crypto pair whose currencies Massive's reference data does not give)
+fails the table through `publish_failure`, marks the row `FAILED` (`SessionCore.fail_stream`),
+and ends the poller. Any other error, also one while publishing,
 is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds.
 
@@ -70,7 +71,12 @@ from deephaven.stream.table_publisher import table_publisher
 from deephaven_massive._datasets.schema import RAW_SYMBOL
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode
-from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+from deephaven_massive._errors import (
+    AuthenticationError,
+    EntitlementError,
+    MassiveError,
+    PermanentError,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
@@ -143,22 +149,12 @@ class SymbolRowError(MassiveError):
     """
 
 
-class UnlistedPairError(MassiveError):
-    """A crypto ticker whose two currencies Massive's reference data does not give.
-
-    A path that takes the pair as two currencies (`/v1/open-close/crypto/{from}/{to}/...`)
-    needs the split, which only Massive's reference data gives; the session's crypto ticker
-    list, read once, does not list the ticker, or gives currencies that do not join to it. A
-    `poll()` table fails with it, since every later cycle would read the same list.
-    """
-
-
 _FATAL: Final = (
     AuthenticationError,
     EntitlementError,
     RowDataError,
+    PermanentError,
     SymbolRowError,
-    UnlistedPairError,
     UnsupportedParameterError,
 )
 """The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""

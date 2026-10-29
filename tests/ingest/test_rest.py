@@ -38,7 +38,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, rest
-from deephaven_massive._ingest.poll import RowDataError, UnlistedPairError
+from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._massive import RestPath, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
@@ -730,7 +730,7 @@ def test_a_crypto_pair_lookup_never_guesses(
     if message is None:  # the row of the ticker itself decides
         assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
         return
-    with pytest.raises(UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
+    with pytest.raises(rest.UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
         reader.crypto_pair("X:DOTUSD")
 
 
@@ -836,7 +836,7 @@ def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
     params = {"date": date(2025, 3, 3)}
     static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
     assert isinstance(static, Query)
-    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+    with pytest.raises(rest.UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
         static.poll(60)
     watch = new_table([string_col("Symbol", ["X:DOTUSD"])])
     q = query(session, CRYPTO_OPEN_CLOSE, symbols=watch, params=params)

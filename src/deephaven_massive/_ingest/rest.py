@@ -97,12 +97,11 @@ from deephaven_massive._datasets.timestamps import (
     utc_day_stamps,
 )
 from deephaven_massive._enums import AssetClass, Timespan, UnknownSymbols
-from deephaven_massive._errors import MassiveError, from_wire
+from deephaven_massive._errors import MassiveError, PermanentError, from_wire
 from deephaven_massive._ingest import hosts, poll
 from deephaven_massive._ingest.poll import (
     Pollers,
     RowDataError,
-    UnlistedPairError,
     UnsupportedParameterError,
 )
 from deephaven_massive._massive import (
@@ -201,6 +200,17 @@ def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | s
         f"Massive's reference data gives the currencies {base!r} and {quote!r}, which do not "
         "join to it"
     )
+
+
+class UnlistedPairError(PermanentError):
+    """A crypto ticker whose two currencies Massive's reference data does not give.
+
+    A path that takes the pair as two currencies (`/v1/last/crypto/{from}/{to}`,
+    `/v1/open-close/crypto/{from}/{to}/{date}`) needs the split, which only Massive's reference
+    data gives; the session's crypto ticker list, read once, does not list the ticker, or gives
+    currencies that do not join to it (`RestReader.crypto_pair`). A `poll()` table fails with
+    it, since every later cycle would read the same list.
+    """
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,12 +9,13 @@ from deephaven_massive._errors import (
     BoundedWarnings,
     EntitlementError,
     MassiveError,
+    PermanentError,
     from_wire,
     log_once,
 )
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 
-ALL_ERRORS = [MassiveError, AuthenticationError, EntitlementError]
+ALL_ERRORS = [MassiveError, AuthenticationError, EntitlementError, PermanentError]
 
 
 @pytest.mark.parametrize("error", ALL_ERRORS)
@@ -67,7 +68,7 @@ def test_from_wire_keeps_missing_context_as_none() -> None:
     assert converted.args == ("connection reset by peer",)
 
 
-@pytest.mark.parametrize("error", [AuthenticationError, EntitlementError])
+@pytest.mark.parametrize("error", [AuthenticationError, EntitlementError, PermanentError])
 def test_specific_errors_are_massive_errors(error: type[MassiveError]) -> None:
     with pytest.raises(MassiveError, match="detail"):
         raise error("detail")
@@ -76,6 +77,8 @@ def test_specific_errors_are_massive_errors(error: type[MassiveError]) -> None:
 def test_errors_are_distinct() -> None:
     assert not issubclass(AuthenticationError, EntitlementError)
     assert not issubclass(EntitlementError, AuthenticationError)
+    # A permanent failure is neither: a poll() fails on it as on them, for its own reason.
+    assert not issubclass(PermanentError, (AuthenticationError, EntitlementError))
 
 
 def test_log_once_logs_each_key_once(

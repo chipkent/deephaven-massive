@@ -44,6 +44,7 @@ __all__ = [
     "BoundedWarnings",
     "EntitlementError",
     "MassiveError",
+    "PermanentError",
     "from_wire",
     "log_once",
 ]
@@ -139,6 +140,23 @@ class EntitlementError(MassiveError):
                 raise dm.EntitlementError("NBBO quotes are not on this plan")
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
+    """
+
+
+class PermanentError(MassiveError):
+    """A failure that the same request would meet again, so a retry cannot fix it.
+
+    The base of the errors a module raises when the answer it needs is settled for the session
+    (a crypto pair missing from the ticker list the session read). A `poll()` table fails with
+    one rather than retrying it every cycle; the module that raises a subclass defines it, and
+    `_ingest/poll.py` names only this base, so neither imports the other.
+
+    Example:
+        ::
+
+            from deephaven_massive._errors import MassiveError, PermanentError
+
+            assert issubclass(PermanentError, MassiveError)
     """
 
 
