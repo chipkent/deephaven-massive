@@ -143,9 +143,8 @@ from deephaven_massive._massive import (
     to_batch,
 )
 from deephaven_massive._tables.columns import dataset_table
-from deephaven_massive._tables.core import holds_update_graph_lock
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
-from deephaven_massive._tables.liveness import entered
+from deephaven_massive._tables.liveness import entered, holds_update_graph_lock
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:

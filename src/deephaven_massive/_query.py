@@ -62,8 +62,7 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._tables.columns import column_table, describe
-from deephaven_massive._tables.core import refuse_update_graph_thread
-from deephaven_massive._tables.liveness import entered
+from deephaven_massive._tables.liveness import entered, refuse_update_graph_thread
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import ALL, override
 

@@ -1400,24 +1400,33 @@ def test_a_console_close_shows_its_connections_closed(
     connection = ws_session.connection()
     view = m.connections()
 
-    def states(rows: list[dict[str, Any]]) -> list[tuple[str, str]]:
-        return [(r["Family"], r["State"]) for r in rows if r["Transport"] == "WS"]
+    def states(rows: list[dict[str, Any]]) -> list[tuple[str, str, int, int]]:
+        return [
+            (r["Family"], r["State"], r["Topics"], r["BufferedRows"])
+            for r in rows
+            if r["Transport"] == "WS"
+        ]
 
-    rows_when(view, lambda rows: states(rows) == [("TICK", "CONNECTED")])
+    rows_when(view, lambda rows: states(rows) == [("TICK", "CONNECTED", 1, 0)])
     with connection._lock:
         (row,) = connection._rows.values()
-        connection._rows[ChannelFamily.TICK] = dataclasses.replace(row, state=ConnectionState(last))
+        connection._rows[ChannelFamily.TICK] = dataclasses.replace(
+            row, state=ConnectionState(last), buffered_rows=7
+        )
         # A family the session does not show a row of: show_closed writes nothing for it.
         connection._rows[ChannelFamily.FMV] = dataclasses.replace(row, family=ChannelFamily.FMV)
     client = connection._client
     stop = client.close
     monkeypatch.setattr(client, "close", lambda: None)
-    console_command(m.close)
-    final = "FAILED" if last == "FAILED" else "CLOSED"
-    rows_when(view, lambda rows: states(rows) == [("TICK", final)])
-    assert ws_session.connections not in connection.users
-    stop()
-    assert client.join(TIMEOUT)
+    try:
+        console_command(m.close)
+        # A FAILED row is shown as the client last wrote it; a CLOSED one holds nothing.
+        final = ("TICK", "FAILED", 1, 7) if last == "FAILED" else ("TICK", "CLOSED", 0, 0)
+        rows_when(view, lambda rows: states(rows) == [final])
+        assert ws_session.connections not in connection.users
+    finally:  # even when a check fails, the client must not outlive the test
+        stop()
+        assert client.join(TIMEOUT)
     del result, view
 
 

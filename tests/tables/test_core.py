@@ -15,7 +15,6 @@ import itertools
 import logging
 import sys
 import threading
-import types
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -28,7 +27,7 @@ from deephaven.dherror import DHError
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 from deephaven.table_listener import listen
-from deephaven.update_graph import exclusive_lock, shared_lock
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import catalog as _catalog
@@ -1120,20 +1119,6 @@ def test_the_update_graph_check_precedes_the_closed_check(
     errors.clear()  # their tracebacks hold the session too
 
 
-def test_the_update_graph_check_refuses_only_update_graph_threads(
-    dh_exec_ctx: ExecutionContext,
-) -> None:
-    # The check itself, run on this thread with an update graph that says this is one of its
-    # threads (coverage tools on Python 3.11 do not see lines run on Deephaven's own threads).
-    graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
-    update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
-    with pytest.raises(ValueError, match="must not run on a Deephaven update-graph thread"):
-        _core.refuse_update_graph_thread(cast("ExecutionContext", update_thread))
-    with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
-        _core.refuse_update_graph_thread(dh_exec_ctx)
-    _core.refuse_update_graph_thread(dh_exec_ctx)
-
-
 def test_a_long_verb_in_a_console_command_is_reported_once(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
@@ -1177,16 +1162,6 @@ def test_a_short_verb_in_a_console_command_is_not_reported(
         console_command(lambda: made.append(q.blink()))
     assert caplog.messages == []
     massive_session.release(made.pop())
-
-
-def test_the_lock_check_sees_either_lock(dh_exec_ctx: ExecutionContext) -> None:
-    update_graph = dh_exec_ctx.update_graph
-    assert not _core.holds_update_graph_lock(dh_exec_ctx)
-    with shared_lock(update_graph):
-        assert _core.holds_update_graph_lock(dh_exec_ctx)
-    with exclusive_lock(update_graph):
-        assert _core.holds_update_graph_lock(dh_exec_ctx)
-    assert not _core.holds_update_graph_lock(dh_exec_ctx)
 
 
 def test_calls_holding_the_shared_lock_work(massive_session: dm.MassiveSession) -> None:

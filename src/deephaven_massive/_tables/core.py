@@ -46,12 +46,12 @@ because the core's finalizer only queues work on the reaper. On a free-threaded 
 reference dropped on another thread reaches the thread that created the core only when that
 thread next runs Python code (or a cyclic collection runs), so the core is freed then.
 
-The module also holds the process-wide stream-id allocator and four context checks.
-`refuse_update_graph_thread` runs at every entry point: `MassiveSession()`, every verb (through
-`SessionCore.run_verb`), and `close()`. `has_execution_context` and
-`has_script_query_scope` run only when a `MassiveSession` is constructed, which is the one place
-an execution context is captured. `holds_update_graph_lock` tells the calls that would wait on
-another thread whether they may.
+The module also holds the process-wide stream-id allocator and two context checks,
+`has_execution_context` and `has_script_query_scope`, which run only when a `MassiveSession` is
+constructed, the one place an execution context is captured. The thread checks live beside
+`entered` in `_tables/liveness.py`: `refuse_update_graph_thread` runs at every entry point
+(`MassiveSession()`, every verb through `SessionCore.run_verb`, and `close()`), and
+`holds_update_graph_lock` tells the calls that would wait on another thread whether they may.
 
 **The console holds the UG lock.** Deephaven's console runs every command holding the update
 graph's exclusive lock, so no update cycle runs until the command returns; a user thread may
@@ -84,7 +84,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 
 from deephaven.dherror import DHError
-from deephaven.update_graph import has_exclusive_lock, has_shared_lock, shared_lock
+from deephaven.update_graph import shared_lock
 
 from deephaven_massive._enums import UnknownSymbols
 from deephaven_massive._errors import MassiveError
@@ -97,7 +97,14 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     describe_symbols,
 )
-from deephaven_massive._tables.liveness import Reaper, ResultRegistry, entered, make_result
+from deephaven_massive._tables.liveness import (
+    Reaper,
+    ResultRegistry,
+    entered,
+    holds_update_graph_lock,
+    make_result,
+    refuse_update_graph_thread,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -125,8 +132,6 @@ __all__ = [
     "StreamTransport",
     "has_execution_context",
     "has_script_query_scope",
-    "holds_update_graph_lock",
-    "refuse_update_graph_thread",
 ]
 
 logger = logging.getLogger(__name__)
@@ -186,45 +191,6 @@ def has_script_query_scope(exec_ctx: ExecutionContext) -> bool:
     """
     j_query_scope = exec_ctx.j_exec_ctx.getQueryScope()
     return str(j_query_scope.getClass().getName()) == _SCRIPT_QUERY_SCOPE
-
-
-def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
-    """Refuse a call on one of the update graph's own threads, such as inside a table listener.
-
-    An update-graph thread runs the graph's cycle: a library call there would create tables and
-    wait on library threads while the cycle, which those threads may need, cannot go on. A
-    thread that merely holds the update graph's lock, as the Deephaven console does for every
-    command, is not refused: the library never waits there for an update cycle or on a thread
-    that may need the lock.
-
-    Args:
-        exec_ctx: The session's execution context, or the one a new session captures.
-
-    Raises:
-        ValueError: On an update-graph thread.
-    """
-    if exec_ctx.update_graph.j_update_graph.currentThreadProcessesUpdates():
-        raise ValueError(
-            "deephaven_massive calls must not run on a Deephaven update-graph thread "
-            "(for example inside a table listener)"
-        )
-
-
-def holds_update_graph_lock(exec_ctx: ExecutionContext) -> bool:
-    """Tell whether the calling thread holds the update graph's exclusive or shared lock.
-
-    The Deephaven console runs every command holding the exclusive lock. While a thread holds
-    either lock no update cycle runs, so it must not wait for one, nor on a thread that may
-    need the lock. A Java call: never make it under `registry_lock`.
-
-    Args:
-        exec_ctx: The session's execution context.
-
-    Returns:
-        True while the thread holds either lock.
-    """
-    update_graph = exec_ctx.update_graph
-    return has_exclusive_lock(update_graph) or has_shared_lock(update_graph)
 
 
 PAUSED_TABLES_WARNING_SECONDS: Final = 5.0

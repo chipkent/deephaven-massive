@@ -85,7 +85,6 @@ from deephaven_massive._ingest.subscriptions import (
     wildcard,
 )
 from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
-from deephaven_massive._tables.core import holds_update_graph_lock
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
@@ -93,6 +92,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     describe_symbols,
 )
+from deephaven_massive._tables.liveness import holds_update_graph_lock
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import _All
@@ -456,15 +456,16 @@ class Connection:
         session's diagnostics only after they are released, and be dropped: a held
         `m.connections()` would keep showing the connection as it last was. So, under the
         group's lock, which every row write holds, the session gets the last row written for
-        each family it shows, marked `CLOSED` (a `FAILED` row keeps its state), and then leaves
+        each family it shows, marked `CLOSED` with no topics and no buffered rows, as a
+        connection that has ended holds none (a `FAILED` row keeps its state), and then leaves
         the connection's users, so no later row of the client replaces it. Reads only the
         immutable rows the client thread stored, never its loop-confined state. Any thread.
 
         Args:
             owner: The closing session's `WsConnections`.
         """
-        now = time.time_ns()
         with self._lock:
+            now = time.time_ns()
             core = owner.core()
             for family, row in self._rows.items():
                 if core is not None and owner.owns_row(self, family):
@@ -473,6 +474,11 @@ class Connection:
                         final = replace(
                             row,
                             state=ConnectionState.CLOSED,
+                            topics=0,
+                            acked_topics=0,
+                            pending_topics=0,
+                            no_ack_topics=0,
+                            buffered_rows=0,
                             next_reconnect_at=None,
                             updated_at=now,
                         )

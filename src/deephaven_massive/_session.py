@@ -61,8 +61,8 @@ from deephaven_massive._tables.core import (
     SessionCore,
     has_execution_context,
     has_script_query_scope,
-    refuse_update_graph_thread,
 )
+from deephaven_massive._tables.liveness import refuse_update_graph_thread
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:

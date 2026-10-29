@@ -861,8 +861,8 @@ return result
      `CLOSED`, would then reach the session only after its diagnostics are released, and be
      dropped, so the closing thread writes it instead: under the group's lock, which every row
      write holds, the session gets the last row written for each family it shows, marked
-     `CLOSED` (a `FAILED` row keeps its state), and leaves the connection's users, so no later
-     row replaces it.
+     `CLOSED` with no topics and no buffered rows (a `FAILED` row keeps its state and counts),
+     and leaves the connection's users, so no later row replaces it.
   5. It writes the final rows, then releases the diagnostics scope, and returns once the
      update cycle that applied the rows has ended (it takes the shared update-graph lock once),
      so a held `m.streams()` view, which updates later in that cycle, shows them. On a thread
