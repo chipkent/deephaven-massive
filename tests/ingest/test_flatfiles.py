@@ -2068,19 +2068,19 @@ def test_a_session_collected_unclosed_closes_its_bucket(
 
 
 def synthetic_trades(rows: int) -> str:
-    # A trades file whose rows vary like real ones; one row in 200 is the symbol
-    # RARE, so at 16 KiB blocks (about 200 rows) most blocks hold one RARE row.
+    # A trades file whose rows vary like real ones; one row in 100 is the symbol RARE, so at
+    # 16 KiB blocks (about 200 rows) every block holds about two RARE rows.
     moment = 1741012200000000000
     tickers = ("AAPL", "MSFT", "SPY", "NVDA")
     lines = [
         f"12,,4,{n},{moment + n * 1000},{100 + n % 997 / 7:.4f},{n},{moment + n * 1001},"
-        f"{n % 5000 + 1},3,{'RARE' if n % 200 == 0 else tickers[n % 4]},,\n"
+        f"{n % 5000 + 1},3,{'RARE' if n % 100 == 0 else tickers[n % 4]},,\n"
         for n in range(rows)
     ]
     return TRADE_HEADER + "".join(lines)
 
 
-class Memory(NamedTuple):
+class ReadMemory(NamedTuple):
     # One read's rows and memory. The peaks are the highest Python memory (tracemalloc) and
     # Arrow pool level above where the read started. The rises are how far those running peaks
     # climbed from a third of the way through the file to its end, so they leave out whatever
@@ -2125,7 +2125,7 @@ class MemorySampler:
         self.arrow[self.taken[0]] = pa.total_allocated_bytes()
         self.taken[0] += 1
 
-    def measure(self, read: Callable[[], Table]) -> Memory:
+    def measure(self, read: Callable[[], Table]) -> ReadMemory:
         # Runs `read` and returns its rows and what its reader's memory did.
         self.taken[:] = [0, 0]
         arrow_baseline = pa.total_allocated_bytes()
@@ -2136,7 +2136,7 @@ class MemorySampler:
         finally:
             tracemalloc.stop()
         blocks, samples = self.taken[1], self.taken[0]
-        return Memory(
+        return ReadMemory(
             rows=rows,
             python_peak=python_peak,
             arrow_peak=max(self.arrow[:samples]) - arrow_baseline,
@@ -2153,15 +2153,15 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A reader holds a window of its file, not the file: about 32 blocks of Arrow's read-ahead
-    # plus at most `_TABLE_BLOCKS` blocks of gathered rows. Small blocks give a file of a few
-    # hundred blocks, cheap to build and read, in which that window fills within the first
-    # third.
+    # plus at most `_TABLE_BLOCKS` blocks of gathered rows. Small blocks give a file of about
+    # 900 blocks, cheap to build and read, in which that window fills within the first third.
     block = 16 * 1024
+    window = 32 + flatfiles._TABLE_BLOCKS
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
-    rows = 96_000
+    rows = 192_000
     text = synthetic_trades(rows)
     blocks = len(text) // block
-    assert blocks > 12 * 32  # the window is a small part of the file
+    assert blocks > 15 * window  # the last two thirds of the file dwarf the window
     fake_s3.put(TRADES_0303, make_csv_gz(text))
     fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
     sampler = MemorySampler(2 * blocks + 100)
@@ -2181,26 +2181,30 @@ def test_memory_per_reader_does_not_grow_with_the_file(
         short = sampler.measure(read(["RARE"]))
     finally:
         m.close()
-    assert (every.rows, rare.rows, short.rows) == (rows, rows // 200, rows // 800)
-    # Python's peak includes the read-ahead's decompressed text, whose depth, on Arrow's own
-    # thread, varies from run to run by up to about 30 blocks; Arrow's pool varies far less.
-    python_slack, arrow_slack = 64 * block, 32 * block
+    assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
+    # Python's peak includes the read-ahead's decompressed text, made on Arrow's own thread,
+    # so it varies from run to run by up to about 40 blocks; a reader that kept a little Python
+    # data per block (a copy of the compressed chunks, or of the RARE rows) adds 100 or more.
+    python_slack = 64 * block
+    # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
+    # and legitimately grow it by about 17 blocks over the last two thirds of the file (about
+    # 19 between the two files), but each small batch also costs allocation overhead that its
+    # byte count does not show: kept as one batch per block instead of merged, they grow it by
+    # about 62 (70 between the files).
+    arrow_slack = 40 * block
     # From a third of the way through the file to its end, a reader that kept each block it
-    # read would rise by about 300 blocks. When every row survives, the result itself (a
+    # read would rise by about 600 blocks. When every row survives, the result itself (a
     # Deephaven table, and its Python wrapper, per `_TABLE_BLOCKS` blocks) legitimately grows
     # with the file, but by far less than a block per table.
     assert every.python_rise < python_slack
     assert every.arrow_rise < arrow_slack
+    assert rare.python_rise < python_slack
+    assert rare.arrow_rise < arrow_slack
     # The rises leave out whatever a read sets up before its first block, such as the whole
-    # file decompressed up front: reading a file four times as long must peak about as high
-    # as reading the short one.
+    # body read or decompressed up front: reading a file four times as long must peak about as
+    # high as reading the short one.
     assert rare.python_peak - short.python_peak < python_slack
     assert rare.arrow_peak - short.arrow_peak < arrow_slack
-    # Arrow's pool is invisible to tracemalloc: each small batch a selective read gathers costs
-    # allocation overhead that its byte count does not show, so the batches must be merged.
-    # Merged, the rows of RARE grow the pool by about 4 blocks over the last two thirds of the
-    # file; kept as one batch per block, by about 35.
-    assert rare.arrow_rise < 16 * block
 
 
 def test_the_production_block_size() -> None:
