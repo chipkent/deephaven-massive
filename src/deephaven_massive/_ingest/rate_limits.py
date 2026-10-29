@@ -40,7 +40,6 @@ import itertools
 import logging
 import math
 import threading
-import time
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
@@ -48,7 +47,7 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
-from deephaven_massive._tables.diagnostics import RateLimitBasis, RateLimitRow, RateLimitState
+from deephaven_massive._tables.diagnostics import LimitSource, RateLimitRow, RateLimitState
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -61,14 +60,15 @@ __all__ = [
     "GOVERNORS",
     "LABELS",
     "OTHER",
+    "UNPACED",
     "GovernorLease",
     "GovernorRegistry",
     "PaceCheck",
     "RateLimitWarnings",
     "announce",
     "bucket_of",
+    "rate_limit_pull",
     "rate_limit_rows",
-    "rate_limit_source",
 ]
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,10 @@ economy, partner data, the unified snapshot); it is never paced."""
 
 BUCKETS: Final = (*(subscription.value for subscription in Subscription), OTHER)
 """Every bucket of a governor: one per subscription, then `OTHER`."""
+
+UNPACED: Final = frozenset({OTHER})
+"""The buckets no refusal or declaration ever paces: data of no subscription belongs to no
+tier, so a 429 there pauses its requests but never paces them."""
 
 LABELS: Final = {OTHER: "requests outside Massive's subscriptions"}
 """How the governor's messages name the requests of `OTHER`; a subscription's bucket is
@@ -92,7 +96,7 @@ _MINUTE: Final = 60.0
 class ReadShape(StrEnum):
     """How a static read's requests are counted, which decides its INFO notice (`announce`).
 
-    A member's value is the phrase the notice quotes.
+    The notice's wording for each lives in `announce`, not in the values.
 
     Attributes:
         PAGED: The pages of a read whose request count follows its data, not its window. Only
@@ -103,17 +107,24 @@ class ReadShape(StrEnum):
     """
 
     PAGED = "paged"
-    PER_DAY = "one per day"
-    PER_SESSION = "one per session and symbol, more where a session spans several pages"
+    PER_DAY = "per_day"
+    PER_SESSION = "per_session"
+
+
+_SHAPE_WORDS: Final = {
+    ReadShape.PER_DAY: "one per day",
+    ReadShape.PER_SESSION: "one per session and symbol, more where a session spans several pages",
+}
+"""How the INFO notice says a read counts its requests; a paged read says nothing."""
 
 
 def _real_clock_governor() -> RequestGovernor:
-    """Make a governor with every bucket of `BUCKETS`, named by `LABELS`, on the real clock.
+    """Make a governor of `BUCKETS`, `OTHER` never paced, named by `LABELS`, on the real clock.
 
     Returns:
         A new `RequestGovernor` with nothing declared.
     """
-    return _massive.RequestGovernor(BUCKETS, labels=LABELS)
+    return _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, labels=LABELS)
 
 
 def bucket_of(subscription: Subscription | None) -> str:
@@ -415,7 +426,7 @@ class RateLimitWarnings:
             if bucket in self._warned:
                 return
             self._warned.add(bucket)
-        rate = _massive.RequestGovernor.BASIC_REQUESTS_PER_MINUTE
+        rate = _massive.BASIC_REQUESTS_PER_MINUTE
         what = f"{'an' if bucket[0] in 'aeiou' else 'a'} {bucket} request"
         if bucket == OTHER:
             what = "a request outside Massive's subscriptions"
@@ -425,16 +436,19 @@ class RateLimitWarnings:
                 "processes, or API keys of the account are using the same limit; requests "
                 "pause and resume"
             )
+        elif basic and bucket == OTHER:
+            advice = (
+                f"its message names the Basic tier's limit of {rate} requests per minute, but "
+                "requests outside Massive's subscriptions belong to no tier, so they pause and "
+                "resume and are not paced"
+            )
         elif basic:
             advice = (
                 f"that is the Basic tier's limit of {rate} requests per minute, so these "
-                "requests are paced at that rate from now on"
+                "requests are paced at that rate from now on; declare "
+                f"MassiveConfig(rest_basic_subscriptions={{dm.Subscription.{bucket.upper()}}}) "
+                "to pace them from the first request"
             )
-            if bucket != OTHER:
-                advice += (
-                    "; declare MassiveConfig(rest_basic_subscriptions="
-                    f"{{dm.Subscription.{bucket.upper()}}}) to pace them from the first request"
-                )
         else:
             advice = (
                 "requests pause and resume; a paid subscription has no request limit, so if "
@@ -452,9 +466,10 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
         governor: The session's governor.
 
     Returns:
-        One row per bucket, in `BUCKETS` order, stamped now.
+        One row per bucket, in `BUCKETS` order, stamped now on the governor's clock, the one
+        `PausedUntil` is read on.
     """
-    now = time.time_ns()
+    now = round(governor.clock.time() * 1e9)  # the clock `PausedUntil` is read on
     rows = []
     for state in governor.snapshot():
         if state.gave_up:
@@ -466,9 +481,9 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
         else:
             status = RateLimitState.READY
         basis = (
-            RateLimitBasis.DECLARED
+            LimitSource.DECLARED
             if state.declared
-            else RateLimitBasis.LEARNED
+            else LimitSource.LEARNED
             if state.learned
             else None
         )
@@ -482,7 +497,7 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
                 in_flight=state.in_flight,
                 waiting=state.waiting,
                 recent_requests=state.recent,
-                requests=state.requests,
+                attempts=state.attempts,
                 refusals=state.refusals,
                 paused_until=until,
                 last_refusal=state.last_refusal,
@@ -492,7 +507,7 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
     return rows
 
 
-def rate_limit_source(governor: RequestGovernor) -> tuple[list[RateLimitRow], float | None]:
+def rate_limit_pull(governor: RequestGovernor) -> tuple[list[RateLimitRow], float | None]:
     """Return the rows of `m.rate_limits()` and when they next change with time alone.
 
     The session's diagnostics writer calls it (`Diagnostics.watch_rate_limits`) whenever the
@@ -538,10 +553,11 @@ def announce(
         shape: How the read counts its requests. The default, `ReadShape.PAGED`, announces
             a read only when it is paced.
     """
-    rate = _massive.RequestGovernor.BASIC_REQUESTS_PER_MINUTE
+    rate = _massive.BASIC_REQUESTS_PER_MINUTE
     for bucket, count in Counter(buckets).items():
         seconds = governor.estimate(bucket, count)
-        what = f"{count} requests" if shape is ReadShape.PAGED else f"{count} requests, {shape}"
+        words = _SHAPE_WORDS.get(shape)
+        what = f"{count} requests" if words is None else f"{count} requests, {words}"
         if seconds is not None:
             if seconds >= _MINUTE:
                 logger.info(
@@ -600,7 +616,7 @@ class PaceCheck:
         limits = {state.bucket: state.limit for state in governor.snapshot()}
         for bucket, count in requests.items():
             limit = limits[bucket]
-            needs = count * _massive.RequestGovernor.RATE_WINDOW / limit if limit else 0.0
+            needs = count * _massive.RATE_WINDOW / limit if limit else 0.0
             if needs <= self._interval:
                 continue
             self._warned = True

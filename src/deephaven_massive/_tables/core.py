@@ -212,6 +212,11 @@ class RestTransport(Protocol):
 
     Every method runs synchronously on the calling thread and raises `EntitlementError` on
     HTTP 403 and `MassiveError` on other failures; `poll()` instead fails its live table.
+
+    The raw-row read the futures calendar uses (`RestEndpoints.fetch_rows`) is not part of this
+    port: it takes the rate governor's bucket and the wire layer's `Cancel` token, which no
+    module of `_tables` may name. The ingest layer, which wires the calendar to the REST
+    transport, reaches it on the concrete `RestEndpoints` (`SessionClients.rest`).
     """
 
     def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:

@@ -35,6 +35,8 @@ Interface:
     - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
       start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
       API key, and a snapshot of one subscription's state for diagnostics.
+    - `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`: a Basic subscription's limit (5 requests
+      per minute) and the seconds a finished request holds its slot (61).
     - `Cancel`: the cancellation token that ends a request's waits.
     - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, which keys the
       governor the library shares. It is part of `net` and loads no client.
@@ -66,6 +68,8 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 __all__ = [
+    "BASIC_REQUESTS_PER_MINUTE",
+    "RATE_WINDOW",
     "BucketState",
     "Cancel",
     "DriftReport",
@@ -103,6 +107,8 @@ __all__ = [
 
 # Each name of the interface, and the module that defines it.
 _EXPORTS: dict[str, str] = {
+    "BASIC_REQUESTS_PER_MINUTE": "deephaven_massive._massive.rest.governor",
+    "RATE_WINDOW": "deephaven_massive._massive.rest.governor",
     "BucketState": "deephaven_massive._massive.rest.governor",
     "Cancel": "deephaven_massive._massive.net.cancel",
     "RequestGovernor": "deephaven_massive._massive.rest.governor",
@@ -153,7 +159,12 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.net.origins import origin_of
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
-    from deephaven_massive._massive.rest.governor import BucketState, RequestGovernor
+    from deephaven_massive._massive.rest.governor import (
+        BASIC_REQUESTS_PER_MINUTE,
+        RATE_WINDOW,
+        BucketState,
+        RequestGovernor,
+    )
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec import provenance, source, sources
     from deephaven_massive._massive.spec.types import (

@@ -6,6 +6,7 @@ Time is virtual: every client gets a `FakeClock`, so retry waits are recorded, n
 from __future__ import annotations
 
 import logging
+import math
 import ssl
 import threading
 from pathlib import Path
@@ -437,7 +438,7 @@ def test_a_refused_connection_is_retried_then_fails(no_proxy_env: pytest.MonkeyP
     assert len(clock.waits) == 3
     # No connection was made, so no attempt reached Massive: none holds a slot.
     state = governor.snapshot()[0]
-    assert (state.requests, state.in_flight, state.recent) == (4, 0, 0)
+    assert (state.attempts, state.in_flight, state.recent) == (4, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -558,9 +559,9 @@ def test_a_lasting_refusal_gives_up_with_status_429_naming_the_request(
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert str(caught.value) == (
-        "Massive has refused stocks requests with HTTP 429 for 0 s and asks to wait 601 s "
-        "more, past the 600 s the library waits from the first refusal; they fail at once "
-        "until the pause ends (latest refusal: HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1 "
+        "Massive has refused stocks requests with HTTP 429 for 0 s, and its pauses come to "
+        "601 s, past the 600 s the library waits out; they fail at once for 601 s more, until "
+        "the pause ends (latest refusal: HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1 "
         "(request_id r): quota)"
     )
     assert (caught.value.status, caught.value.request_id) == (429, "r")
@@ -626,7 +627,7 @@ def test_the_client_waits_for_its_bucket_s_slot(
     for _ in range(6):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert clock.waits == [61.0]
-    assert governor.snapshot()[0].requests == 6
+    assert governor.snapshot()[0].attempts == 6
     rest.close()
 
 
@@ -654,8 +655,9 @@ def test_16_threads_wait_out_one_pause_together(fake_rest: FakeRestServer) -> No
     others = [threading.Thread(target=call, daemon=True) for _ in range(16)]
     for thread in others:
         thread.start()
-    # The head waits for the pause and the rest for their turn; none has sent anything.
-    assert clock.wait_for_sleepers(17) == [30.0] + [60.0] * 16
+    # The head waits for the pause and the rest for their turn; none has sent anything. Once
+    # the pause ends the head probes alone, and the rest go once its answer comes.
+    assert clock.wait_for_sleepers(17) == [30.0] + [math.inf] * 16
     assert len(fake_rest.requests) == 1
     clock.advance(30.0)
     for thread in [first, *others]:
@@ -1021,9 +1023,12 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
     governor = _governor(clock)
     rest = _client(fake_rest, governor=governor)
     cancel = Cancel()
+    # A short pause makes the request queue, so its admission sends a change notice.
+    refused = governor.acquire("stocks", Cancel(), lane=object())
+    governor.refused(refused, retry_after=1.0, message="slow down", request_id=None)
 
     def admitted() -> None:  # the change notice of the admission sets the token
-        if governor.snapshot()[0].requests:
+        if governor.snapshot()[0].attempts == 2:
             cancel.set()
 
     governor.subscribe(admitted)
@@ -1031,7 +1036,8 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
         rest.get(_TRADES, _AAPL, {}, bucket="stocks", cancel=cancel)
     assert fake_rest.requests == []
     state = governor.snapshot()[0]
-    assert (state.requests, state.in_flight, state.recent) == (1, 0, 0)  # unsent: no slot
+    # The unsent attempt holds no slot; only the refused one does.
+    assert (state.attempts, state.in_flight, state.recent) == (2, 0, 1)
     rest.close()
 
 

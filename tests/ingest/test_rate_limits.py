@@ -15,6 +15,7 @@ from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.rate_limits import (
     BUCKETS,
     OTHER,
+    UNPACED,
     GovernorRegistry,
     PaceCheck,
     RateLimitWarnings,
@@ -23,7 +24,7 @@ from deephaven_massive._ingest.rate_limits import (
     bucket_of,
     rate_limit_rows,
 )
-from deephaven_massive._tables.diagnostics import RateLimitBasis, RateLimitState
+from deephaven_massive._tables.diagnostics import LimitSource, RateLimitState
 from tests._fakes.clock import FakeClock
 
 LOGGER = rate_limits.__name__
@@ -32,7 +33,9 @@ BASIC = "You've exceeded the maximum requests per minute"
 
 
 def _registry(clock: FakeClock) -> GovernorRegistry:
-    return GovernorRegistry(functools.partial(_massive.RequestGovernor, BUCKETS, clock=clock))
+    return GovernorRegistry(
+        functools.partial(_massive.RequestGovernor, BUCKETS, unpaced=UNPACED, clock=clock)
+    )
 
 
 def _lease(
@@ -258,7 +261,12 @@ def test_a_refusal_outside_the_subscriptions_names_no_subscription(
     assert caplog.messages[0].startswith(
         "MassiveSession #1: Massive refused a request outside Massive's subscriptions with "
     )
-    assert caplog.messages[0].endswith("paced at that rate from now on")
+    # Data of no subscription belongs to no tier: the refusal pauses it but never paces it.
+    assert caplog.messages[0].endswith(
+        "requests outside Massive's subscriptions belong to no tier, so they pause and resume "
+        "and are not paced"
+    )
+    assert "MassiveConfig" not in caplog.messages[0]
 
 
 # --- Rows ----------------------------------------------------------------------------------------
@@ -266,7 +274,7 @@ def test_a_refusal_outside_the_subscriptions_names_no_subscription(
 
 def test_rows_show_each_buckets_state() -> None:
     clock = FakeClock(manual=True, wall=1_800_000_000.0)
-    governor = _massive.RequestGovernor(BUCKETS, clock=clock)
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
         governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
@@ -286,10 +294,10 @@ def test_rows_show_each_buckets_state() -> None:
     assert (stocks.state, stocks.requests_per_minute, stocks.limit_source) == (
         RateLimitState.PACED,
         5,
-        RateLimitBasis.DECLARED,
+        LimitSource.DECLARED,
     )
-    assert (stocks.waiting, stocks.recent_requests, stocks.requests) == (1, 5, 5)
-    assert (options.state, options.limit_source) == (RateLimitState.PAUSED, RateLimitBasis.LEARNED)
+    assert (stocks.waiting, stocks.recent_requests, stocks.attempts) == (1, 5, 5)
+    assert (options.state, options.limit_source) == (RateLimitState.PAUSED, LimitSource.LEARNED)
     assert options.paused_until == 1_800_000_030 * 10**9
     assert (options.refusals, options.last_refusal) == (1, BASIC)
     assert futures.state is RateLimitState.REFUSED
@@ -305,7 +313,7 @@ def test_rows_show_each_buckets_state() -> None:
 
 
 def test_a_paced_read_announces_its_least_duration(caplog: pytest.LogCaptureFixture) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
     governor.declare({"stocks"})
     buckets = ["stocks"] * 250 + ["options"] * 3 + ["other"] * 40
     with caplog.at_level(logging.INFO, LOGGER):
@@ -322,7 +330,7 @@ def test_a_paced_read_announces_its_least_duration(caplog: pytest.LogCaptureFixt
 def test_a_daily_download_of_an_unpaced_subscription_names_the_basic_cost(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
         announce(governor, "stocks.bars history", ["stocks"] * 5, shape=ReadShape.PER_DAY)
@@ -337,7 +345,7 @@ def test_a_daily_download_of_an_unpaced_subscription_names_the_basic_cost(
 
 
 def test_a_paced_daily_download_states_its_pace(caplog: pytest.LogCaptureFixture) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
@@ -352,7 +360,7 @@ def test_a_paced_daily_download_states_its_pace(caplog: pytest.LogCaptureFixture
 def test_a_poll_whose_cycles_outlast_their_interval_warns_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
     check = PaceCheck("stocks.snapshots poll()", 30.0)
     with caplog.at_level(logging.WARNING, LOGGER):
         check.check(governor, {"stocks": 4, "other": 50})  # unpaced: fine
@@ -371,11 +379,11 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns_once(
 
 def test_a_paced_bucket_with_every_slot_held_shows_paced() -> None:
     clock = FakeClock()
-    governor = _massive.RequestGovernor(BUCKETS, clock=clock)
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
         governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
-    rows, change = rate_limits.rate_limit_source(governor)
+    rows, change = rate_limits.rate_limit_pull(governor)
     stocks = next(row for row in rows if row.bucket == "stocks")
     # Nobody waits, but the next request would: it is not READY.
     assert (stocks.state, stocks.waiting, stocks.recent_requests) == (RateLimitState.PACED, 0, 5)
@@ -410,7 +418,7 @@ def test_the_default_registry_names_the_other_buckets_requests() -> None:
 def test_the_pace_warning_counts_each_slot_for_61_seconds(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.WARNING, LOGGER):
         PaceCheck("fits", 61.0).check(governor, {"stocks": 5})  # 5 per 61 s: just fits

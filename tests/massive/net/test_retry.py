@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
 
@@ -96,3 +97,12 @@ def test_the_system_clock_wait_ends_when_its_event_is_set() -> None:
     event = threading.Event()
     event.set()
     assert retry.SYSTEM_CLOCK.wait(event, 60.0) is True
+
+
+def test_the_system_clock_waits_without_a_deadline_until_its_event_is_set() -> None:
+    # `threading.Event.wait` refuses an infinite timeout; the clock waits for the event alone.
+    event = threading.Event()
+    setter = threading.Thread(target=event.set, daemon=True)
+    setter.start()
+    assert retry.SYSTEM_CLOCK.wait(event, math.inf) is True
+    setter.join(10)

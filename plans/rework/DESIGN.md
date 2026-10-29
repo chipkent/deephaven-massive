@@ -493,7 +493,8 @@ gone; the transports it builds hold the core itself, never the weak reference.
 - `_massive.__all__` splits into vocabulary names (the three errors, the spec names, and the
   pure functions `encode_value` and `origin_of`; a subprocess test checks that reading every
   one of them loads no client and no network module) and
-  client names (`RestClient`, `Page`, `to_batch`, `RequestGovernor`, `BucketState`, `Cancel`,
+  client names (`RestClient`, `Page`, `to_batch`, `RequestGovernor`, `BucketState`,
+  `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`, `Cancel`,
   `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`,
   `ReadPlan`, `ReadColumn`, `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
   literal `getattr`, or string), nor anything that can reach one (a star import of `_massive`,
@@ -2935,19 +2936,25 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   (seconds, or an HTTP date measured against the response's own `Date`); without one, or with
   one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
   30, then 60 s by the refusals of the run, so a request is never sent again at once. A pause
-  only grows. Only the first 429 to requests started after the latest pause counts toward the
-  run (a burst in flight is one refusal); a 429 to an earlier request that lengthens the pause
-  starts a run if none is going. The run ends with the first answer other than 429 to a request
-  started after the latest pause. A 429 is never counted as a retry.
-- **Giving up.** Once a run has lasted 10 minutes (`RATE_LIMIT_PATIENCE`), or its pause would
-  end later than 10 minutes after its first refusal (a long `Retry-After`), the bucket gives
-  up: the refused request and every request of the bucket, waiting or new, fail with status
-  429 (`MassiveError("rate limited: ...")`, which names `m.rate_limits()` for when requests
+  only grows. When it ends, one request of the bucket goes first as a probe while the others
+  wait for its answer: an answer other than 429 releases them, and a 429 pauses again. So a
+  subscription whose 429s do not say it is Basic still sends one refused request per pause,
+  never a burst. Only the first 429 to requests started after the latest pause counts toward
+  the run (a burst in flight is one refusal); a 429 to an earlier request that lengthens the
+  pause starts a run if none is going. The run ends with the first answer other than 429 to a
+  request started after the latest pause, or once more than a window (61 s) has passed since
+  its pause ended with no refusal (the read was cancelled or the session closed), so a 429
+  hours later starts a new run. A 429 is never counted as a retry.
+- **Giving up.** Once a run's pauses add up to more than 10 minutes (`RATE_LIMIT_PATIENCE`,
+  the time spent paused, not the time since the first refusal), the bucket gives up: the
+  refused request and every request of the bucket, waiting or new, fail with status 429
+  (`MassiveError("rate limited: ...")`, which names `m.rate_limits()` for when requests
   resume) until that pause has passed; the pause is still set, so the bucket's other requests
-  do not each collect a 429. The first request after it starts a new run.
-- **Learning.** A 429 whose message names the per-minute maximum makes its bucket learned
-  Basic, paced from then on, for the life of the process for that key and origin; any other
-  429 only pauses.
+  do not each collect a 429. The first refusal after it starts a new run.
+- **Learning.** A 429 whose message names the per-minute maximum makes its subscription's
+  bucket learned Basic, paced from then on, for the life of the process for that key and
+  origin; any other 429 only pauses. The `other` bucket is never paced: such a 429 there only
+  pauses it, since data of no subscription belongs to no tier.
 - **Warnings and notices.** The first 429 of each bucket in a session logs one WARNING, naming
   the session and the refusal (status, path, `request_id`, Massive's message) and saying what
   it means: for a declared subscription, that other sessions, processes, or keys of the account
@@ -3364,7 +3371,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 
 **`m.rate_limits()`**: one row per REST rate-limit bucket ([section 13.4](#134-rest)), keyed by
 `Bucket`. The bucket's state lives in a governor that sessions of the same API key share, so
-the writer pulls a fresh snapshot (`_ingest/rate_limits.rate_limit_source`) whenever the
+the writer pulls a fresh snapshot (`_ingest/rate_limits.rate_limit_pull`) whenever the
 governor signals a change, at most once per batch, instead of applying queued rows; a row can
 never be overtaken by an older one, and every sharing session shows the same rows. The state
 also changes with time alone (a pause ends, a slot frees), so each pull names when the rows
@@ -3378,7 +3385,7 @@ again; a batch handled after that moment pulls them too, so a busy queue cannot 
 | `RequestsPerMinute` | 5 while paced; null while unpaced |
 | `LimitSource` | `DECLARED` (`rest_basic_subscriptions` of a sharing session) or `LEARNED` (Massive's refusal named the per-minute maximum); null while unpaced |
 | `InFlight`, `Waiting`, `RecentRequests` | counts: requests on the wire; waiting for a slot or a pause; holding a slot (in flight, or answered within 61 s) |
-| `Requests`, `Refusals` | totals since the governor was created |
+| `Attempts`, `Refusals` | totals since the governor was created; every retry and refused attempt counts |
 | `PausedUntil`, `UpdatedAt` | `Instant` |
 | `LastRefusal` | text of the latest 429: status, path, `request_id`, and Massive's message |
 
@@ -3622,7 +3629,7 @@ net/                 shared by every client; imports nothing else in _massive
   origins.py         origin_of(url): the (scheme, host, port) a URL reaches, default port
                      filled in; the REST client's next_url check and the governor registry's
                      key both compare origins with it
-  retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; 15/30/60 s 429
+  retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; an unpaced 429
                      pauses; RATE_LIMIT_PATIENCE, 10 minutes),
                      retryable classification; TLS never retried (net.errors finds it);
                      Clock (injectable, tests never sleep); an unusable Retry-After is logged
@@ -3712,8 +3719,9 @@ names, resolving them lazily (PEP 562), so a REST-only session never imports bot
 websockets:
 
 - errors: `WireError`, `WireAuthError`, `WireEntitlementError`;
-- REST: `RestClient`, `Page`, `to_batch`, `RequestGovernor`, `BucketState`, and `Cancel` (the
-  token that ends a request's waits, from `net.cancel`);
+- REST: `RestClient`, `Page`, `to_batch`, `RequestGovernor`, `BucketState`,
+  `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`, and `Cancel` (the token that ends a request's
+  waits, from `net.cancel`);
 - WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
 - flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
 - spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
@@ -3871,12 +3879,16 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   start until 61 s after its response; a 429 pauses the bucket (its `Retry-After` in either
   form, an HTTP date measured against the response's own `Date` header, else a whole window
   when paced, else 15, 30, then 60 s by the run's refusals; a `Retry-After` of zero counts as
-  none), the burst of 429s in flight when the pause began counting once; a 429 is not a retry,
-  and the attempt is made again once the governor allows it; once the run has lasted
-  `RATE_LIMIT_PATIENCE` (600 s), or its pause would end later than that after its first
-  refusal, the refused request and every request of the bucket raise `WireError(status=429)`,
-  quoting the latest refusal, until that pause has passed. A bucket
-  the governor was not built with raises `ValueError`. Before the governor pauses the bucket,
+  none), the burst of 429s in flight when the pause began counting once; after a pause one
+  probe request goes alone until it is answered; a run ends with an answer to a request
+  started after the latest pause, or a window after its pause ended with no refusal; a 429 is
+  not a retry, and the attempt is made again once the governor allows it; once the run's
+  pauses add up to more than `RATE_LIMIT_PATIENCE` (600 s), the refused request and every
+  request of the bucket raise `WireError(status=429)`, quoting the latest refusal, until that
+  pause has passed. A bucket named `unpaced` at construction (`other`) is never paced. A
+  request that may start at once with nothing queued before it is granted without queuing,
+  and a wait without a deadline is woken only by a change of its bucket, never by a timer. A
+  bucket the governor was not built with raises `ValueError`. Before the governor pauses the bucket,
   the client calls its `on_refused(bucket, error, *, basic)` hook (the library's first-429
   WARNING).
 - **Cancellation.** Each `get` and each page waits on a `Cancel` token of its own, made from
@@ -5259,8 +5271,8 @@ document already reflects them.
 30. **Wire behaviour settled in review** (2026-10-26; the REST 429 half revised 2026-10-28 by
     decision 60). A REST 429 pauses its subscription's requests: without a usable
     `Retry-After`, for a whole 61 s window when the subscription is paced and for 15, 30, then
-    60 s when it is not; with one, for as long as it asks; and for at most 10 minutes from the
-    run's first refusal; a TLS certificate failure is never
+    60 s when it is not; with one, for as long as it asks; and for at most 10 minutes of pauses
+    in a run; a TLS certificate failure is never
     retried; a 429 at the WebSocket upgrade is retried; wildcard transitions make before they
     break, accepting a brief duplicate rather than a gap
     ([section 13.3](#133-connection-and-subscription-protocol),
@@ -5519,10 +5531,15 @@ document already reflects them.
     the 5 per minute is one wire constant; validation names `Subscription.CURRENCIES` for forex
     and crypto. A 429 whose message names the per-minute maximum makes the subscription
     learned Basic, remembered for the key and origin for the life of the process; any other 429
-    only pauses. A 429 pauses and resumes even when nothing is declared, honours `Retry-After`
-    up to 10 minutes (one of zero or in the past falls back to the 15, 30, 60 s schedule), and
-    gives up at a fixed 10 minutes of refusals (`RATE_LIMIT_PATIENCE`, not configurable); a
-    stale refusal that lengthens the pause starts a run; pacing waits never give up. Waiting
+    only pauses, and `other` is never paced, whatever its 429 says. A 429 pauses and resumes
+    even when nothing is declared and honours `Retry-After` up to 10 minutes; without a usable
+    one (absent, zero, or in the past) a paced bucket pauses one 61 s window and an unpaced one
+    15, 30, then 60 s by the run's refusals. After a pause one probe request goes alone until
+    Massive answers it, so a 429 that does not name the Basic limit costs one refused request
+    per pause, never a burst. A run gives up once its pauses add up to 10 minutes
+    (`RATE_LIMIT_PATIENCE`, not configurable), and ends by itself a window after its pause
+    ends with no refusal, so an abandoned run never makes a later 429 give up at once; a stale
+    refusal that lengthens the pause starts a run; pacing waits never give up. Waiting
     requests take round-robin turns by lane (a read, a poll cycle, a host decision) and start
     first in, first out within a lane; they end their waits on `Cancel` tokens (client close, a
     read's end, a poller's stop); the stricter declaration of the sharing sessions wins. One

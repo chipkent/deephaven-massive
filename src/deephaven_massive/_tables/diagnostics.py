@@ -10,10 +10,10 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
-  snapshot from its source whenever it was told the state changed (`rate_limits_changed`),
-  and a row can never be overtaken by an older one.
-  The writer also pulls again when the state changes with time alone (a pause ends, a slot
-  frees): it waits on its queue no longer than until the moment the source names.
+  snapshot through its pull (`RateLimitPull`) whenever it was told the state changed
+  (`rate_limits_changed`), and a row can never be overtaken by an older one. The writer also
+  pulls again when the state changes with time alone (a pause ends, a slot frees): it waits on
+  its queue no longer than until the moment the pull names.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. Users never get the tables themselves: `m.connections()` and
@@ -79,9 +79,9 @@ __all__ = [
     "ConnectionState",
     "Diagnostics",
     "DriftRegistry",
-    "RateLimitBasis",
+    "LimitSource",
+    "RateLimitPull",
     "RateLimitRow",
-    "RateLimitSource",
     "RateLimitState",
     "StreamRow",
     "StreamState",
@@ -145,7 +145,7 @@ class RateLimitState(StrEnum):
     REFUSED = "REFUSED"
 
 
-class RateLimitBasis(StrEnum):
+class LimitSource(StrEnum):
     """Why a bucket of `m.rate_limits()` is paced: the `LimitSource` column.
 
     `DECLARED`: a session that shares the bucket names the subscription in
@@ -231,7 +231,7 @@ RATE_LIMITS: Final = Schema(
             ("InFlight", _I),
             ("Waiting", _I),
             ("RecentRequests", _I),
-            ("Requests", _L),
+            ("Attempts", _L),
             ("Refusals", _L),
             ("PausedUntil", _T),
             ("LastRefusal", _S),
@@ -434,7 +434,8 @@ class RateLimitRow:
         waiting: Requests waiting for a slot or for the end of a pause.
         recent_requests: Requests in flight or answered within the last 61 seconds: the
             slots a paced bucket counts against its limit.
-        requests: Requests started since the governor was created.
+        attempts: Attempts started since the governor was created; every retry and refused
+            attempt counts, so one request may count several times.
         refusals: HTTP 429 responses since the governor was created.
         paused_until: When the current pause ends; null without one.
         last_refusal: The latest 429's message, with its HTTP status, path, and request id.
@@ -444,11 +445,11 @@ class RateLimitRow:
     bucket: str
     state: RateLimitState
     requests_per_minute: int | None = None
-    limit_source: RateLimitBasis | None = None
+    limit_source: LimitSource | None = None
     in_flight: int = 0
     waiting: int = 0
     recent_requests: int = 0
-    requests: int = 0
+    attempts: int = 0
     refusals: int = 0
     paused_until: int | None = None
     last_refusal: str | None = None
@@ -633,7 +634,7 @@ class DriftRegistry:
             self._owners.pop(owner, None)
 
 
-RateLimitSource: TypeAlias = "Callable[[], tuple[Sequence[RateLimitRow], float | None]]"
+RateLimitPull: TypeAlias = "Callable[[], tuple[Sequence[RateLimitRow], float | None]]"
 """Returns the `m.rate_limits()` rows and the seconds until they change with time alone."""
 
 _RATE_LIMITS_CHANGED: Final = object()
@@ -654,7 +655,7 @@ class Diagnostics:
     thread, including one that holds the session's `registry_lock`: its internal lock is a leaf
     held only around a non-blocking `put`. A row that does not fit its schema is logged at ERROR
     and skipped; the rest of its batch is applied. The rate-limit rows are pulled rather than
-    queued: `watch_rate_limits` names their source, and `rate_limits_changed` (safe from any
+    queued: `watch_rate_limits` names their pull, and `rate_limits_changed` (safe from any
     thread, never blocking) asks the writer to pull them again, at most once per batch.
 
     `release()` lets the writer apply the rows already queued, release the scope, and exit, and
@@ -668,7 +669,7 @@ class Diagnostics:
         "_rate_due",
         "_rate_limits",
         "_rate_pending",
-        "_rate_source",
+        "_rate_pull",
         "_release_lock",
         "_released",
         "_scope",
@@ -697,7 +698,7 @@ class Diagnostics:
         self._release_lock = threading.Lock()
         self._released = False
         # Set once by `watch_rate_limits`; read by the writer. Guarded by `_release_lock`.
-        self._rate_source: RateLimitSource | None = None
+        self._rate_pull: RateLimitPull | None = None
         self._rate_pending = False
         # When the rate-limit rows next change with time alone (`time.monotonic()`), or None;
         # read and written only by the writer thread.
@@ -759,23 +760,23 @@ class Diagnostics:
             if not self._released:
                 self._writer.put(row)
 
-    def watch_rate_limits(self, source: RateLimitSource) -> None:
-        """Name where the `m.rate_limits()` rows come from, and pull them once.
+    def watch_rate_limits(self, pull: RateLimitPull) -> None:
+        """Name how the `m.rate_limits()` rows are read, and read them once.
 
         Args:
-            source: Returns the current row of every bucket and the seconds until they change
+            pull: Returns the current row of every bucket and the seconds until they change
                 with time alone (None when they do not). The writer calls it, on its own
                 thread and without any lock of this object, and pulls again at that moment if
                 nothing woke it sooner (its queue wait times out then); it must not block or
                 call Deephaven.
 
         Raises:
-            RuntimeError: If a source is already set.
+            RuntimeError: If a pull is already set.
         """
         with self._release_lock:
-            if self._rate_source is not None:
-                raise RuntimeError("the rate-limit rows already have a source")
-            self._rate_source = source
+            if self._rate_pull is not None:
+                raise RuntimeError("the rate-limit rows already have a pull")
+            self._rate_pull = pull
         self.rate_limits_changed()
 
     def rate_limits_changed(self) -> None:
@@ -786,7 +787,7 @@ class Diagnostics:
         `release()`.
         """
         with self._release_lock:
-            if self._released or self._rate_pending or self._rate_source is None:
+            if self._released or self._rate_pending or self._rate_pull is None:
                 return
             self._rate_pending = True
             self._writer.put(_RATE_LIMITS_CHANGED)
@@ -874,13 +875,13 @@ class Diagnostics:
         Runs on the writer thread, the only one that touches `_rate_due`.
 
         Returns:
-            The source's rows. A marker is queued only once the source is set, and the source
-            is never unset.
+            The pull's rows. A marker is queued only once the pull is set, and the pull is
+            never unset.
         """
         with self._release_lock:
             self._rate_pending = False
-            source = cast("RateLimitSource", self._rate_source)
-        rows, change = source()
+            pull = cast("RateLimitPull", self._rate_pull)
+        rows, change = pull()
         self._rate_due = None if change is None else time.monotonic() + change
         return list(rows)
 

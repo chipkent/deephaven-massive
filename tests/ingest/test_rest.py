@@ -2511,7 +2511,7 @@ def governor_of(m: dm.MassiveSession) -> _massive.RequestGovernor:
 
 
 def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
-    return {state.bucket: state.requests for state in governor_of(m).snapshot() if state.requests}
+    return {state.bucket: state.attempts for state in governor_of(m).snapshot() if state.attempts}
 
 
 def test_each_request_is_charged_to_its_subscription() -> None:
@@ -2583,7 +2583,7 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
         assert m._core.diagnostics.barrier().wait(30)
         stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Bucket"] == "stocks")
         assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (5, "LEARNED")
-        assert (stocks["Requests"], stocks["Refusals"]) == (2, 1)
+        assert (stocks["Attempts"], stocks["Refusals"]) == (2, 1)
     finally:
         m.close()
 
@@ -2619,7 +2619,9 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
 ) -> None:
     # A manual clock: a call waiting for a slot can only stop by being cancelled.
     clock = FakeClock(manual=True)
-    create = functools.partial(_massive.RequestGovernor, rate_limits.BUCKETS, clock=clock)
+    create = functools.partial(
+        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+    )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     config = dm.MassiveConfig(
@@ -2711,7 +2713,9 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = FakeClock(manual=True)  # a waiting cycle can only stop through its poller's token
-    create = functools.partial(_massive.RequestGovernor, rate_limits.BUCKETS, clock=clock)
+    create = functools.partial(
+        _massive.RequestGovernor, rate_limits.BUCKETS, unpaced=rate_limits.UNPACED, clock=clock
+    )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))

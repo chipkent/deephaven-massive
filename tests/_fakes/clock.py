@@ -11,15 +11,18 @@ calls `advance` (manual mode):
   waits for threads to reach their waits with `wait_for_sleepers`, so it can check what they
   did (and did not do) before releasing them.
 
-In both modes a wait whose event is set ends at once and returns True, without moving time,
-as `threading.Event.wait` does; a blocked manual wait notices the event within 10 ms of real
-time, and from the moment its event is set it no longer counts as a sleeper, so a test that
-waits for sleepers sees the thread's next wait rather than the one it is leaving. Every
-wait is recorded. All state sits behind one condition, so any thread may call any method.
+A wait of `math.inf` (until its event is set) blocks in both modes until the event is set,
+and never moves time; its deadline is `math.inf`. In both modes a wait whose event is set
+ends at once and returns True, without moving time, as `threading.Event.wait` does; a blocked
+wait notices the event within 10 ms of real time, and from the moment its event is set it no
+longer counts as a sleeper, so a test that waits for sleepers sees the thread's next wait
+rather than the one it is leaving. Every wait is recorded. All state sits behind one
+condition, so any thread may call any method.
 """
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
@@ -72,7 +75,7 @@ class FakeClock:
             self._sleeps.append(seconds)
             if event.is_set():
                 return True
-            if not self._manual:
+            if not self._manual and deadline != math.inf:
                 self._now = max(self._now, deadline)
                 return False
             sleeper = (deadline, event)

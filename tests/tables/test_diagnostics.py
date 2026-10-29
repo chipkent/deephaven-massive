@@ -31,7 +31,7 @@ from deephaven_massive._tables.diagnostics import (
     ConnectionState,
     Diagnostics,
     DriftRegistry,
-    RateLimitBasis,
+    LimitSource,
     RateLimitRow,
     RateLimitState,
     StreamRow,
@@ -118,14 +118,14 @@ def test_column_sets() -> None:
         "InFlight",
         "Waiting",
         "RecentRequests",
-        "Requests",
+        "Attempts",
         "Refusals",
         "PausedUntil",
         "LastRefusal",
         "UpdatedAt",
     )
     assert [s.value for s in RateLimitState] == ["READY", "PACED", "PAUSED", "REFUSED"]
-    assert [s.value for s in RateLimitBasis] == ["DECLARED", "LEARNED"]
+    assert [s.value for s in LimitSource] == ["DECLARED", "LEARNED"]
 
 
 def test_stream_updates_set_only_the_given_fields() -> None:
@@ -651,8 +651,8 @@ def test_the_lock_makes_the_check_and_the_update_one_step(
 # --- Rate limits ---------------------------------------------------------------------------------
 
 
-class _RateSource:
-    """A source of rate-limit rows that counts its pulls; `rows` is what the next pull returns."""
+class _RatePull:
+    """A rate-limit pull that counts its calls; `rows` is what the next call returns."""
 
     def __init__(self) -> None:
         self.pulls = 0
@@ -685,8 +685,8 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    source = _RateSource()
-    diagnostics.rate_limits_changed()  # no source yet: nothing is queued
+    source = _RatePull()
+    diagnostics.rate_limits_changed()  # no pull yet: nothing is queued
     assert diagnostics.barrier().wait(TIMEOUT)
     assert source.pulls == 0
     source.rows = [
@@ -701,7 +701,7 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
             "stocks",
             RateLimitState.PAUSED,
             requests_per_minute=5,
-            limit_source=RateLimitBasis.LEARNED,
+            limit_source=LimitSource.LEARNED,
             paused_until=2 * 10**18,
             last_refusal="HTTP 429",
         )
@@ -718,7 +718,7 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
     )
     assert stocks["LastRefusal"] == "HTTP 429"
     assert rows["other"]["State"] == "READY"
-    with pytest.raises(RuntimeError, match="already have a source"):
+    with pytest.raises(RuntimeError, match="already have a pull"):
         diagnostics.watch_rate_limits(source)
     diagnostics.release()
     diagnostics.rate_limits_changed()  # after release: ignored
@@ -727,7 +727,7 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
 
 def test_many_changes_queue_one_pull(dh_exec_ctx: ExecutionContext) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    source = _RateSource()
+    source = _RatePull()
     started, go = threading.Event(), threading.Event()
 
     def slow() -> tuple[list[RateLimitRow], float | None]:
@@ -750,7 +750,7 @@ def test_rate_limit_rows_are_pulled_again_when_time_alone_changes_them(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    source = _RateSource()
+    source = _RatePull()
     # The pause has already ended (change due now): the writer must not wait for an item.
     source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]
     source.rows = [_rate_row("stocks", RateLimitState.READY)]
@@ -769,7 +769,7 @@ def test_a_release_right_after_a_change_leaves_no_thread_behind(
 ) -> None:
     before = set(threading.enumerate())
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    source = _RateSource()
+    source = _RatePull()
     source.change = 30.0  # a change due later
     diagnostics.watch_rate_limits(source)
     diagnostics.rate_limits_changed()
@@ -779,7 +779,7 @@ def test_a_release_right_after_a_change_leaves_no_thread_behind(
 
 def test_after_stop_nothing_more_is_queued(dh_exec_ctx: ExecutionContext) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    source = _RateSource()
+    source = _RatePull()
     diagnostics.watch_rate_limits(source)
     assert source.pulled.acquire(timeout=TIMEOUT)
     diagnostics.stop()  # as a collected session's finalizer does
@@ -798,7 +798,7 @@ def test_a_busy_queue_does_not_hold_back_a_due_rate_limit_pull(
     # deterministically: the wait never times out, so only the batch itself can pull.
     monkeypatch.setattr(Diagnostics, "_rate_wait", lambda _self: None)
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    source = _RateSource()
+    source = _RatePull()
     source.script = [([_rate_row("stocks", RateLimitState.PAUSED)], 0.0)]  # due at once
     try:
         diagnostics.watch_rate_limits(source)
@@ -814,7 +814,7 @@ def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
     dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
 ) -> None:
     diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
-    source = _RateSource()
+    source = _RatePull()
     source.script = [([], 0.0), RuntimeError("source broke")]  # due at once, then it fails
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.watch_rate_limits(source)

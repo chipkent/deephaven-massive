@@ -445,6 +445,7 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
 
     A session is in the live set exactly while it has a running stream or poll or a held
     diagnostics view, so a test that ends with one has leaked a table, or the library has. A
+    test whose call already failed is not checked: its traceback holds its locals. A
     session that ends without releasing its lease on the shared REST rate governor fails it
     too: the test's registry (`rest_clock`) must hold no more leases than when it began. A
     session the test created that is still alive at the end, in the live set or not, is held
@@ -464,6 +465,8 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     """
     before = _running()
     yield
+    if request.node.stash.get(_CALL_FAILED, False):
+        return  # its traceback holds the test's locals; the failure is already reported
     # Every other fixture is torn down, but pytest keeps their values in the item until its
     # teardown ends; drop them, as pytest is about to, so a closed session can be freed.
     funcargs: dict[str, object] | None = getattr(request.node, "funcargs", None)
@@ -770,7 +773,11 @@ def rest_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
         registry = _live_governors()
     else:
         create = functools.partial(
-            wire.RequestGovernor, rate_limits.BUCKETS, clock=clock, labels=rate_limits.LABELS
+            wire.RequestGovernor,
+            rate_limits.BUCKETS,
+            unpaced=rate_limits.UNPACED,
+            clock=clock,
+            labels=rate_limits.LABELS,
         )
         registry = rate_limits.GovernorRegistry(create)
     monkeypatch.setattr(rate_limits, "GOVERNORS", registry)
@@ -1369,6 +1376,36 @@ def is_entitlement_text(text: object) -> bool:
         of a refused topic.
     """
     return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
+
+
+_CALL_FAILED: Final = pytest.StashKey[bool]()
+"""Whether a test's call failed, so the leak check does not wait on what its traceback holds."""
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """Note a failed call, so the leak check of its teardown returns at once.
+
+    A failed assertion's traceback keeps the test's frame, and with it the test's sessions,
+    alive until pytest drops the report; waiting 30 s for them to go would only delay the
+    failure already reported.
+
+    Args:
+        item: The test.
+        call: The phase's result.
+
+    Yields:
+        Control to the report's creation.
+
+    Returns:
+        The report, unchanged.
+    """
+    report = yield
+    if call.when == "call" and report.failed:
+        item.stash[_CALL_FAILED] = True
+    return report
 
 
 @pytest.hookimpl(wrapper=True)

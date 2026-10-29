@@ -92,7 +92,7 @@ class SessionClients:
         )
         core.on_close(self._lease.release)
         diagnostics.watch_rate_limits(
-            functools.partial(rate_limits.rate_limit_source, self._lease.governor)
+            functools.partial(rate_limits.rate_limit_pull, self._lease.governor)
         )
         # Created by the first flat-file read (`flat_files`), under the core's `registry_lock`.
         self._flat_files: FlatFileClient | None = None
@@ -119,7 +119,9 @@ class SessionClients:
     def rest(self) -> RestEndpoints:
         """Return a REST transport bound to the session's core and its shared REST state.
 
-        Each call gets a new, lightweight `RestEndpoints`. The first call creates the
+        Each call gets a new, lightweight `RestEndpoints`, typed as such rather than as the
+        `RestTransport` port so that the futures calendar's `fetch_rows`, which names the wire
+        layer's `Cancel` and so stays out of the port, is reachable here. The first call creates the
         session's `RestState`: it creates the `_massive.RestClient` outside every lock, on the
         session's shared governor and with the session's `RateLimitWarnings` as its refusal
         hook (the constructor reads the proxy and certificate settings, but makes no

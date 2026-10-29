@@ -1396,6 +1396,8 @@ _WIRE_CLIENTS = frozenset(
         "Cancel",
         "RequestGovernor",
         "BucketState",
+        "BASIC_REQUESTS_PER_MINUTE",
+        "RATE_WINDOW",
         "RestClient",
         "Page",
         "to_batch",

@@ -8,8 +8,8 @@ clients do the waiting, through a `Clock`, so tests replace time with a fake and
   2 seconds, each lengthened by up to 20 % of random jitter, so clients that failed together
   do not retry together.
 - **Rate limits** (HTTP 429) are not retries: the REST client's `RequestGovernor` pauses the
-  refused subscription's requests and resumes them, for up to `RATE_LIMIT_PATIENCE`
-  (10 minutes) from the first refusal of a run, and they never count against `MAX_RETRIES`.
+  refused subscription's requests and resumes them, until a run's pauses add up to
+  `RATE_LIMIT_PATIENCE` (10 minutes), and they never count against `MAX_RETRIES`.
   This module gives the pause of a subscription whose requests are not paced
   (`rate_limit_wait`): what the response's `Retry-After` header asks, in either of its forms
   (a number of seconds or an HTTP date), and without a usable header 15, 30, then 60 seconds
@@ -28,6 +28,7 @@ thread. This module imports only the standard library.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -70,10 +71,10 @@ RATE_LIMIT_WAITS = (15.0, 30.0, 60.0)
 no usable `Retry-After`, for a subscription whose requests are not paced."""
 
 RATE_LIMIT_PATIENCE = 600.0
-"""How long, in seconds from a run's first 429, requests keep pausing and resuming.
+"""How long, in seconds of pauses in one run of 429s, requests keep pausing and resuming.
 
-A pause that would end later than this after the run's first refusal (a long `Retry-After`,
-or refusals that go on) is not waited for: the request fails with status 429 instead.
+A pause that brings the run's pauses past this (a long `Retry-After`, or refusals that go on)
+is not waited for: the request fails with status 429 instead.
 """
 
 
@@ -95,10 +96,11 @@ class Clock(Protocol):
         ...
 
     def wait(self, event: threading.Event, seconds: float) -> bool:
-        """Block the calling thread for `seconds` (a positive number), or until `event` is set.
+        """Block the calling thread for `seconds`, or until `event` is set.
 
-        Returns True when `event` is set (the wait was interrupted), False when the time ran
-        out.
+        `seconds` is a positive number, or `math.inf` to wait until `event` is set however
+        long that takes. Returns True when `event` is set (the wait was interrupted), False
+        when the time ran out.
         """
         ...
 
@@ -130,12 +132,13 @@ class SystemClock:
 
         Args:
             event: Ends the wait early when set, such as a client's closed event.
-            seconds: The longest the wait lasts.
+            seconds: The longest the wait lasts; `math.inf` waits for `event` alone, since
+                `threading.Event.wait` refuses an infinite timeout.
 
         Returns:
             True if `event` was set, False if the time ran out.
         """
-        return event.wait(seconds)
+        return event.wait(None if math.isinf(seconds) else seconds)
 
 
 SYSTEM_CLOCK = SystemClock()

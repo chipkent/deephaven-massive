@@ -326,8 +326,8 @@ class RestClient:
         """Request one page of a REST path.
 
         Blocks the calling thread for the request and its waits: for the governor's permit
-        (a paced bucket's slot, or a pause after a 429, for up to 10 minutes from the first
-        refusal of a run), and for up to three retries of a 5xx or connection failure, 0.5 to
+        (a paced bucket's slot, or a pause after a 429, until a run's pauses add up to 10
+        minutes), and for up to three retries of a 5xx or connection failure, 0.5 to
         2.4 s each. A 429 is not a retry: the attempt is made again once the governor allows.
 
         Errors: `WireError` when the request fails after its retries, Massive keeps refusing
