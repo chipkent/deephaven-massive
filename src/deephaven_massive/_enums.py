@@ -7,7 +7,7 @@ one spelling per value, tab completion in every IDE and in the Deephaven web con
 safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
 names the member to use; `Timespan("minute")` is the documented way to convert text.
 An enum of a library setting that never reaches the wire (`HistorySource`, `SymbolConvention`,
-`OnError`, `UnknownSymbols`) takes its member names in lower case as values.
+`OnError`, `UnknownSymbols`, `Subscription`) takes its member names in lower case as values.
 
 Three further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is) and `ChannelFamily` (which host a channel is served from), which appear as values in
@@ -16,8 +16,8 @@ flat files once for both sides of the wire boundary; and `ClassFromPrefix`, a pl
 (not a `StrEnum`, so it never equals an `AssetClass` value), whose one member `ANY` is the
 class of a dataset whose symbols span classes, each read from its prefix.
 
-The eighteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
-private.
+The nineteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
+private. `subscription_of` maps an asset class to the subscription that covers it.
 """
 
 from __future__ import annotations
@@ -43,11 +43,13 @@ __all__ = [
     "Recency",
     "SeriesType",
     "Sip",
+    "Subscription",
     "SymbolConvention",
     "TickerType",
     "Timeframe",
     "Timespan",
     "UnknownSymbols",
+    "subscription_of",
 ]
 
 logger = logging.getLogger(__name__)
@@ -463,6 +465,62 @@ class UnknownSymbols(StrEnum):
 
     FAIL = "fail"
     WARN = "warn"
+
+
+class Subscription(StrEnum):
+    """One of Massive's five subscriptions, each bought, and rate-limited, on its own.
+
+    Massive sells market data as five subscriptions, one per asset class, with no bundle and
+    no account-wide plan; forex and crypto share one, `CURRENCIES`. Each is on a tier of its
+    own, and the tier sets its REST request limit: the free Basic tier allows 5 requests per
+    minute, and every paid tier has no request limit. All the API keys of an account share the
+    limits. Declare the subscriptions on Basic in `MassiveConfig.rest_basic_subscriptions` so
+    their requests are paced from the first one; otherwise the library learns it from
+    Massive's first refusal. `m.rate_limits()` shows each one's state. Datasets Massive assigns
+    to no subscription (cross-market reference data, economy, partner data, the unified
+    snapshot) are never paced.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            # Paid stocks; free options and currencies (forex and crypto).
+            cfg = dm.MassiveConfig(
+                rest_basic_subscriptions={dm.Subscription.OPTIONS, dm.Subscription.CURRENCIES}
+            )
+    """
+
+    STOCKS = "stocks"
+    OPTIONS = "options"
+    INDICES = "indices"
+    CURRENCIES = "currencies"
+    FUTURES = "futures"
+
+
+_SUBSCRIPTIONS: dict[AssetClass, Subscription] = {
+    AssetClass.STOCKS: Subscription.STOCKS,
+    AssetClass.OPTIONS: Subscription.OPTIONS,
+    AssetClass.INDICES: Subscription.INDICES,
+    AssetClass.FOREX: Subscription.CURRENCIES,
+    AssetClass.CRYPTO: Subscription.CURRENCIES,
+    AssetClass.FUTURES: Subscription.FUTURES,
+}
+
+
+def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription | None:
+    """Return the subscription that covers an asset class's data.
+
+    Args:
+        asset_class: The class, or `ClassFromPrefix.ANY` for data of no single class.
+
+    Returns:
+        The class's subscription (`CURRENCIES` for forex and crypto), or None for
+        `ClassFromPrefix.ANY`: data of no single class belongs to no subscription.
+    """
+    if isinstance(asset_class, ClassFromPrefix):
+        return None
+    return _SUBSCRIPTIONS[asset_class]
 
 
 class Recency(StrEnum):

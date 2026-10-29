@@ -110,6 +110,8 @@ behavior worth knowing is a defect.
   threading constraints.
 - **Examples** are real code that runs against the documented API. **Never** restate the
   signature, use filler ("This function…"), or leave a term undefined.
+- **Configuration text is documentation too**: config comments, pytest marker descriptions
+  (`name(args): meaning`, in plain sentences), and CLI help text meet this same standard.
 
 ## Deephaven invariants
 

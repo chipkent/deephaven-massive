@@ -119,7 +119,7 @@ def _raw(
     path_params = {"underlyingAsset": params["underlyingAsset"]} if "{" in path else {}
     query = {key: value for key, value in params.items() if key != "underlyingAsset"}
     try:
-        return client.get(source(Transport.REST, path), path_params, query).rows
+        return client.get(source(Transport.REST, path), path_params, query, bucket="options").rows
     except WireEntitlementError as error:
         if path == _CONTRACTS:
             raise
@@ -166,7 +166,7 @@ def _root_contracts(
     last = ""
     query = {**query, "sort": "ticker", "order": "asc", "limit": _CONTRACT_PAGE}
     try:
-        for page in client.pages(source(Transport.REST, _CONTRACTS), {}, query):
+        for page in client.pages(source(Transport.REST, _CONTRACTS), {}, query, bucket="options"):
             pages += 1
             read += len(page.rows)
             found.extend(r for r in page.rows if _root(str(r.get("ticker", ""))) == root)
@@ -339,6 +339,7 @@ def test_half_day_option_bars_and_their_stamps(
             "expiration_date.gte": date(2026, 1, 16),
             "limit": 1,
         },
+        bucket="options",
     ).rows
     assert contracts, "no SPY contract listed on 2025-11-28"
     ticker = str(contracts[0]["ticker"])
@@ -415,7 +416,10 @@ def _listed_calls(
     }
     contracts = source(Transport.REST, _CONTRACTS)
     spy = live_rest.get(
-        contracts, {}, query | {"underlying_ticker": "SPY", "strike_price.gte": close, "limit": 1}
+        contracts,
+        {},
+        query | {"underlying_ticker": "SPY", "strike_price.gte": close, "limit": 1},
+        bucket="options",
     ).rows
     found: dict[str, str | None] = {"SPY": str(spy[0]["ticker"]) if spy else None, "SPXW": None}
     for spelling in _SPX_SPELLINGS:
@@ -428,6 +432,7 @@ def _listed_calls(
                 "strike_price.gte": close * 10,
                 "limit": _CONTRACT_PAGE,
             },
+            bucket="options",
         ).rows
         spxw = [str(r["ticker"]) for r in rows if str(r["ticker"]).startswith("O:SPXW")]
         evidence(

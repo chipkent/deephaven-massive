@@ -74,7 +74,7 @@ def _page(client: RestClient, path: str, *, query: Mapping[str, object]) -> list
     """
     path_params = {"ticker": query["ticker"]} if "{ticker}" in path else {}
     rest = {key: value for key, value in query.items() if not path_params or key != "ticker"}
-    return client.get(source(Transport.REST, path), path_params, rest).rows
+    return client.get(source(Transport.REST, path), path_params, rest, bucket="futures").rows
 
 
 def _aggregates(

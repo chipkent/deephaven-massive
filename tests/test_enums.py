@@ -41,6 +41,7 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     dm.Locale: ["us", "global"],
     dm.ConditionDataType: ["trade", "bbo", "nbbo"],
     dm.Sip: ["CTA", "UTP", "OPRA"],
+    dm.Subscription: ["stocks", "options", "indices", "currencies", "futures"],
     dm.TickerType: [
         "CS",
         "ADRC",
@@ -179,6 +180,7 @@ def test_module_exports() -> None:
     assert set(_enums.__all__) == {e.__name__ for e in EXPECTED_VALUES} | {
         "Recency",
         "ChannelFamily",
+        "subscription_of",
         "ClassFromPrefix",
     }
     # The class of a dataset that spans classes is internal: no public signature takes it.
@@ -304,6 +306,9 @@ _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects
 
 ENUM_PARAMETERS = {
     "MassiveConfig.__init__.ws_hosts": "test_config.py::test_ws_hosts_types",
+    "MassiveConfig.__init__.rest_basic_subscriptions": (
+        "test_config.py::test_rest_basic_subscriptions_hold_subscriptions_only"
+    ),
     "MassiveConfig.__init__.unknown_symbols": "test_config.py::test_unknown_symbols_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
@@ -448,3 +453,15 @@ def test_every_enum_parameter_names_an_existing_rejection_test() -> None:
     for location in ENUM_PARAMETERS.values():
         file_name, test_name = location.split("::")
         assert f"def {test_name}(" in (tests / file_name).read_text(), location
+
+
+def test_each_asset_class_has_one_subscription() -> None:
+    assert {asset_class: _enums.subscription_of(asset_class) for asset_class in dm.AssetClass} == {
+        dm.AssetClass.STOCKS: dm.Subscription.STOCKS,
+        dm.AssetClass.OPTIONS: dm.Subscription.OPTIONS,
+        dm.AssetClass.FUTURES: dm.Subscription.FUTURES,
+        dm.AssetClass.INDICES: dm.Subscription.INDICES,
+        dm.AssetClass.FOREX: dm.Subscription.CURRENCIES,
+        dm.AssetClass.CRYPTO: dm.Subscription.CURRENCIES,
+    }
+    assert _enums.subscription_of(_enums.ClassFromPrefix.ANY) is None

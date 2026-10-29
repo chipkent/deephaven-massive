@@ -152,7 +152,7 @@ def test_index_ticker_spelling_on_every_index_endpoint(
     answered = 0
     for path, path_params, query in _raw_requests(index_symbol):
         try:
-            page = live_rest.get(source(Transport.REST, path), path_params, query)
+            page = live_rest.get(source(Transport.REST, path), path_params, query, bucket="indices")
         except WireEntitlementError as error:
             evidence(f"{path}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
             continue

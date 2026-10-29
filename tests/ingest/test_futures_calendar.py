@@ -28,6 +28,8 @@ from deephaven_massive._namespaces import futures
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
+    from deephaven_massive import _massive
+
 TIMEOUT = 15.0
 CONTRACTS_PATH = cast("str", futures.CONTRACTS.fetch_path)
 SCHEDULES_PATH = cast("str", futures.SCHEDULES.fetch_path)
@@ -97,10 +99,15 @@ class FakeFetch:
         }
         self.held: set[str] = set()  # the paths whose requests wait for `release`
         self.release = threading.Event()
+        self.charged: list[tuple[str, _massive.Cancel]] = []  # each call's bucket and token
 
-    def __call__(self, path: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+    def __call__(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: _massive.Cancel
+    ) -> list[dict[str, object]]:
+        path = template
         with self.cond:
             self.calls.append((path, dict(query)))
+            self.charged.append((bucket, cancel))
             self.cond.notify_all()
             held = path in self.held
         if held:
@@ -497,6 +504,39 @@ def test_closing_wakes_a_caller_waiting_for_the_worker(fetch: FakeFetch, clock: 
     closing.start()
     waiter.join(TIMEOUT / 3)
     assert results == [True]  # woken by the close, while the lookup is still held
+    fetch.release.set()
+    closing.join(TIMEOUT)
+    assert not closing.is_alive()
+
+
+def test_each_lookup_is_charged_to_futures_in_a_lane_of_its_own(
+    calendar: FuturesCalendar, fetch: FakeFetch
+) -> None:
+    watched(calendar, "ESM4")
+    assert [path for path, _ in fetch.calls] == [CONTRACTS_PATH, SCHEDULES_PATH]
+    (first_bucket, first), (second_bucket, second) = fetch.charged
+    assert first_bucket == second_bucket == "futures"
+    assert first is not second  # each lookup waits in its own lane
+    assert not first.is_set()
+    assert not second.is_set()
+
+
+@pytest.mark.parametrize("held", [CONTRACTS_PATH, SCHEDULES_PATH])
+def test_closing_ends_a_lookup_still_waiting_for_the_rate_governor(
+    fetch: FakeFetch, clock: Clock, held: str
+) -> None:
+    # The lookup's token follows the calendar's: a lookup paced behind a Basic futures
+    # subscription's limit stops waiting the moment the calendar closes.
+    calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
+    fetch.hold(held)
+    calendar.watch(["ESM4"])
+    calls = 1 if held == CONTRACTS_PATH else 2  # the schedule follows the contract's product
+    fetch.wait(calls)
+    _, lookup = fetch.charged[calls - 1]
+    assert not lookup.is_set()
+    closing = threading.Thread(target=calendar.close, daemon=True)
+    closing.start()
+    assert lookup.wait(TIMEOUT)
     fetch.release.set()
     closing.join(TIMEOUT)
     assert not closing.is_alive()

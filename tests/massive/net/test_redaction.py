@@ -25,6 +25,7 @@ from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlement
 from deephaven_massive._massive.net.redaction import REDACTED, Redactor, redact
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
+from deephaven_massive._massive.rest.governor import RequestGovernor
 from deephaven_massive._massive.spec.types import (
     DriftReport,
     Field,
@@ -203,7 +204,8 @@ def _escaped_envelope(status: str, key: str, words: str) -> bytes:
 
 @pytest.fixture
 def rest(fake_rest: FakeRestServer) -> Iterator[RestClient]:
-    client = RestClient(PLANTED_KEY, base_url=fake_rest.url, max_concurrency=2, clock=FakeClock())
+    governor = RequestGovernor(("stocks",), clock=FakeClock())
+    client = RestClient(PLANTED_KEY, base_url=fake_rest.url, max_concurrency=2, governor=governor)
     yield client
     client.close()
 
@@ -248,7 +250,7 @@ def test_the_rest_client_never_shows_the_api_key(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", reply)
     with pytest.raises(WireError) as info:
-        rest.get(_TRADES, {"stockTicker": "AAPL"}, {})
+        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
     # The server's words are kept, with the key replaced, so the failure still explains itself.
     assert REDACTED in info.value.message
     _assert_no_secret(every_logger_at_debug, info.value)
@@ -264,7 +266,7 @@ def test_a_page_whose_rows_echo_the_api_key_is_cleaned_before_it_is_decoded(
 ) -> None:
     body = f'{{"status":"OK","request_id":"x","results":[{{"note":"key {spelled}"}}]}}'
     fake_rest.reply("/v3/trades/AAPL", Reply(body.encode()))
-    page = rest.get(_TRADES, {"stockTicker": "AAPL"}, {})
+    page = rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
     assert page.rows == [{"note": f"key {REDACTED}"}]
     _assert_no_secret(every_logger_at_debug)
 
@@ -372,7 +374,7 @@ def test_a_rejected_rest_row_echoing_the_api_key_is_logged_cleaned(
     rest: RestClient, fake_rest: FakeRestServer, every_logger_at_debug: pytest.LogCaptureFixture
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(envelope([{"v": "bad", "note": PLANTED_KEY}])))
-    page = rest.get(_TRADES, {"stockTicker": "AAPL"}, {})
+    page = rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
     path = RestPath(
         key="/v3/trades/{stockTicker}",
         fields=(Field(wire_key="v", column="V", wire_type=WireType.LONG),),

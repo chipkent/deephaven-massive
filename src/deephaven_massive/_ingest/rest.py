@@ -37,8 +37,19 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
   `MassiveConfig.max_concurrency` at a time. A symbol with no data returns no rows: HTTP 404
   on its first request drops that symbol with one WARNING. HTTP 404 on a later page of a
-  symbol's pages means its data was cut short and raises `MassiveError`, and any other error
-  fails the call.
+  symbol's pages means its data was cut short and raises `MassiveError`. Any other error
+  fails the call, and every request of the read still waiting for the rate governor stops at
+  once (each read has a `Cancel` token of its own, set when a fan-out ends, and a `poll()`
+  cycle's token follows its poller's). The token is also the read's lane in the governor:
+  the reads, poll cycles, and host decisions waiting on a bucket take turns, whatever their
+  number of threads.
+- **Rate limits.** Each request is charged to its Massive subscription (`DatasetSpec`'s class,
+  or for a dataset with a path per symbol class the class of the request's symbols; a request
+  of no class goes to the class its `market` filter names, else to the unpaced `other`
+  bucket), and the session's client asks the shared
+  `RequestGovernor` before every attempt (`_ingest/rate_limits.py`). A static read whose
+  paced requests cannot all start within a minute logs its least duration at INFO, and a
+  `poll()` whose cycles need more paced requests than its interval allows logs one WARNING.
 - **Rows.** Each page's rows go through `_massive.to_batch` (strict decoding against the path's
   generated fields), then `schema.rename`'s column mapping for the dataset, the timestamp
   routine of `_datasets/timestamps.py`, and the lattice widening of `schema.widen`, into one
@@ -49,11 +60,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   dataset, transport, and field; undocumented envelope statuses once per path); a `poll()`
   table's drift also reaches its `SchemaDrift` through `SessionCore.record_stream_drift`.
 - **Errors.** Every `WireError` becomes its public exception through `_errors.from_wire`
-  (401 `AuthenticationError`, 403 `EntitlementError`), except a rate limit that outlived the
-  retries, which becomes `MassiveError("rate limited: ...")` and logs, once per session, that
-  Basic keys allow 5 requests per minute. A row that breaks the schema (a missing required key,
-  a value that does not convert, a timestamp out of bounds) raises `RowDataError`. Static verbs
-  log each error at ERROR and raise it.
+  (401 `AuthenticationError`, 403 `EntitlementError`), except a rate limit Massive kept up
+  for longer than the governor waits, which becomes `MassiveError("rate limited: ...")` with
+  status 429 (the first 429 of each subscription has already logged its WARNING). A row that
+  breaks the schema (a missing required key, a value that does not convert, a timestamp out of
+  bounds) raises `RowDataError`. Static verbs log each error at ERROR and raise it.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/hosts.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
@@ -70,6 +81,7 @@ import functools
 import logging
 import threading
 import time
+from collections import Counter
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
@@ -109,15 +121,21 @@ from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan, UnknownSymbols
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    Market,
+    Subscription,
+    Timespan,
+    UnknownSymbols,
+    subscription_of,
+)
 from deephaven_massive._errors import MassiveError, PermanentError, from_wire
 from deephaven_massive._ingest import hosts, poll
-from deephaven_massive._ingest.poll import (
-    Pollers,
-    RowDataError,
-    UnsupportedParameterError,
-)
+from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
+from deephaven_massive._ingest.rate_limits import PaceCheck, ReadShape, announce, bucket_of
 from deephaven_massive._massive import (
+    Cancel,
     DriftReport,
     ParamKind,
     Transport,
@@ -150,6 +168,7 @@ __all__ = [
     "RestEndpoints",
     "RestReader",
     "RestState",
+    "call_bucket",
     "fetch_paths",
     "plan_calls",
 ]
@@ -173,15 +192,6 @@ _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 _SESSION_DATE: Final = "session_end_date"
 """The futures date parameter that names a trading session, not a calendar day."""
-
-_BASIC_REQUESTS_PER_MINUTE: Final = 5
-"""How many REST requests a minute a Basic key allows."""
-
-
-_RATE_LIMIT_ADVICE: Final = (
-    "%s: Massive rate-limited this session's REST requests; Basic keys allow 5 requests per "
-    "minute, and a fan-out poll() makes one request per symbol per cycle"
-)
 
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
@@ -1066,11 +1076,6 @@ class RestState:
             self._once.add(key)
             return True
 
-    def warn_rate_limit(self) -> None:
-        """Log, once per session, why Massive rate-limited the session and what multiplies it."""
-        if self.first("rate-limit"):
-            logger.warning(_RATE_LIMIT_ADVICE, self.label)
-
 
 @dataclass(frozen=True, eq=False, slots=True)
 class RestReader:
@@ -1118,10 +1123,11 @@ class RestReader:
         once, on first need (`/v3/reference/tickers?market=crypto`, every page, first with
         `active=true` and then with `active=false`, so a delisted pair splits too), keeping
         each ticker's `base_currency_symbol` and `currency_symbol`, whose join must be the
-        ticker. Blocks the calling thread for that read, or while another thread makes it;
-        holds no lock meanwhile. A failed read is not kept, so the next call tries again. A
-        read that succeeds is kept for the session as it is, even when it lists no pair: every
-        pair is then refused.
+        ticker. Its requests count against the currencies subscription's rate limit, so on a
+        Basic subscription they wait their turn. Blocks the calling thread for that read, or
+        while another thread makes it; holds no lock meanwhile. A failed read is not kept, so
+        the next call tries again. A read that succeeds is kept for the session as it is, even
+        when it lists no pair: every pair is then refused.
 
         Args:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
@@ -1168,15 +1174,25 @@ class RestReader:
             return future.result()
         tickers: dict[str, tuple[str, str] | str] = {}
         try:
-            # Listed pairs first, then delisted ones, so that a past date of a delisted pair
-            # still splits; a ticker in both keeps its listed entry.
-            for active in (True, False):
-                query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
-                for page in self.state.client.pages(self.rest_path(_TICKERS_PATH), {}, query):
-                    for row in page.rows:
-                        ticker = row.get("ticker")
-                        if isinstance(ticker, str):
-                            tickers.setdefault(ticker, _crypto_entry(ticker, row))
+            # The list is crypto reference data, charged to the currencies subscription. Its
+            # pages share one lane of their own, so they wait their turn with other reads
+            # instead of queueing behind them; closing the client still ends their waits.
+            with Cancel() as lane:
+                # Listed pairs first, then delisted ones, so that a past date of a delisted
+                # pair still splits; a ticker in both keeps its listed entry.
+                for active in (True, False):
+                    query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
+                    for page in self.state.client.pages(
+                        self.rest_path(_TICKERS_PATH),
+                        {},
+                        query,
+                        bucket=bucket_of(Subscription.CURRENCIES),
+                        cancel=lane,
+                    ):
+                        for row in page.rows:
+                            ticker = row.get("ticker")
+                            if isinstance(ticker, str):
+                                tickers.setdefault(ticker, _crypto_entry(ticker, row))
         except WireError as error:
             public = self._public(error)
             self.state.forget_crypto()
@@ -1202,14 +1218,19 @@ class RestReader:
         remedy: str = "",
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
+        cancel: Cancel | None = None,
     ) -> tuple[pa.Table, int]:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
         One call runs on this thread; several run on `executor`, or on a pool of
-        `min(max_concurrency, calls)` threads made for this read. If a call fails, or this
-        thread is interrupted, the calls not yet started are cancelled, the read waits for the
-        running ones, and the failure of the earliest call is raised. Every page's rows get
-        the library's time columns (`_call`).
+        `min(max_concurrency, calls)` threads made for this read. Every request of the read
+        listens to a `Cancel` token of the read's own (following `cancel`), which is also the
+        read's lane in the rate governor, so a read takes its turn with the others whatever
+        its number of threads. A fan-out sets the token when it ends. So if a call fails, or
+        this thread is interrupted, the calls not yet started are cancelled, the running ones
+        stop waiting for the rate governor at once, the read waits for the requests already on
+        the wire, and the failure of the earliest call that failed on its own is raised. Every
+        page's rows get the library's time columns (`_call`).
 
         Args:
             spec: The dataset.
@@ -1226,6 +1247,8 @@ class RestReader:
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
+            cancel: Ends the read's waits when set, such as a poller's stop token; None when
+                only the session's close should.
 
         Returns:
             The rows, in call order and then page order, and the number of requests made.
@@ -1238,20 +1261,22 @@ class RestReader:
         converter = _Converter.build(
             self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
         )
-        run = functools.partial(
-            self._call,
-            converter,
-            request=request,
-            limit=limit,
-            window=window,
-            remedy=remedy,
-            record=record,
-            spec=spec,
-        )
-        if len(calls) <= 1:
-            outcomes = [run(call) for call in calls]
-        else:
-            outcomes = self._fan_out(run, calls, executor)
+        with Cancel(*(() if cancel is None else (cancel,))) as stop:
+            run = functools.partial(
+                self._call,
+                converter,
+                request=request,
+                limit=limit,
+                window=window,
+                remedy=remedy,
+                record=record,
+                spec=spec,
+                stop=stop,
+            )
+            if len(calls) <= 1:
+                outcomes = [run(call) for call in calls]
+            else:
+                outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
         batches = [batch for outcome in outcomes for batch in outcome.batches]
         table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
         return table, sum(outcome.requests for outcome in outcomes)
@@ -1260,30 +1285,44 @@ class RestReader:
         self,
         run: Callable[[Call], _Outcome],
         calls: Sequence[Call],
+        *,
         executor: ThreadPoolExecutor | None,
+        stop: Cancel,
     ) -> list[_Outcome]:
         """Run several calls concurrently and return their outcomes in call order.
+
+        When a call fails, or this thread is interrupted, the read's token is set before the
+        read waits for its calls, so a call waiting for the rate governor stops at once
+        instead of being sent. The calls that failed only because of that are not reported.
 
         Args:
             run: Makes one call.
             calls: The calls.
             executor: The caller's pool, or None for one of this read's own.
+            stop: The read's token.
 
         Returns:
             The outcomes, in call order.
+
+        The earliest call, in call order, among those that had failed when the first failure
+        was seen raises its error.
         """
         own = executor is None
         pool = executor or ThreadPoolExecutor(min(self.max_concurrency, len(calls)), self.threads)
         futures = [pool.submit(run, call) for call in calls]
         try:
-            wait(futures, return_when=FIRST_EXCEPTION)
+            done, _ = wait(futures, return_when=FIRST_EXCEPTION)
         finally:
+            stop.set()
             for future in futures:
                 future.cancel()
             wait(futures)
             if own:
                 pool.shutdown()
-        return [future.result() for future in futures if not future.cancelled()]
+        failed = [future for future in futures if future in done and future.exception()]
+        if failed:
+            failed[0].result()  # raises the failure
+        return [future.result() for future in futures]
 
     def _call(
         self,
@@ -1296,6 +1335,7 @@ class RestReader:
         window: HistoryWindow | None,
         remedy: str,
         record: Callable[[DriftReport], None] | None,
+        stop: Cancel,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
 
@@ -1314,6 +1354,7 @@ class RestReader:
             window: The `history()` window whose rows to keep, or None.
             remedy: What the caller can do instead when a stamp is refused.
             record: Also given each page's drift, or None.
+            stop: The read's token, which ends the call's waits.
 
         Returns:
             The call's rows and request count; no rows for a per-symbol call whose first
@@ -1339,7 +1380,12 @@ class RestReader:
         times = time_rule(spec, request, asset_class=zone_class)
         try:
             for page in self.state.client.pages(
-                converter.rest_path, call.path_params, call.query, limit=limit
+                converter.rest_path,
+                call.path_params,
+                call.query,
+                bucket=call_bucket(spec, call),
+                cancel=stop,
+                limit=limit,
             ):
                 received = time.time_ns()
                 requests += 1
@@ -1459,9 +1505,9 @@ class RestReader:
         """Return the public error of a wire error.
 
         A closed session's error is `MassiveError("MassiveSession #1 is closed")`, whatever
-        the request returned. A rate limit that outlived the retries is `MassiveError("rate
-        limited: ...")` with status 429, and logs the rate-limit advice once per session.
-        Every other error is `_errors.from_wire`'s.
+        the request returned. A rate limit Massive kept up for longer than the governor waits
+        is `MassiveError("rate limited: ...")` with status 429. Every other error is
+        `_errors.from_wire`'s.
 
         Args:
             error: The wire error.
@@ -1472,13 +1518,16 @@ class RestReader:
         if self.state.closed:
             return MassiveError(f"{self.state.label} is closed")
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
-            self.state.warn_rate_limit()
             return MassiveError(
-                f"rate limited: {error.message}", status=429, request_id=error.request_id
+                f"rate limited: {error.message}; m.rate_limits() shows when requests resume",
+                status=429,
+                request_id=error.request_id,
             )
         return from_wire(error)
 
-    def rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+    def rows(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+    ) -> list[dict[str, object]]:
         """Return every raw JSON row of a REST path for a query, following its pages.
 
         For the library's own lookups, such as the futures schedule calendar of the WebSocket
@@ -1488,6 +1537,9 @@ class RestReader:
             template: The path template, such as `"/futures/v1/schedules"`; it takes no path
                 parameter.
             query: The query parameters, by wire name.
+            bucket: The rate governor bucket every page is charged to, such as `"futures"`.
+            cancel: The lookup's token: its lane in the governor, and, once set, the end of
+                every page's wait for a slot.
 
         Returns:
             The rows of every page, every key kept.
@@ -1498,16 +1550,24 @@ class RestReader:
         rest_path = self.rest_path(template)
         try:
             return [
-                row for page in self.state.client.pages(rest_path, {}, query) for row in page.rows
+                row
+                for page in self.state.client.pages(
+                    rest_path, {}, query, bucket=bucket, cancel=cancel
+                )
+                for row in page.rows
             ]
         except WireError as error:
             raise self._public(error) from error
 
-    def probe(self, probe: hosts.SnapshotProbe) -> list[dict[str, object]]:
+    def probe(
+        self, probe: hosts.SnapshotProbe, *, asset_class: AssetClass
+    ) -> list[dict[str, object]]:
         """Make a host-decision request and return its raw JSON rows.
 
         Args:
             probe: The request.
+            asset_class: The class whose host is decided; the request is charged to its
+                subscription, whatever path it reads.
 
         Returns:
             The rows, every key kept.
@@ -1516,7 +1576,12 @@ class RestReader:
         `AuthenticationError`, `EntitlementError`, or `MassiveError`.
         """
         try:
-            page = self.state.client.get(self.rest_path(probe.path), probe.path_params, probe.query)
+            page = self.state.client.get(
+                self.rest_path(probe.path),
+                probe.path_params,
+                probe.query,
+                bucket=bucket_of(subscription_of(asset_class)),
+            )
         except WireError as error:
             raise self._public(error) from error
         return page.rows
@@ -1529,12 +1594,16 @@ class RestReader:
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
+        cancel: Cancel,
+        pace: PaceCheck,
     ) -> tuple[pa.Table, int]:
-        """Run one `poll()` cycle: `read_fetch` for the cycle's symbols.
+        """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
 
         A reactive symbol table can route a new symbol to a path that lacks a parameter the
         caller set (an explicit `adjusted` on the crypto indicators). Retrying cannot fix that,
-        so its `ValueError` becomes `UnsupportedParameterError`, which fails the table.
+        so its `ValueError` becomes `UnsupportedParameterError`, which fails the table. Before
+        reading, the cycle's requests per bucket go to `pace`, which warns once when the paced
+        ones outlast the interval.
 
         Args:
             spec: The dataset.
@@ -1542,6 +1611,8 @@ class RestReader:
             symbols: The cycle's static symbols (a reactive table already read).
             record: Records each page's drift in the table's `SchemaDrift`.
             executor: The poller's fan-out pool.
+            cancel: The poller's stop token, which ends the cycle's waits.
+            pace: The table's pace check.
 
         Returns:
             The cycle's rows and request count.
@@ -1556,7 +1627,10 @@ class RestReader:
             planned = self.plan_fetch(spec, request, symbols)
         except ValueError as error:
             raise UnsupportedParameterError(str(error)) from error
-        return self._read_planned(spec, request, planned, record=record, executor=executor)
+        pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
+        return self._read_planned(
+            spec, request, planned, record=record, executor=executor, cancel=cancel
+        )
 
     def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
         """Check, before any symbol is known, that some fetch path can take the parameters.
@@ -1635,7 +1709,10 @@ class RestReader:
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
     ) -> tuple[pa.Table, int]:
-        """Read a dataset's fetch paths for the symbols: `fetch()`, or one `poll()` cycle.
+        """Read a dataset's fetch paths for the symbols: `fetch()`.
+
+        Once planned, the read logs at INFO the least time its paced requests take, when they
+        cannot all start within a minute (`rate_limits.announce`).
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1652,7 +1729,10 @@ class RestReader:
         `ValueError` of `_base`.
         """
         planned = self.plan_fetch(spec, request, symbols)
-        return self._read_planned(spec, request, planned, record=record, executor=executor)
+        announce(self.state.client.governor, f"{spec.name} fetch", _buckets(spec, planned))
+        return self._read_planned(
+            spec, request, planned, record=record, executor=executor, cancel=None
+        )
 
     def _read_planned(
         self,
@@ -1662,6 +1742,7 @@ class RestReader:
         *,
         record: Callable[[DriftReport], None] | None,
         executor: ThreadPoolExecutor | None,
+        cancel: Cancel | None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the total rows at `Request.limit`.
 
@@ -1671,6 +1752,7 @@ class RestReader:
             planned: Each path with its calls (`plan_fetch`); empty for no symbols.
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
+            cancel: Ends the reads' waits when set, or None.
 
         Returns:
             The rows of every path, in path order, and the request count.
@@ -1689,6 +1771,7 @@ class RestReader:
                 remedy=_fetch_remedy(spec),
                 record=record,
                 executor=executor,
+                cancel=cancel,
             )
             tables.append(table)
             requests += made
@@ -1790,7 +1873,7 @@ class RestEndpoints:
                 asset_class,
                 family,
                 ws_hosts=self._core.config.ws_hosts,
-                fetch=self._reader("hosts").probe,
+                fetch=functools.partial(self._reader("hosts").probe, asset_class=asset_class),
             )
         except BaseException as error:
             self._state.forget_host(key, future)
@@ -1820,22 +1903,26 @@ class RestEndpoints:
         self._write_decision(asset_class, family, decision)
         return decision
 
-    def fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+    def fetch_rows(
+        self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+    ) -> list[dict[str, object]]:
         """Return every raw JSON row of a REST path for a query (`RestReader.rows`).
 
         Runs on the calling thread, here the WebSocket transport's futures schedule worker,
-        and holds no library lock while it waits on the network.
+        and holds no library lock while it waits on the network or the rate governor.
 
         Args:
             template: The path template; it takes no path parameter.
             query: The query parameters, by wire name.
+            bucket: The rate governor bucket the requests are charged to.
+            cancel: The lookup's token: its lane, and the end of its waits once set.
 
         Returns:
             The rows of every page.
 
         A failed request raises the public error of `RestReader.rows`.
         """
-        return self._reader("schedules").rows(template, query)
+        return self._reader("schedules").rows(template, query, bucket=bucket, cancel=cancel)
 
     def crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Return a crypto ticker's base and quote, from Massive's reference data if needed.
@@ -1954,9 +2041,10 @@ class RestEndpoints:
         request series per symbol where the path takes one. Rows outside the window are
         dropped (`_keep`), bars of a day or longer are stamped at 00:00 of their day in the
         class day zone (`_stamped`, `timestamps.day_starts`), and every row gets the library's
-        time columns. A symbol with no data adds no rows. A grouped-daily or per-session
-        download of more than five requests first logs, at INFO, how many requests it makes
-        and about how long a Basic key's 5 requests a minute make it last. Logs
+        time columns. A symbol with no data adds no rows. Before the first request, one INFO
+        line announces a long download (`rate_limits.announce`): a grouped-daily or
+        per-session download of more than five requests, and any read whose paced requests
+        cannot all start within a minute, with the least time it takes. Logs
         `source=REST requests=<n>` at INFO.
 
         Args:
@@ -1985,14 +2073,19 @@ class RestEndpoints:
                 if is_trading_day(spec.asset_class, day)
             ]
             calls = [Call({**path, "date": day}, query) for day in days]
-            _announce(spec, len(calls), sessions=False)
+            shape = ReadShape.PER_DAY
         else:
             rest_path = reader.rest_path(cast("str", spec.history_path))
             calls = _history_calls(
                 spec, rest_path, request, window=window, split=reader.crypto_pair
             )
-            if window.requested is None:
-                _announce(spec, len(calls), sessions=True)
+            shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
+        announce(
+            self._state.client.governor,
+            f"{spec.name} history",
+            [call_bucket(spec, call) for call in calls],
+            shape=shape,
+        )
         try:
             table, requests = reader.read(
                 spec,
@@ -2048,12 +2141,66 @@ class RestEndpoints:
             request=request,
             interval=interval,
             mode=mode,
-            read=functools.partial(reader.read_cycle, spec, request),
+            read=functools.partial(
+                reader.read_cycle,
+                spec,
+                request,
+                pace=PaceCheck(f"{spec.name} poll()", interval.total_seconds()),
+            ),
             pollers=self._state.pollers,
             host=host,
             path=paths,
             clock=poll.CLOCK,
         )
+
+
+_MARKET_CLASSES: Final[dict[str, AssetClass]] = {
+    Market.STOCKS: AssetClass.STOCKS,
+    Market.OTC: AssetClass.STOCKS,
+    Market.INDICES: AssetClass.INDICES,
+    Market.FX: AssetClass.FOREX,
+    Market.CRYPTO: AssetClass.CRYPTO,
+}
+"""The asset class whose data a request's `market` filter selects (OTC tickers are stocks)."""
+
+
+def call_bucket(spec: DatasetSpec, call: Call) -> str:
+    """Return the governor bucket a planned request is charged to: its Massive subscription.
+
+    The request reads the data of the class `dates.day_class` gives it (the dataset's class, or
+    for a dataset with a path per symbol class the class its symbols share), and that class's
+    subscription covers it. A request with no class of its own whose `market` filter names
+    one, such as `m.reference.tickers(market=dm.Market.CRYPTO)`, reads that class's data and
+    is charged to its subscription (`crypto` and `fx` to currencies, `stocks` and `otc` to
+    stocks), as the session's own read of the crypto ticker list is. Any other request of no
+    class is charged to `rate_limits.OTHER`.
+
+    Args:
+        spec: The dataset.
+        call: The planned request.
+
+    Returns:
+        The bucket's name, such as `"stocks"`, `"currencies"`, or `"other"`.
+    """
+    classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
+    asset_class = day_class(spec, classes)
+    market = call.query.get("market")
+    if asset_class is ClassFromPrefix.ANY and isinstance(market, str):
+        asset_class = _MARKET_CLASSES.get(market, ClassFromPrefix.ANY)
+    return bucket_of(subscription_of(asset_class))
+
+
+def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) -> list[str]:
+    """Return the bucket of every planned request, path by path.
+
+    Args:
+        spec: The dataset.
+        planned: Each path with its calls.
+
+    Returns:
+        One bucket per call.
+    """
+    return [call_bucket(spec, call) for _, calls in planned for call in calls]
 
 
 def _report(error: MassiveError) -> None:
@@ -2189,46 +2336,6 @@ def _history_calls(
         extra=order,
         split=split,
     )
-
-
-def _announce(spec: DatasetSpec, requests: int, *, sessions: bool) -> None:
-    """Log, before a long one-request-per-day download, how many requests it makes.
-
-    A grouped-daily download makes one request per day, and a per-session download one request
-    series per session and symbol, more where a session spans several pages. At a Basic key's 5
-    requests a minute, the first five go at once and every further five take a minute. Only a
-    download of more than five requests is announced.
-
-    Args:
-        spec: The dataset.
-        requests: The number of planned requests (for sessions, of first pages).
-        sessions: True for a per-session download, whose pages may add requests.
-    """
-    if requests <= _BASIC_REQUESTS_PER_MINUTE:
-        return
-    minutes = max(1, -(-(requests - _BASIC_REQUESTS_PER_MINUTE) // _BASIC_REQUESTS_PER_MINUTE))
-    unit = "minute" if minutes == 1 else "minutes"
-    if sessions:
-        logger.info(
-            "%s history: at least %d requests, one per session and symbol, more where a "
-            "session spans several pages; at a Basic key's %d requests a minute that takes "
-            "at least %d %s",
-            spec.name,
-            requests,
-            _BASIC_REQUESTS_PER_MINUTE,
-            minutes,
-            unit,
-        )
-    else:
-        logger.info(
-            "%s history: %d requests, one per day; at a Basic key's %d requests a minute that "
-            "takes about %d %s",
-            spec.name,
-            requests,
-            _BASIC_REQUESTS_PER_MINUTE,
-            minutes,
-            unit,
-        )
 
 
 def _waited(future: Future[HostDecision]) -> HostDecision:

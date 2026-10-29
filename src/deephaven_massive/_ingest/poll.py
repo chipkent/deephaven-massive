@@ -51,10 +51,11 @@ happens once nothing uses the table any more, when the table fails, or when the 
 which fails the table (`Poller.fail`) after stopping the poller. Every live poller is also
 registered with the session's `Pollers`, which the session's REST closer stops, and a poller can
 no longer be registered once that has run, so a `poll()` that races `close()` never starts a
-poller the session would not stop. A stopped poller finishes the request it is waiting on and
-publishes nothing more; a failed table keeps its rows. The poller holds the session core only
-through a weak reference; the poll's record in the session keeps the session alive while the
-poll runs (`SessionCore.register_poll`).
+poller the session would not stop. A stopped poller finishes a request already on the wire,
+stops at once a request still waiting for the rate governor (its stop token is the cycle's
+`Cancel`), and publishes nothing more; a failed table keeps its rows. The poller holds the
+session core only through a weak reference; the poll's record in the session keeps the session
+alive while the poll runs (`SessionCore.register_poll`).
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ from deephaven_massive._errors import (
     MassiveError,
     PermanentError,
 )
-from deephaven_massive._massive import Transport
+from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
@@ -217,6 +218,7 @@ class CycleReader(Protocol):
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
+        cancel: Cancel,
     ) -> tuple[pa.Table, int]:
         """Request the dataset for the symbols and return the rows and the request count.
 
@@ -224,6 +226,8 @@ class CycleReader(Protocol):
             symbols: The cycle's static symbols: a sorted tuple, `ALL`, or None.
             record: Receives each page's drift, for the table's `SchemaDrift`.
             executor: The poller's pool for fan-out requests.
+            cancel: The poller's stop token: once set, the cycle's requests stop waiting for
+                the rate governor.
 
         Returns:
             The rows in the dataset's schema, and how many requests were made.
@@ -344,7 +348,7 @@ class Poller:
         pollers: Pollers,
         clock: PollClock,
         publisher: TablePublisher,
-        stop: threading.Event,
+        stop: Cancel,
     ) -> None:
         """Prepare the poller; nothing is requested, and the thread is not started yet.
 
@@ -360,7 +364,8 @@ class Poller:
             clock: The time source of the waits between cycles.
             publisher: The table's publisher (`build_table`).
             stop: Set to stop the poller; the publisher's blink table sets it when it shuts
-                down.
+                down. Each cycle's requests listen to it, so a stopped poller never waits for
+                a rate-limited slot.
         """
         self._core = weakref.ref(core)
         self._exec_ctx = core.exec_ctx
@@ -511,7 +516,9 @@ class Poller:
         """
         symbols = self._symbols()
         record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST.value)
-        table, requests = self._read(symbols=symbols, record=record, executor=pool)
+        table, requests = self._read(
+            symbols=symbols, record=record, executor=pool, cancel=self._stop
+        )
         if self._stop.is_set():
             return False
         self._published += self._publish(table)
@@ -779,19 +786,19 @@ def build_table(
     return keyed.where(LIVE_COLUMN).drop_columns(LIVE_COLUMN), publisher
 
 
-def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: threading.Event) -> None:
+def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel) -> None:
     """A `poll()` blink table's shutdown callback: stop the poller and tell the session.
 
     Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
     thread after a failure, a gRPC thread, or Deephaven's liveness-cleanup thread), so it only
-    sets an event and updates the registry (`SessionCore.poll_shut_down`). The session is alive:
+    sets a token and updates the registry (`SessionCore.poll_shut_down`). The session is alive:
     the poll's record keeps it in the live set until this has run, and before the record
     exists the opening caller holds it.
 
     Args:
         core_ref: The session's core, weakly.
         stream_id: The table's `StreamId`.
-        stop: The poller's stop event.
+        stop: The poller's stop token.
     """
     stop.set()
     cast("SessionCore", core_ref()).poll_shut_down(stream_id)
@@ -803,7 +810,7 @@ def _build(
     *,
     mode: PollMode,
     stream_id: int,
-    stop: threading.Event,
+    stop: Cancel,
 ) -> tuple[tuple[Table, TablePublisher], LivenessScope]:
     """Create a `poll()` table in a new result scope (`make_result`).
 
@@ -812,7 +819,7 @@ def _build(
         spec: The dataset.
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
-        stop: The poller's stop event, set when the blink table shuts down.
+        stop: The poller's stop token, set when the blink table shuts down.
 
     Returns:
         The result and its publisher (`build_table`), and the result scope. The result is the
@@ -882,7 +889,7 @@ def open_poll(
             `Pollers.add`.
     """
     stream_id = core.next_stream_id()
-    stop = threading.Event()
+    stop = Cancel()
     with entered(core.exec_ctx):
         (result, publisher), scope = _build(core, spec, mode=mode, stream_id=stream_id, stop=stop)
     poller = Poller(
