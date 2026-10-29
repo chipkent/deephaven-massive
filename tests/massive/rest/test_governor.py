@@ -1207,3 +1207,25 @@ def test_a_slow_probe_refused_after_a_window_continues_its_run() -> None:
     clock.advance(RATE_WINDOW + 10.0)  # answered 71 s after the pause ended
     _refuse(governor, probe)
     assert _state(governor).paused_until == 1_800_000_000.0 + 86.0 + 30.0
+
+
+def test_a_longer_pause_fails_an_impatient_request_behind_a_patient_one() -> None:
+    # Only the head works out its start, but every waiter checks a new pause against its own
+    # patience: the impatient request must not sleep behind the patient one.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    in_flight = governor.admission("stocks", lane=object()).acquire(Cancel())
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))  # until 15
+    patient = _Waiting(governor, "stocks", lane=object(), give_up_at=1000.0)
+    clock.wait_for_sleepers(1)
+    impatient = _Waiting(governor, "stocks", lane=object(), give_up_at=90.0)
+    assert clock.wait_for_sleepers(2) == [15.0, math.inf]
+    _refuse(governor, in_flight, retry_after=700.0)  # stale: the pause grows to 700
+    impatient.join()
+    assert impatient.error is not None
+    assert impatient.error.status == 429
+    assert clock.wait_for_sleepers(1) == [700.0]  # the patient one waits the pause out
+    clock.advance(700.0)
+    patient.join()
+    assert patient.permit is not None
+    governor.done(patient.permit, answered=True)

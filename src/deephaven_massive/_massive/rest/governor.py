@@ -472,12 +472,19 @@ class _Bucket:
             self.run_refusals = 0
 
     def pause(self, until: float) -> None:
-        """Extend the pause to `until`, and probe after it.
+        """Extend the pause to `until`, probe after it, and wake every waiting request.
+
+        Every waiter, not only the head, checks the new pause against its own `give_up_at`:
+        a request behind a more patient one must not sleep past its own patience.
 
         Args:
             until: When the new pause ends; a pause only ever grows.
         """
-        self.pause_until = max(self.pause_until, until)
+        if until > self.pause_until:
+            self.pause_until = until
+            for lane in self.lanes.values():
+                for waiter in lane:
+                    waiter.wake.set()
         self.probing = True
 
     def start_at(self, now: float) -> float:
