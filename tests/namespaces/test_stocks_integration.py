@@ -347,7 +347,7 @@ def _new_york(nanos: int) -> str:
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("50", "half-day stamps")
+@pytest.mark.settles("half-day stamps")
 @pytest.mark.requests(6)
 @pytest.mark.timeout(100)
 def test_half_day_stock_bars_and_their_stamps(
@@ -372,7 +372,7 @@ def test_half_day_stock_bars_and_their_stamps(
 
 
 @pytest.mark.needs("stocks:starter", "s3")
-@pytest.mark.settles("50", "half-day stamps")
+@pytest.mark.settles("half-day stamps")
 @pytest.mark.timeout(100)
 def test_half_day_stock_flat_files_and_their_stamps(
     flat_file_tickers: FlatFileTickers, *, evidence: Evidence
