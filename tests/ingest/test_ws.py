@@ -2810,6 +2810,8 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     monkeypatch.setattr(hosts, "decide", decide)
     core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     prefix, group = core.thread_prefix, custom_session.connections.group.label
+    assert re.fullmatch(r"massive #\d+", prefix), prefix
+    assert re.fullmatch(r"massive group #\d+", group), group
     assert readers == [f"{prefix} hosts rest"]
     mine = {name.removeprefix(f"{prefix} ") for name in started if name.startswith(f"{prefix} ")}
     shared = {name.removeprefix(f"{group} ") for name in started if name.startswith(f"{group} ")}
