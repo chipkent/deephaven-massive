@@ -43,6 +43,10 @@ The client follows the network rules the REST and WebSocket clients follow, from
   `FlatFile.dropped` says why; a caller that has kept the file's rows to itself can discard
   them and read the object again from its start, waiting first with `wait_to_reread`, which
   follows the same schedule and limit.
+- **Logging.** Each object request logs one DEBUG line on this module's logger: the object's
+  location, `200` with its size or `404 NoSuchKey`, and S3's `x-amz-request-id`. A retry logs
+  at INFO and giving up at ERROR; an error names S3's code and message, with the secret
+  replaced by `***` should S3 ever quote it.
 
 The body of an object reaches `FlatFile` through a small stream that turns botocore's and
 urllib3's read errors (a connection dropped, reset, or broken at the TLS layer part-way
@@ -319,12 +323,22 @@ class FlatFileClient:
 
         def get(client: S3Client) -> StreamingBody | None:
             try:
-                return client.get_object(Bucket=self._bucket, Key=key)["Body"]
+                answer = client.get_object(Bucket=self._bucket, Key=key)
             except ClientError as error:
                 code = error.response.get("Error", {}).get("Code")
                 if _status(error) == HTTPStatus.NOT_FOUND and code == _MISSING_KEY:
+                    _log.debug(
+                        "GET %s -> 404 NoSuchKey (request_id %s)", location, _request_id(error)
+                    )
                     return None
                 raise
+            _log.debug(
+                "GET %s -> 200, %s bytes (request_id %s)",
+                location,
+                answer.get("ContentLength"),
+                answer.get("ResponseMetadata", {}).get("RequestId"),
+            )
+            return answer["Body"]
 
         body = self._request(get, key=key, location=location, verb="read")
         if body is None:
@@ -681,7 +695,6 @@ class FlatFileClient:
             themselves, `WireEntitlementError` for any other 403, and `WireError` for any other
             status, each with the status, host, key, and `x-amz-request-id`.
         """
-        metadata = error.response.get("ResponseMetadata", {})
         status = _status(error)
         details = error.response.get("Error", {})
         code = details.get("Code", "")
@@ -691,7 +704,7 @@ class FlatFileClient:
             "status": status,
             "host": self._host,
             "path": key,
-            "request_id": metadata.get("HTTPHeaders", {}).get("x-amz-request-id"),
+            "request_id": _request_id(error),
         }
         if status != HTTPStatus.FORBIDDEN:
             return WireError(f"cannot {verb} {location}: HTTP {status} ({server})", **context)
@@ -699,6 +712,21 @@ class FlatFileClient:
         if code in _CREDENTIAL_ERRORS:
             return WireAuthError(refused, **context)
         return WireEntitlementError(refused, **context)
+
+
+def _request_id(error: ClientError) -> str | None:
+    """Return S3's `x-amz-request-id` of an error response.
+
+    Args:
+        error: The SDK error.
+
+    Returns:
+        The request id, or None when the response had none.
+    """
+    request_id: str | None = (
+        error.response.get("ResponseMetadata", {}).get("HTTPHeaders", {}).get("x-amz-request-id")
+    )
+    return request_id
 
 
 def _status(error: ClientError) -> int | None:

@@ -248,6 +248,16 @@ def test_the_key_is_never_logged_by_anyone(
     assert KEY not in text
 
 
+def test_each_status_is_logged_at_debug(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = _log_a_session(make_client, caplog)
+    url = fake_ws_server.url()
+    assert f"{client_module.__name__} {url} status ACK: subscribed to: T.AAPL" in text
+
+
 def test_websockets_would_log_the_key_without_the_quiet_logger(
     make_client: Callable[..., Harness],
     caplog: pytest.LogCaptureFixture,

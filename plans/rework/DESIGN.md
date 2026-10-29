@@ -2017,9 +2017,10 @@ The client reports to `_ingest/ws.py` through four callbacks, each called on the
 - `on_data(generation, channel, rows, rejects, drift)`: one channel's data from one frame,
   decoded against `ws.json`. `rows` are keyed by **long-form** column (the library renames
   them), with symbols as the wire spells them (`EUR/USD`, `BTC-USD`). `rejects` are the rows
-  that failed validation, one `Reject(channel, symbol or None, WireError)` each, whose
-  `symbol` is the raw wire value of the channel's declared symbol column; `drift` is the frame's
-  `DriftReport` ([section 19.5](#195-runtime-drift)).
+  that failed validation, one `Reject(channel, symbol or None, WireError, raw)` each, whose
+  `symbol` is the raw wire value of the channel's declared symbol column and `raw` the whole
+  row's JSON text (up to 2,000 characters); `drift` is the frame's `DriftReport`
+  ([section 19.5](#195-runtime-drift)).
 - `on_state(state, detail)`: `CONNECTING`, `RECONNECTING` (with the next attempt's time),
   `WAITING_SLOT` (with the next attempt's time; the auth reply was `max_connections`, or the
   server sent a `max_connections` status before closing an authenticated socket), `FAILED`
@@ -2683,6 +2684,23 @@ logger through a 401, a 429, bodies and a status that echo the key, `auth_failed
 `tests/test_layout.py` are a cheap backstop (no secret name in a logging call, every thread
 and pool named, no logging call under a leaf lock).
 
+**What the wire clients log.** Each layer logs what it knows, and repeats are fine:
+
+- The REST client logs every attempt at DEBUG with the full URL, the status, the `request_id`,
+  and the time it took: `GET https://api.massive.com/v3/trades/AAPL?limit=50000 -> 200
+  (request_id 6a1f): 1950 rows in 0.410 s`. Any other status adds the body, up to 2,000
+  characters with the key replaced. A retry logs at INFO and giving up at ERROR.
+- A row that cannot be read is logged whole at DEBUG (its JSON, up to 2,000 characters) by the
+  decoder that read it, beside the error: `rest.batch` for a REST page, `ws.protocol` for a
+  WebSocket frame, whose `Reject` also carries the row as `raw`. Every error quotes the
+  offending value's JSON text up to 200 characters.
+- The WebSocket client logs each status object Massive sends (acknowledgements, refusals) and
+  each subscription frame it sends at DEBUG, and its connections, handshakes, closes, and
+  backoffs at INFO or WARNING.
+- The flat-file client logs each object request at DEBUG: the object, `200` with its size or
+  `404 NoSuchKey`, and S3's `request_id`.
+- Each `DriftReport` carries a sample per drifted key ([section 19.5](#195-runtime-drift)).
+
 **Cost.** With the log off, a level check fails and nothing is formatted (`%` arguments,
 enforced by ruff's `G` rules); a value that costs a call to compute is computed only under
 `isEnabledFor`. Nothing is logged per row or per frame except a failure.
@@ -2840,7 +2858,8 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
                      result key, params), Field(wire key, column, WireType, unit, required,
                      conversion), Conversion (named conversions, each with its declared and
                      resulting WireType), Param(+ unit), ParamKind, WireType, WireUnit,
-                     ENVELOPE_KEYS, DriftReport(extra, missing, statuses)
+                     ENVELOPE_KEYS, DriftReport(extra, missing, statuses, samples),
+                     DriftSample(symbol, value)
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
                      convert_field applies a field's named conversion and raises with the
@@ -3139,7 +3158,7 @@ work to the loop. That is what makes the design correct on free-threaded 3.14t w
     frame. Rows are keyed by **long-form** column (the library renames them) and hold every
     column of the channel's source, null when absent; values are validated and converted to
     their Python form (an epoch keeps its integer count; an ISO-8601 instant becomes exact
-    integer nanoseconds since the epoch), and symbols stay as the wire spells them. A row that fails validation becomes a `Reject(channel, symbol or None, WireError)`
+    integer nanoseconds since the epoch), and symbols stay as the wire spells them. A row that fails validation becomes a `Reject(channel, symbol or None, WireError, raw)`
     instead, with the raw value of the declared symbol column (`None` when none is declared or
     the value is missing); the frame's other rows are delivered. `drift` is the frame's
     `DriftReport` ([section 19.5](#195-runtime-drift)).
@@ -3824,9 +3843,11 @@ absent, as in an installed wheel; the CI build job checks that the wheel holds n
 
 Data on the wire can differ from the committed schema until the next refresh. **Detection** is in
 `_massive`: each decoder compares a payload with its generated source and returns a
-`DriftReport(extra, missing, statuses)` (`missing`: only vendor-`required` fields that some
-row lacked or held as null; `statuses`: REST envelope statuses outside the
-documented ones). A decoder never raises for drift; REST and flat files raise
+`DriftReport(extra, missing, statuses, samples)` (`missing`: only vendor-`required` fields that
+some row lacked or held as null; `statuses`: REST envelope statuses outside the
+documented ones; `samples`: for each drifted key, the first row's symbol as the wire spells it,
+known to the WebSocket decoder only, and an extra key's value, so a WARNING can quote them;
+outside equality and the `repr`). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
 session's `DriftRegistry` in `_tables/diagnostics.py` (a leaf lock, WARNINGs logged after release) and the
 routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
@@ -3837,7 +3858,7 @@ routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/strea
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
 | **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
-| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 50 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
+| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 200 characters), the whole row logged at DEBUG (first 2,000 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 

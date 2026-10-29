@@ -300,10 +300,11 @@ class FakeS3:
             status, code, message = refusal
             return _error(status, code, message)
         if dropped is not None:
-            return _ok(self._body(key, _DroppedStream(dropped), len(dropped) + 1))
+            length = len(dropped) + 1
+            return _ok(self._body(key, _DroppedStream(dropped), length), length)
         if data is None:
             return _error(404, "NoSuchKey", "The specified key does not exist.")
-        return _ok(self._body(key, io.BytesIO(data), len(data)))
+        return _ok(self._body(key, io.BytesIO(data), len(data)), len(data))
 
     def _body(self, key: str, raw: io.BytesIO, length: int) -> StreamingBody:
         def closed() -> None:
@@ -313,10 +314,12 @@ class FakeS3:
         return _RecordedBody(raw, length, closed)
 
 
-def _ok(body: StreamingBody) -> tuple[AWSResponse, dict[str, Any]]:
+def _ok(body: StreamingBody, length: int) -> tuple[AWSResponse, dict[str, Any]]:
+    # As S3 answers: the object's size, and the request id botocore reads from its header.
     return AWSResponse("", 200, HTTPHeaders(), None), {
         "Body": body,
-        "ResponseMetadata": {"HTTPStatusCode": 200},
+        "ContentLength": length,
+        "ResponseMetadata": {"HTTPStatusCode": 200, "RequestId": REQUEST_ID},
     }
 
 

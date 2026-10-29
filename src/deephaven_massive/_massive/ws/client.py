@@ -21,6 +21,12 @@ forever. A fatal failure (a rejected key, a TLS certificate failure, an HTTP sta
 retrying cannot fix) ends it with `FAILED`. `close()` ends it with `CLOSED` at once, whatever it
 is waiting for.
 
+**Logging.** The client's thread is named `<thread_prefix> ws <host><path>`. It logs connecting,
+authenticating, closing, and each backoff at INFO or WARNING; each status object Massive sends
+(an acknowledgement, a refusal) and each subscription frame it sends at DEBUG; and each rejected
+row, whole, at DEBUG (`ws.protocol`). Never the authentication frame: websockets' own frame log
+is kept off, and a server text that echoes the key has it replaced with `***`.
+
 This module imports the standard library, `websockets`, `net`, and `spec` (through
 `ws.protocol`).
 """
@@ -626,7 +632,11 @@ class WsClient:
                 for event in self._decoder.decode(frame):
                     if isinstance(event, Status):
                         no_slot = no_slot or event.kind is StatusKind.MAX_CONNECTIONS
-                        self._on_status(generation.number, self._cleaned(event))
+                        status = self._cleaned(event)
+                        logger.debug(
+                            "%s status %s: %s", self._url, status.kind.name, status.message
+                        )
+                        self._on_status(generation.number, status)
                     else:
                         self._on_data(
                             generation.number, event.channel, event.rows, event.rejects, event.drift

@@ -176,6 +176,23 @@ def test_an_existing_object_opens_and_a_missing_one_is_none(
     assert fake_s3.requests == [("flatfiles", KEY), ("flatfiles", KEY.replace("03-03", "03-04"))]
 
 
+def test_each_object_request_is_logged_at_debug(
+    *, client: FlatFileClient, fake_s3: FakeS3, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_s3.put(KEY, b"data")
+    missing = KEY.replace("03-03", "03-04")
+    with caplog.at_level(logging.DEBUG, logger=client_module.__name__):
+        file = client.open(KEY)
+        assert client.open(missing) is None
+    assert file is not None
+    file.close()
+    at = "at https://files.massive.com"
+    assert caplog.messages == [
+        f"GET s3://flatfiles/{KEY} {at} -> 200, 4 bytes (request_id {fake_s3.request_id})",
+        f"GET s3://flatfiles/{missing} {at} -> 404 NoSuchKey (request_id {fake_s3.request_id})",
+    ]
+
+
 def test_the_client_is_created_once_on_first_use_from_its_settings(fake_s3: FakeS3) -> None:
     client = make_client(endpoint_url="https://s3.example.com", bucket="other", max_pool=3)
     try:

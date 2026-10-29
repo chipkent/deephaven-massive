@@ -873,16 +873,23 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
+    body = '{"status":"ERROR","error":"' + "e" * 2500 + '"}'
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=503), _ok(request_id="r1"))
-    fake_rest.reply("/v3/trades/MSFT", Reply(b"x", status=502))
+    fake_rest.reply("/v3/trades/MSFT", Reply(body.encode(), status=502))
     client.get(_TRADES, _AAPL, {"limit": 1})
     with pytest.raises(WireError):
         client.get(_TRADES, {"stockTicker": "MSFT"}, {})
     ours = [r for r in caplog.records if r.name == client_module.__name__]
     messages = [(r.levelno, r.getMessage()) for r in ours]
+    url = fake_rest.url
+    # Each attempt names the whole URL; a failed one quotes its body, up to 2,000 characters.
     assert (
         logging.DEBUG,
-        "GET /v3/trades/AAPL?limit=1 -> 503 (request_id None) in 0.000 s",
+        f"GET {url}/v3/trades/AAPL?limit=1 -> 503 (request_id None) in 0.000 s; body: ",
+    ) in messages
+    assert (
+        logging.DEBUG,
+        f"GET {url}/v3/trades/MSFT -> 502 (request_id None) in 0.000 s; body: {body[:2000]}",
     ) in messages
     assert (
         logging.INFO,
@@ -893,11 +900,12 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     ) in messages
     assert (
         logging.DEBUG,
-        "GET /v3/trades/AAPL?limit=1 -> 200 (request_id r1): 1 rows in 0.000 s",
+        f"GET {url}/v3/trades/AAPL?limit=1 -> 200 (request_id r1): 1 rows in 0.000 s",
     ) in messages
+    # The error quotes only the envelope's message, cut to 200 characters.
     assert (
         logging.ERROR,
-        "HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: x; giving up after 4 attempts",
+        f"HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: {'e' * 200}; giving up after 4 attempts",
     ) in messages
     every = [r.getMessage() + repr(r.args) for r in caplog.records]
     assert every

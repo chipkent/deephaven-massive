@@ -13,6 +13,11 @@ instant before which no thread sends, so concurrent workers back off together in
 multiplying 429s. The lock is held only to read or raise that instant, never across a wait or
 a request. No call modifies its arguments.
 
+**Logging.** Each attempt logs one DEBUG line on this module's logger: the full URL, the status,
+the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
+the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
+up at ERROR. Nothing logs a header.
+
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
 
@@ -44,13 +49,18 @@ from deephaven_massive._massive.net.retry import (
     retry_after_seconds,
     transient_wait,
 )
-from deephaven_massive._massive.net.secrets import redacted
+from deephaven_massive._massive.net.secrets import redact, redacted
 from deephaven_massive._massive.rest.query import (
     next_target,
     origin_of,
     request_target,
 )
-from deephaven_massive._massive.rest.response import Request, decode_page, http_error
+from deephaven_massive._massive.rest.response import (
+    Request,
+    body_excerpt,
+    decode_page,
+    http_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -481,20 +491,25 @@ class RestClient:
                 raise clean from error.__cause__
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
-                request.target,
+                self._base + request.target,
                 page.request_id,
                 len(page.rows),
                 elapsed,
             )
             return page
         failure = redacted(http_error(response.status, response.data, request), self._api_key)
-        _log.debug(
-            "GET %s -> %d (request_id %s) in %.3f s",
-            request.target,
-            response.status,
-            failure.request_id,
-            elapsed,
-        )
+        if _log.isEnabledFor(logging.DEBUG):
+            # The whole body (up to 2,000 characters), cleaned, so the line shows every word
+            # Massive or a proxy said; the error quotes only its message.
+            body = redact(body_excerpt(response.data), self._api_key)
+            _log.debug(
+                "GET %s -> %d (request_id %s) in %.3f s; body: %s",
+                self._base + request.target,
+                response.status,
+                failure.request_id,
+                elapsed,
+                body,
+            )
         if response.status == HTTPStatus.TOO_MANY_REQUESTS:
             return self._rate_limited(failure, response.headers.get("Retry-After"))
         if response.status in TRANSIENT_STATUSES:

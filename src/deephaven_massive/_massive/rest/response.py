@@ -49,7 +49,7 @@ from deephaven_massive._massive.spec.types import ENVELOPE_KEYS, DriftReport
 if TYPE_CHECKING:
     from deephaven_massive._massive.spec.types import RestPath
 
-__all__ = ["GOOD_STATUSES", "Page", "Request", "decode_page", "http_error"]
+__all__ = ["GOOD_STATUSES", "Page", "Request", "body_excerpt", "decode_page", "http_error"]
 
 GOOD_STATUSES = frozenset({"OK", "DELAYED", "success"})
 """The documented envelope statuses of a good page; any other non-error status is drift."""
@@ -145,6 +145,25 @@ class Page:
     rows: list[dict[str, object]] = field(repr=False)
     body: dict[str, object] | list[object] = field(repr=False)
     drift: DriftReport = field(default_factory=DriftReport)
+
+
+_BODY_EXCERPT = 2000
+"""How many characters of a failed response's body the client's DEBUG line quotes."""
+
+
+def body_excerpt(data: bytes) -> str:
+    """Return the start of a failed response's body as text, for the client's DEBUG line.
+
+    Longer than an error's excerpt, so the line shows Massive's whole error envelope or the
+    meaningful part of a proxy's page. The caller replaces its secrets in it (`net.secrets`).
+
+    Args:
+        data: The body.
+
+    Returns:
+        The first 2,000 characters, with undecodable bytes replaced; empty for an empty body.
+    """
+    return data.decode("utf-8", "replace")[:_BODY_EXCERPT]
 
 
 def _excerpt(data: bytes) -> str:
