@@ -5715,10 +5715,11 @@ document already reflects them.
     says reference and cross-asset endpoints are counted in a bucket of their own, so every
     reference endpoint (`/v3/reference/...`, `/vX/reference/...`, `/v2/reference/news`) goes to
     `other`, whatever its dataset's class or filters: options contracts and IPOs, reference
-    reads filtered by market, and the session's crypto ticker list (charging the class-specific
-    reference endpoints there too is a coordinator decision of 2026-10-29, for item 66's live
-    check to confirm); and `other` learns Basic from a 429 that names the per-minute limit, as a subscription does;
-    declaring it still raises. What a governor learned is forgotten with the governor, once
+    reads filtered by market, and the session's crypto ticker list. Charging every reference
+    endpoint there, the class-specific ones included, is the coordinator's decision,
+    2026-10-29, consistent with the owner's approval of a separate reference bucket; the owner
+    may object, and item 66's live check is to confirm it. `other` learns Basic from a 429
+    that names the per-minute limit, as a subscription does; declaring it still raises. What a governor learned is forgotten with the governor, once
     the last session of its key has gone and it holds no slot or pause, rather than kept for
     the life of the process: relearning costs one refused request and one WARNING. The `REFUSED`
     state of `m.rate_limits()` goes, since no bucket gives up
