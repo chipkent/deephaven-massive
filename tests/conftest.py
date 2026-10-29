@@ -300,6 +300,64 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     return to_pylist
 
 
+_CONSOLE_COMMAND_TIMEOUT: Final = 30.0
+"""Seconds `console_command` lets one command run before it fails the test as a deadlock."""
+
+
+@pytest.fixture
+def console_command(
+    dh_exec_ctx: ExecutionContext, request: pytest.FixtureRequest
+) -> Callable[[Callable[[], None]], None]:
+    """Return a function that runs code the way the Deephaven console runs a command.
+
+    The console runs every command on one server thread that holds the update graph's exclusive
+    lock from the command's first line to its last, so no update cycle runs meanwhile. The
+    function runs its argument the same way: on a new daemon thread that enters the embedded
+    server's execution context (through a fresh wrapper, as library threads do) and takes the
+    Java exclusive lock itself, as the console does.
+
+    A command that raises fails the test: pytest reports the thread's exception with its
+    traceback. A command that has not returned after 30 seconds is a deadlock: its thread still
+    holds the lock, so no update cycle can run again in this process and every later test would
+    hang too. The function then fails the test, naming the deadlock, and stops the run after it
+    (`session.shouldstop`, which pytest-xdist passes on to the whole run); the thread is a
+    daemon, so it cannot keep the process alive.
+
+    Returns:
+        The function; it takes the command and returns once the command has returned.
+    """
+    liveness = importlib.import_module("deephaven_massive._tables.liveness")
+
+    def run(command: Callable[[], None]) -> None:
+        returned = threading.Event()
+
+        def body() -> None:
+            with liveness.entered(dh_exec_ctx):
+                lock = dh_exec_ctx.update_graph.j_update_graph.exclusiveLock()
+                lock.lock()
+                try:
+                    command()
+                finally:
+                    lock.unlock()
+            returned.set()
+
+        thread = threading.Thread(target=body, name="console command", daemon=True)
+        thread.start()
+        thread.join(_CONSOLE_COMMAND_TIMEOUT)
+        if thread.is_alive():
+            deadlock = (
+                f"a console command deadlocked: it did not return within "
+                f"{_CONSOLE_COMMAND_TIMEOUT:.0f} s, waiting for something that needs the update "
+                "graph's lock, which it holds; no update cycle can run in this process again"
+            )
+            request.session.shouldstop = deadlock
+            pytest.fail(deadlock)
+        if not returned.is_set():
+            pytest.fail("the console command raised; its traceback is reported with this test")
+
+    return run
+
+
 @pytest.fixture
 def string_objects() -> Callable[[Table, str], int]:
     """Return a function that counts the distinct Java string objects of a column's values.

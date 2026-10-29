@@ -339,6 +339,29 @@ def test_a_paced_read_announces_its_least_duration(caplog: pytest.LogCaptureFixt
     ]
 
 
+def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_worker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # In a console command, which holds the update graph's lock, a paced read holds every live
+    # table of the worker still while it runs: the least duration becomes a WARNING.
+    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
+    governor.declare({"stocks"})
+    with caplog.at_level(logging.INFO, LOGGER):
+        announce(governor, "stocks.bars history", ["stocks"] * 250, pauses_live_tables=True)
+        quick = ["stocks"] * 5  # every request starts at once: quiet
+        announce(governor, "stocks.bars history", quick, pauses_live_tables=True)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "stocks.bars history: 250 requests; paced at 5 requests a minute (stocks); this "
+                "command will pause every live table in the worker for at least 49 min: run "
+                "long downloads from a thread of your own, outside a console command"
+            ),
+        )
+    ]
+
+
 def test_a_daily_download_of_an_unpaced_subscription_names_the_basic_cost(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

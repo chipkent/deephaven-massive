@@ -362,10 +362,15 @@ class FuturesCalendar:
             self._ask_products(batch.products)
         return pa.array(fixed, pa.string()), self._report(batch)
 
-    def close(self) -> None:
-        """Stop the worker after its current request and wait a bounded time; idempotent.
+    def close(self, *, wait: bool = True) -> None:
+        """Stop the worker after its current request; idempotent.
 
         A lookup still waiting for the rate governor stops at once; one on the wire finishes.
+
+        Args:
+            wait: True to wait for the worker for at most `_JOIN_TIMEOUT` seconds; False to
+                return at once, as a thread that holds the update graph's lock must. The
+                worker is a daemon that never needs that lock, so it ends on its own.
         """
         with self._idle:
             if self._closed:
@@ -374,7 +379,8 @@ class FuturesCalendar:
             self._idle.notify_all()  # `wait_idle` returns once closed
         self._stop.set()
         self._queue.put(_STOP)
-        self._thread.join(_JOIN_TIMEOUT)
+        if wait:
+            self._thread.join(_JOIN_TIMEOUT)
 
     # --- correction ---------------------------------------------------------------------------
 

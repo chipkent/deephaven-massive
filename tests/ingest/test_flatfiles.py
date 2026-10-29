@@ -26,7 +26,6 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
-from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -372,16 +371,6 @@ def pool(monkeypatch: pytest.MonkeyPatch) -> type[ShutdownSignal]:
 
 
 # --- The verb ----------------------------------------------------------------------------------
-
-
-def test_history_is_guarded_like_every_verb(*, session: dm.MassiveSession, fake_s3: FakeS3) -> None:
-    q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with (
-        shared_lock(session._core.exec_ctx.update_graph),
-        pytest.raises(ValueError, match="update-graph lock"),
-    ):
-        q.history("2025-03-03", "2025-03-03")
-    assert fake_s3.requests == []
 
 
 def test_history_after_close_is_a_closed_session_error(
