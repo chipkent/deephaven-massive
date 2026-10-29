@@ -362,7 +362,7 @@ def _chicago(nanos: int) -> str:
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("50")
+@pytest.mark.settles("51")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_session_labels_around_the_roll_and_a_holiday(
@@ -409,7 +409,7 @@ def test_session_labels_around_the_roll_and_a_holiday(
 
 
 @pytest.mark.needs("futures:starter")
-@pytest.mark.settles("50", "51")
+@pytest.mark.settles("51", "52")
 @pytest.mark.timeout(100)
 def test_streamed_futures_dates_and_one_second_ends(
     live_session: dm.MassiveSession,

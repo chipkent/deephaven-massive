@@ -172,6 +172,11 @@ class DescriptionFix:
     that quotes the empty text (`vendor=""`) and takes the sibling's, so the entry goes stale
     once the vendor writes one.
 
+    An entry may also name a nested object of the rows (`last_trade`): its text is the note
+    every field flattened out of the object carries after its own description, and the entry
+    corrects that note the same way. One quoting `""` gives a note to an object the vendor
+    leaves undescribed.
+
     An entry takes one of two forms:
 
     - `text` replaces the field's description everywhere the source is used;
@@ -1073,6 +1078,27 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             },
             reason="For an option only, as on the options chain snapshot. "
             + _OPTIONS_EXCHANGE_REASON,
+        ),
+        (_UNIFIED_SNAPSHOT, "last_trade"): DescriptionFix(
+            vendor="The most recent quote for this contract. This is only returned if your "
+            "current plan includes trades.",
+            text="The most recent trade for this contract. This is only returned if your "
+            "current plan includes trades.",
+            reason="The trade object is described as the quote: its own second sentence, and "
+            "Massive's text for the same object on the options chain snapshot "
+            "(`/v3/snapshot/options/{underlyingAsset}` `last_trade`), say trade. Every column "
+            "of the object carries this text as its note. 'For this contract' stays: Massive "
+            "uses it on most of the unified snapshot's objects (`details`, `greeks`, "
+            "`last_quote`), and on a stock's row it is imprecise rather than another asset "
+            "class's text, which is the bar for a fix.",
+        ),
+        (_UNIFIED_SNAPSHOT, "last_minute"): DescriptionFix(
+            vendor="The most recent minute aggregate for this stock.",
+            asset_classes={"options": "The most recent minute aggregate for this contract."},
+            reason="The unified snapshot serves options too, and an option's row is a contract, "
+            "not a stock. Written here because no Massive sibling exists: the options chain "
+            "snapshot has no minute aggregate. Every column of the object carries this text as "
+            "its note.",
         ),
         **_for(("futures/A", "futures/AM"), ("dv",), _FUTURES_WS_DOLLAR_VOLUME),
         **_for(

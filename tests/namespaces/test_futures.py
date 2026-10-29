@@ -12,8 +12,7 @@ import inspect
 import io
 import json
 import re
-import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -24,29 +23,26 @@ from deephaven import arrow as dh_arrow
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
-from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import KeySpec
 from deephaven_massive._datasets.dates import CHICAGO
-from deephaven_massive._datasets.request import HostDecision, Request
-from deephaven_massive._enums import Recency
-from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Transport, object_key, source
 from deephaven_massive._namespaces import futures
 from deephaven_massive._namespaces.base import Namespace, build_query, query_class
 from deephaven_massive._query import HistoryQuery, Query, QueryBase, StreamHistoryQuery
 from deephaven_massive._session import CATALOG
 
-# The reply builder is a plain class of the fake, which no fixture can hand over; the server
-# itself comes from the `fake_rest` fixture.
+# The reply builder is a plain class of the fake, which no fixture can hand over; the servers
+# and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
 from tests._fakes.rest import FakeRestServer, Reply
 
 if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.request import Request
     from tests._fakes.s3 import FakeS3
-    from tests._fakes.ws import FakeMassiveServer
+    from tests._fakes.ws_session import WsSession
 
 OWNER = "namespaces/futures"
 DOCS = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md"
@@ -876,10 +872,7 @@ def test_poll_keys_tell_the_rows_apart(
         assert len({tuple(r[k] for k in rest) for r in out}) < len(out), dropped
 
 
-# Streams: a session whose futures connection reaches the fake WebSocket server.
-
-REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
-WS_TIMEOUT = 15.0
+# Streams: the futures connection reaches the fake WebSocket server.
 
 
 PRODUCTS = {"ESZ4": "ES", "6CH5": "6C"}
@@ -901,75 +894,19 @@ SCHEDULES = {
 """Each product's sessions: the session date, its pre-open, and its close."""
 
 
-def schedule_rows(template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
-    # The contracts and schedules the streams' session calendar looks up, as Massive serves
-    # them: one row per contract, and a pre-open and a close per session.
-    if template == "/futures/v1/contracts":
-        tickers = cast("tuple[str, ...]", query["ticker.any_of"])
-        return [{"ticker": t, "product_code": PRODUCTS[t]} for t in tickers if t in PRODUCTS]
-    products = cast("tuple[str, ...]", query["product_code.any_of"])
-    return [
+SCHEDULE_ROWS: dict[str, list[dict[str, object]]] = {
+    "/futures/v1/contracts": [
+        {"ticker": ticker, "product_code": product} for ticker, product in PRODUCTS.items()
+    ],
+    "/futures/v1/schedules": [
         {"product_code": product, "session_end_date": day, "event": event, "timestamp": stamp}
-        for product in products
-        for day, opens, closes in SCHEDULES.get(product, [])
+        for product, sessions in SCHEDULES.items()
+        for day, opens, closes in sessions
         for event, stamp in (("pre_open", opens), ("close", closes))
-    ]
-
-
-@pytest.fixture
-def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", flush_interval=3600.0))
-
-    def client(url: str, **callbacks: object) -> _massive.WsClient:
-        assert url == "wss://socket.test/futures"  # every venue streams on /futures
-        return _massive.WsClient(
-            fake_ws_server.url("/futures"),
-            api_key="test-key",
-            reconnect_backoff=0.05,
-            max_reconnect_backoff=0.1,
-            **cast("dict[str, Any]", callbacks),
-        )
-
-    connections = ws.WsConnections(
-        m._core,
-        resolve_host=lambda *_: REALTIME,
-        record_verdict=lambda *_: None,
-        fetch_rows=schedule_rows,
-        client_factory=client,
-    )
-    cast("Any", m._core._ports)._streams = connections
-    m._core.on_close(connections.close)
-    yield m
-    m.close()
-
-
-def subscribed(server: FakeMassiveServer, topic: str) -> None:
-    def named(s: FakeMassiveServer) -> bool:
-        return bool(s.connections) and any(
-            topic in json.loads(f)["params"].split(",")
-            for f in s.connections[-1].frames
-            if json.loads(f)["action"] == "subscribe"
-        )
-
-    server.wait_for(named, WS_TIMEOUT)
-
-
-def wait_until(condition: Callable[[], bool]) -> None:
-    # Bounded wait for the session calendar's worker thread.
-    pause = threading.Event()  # never set; only paces the loop
-    for _ in range(int(WS_TIMEOUT / 0.02)):
-        if condition():
-            return
-        pause.wait(0.02)
-    assert condition()
-
-
-def flush(m: dm.MassiveSession) -> None:
-    connections = cast("Any", m._core._ports)._streams
-    with m._core.registry_lock:
-        live = list(connections._connections.values())
-    for connection in live:
-        connection.flusher.flush()
+    ],
+}
+"""The contracts and schedules the streams' session calendar looks up, as Massive serves them:
+one row per contract, and a pre-open and a close per session."""
 
 
 def at_ms(millis: int) -> datetime:
@@ -989,8 +926,7 @@ def at_ms(millis: int) -> datetime:
 )
 def test_one_frame_lands_in_blink(
     *,
-    ws_session: dm.MassiveSession,
-    fake_ws_server: FakeMassiveServer,
+    ws_session: WsSession,
     load_fixture: Loader,
     dh_exec_ctx: object,
     rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
@@ -999,23 +935,17 @@ def test_one_frame_lands_in_blink(
     index: int,
 ) -> None:
     frame = json.loads(load_fixture(OWNER, "ws_frames.json"))[index]
-    live = build(ws_session.futures).blink()
+    ws_session.rows.update(SCHEDULE_ROWS)
+    live = build(ws_session.session.futures).blink()
     seen = blink_to_append_only(live)
     # The stream's contract is looked up as it opens; its schedule places its rows.
-    calendar = cast("Any", ws_session._core._ports)._streams.futures_sessions()
-    product = PRODUCTS[frame["sym"]]
-    wait_until(lambda: product in calendar._sessions)
-
-    def landed(arrived: list[dict[str, Any]]) -> bool:
-        # The frame may reach the session after any one flush, so every check flushes again.
-        flush(ws_session)
-        return len(arrived) == 1
-
-    subscribed(fake_ws_server, topic)
-    fake_ws_server.send(json.dumps([frame]))
+    assert ws_session.connections.futures_sessions().wait_idle(15.0)
+    ws_session.subscribed(topic)
+    assert ws_session.urls == ["wss://socket.test/futures"]  # every venue streams on /futures
+    ws_session.publish(frame)
     # Wait on a consistent snapshot of the rows and assert on that same snapshot: a size read
     # can show a row that the update cycle in progress is still adding.
-    (row,) = rows_when(seen, landed)
+    (row,) = rows_when(seen, lambda arrived: len(arrived) == 1)
     assert row["Symbol"] == frame["sym"]
     time_key = "t" if frame["ev"] in {"T", "Q"} else "s"
     time = "Timestamp" if frame["ev"] in {"T", "Q"} else "TimestampStart"
@@ -1040,7 +970,7 @@ def test_one_frame_lands_in_blink(
         # and Massive's `e`, which agree here.
         length = 1_000 if frame["ev"] == "A" else 60_000
         assert row["TimestampEnd"] == at_ms(frame["s"] + length)
-    ws_session.release(live)
+    ws_session.session.release(live)
 
 
 # Flat files: one block of one venue's file per prefix, read back through history().

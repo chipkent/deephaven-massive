@@ -14,7 +14,7 @@ import io
 import json
 import logging
 import threading
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -25,12 +25,8 @@ from deephaven import arrow as dh_arrow
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
-from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import HostDecision
-from deephaven_massive._enums import Recency
-from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import indices
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -50,9 +46,9 @@ from tests._fakes.rest import FakeRestServer, Reply, envelope
 if TYPE_CHECKING:
     from deephaven.table import Table
 
-    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws import FakeMassiveServer
+    from tests._fakes.ws_session import WsSession
 
 OWNER = "namespaces/indices"
 SNAPSHOT = "/v3/snapshot/indices"
@@ -769,8 +765,6 @@ def test_daily_open_close_fetches_each_index_for_the_day(
 
 # --- End to end: WebSocket --------------------------------------------------------------------
 
-SOCKET = HostDecision("socket.test", Recency.REALTIME, "test evidence")
-
 
 def wait_for(condition: Callable[[], bool]) -> None:
     # Bounded wait for the flush thread and an update-graph cycle to apply a change.
@@ -780,55 +774,6 @@ def wait_for(condition: Callable[[], bool]) -> None:
             return
         pause.wait(0.02)
     assert condition()
-
-
-@pytest.fixture
-def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]:
-    # A session whose connections reach the fake server, as if the TICK host were real-time.
-    session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
-
-    def client(
-        url: str,
-        *,
-        sources: Sequence[Source],
-        on_open: Callable[[int], None],
-        on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
-        on_state: Callable[[WsState, float | WireError | None], None],
-    ) -> _massive.WsClient:
-        return _massive.WsClient(
-            fake_ws_server.url("/" + url.split("/", 3)[3]),
-            api_key="test-key",
-            sources=sources,
-            on_open=on_open,
-            on_status=on_status,
-            on_data=on_data,
-            on_state=on_state,
-            reconnect_backoff=0.05,
-            max_reconnect_backoff=0.1,
-        )
-
-    connections = ws.WsConnections(
-        session._core,
-        resolve_host=lambda *_: SOCKET,
-        record_verdict=lambda *_: None,
-        fetch_rows=lambda *_: [],
-        client_factory=client,
-    )
-    clients: Any = session._core._ports
-    clients._streams = connections
-    session._core.on_close(connections.close)
-    yield session
-    session.close()
-
-
-def subscribed(server: FakeMassiveServer, topic: str) -> None:
-    def named() -> bool:
-        frames = [json.loads(f) for f in server.frames()]
-        return any(topic in f["params"].split(",") for f in frames if f["action"] == "subscribe")
-
-    server.wait_for(lambda s: bool(s.connections) and s.connections[-1].auth is not None)
-    server.wait_for(lambda _: named())
 
 
 @pytest.mark.parametrize(
@@ -880,22 +825,22 @@ def subscribed(server: FakeMassiveServer, topic: str) -> None:
 )
 def test_a_frame_lands_in_blink(
     *,
-    ws_session: dm.MassiveSession,
-    fake_ws_server: FakeMassiveServer,
+    ws_session: WsSession,
     load_fixture: Callable[[str, str], bytes],
     fixture: str,
     topic: str,
     expected: dict[str, object],
 ) -> None:
+    indices = ws_session.session.indices
     if topic.startswith("V."):
-        blink = ws_session.indices.values("SPX").blink()
+        blink = indices.values("SPX").blink()
     elif topic.startswith("A."):
-        blink = ws_session.indices.bars("SPX", dm.Timespan.SECOND).blink()
+        blink = indices.bars("SPX", dm.Timespan.SECOND).blink()
     else:
-        blink = ws_session.indices.bars("SPX").blink()
+        blink = indices.bars("SPX").blink()
     seen = blink_to_append_only(blink)
-    subscribed(fake_ws_server, topic)
-    fake_ws_server.send(load_fixture(OWNER, fixture).decode())
+    ws_session.subscribed(topic)
+    ws_session.publish(*json.loads(load_fixture(OWNER, fixture)))
     # Wait on a consistent snapshot of the rows, never on a size read in the middle of an
     # update cycle; the table is append-only, so the row stays for the read below.
     wait_for(lambda: len(rows(seen)) == 1)
@@ -904,7 +849,7 @@ def test_a_frame_lands_in_blink(
 
 def test_a_refused_values_topic_names_the_indices_host_setting(
     *,
-    ws_session: dm.MassiveSession,
+    ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -917,11 +862,13 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
     monkeypatch.setattr(stream.Flusher, "fail", recording)
     fake_ws_server.refuse["V.I:SPX"] = "not authorized"
-    result = ws_session.indices.values("I:SPX").blink()
+    m = ws_session.session
+    result = m.indices.values("I:SPX").blink()
 
     def error() -> str | None:
-        assert ws_session._core.diagnostics.barrier().wait(15.0)
-        streams = rows(ws_session.streams())
+        ws_session.flush()  # a refused topic fails its streams at the next flush
+        assert m._core.diagnostics.barrier().wait(15.0)
+        streams = rows(m.streams())
         failed = [s["Error"] for s in streams if s["State"] == "FAILED"]
         return failed[0] if failed else None
 

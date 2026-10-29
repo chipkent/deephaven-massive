@@ -32,16 +32,15 @@ column.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, Timespan
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import Namespace, build_query, list_params, one_or_any_of
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from deephaven_massive._enums import FuturesVenue, Order
     from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery
@@ -89,36 +88,20 @@ _PRODUCT_CODE_ARGUMENT: Final = {"product_code.any_of": "product_code"}
 
 
 def _product_codes(product_code: object) -> dict[str, object]:
-    """Return the wire parameter that carries a `product_code` argument.
+    """Return the wire parameters that carry a `product_code` argument.
 
     Every futures path that takes a product code also takes `product_code.any_of`, so one
-    request serves several codes. Both names are always returned, the unset one as None, so
-    `build_query` reserves every form of `product_code` from `filters` even when the argument
-    is not given.
+    request serves several codes; `one_or_any_of` picks the form and checks the argument.
 
     Args:
         product_code: The argument as passed: one code, a sequence of codes, or None.
 
     Returns:
-        `{"product_code": code, "product_code.any_of": None}` for one code or None, and
-        `{"product_code": None, "product_code.any_of": codes}` for a sequence.
+        The two wire parameters, `product_code` and `product_code.any_of`, the unset one None.
 
-    Raises:
-        TypeError: If the argument is neither None, a `str`, nor a sequence.
-        ValueError: If the sequence is empty, which would select no product.
-
-    An element that is not a `str` raises the `TypeError` of `build_query`.
+    The `TypeError` and `ValueError` of `one_or_any_of` propagate.
     """
-    if product_code is None or isinstance(product_code, str):
-        return {"product_code": product_code, "product_code.any_of": None}
-    if not isinstance(product_code, Sequence):
-        raise TypeError(
-            f"product_code must be a str, a sequence of str, or None, not "
-            f"{type(product_code).__name__}"
-        )
-    if not product_code:
-        raise ValueError("product_code is empty; pass None for every product")
-    return {"product_code": None, "product_code.any_of": tuple(product_code)}
+    return one_or_any_of("product_code", product_code, every="every product")
 
 
 def _stream_keys(time: str, *, end: str | None = None) -> SourceKeys:

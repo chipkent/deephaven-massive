@@ -334,7 +334,7 @@ _NVDA_CONTRACT = "O:NVDA240621C00120000"
 
 
 @pytest.mark.needs("options:basic")
-@pytest.mark.settles("49")
+@pytest.mark.settles("50")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_option_bars_across_the_underlyings_split(

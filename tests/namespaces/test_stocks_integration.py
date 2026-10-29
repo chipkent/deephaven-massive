@@ -210,6 +210,47 @@ def test_an_ipo_keeps_its_issuer_name(
 
 
 @pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("42")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_insider_activity_and_holdings_keys_name_one_row_each(
+    live_session: dm.MassiveSession,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether the `poll()` keys of the insider activity and holdings identify one row each.
+
+    Reads a year of NVDA's insider activity (2025) and NVDA's current insider holdings, and
+    records the rows and any key shared by two rows: `IssuerCik` and `TransactionDate` for
+    the activity, `IssuerCik` and `OwnerCik` for the holdings. Reading it: no shared key
+    means a `poll()` table keeps every row Massive sends; a shared key means `poll()` would
+    keep only one of those rows, and the key needs another column.
+    """
+    filings = live_session.stocks.filings
+    queries = {
+        "filings.insider_activity": (
+            filings.insider_activity("NVDA", start=date(2025, 1, 1), end=date(2025, 12, 31)),
+            ("IssuerCik", "TransactionDate"),
+        ),
+        "filings.insider_holdings": (filings.insider_holdings("NVDA"), ("IssuerCik", "OwnerCik")),
+    }
+    shared: dict[str, list[tuple[object, ...]]] = {}
+    for name, (query, keys) in queries.items():
+        rows = table_rows(query.fetch())
+        seen: dict[tuple[object, ...], int] = {}
+        for row in rows:
+            key = tuple(row[k] for k in keys)
+            seen[key] = seen.get(key, 0) + 1
+        shared[name] = [key for key, count in seen.items() if count > 1]
+        evidence(f"{name} NVDA: {len(rows)} rows, {len(shared[name])} keys shared by two rows")
+        for key in shared[name][:5]:
+            evidence(f"    e.g. {dict(zip(keys, key, strict=True))}")
+        assert rows, name
+    assert shared == {name: [] for name in queries}
+
+
+@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -376,7 +417,7 @@ def _days(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("45")
+@pytest.mark.settles("46")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_nvda_split_basis_before_and_on_the_split(
@@ -403,7 +444,7 @@ def test_nvda_split_basis_before_and_on_the_split(
 
 
 @pytest.mark.needs("stocks:starter", "s3")
-@pytest.mark.settles("45")
+@pytest.mark.settles("46")
 @pytest.mark.timeout(100)
 def test_nvda_day_file_before_the_split(
     flat_file_tickers: FlatFileTickers, *, evidence: Evidence
@@ -421,7 +462,7 @@ def test_nvda_day_file_before_the_split(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("46")
+@pytest.mark.settles("47")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Evidence) -> None:
@@ -457,7 +498,7 @@ def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Ev
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("47")
+@pytest.mark.settles("48")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_cash_dividends_are_never_adjusted(
@@ -480,7 +521,7 @@ def test_cash_dividends_are_never_adjusted(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("48")
+@pytest.mark.settles("49")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_stock_dividend_events_and_the_adjustment(
@@ -516,7 +557,7 @@ def test_stock_dividend_events_and_the_adjustment(
 
 
 @pytest.mark.needs("stocks:basic", "currencies:basic")
-@pytest.mark.settles("53")
+@pytest.mark.settles("54")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_daily_indicator_stamps(
@@ -559,7 +600,7 @@ def test_daily_indicator_stamps(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("54")
+@pytest.mark.settles("55")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -> None:
@@ -593,7 +634,7 @@ def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("55")
+@pytest.mark.settles("56")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_bars_of_several_days_count_calendar_or_trading_days(
