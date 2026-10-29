@@ -25,7 +25,7 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once p
 ```
 
 Always go through `uv run`: bare `python`, `pytest`, `ruff`, and `mypy` use the wrong
-environment. [`AGENTS.md`](AGENTS.md) has the full command list and the contribution rules.
+environment. [`AGENTS.md`](AGENTS.md) has the everyday commands and the contribution rules.
 
 ### Live integration tests
 
