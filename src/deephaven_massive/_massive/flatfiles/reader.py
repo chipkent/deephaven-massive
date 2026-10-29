@@ -29,7 +29,9 @@ Python objects.
 
 `ReadPlan` and `ReadColumn` describe what to read; the library builds them from a dataset, so
 this module knows no dataset. It imports only the standard library, `pyarrow`, and `net`: the
-client hands it a stream whose read errors are `OSError`s, so it needs no botocore. The library
+client hands it a stream whose read errors are `OSError`s, so it needs no botocore. A failed
+read of that stream (a connection dropped part-way through the body) sets `FlatFile.dropped`,
+so a caller can tell a failed transfer, worth reading again, from a broken file. The library
 module that uses it is `_ingest/flatfiles.py`.
 """
 
@@ -38,6 +40,7 @@ from __future__ import annotations
 import csv
 import gzip
 import re
+import threading
 import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, cast
@@ -103,6 +106,45 @@ class _Stream(Protocol):
     def close(self) -> None:
         """Release the stream; idempotent."""
         ...
+
+
+class _Watched:
+    """A stream that records, on its file's event, that one of its reads failed.
+
+    The decoders above it (gzip, Arrow) turn a failed read into errors of their own, which a
+    broken file raises too; the event keeps the difference. Arrow may read on its own I/O
+    thread, so the record is an event rather than a plain attribute.
+    """
+
+    __slots__ = ("_body", "_failed")
+
+    def __init__(self, body: _Stream, failed: threading.Event) -> None:
+        """Watch a stream.
+
+        Args:
+            body: The stream.
+            failed: Set when a read of `body` raises.
+        """
+        self._body = body
+        self._failed = failed
+
+    def read(self, size: int = -1, /) -> bytes:
+        """Read up to `size` bytes from the stream.
+
+        Args:
+            size: The most bytes to return; negative for the rest of the stream.
+
+        Returns:
+            The bytes read; empty at the end of the stream.
+
+        Raises:
+            OSError: The stream's own failure, after the event is set.
+        """
+        try:
+            return self._body.read(size)
+        except OSError:
+            self._failed.set()
+            raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +218,7 @@ class FlatFile:
                     ...
     """
 
-    __slots__ = ("_body", "_host", "_key", "_location")
+    __slots__ = ("_body", "_dropped", "_host", "_key", "_location")
 
     def __init__(self, body: _Stream, key: str, *, location: str, host: str | None) -> None:
         """Wrap an object's body; nothing is read yet.
@@ -191,6 +233,18 @@ class FlatFile:
         self._key = key
         self._location = location
         self._host = host
+        self._dropped = threading.Event()
+
+    @property
+    def dropped(self) -> bool:
+        """True once a read of the body has failed: the connection dropped or stalled.
+
+        A `WireError` from `batches()` with this set means the transfer failed, not the file:
+        the same object, requested again and read from its start, may well succeed. False when
+        the read failed because the file itself is broken (not gzip, a value that does not
+        parse), which a second read would only repeat. Safe to read from any thread.
+        """
+        return self._dropped.is_set()
 
     @property
     def key(self) -> str:
@@ -254,22 +308,23 @@ class FlatFile:
 
         Raises:
             WireError: If the body is not gzip, is truncated or corrupt, or the connection
-                drops; if the file is empty (no header line); if the header line is longer
-                than `plan.block_size`, not UTF-8, or not valid CSV; if the header names a
-                column twice or lacks a key header of `plan.required` (before the first block,
-                naming the headers); if a value, or an element of a list, does not parse as
-                its type (naming the header and the type, and quoting Arrow's message); or if
-                a futures block holds a session date other than the plan's session, or none.
-                Every message names the file. An error that `plan.to_ns` raises propagates
-                unchanged, unless it is an Arrow error, which becomes `WireError` like any
-                other.
+                drops (then `dropped` is True); if the file is empty (no header line); if the
+                header line is longer than `plan.block_size`, not UTF-8, or not valid CSV; if
+                the header names a column twice or lacks a key header of `plan.required`
+                (before the first block, naming the headers); if a value, or an element of a
+                list, does not parse as its type (naming the header and the type, and quoting
+                Arrow's message); or if a futures block holds a session date other than the
+                plan's session, or none. Every message names the file. An error that
+                `plan.to_ns` raises propagates unchanged, unless it is an Arrow error, which
+                becomes `WireError` like any other.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         names: list[str] = []
         try:
             # gzip only reads its file object; its stub also asks for `seek`, which a response
             # body has no use for.
-            text = gzip.GzipFile(fileobj=cast("BinaryIO", self._body), mode="rb")
+            body = _Watched(self._body, self._dropped)
+            text = gzip.GzipFile(fileobj=cast("BinaryIO", body), mode="rb")
             names = self._header(text, plan)
             drift = DriftReport(
                 extra=frozenset(names).difference(read_types),
