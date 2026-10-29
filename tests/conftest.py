@@ -1968,7 +1968,8 @@ def _stamp_days(today: date) -> StampDays:
         after (a half day); `"week"` the Monday of the week before and the Sunday ending
         Thanksgiving week; `"month"` the two whole months before the current month;
         `"quarter"` the two whole quarters before the current quarter; and `"year"` January 1
-        of last year to `today`, which holds last year's bar and this year's unfinished one.
+        of this year to `today`, which holds this year's unfinished bar (none yet before the
+        year's first trading day).
     """
     half = _thanksgiving(today.year) + timedelta(days=1)
     if half + timedelta(days=3) > today:
@@ -1980,7 +1981,7 @@ def _stamp_days(today: date) -> StampDays:
         "week": (half - timedelta(days=11), half + timedelta(days=2)),
         "month": (_months_before(today, 2), this_month - timedelta(days=1)),
         "quarter": (_months_before(this_quarter, 6), this_quarter - timedelta(days=1)),
-        "year": (date(today.year - 1, 1, 1), today),
+        "year": (date(today.year, 1, 1), today),
     }
 
 
@@ -2128,6 +2129,64 @@ def _weekday_after(day: date, step: int) -> date:
     while found.weekday() >= 5:
         found += timedelta(days=step)
     return found
+
+
+def _week_stamp_days(start: date, end: date) -> tuple[date, date]:
+    """Return the New York stamp days that count a week bar as one of the weeks `start`-`end`.
+
+    A week bar may be stamped on its Monday, on the Sunday before, or on the Saturday before
+    (00:00 UTC Sunday is 19:00 or 20:00 New York time on Saturday). Counting stamp days from
+    the Saturday before `start` to the Friday before `end` keeps all three stamps of every
+    week in the span and none of a neighbour's: the week before's latest stamp, its Monday,
+    is five days before the first day counted, and the week after's earliest, the Saturday
+    before its Monday, is the day before `end`, one day after the last day counted. For the
+    weeks 2025-11-17 to 2025-11-30 that is 2025-11-15 (Saturday) to 2025-11-28 (Friday).
+
+    Args:
+        start: The Monday of the first week.
+        end: The Sunday of the last week.
+
+    Returns:
+        The first and last stamp day counted, inclusive.
+    """
+    return start - timedelta(days=2), end - timedelta(days=2)
+
+
+def _inside(
+    raw: list[dict[str, Any]],
+    *,
+    ticker: str,
+    span: str,
+    days: tuple[date, date],
+    evidence: Callable[[str], None],
+) -> list[dict[str, Any]]:
+    """Keep the raw bars whose New York stamp day falls in a span, recording the rest.
+
+    Massive may widen a range to whole periods of its unit (a week from its Sunday), so a
+    read can return a period the check did not ask for. Each such bar is recorded as
+    "outside the span" with its stamp, and the count line says how many were read and kept.
+
+    Args:
+        raw: The bars as Massive sent them.
+        ticker: The ticker, for the evidence.
+        span: The unit, for the evidence.
+        days: The first and last stamp day kept, inclusive.
+        evidence: Records one evidence line.
+
+    Returns:
+        The bars kept, in their order.
+    """
+    kept = []
+    for bar in raw:
+        if days[0] <= _new_york_day(int(bar["t"])) <= days[1]:
+            kept.append(bar)
+        else:
+            evidence(f"{ticker} {span} bar outside the span: {_bar_text(_stamped(bar))}")
+    evidence(
+        f"{ticker} {span} bars stamped {days[0]} to {days[1]}: {len(kept)} of {len(raw)} read "
+        "(any other was outside the span: the range widened to whole periods)"
+    )
+    return kept
 
 
 def _bar_text(bar: StampedBar) -> str:
@@ -2297,11 +2356,11 @@ def period_bar_report(
 
     For each unit asked for it reads the bars over a range of days from the aggregates range
     endpoint, unfiltered, and reports each stamp in UTC and New York time with its values.
-    Weeks are read from the Saturday before the first Monday to the last Saturday, so a week
-    stamped on its Monday or on the weekend before is read once and the next week is not.
-    Massive may widen a range to whole periods of its unit (a week from its Sunday), so bars
-    stamped before the first day or after the last are left out, and how many were is
-    recorded either way. A
+    Weeks are read from the Saturday before the first Monday to the last Saturday, and a week
+    bar is counted when its New York stamp day falls from that Saturday to the last Friday
+    (see `_week_stamp_days`), so a week stamped on its Monday or on the weekend before is
+    counted once. Massive may widen a range to whole periods of its unit (a week from its
+    Sunday), so each bar stamped outside the span is recorded as such and left out. A
     read the plan refuses (a range beyond the plan's history) is recorded as evidence and
     counts as no bars, so the other units' evidence is kept. Reading it: a bar stamped 00:00
     New York time (01:00 for an index) on its period's first day, or on the Saturday or
@@ -2337,22 +2396,50 @@ def period_bar_report(
                 )
                 complete = False
                 continue
-            bars = [b for b in map(_stamped, raw) if first <= _new_york_day(b[0]) <= last]
-            evidence(
-                f"{ticker} {span}: {len(raw) - len(bars)} of {len(raw)} bars stamped outside "
-                f"{first} to {last}, left out (more than 0 means the range widened to whole "
-                "periods)"
-            )
+            inside = _week_stamp_days(start, end) if week else (start, end)
+            bars = [
+                _stamped(b)
+                for b in _inside(raw, ticker=ticker, span=span, days=inside, evidence=evidence)
+            ]
             least, most = expected[span]
             complete &= least <= len(bars) <= most
-            evidence(
-                f"{ticker} {span} bars {first} to {last}: {len(bars)} (expected {least} to {most})"
-            )
+            evidence(f"{ticker} {span} bars counted: {len(bars)} (expected {least} to {most})")
             for bar in bars:
                 evidence(f"{ticker} {span} bar: {_bar_text(bar)}")
         return complete
 
     return report
+
+
+@pytest.fixture
+def week_bars(
+    rest_rows: Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]],
+    evidence: Callable[[str], None],
+) -> Callable[[str, tuple[date, date]], list[dict[str, Any]]]:
+    """Return a function that reads one ticker's week bars of whole calendar weeks.
+
+    It reads like `period_bar_report` (from the Saturday before the first Monday to the last
+    Saturday), keeps the bars whose New York stamp day falls in `_week_stamp_days`, and
+    records each bar outside the span and the count, before returning.
+
+    Args:
+        rest_rows: Reads raw REST rows.
+        evidence: Records each evidence line as soon as it is known.
+
+    Returns:
+        A function `(ticker, weeks)`: the ticker and the Monday of the first week and the
+        Sunday of the last. It returns the raw week bars kept, oldest first.
+    """
+
+    def read(ticker: str, weeks: tuple[date, date]) -> list[dict[str, Any]]:
+        start, end = weeks
+        bounds = (start - timedelta(days=2), end - timedelta(days=1))
+        raw = _read_range(rest_rows, ticker, span="week", bounds=bounds)
+        return _inside(
+            raw, ticker=ticker, span="week", days=_week_stamp_days(start, end), evidence=evidence
+        )
+
+    return read
 
 
 def _new_york_text(nanos: int | None) -> str:

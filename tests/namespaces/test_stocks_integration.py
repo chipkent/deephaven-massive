@@ -422,31 +422,34 @@ def _symbol_rows(query: HistoryQuery, day: date) -> Table:
     return query.history(day, day, source=dm.HistorySource.REST).where(f"Symbol == `{_SYMBOL}`")
 
 
-def _library_stock_stamps(
-    session: dm.MassiveSession, stamp_days: StampDays, library_stamps: LibraryStamps
-) -> list[str]:
-    """Describe the library's windows of the bars the REST stamp check reads raw.
+def _record_library_stock_stamps(
+    session: dm.MassiveSession,
+    *,
+    stamp_days: StampDays,
+    library_stamps: LibraryStamps,
+    evidence: Evidence,
+) -> None:
+    """Record the library's windows of the bars the REST stamp check reads raw, call by call.
 
-    Returns:
-        One evidence line per library call: `history()` of the two days, `fetch()`, the
-        grouped-daily `dm.ALL` history of each day (AAPL's row), and the week and month history.
+    One evidence line per library call, each recorded as it returns: `history()` of the two
+    days, `fetch()`, the grouped-daily `dm.ALL` history of each day (AAPL's row), and the
+    week and month history.
     """
     days = stamp_days["day"]
     rest = dm.HistorySource.REST
     day_bars = session.stocks.bars(_SYMBOL, dm.Timespan.DAY)
     every = session.stocks.bars(dm.ALL, dm.Timespan.DAY)
-    lines = [
-        "library history(REST): " + library_stamps(partial(day_bars.history, *days, source=rest)),
-        f"library fetch() (/prev): {library_stamps(day_bars.fetch)}",
-    ]
+    evidence(
+        "library history(REST): " + library_stamps(partial(day_bars.history, *days, source=rest))
+    )
+    evidence(f"library fetch() (/prev): {library_stamps(day_bars.fetch)}")
     for day in days:
         outcome = library_stamps(partial(_symbol_rows, every, day))
-        lines.append(f"library dm.ALL history(REST) {day} (grouped daily): {outcome}")
+        evidence(f"library dm.ALL history(REST) {day} (grouped daily): {outcome}")
     for span in (dm.Timespan.WEEK, dm.Timespan.MONTH):
         query = session.stocks.bars(_SYMBOL, span)
         outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
-        lines.append(f"library {span.value} history: {outcome}")
-    return lines
+        evidence(f"library {span.value} history: {outcome}")
 
 
 @pytest.mark.needs("stocks:basic")
@@ -491,8 +494,9 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     prevs = prev_bar_report(_SYMBOL)
     spans = {span: stamp_days[span] for span in ("week", "month")}
     periods = period_bar_report(_SYMBOL, spans, {"week": (2, 2), "month": (2, 2)})
-    for line in _library_stock_stamps(live_session, stamp_days, library_stamps):
-        evidence(line)
+    _record_library_stock_stamps(
+        live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
+    )
     assert not missing, f"no range bar on {missing}"
     assert all(grouped.values()), f"a stamp day has no grouped-daily row: {grouped}"
     assert prevs, "/prev returned no bar"

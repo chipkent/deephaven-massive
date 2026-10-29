@@ -54,6 +54,7 @@ PrevBarReport: TypeAlias = "Callable[[str], int]"
 PeriodBarReport: TypeAlias = (
     "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
 )
+WeekBars: TypeAlias = "Callable[[str, tuple[date, date]], list[dict[str, Any]]]"
 LargestError: TypeAlias = (
     "Callable[[tuple[float | None, ...], tuple[float | None, ...]], float | None]"
 )
@@ -216,9 +217,9 @@ _CHICAGO = ZoneInfo("America/Chicago")
 _ZONES = (("New York", _NEW_YORK), ("Chicago", _CHICAGO))
 _MATCH = 1e-6
 """The largest relative error at which a rebuilt bar is the bar."""
-_LONGER = {"month": (2, 2), "quarter": (2, 2), "year": (1, 2)}
+_LONGER = {"month": (2, 2), "quarter": (2, 2), "year": (1, 1)}
 """The fewest and most bars expected of each longer unit: two whole months and quarters, and
-last year's bar with this year's unfinished one, if Massive serves it."""
+this year's unfinished bar."""
 
 
 def _rebuilt(minutes: list[dict[str, Any]], start: datetime, end: datetime) -> StampedBar | None:
@@ -319,38 +320,29 @@ def _week_minutes(
     return range_bars(index, "minute", bounds)
 
 
-def _week_lines(
+def _record_weeks(
     index: str,
     weeks: tuple[date, date],
     *,
+    week_bars: WeekBars,
     range_bars: RangeBars,
     largest_error: LargestError,
-) -> tuple[list[str], int]:
-    """Show which days an index's week bars cover, weekend included or not.
+    evidence: Evidence,
+) -> int:
+    """Record which days an index's week bars cover, weekend included or not.
 
-    Reads the week bars of two calendar weeks (stamped from the Saturday before the first
-    Monday to the last Saturday, so a bar stamped on its Monday or the weekend before is
-    counted once; Massive may widen the range to whole weeks, so bars stamped outside are
-    left out and counted either way),
-    then the minute bars of every span those bars may cover, and rebuilds each span (see
-    `_week_spans`) in New York and in Chicago time, reporting each rebuild's largest relative
-    error against the week bar.
+    Reads the week bars of two calendar weeks through `week_bars`, which records each bar
+    outside the span and the count at once; then reads the minute bars of every span those
+    bars may cover and rebuilds each span (see `_week_spans`) in New York and in Chicago time,
+    recording each rebuild's largest relative error against the week bar.
 
     Returns:
-        The evidence lines and how many week bars were read.
+        How many week bars were kept.
     """
-    bounds = (weeks[0] - timedelta(days=2), weeks[1] - timedelta(days=1))
-    raw = range_bars(index, "week", bounds)
-    bars = [b for b in raw if bounds[0] <= _new_york_day(int(b["t"])) <= bounds[1]]
+    bars = week_bars(index, weeks)
     spans = {int(bar["t"]): _week_spans(int(bar["t"])) for bar in bars}
     minutes = _week_minutes(range_bars, index, spans)
-    header = (
-        f"{index}: {len(bars)} week bars stamped {bounds[0]} to {bounds[1]} "
-        f"({len(raw) - len(bars)} of {len(raw)} outside, left out; more than 0 means the range "
-        "widened to whole weeks), "
-        f"{len(minutes)} minute bars"
-    )
-    lines = [header]
+    evidence(f"{index}: {len(minutes)} minute bars for the week rebuilds")
     for bar in bars:
         stamp = datetime.fromtimestamp(int(bar["t"]) / 1000, UTC)
         values = tuple(float(bar[k]) for k in ("o", "h", "l", "c"))
@@ -362,23 +354,45 @@ def _week_lines(
                 verdict = "no minutes" if error is None else f"{error:.2e}"
                 mark = " MATCH" if error is not None and error <= _MATCH else ""
                 rebuilds.append(f"{label} in {name} time: {verdict}{mark}")
-        lines.append(
+        evidence(
             f"{index} week bar t={stamp:%Y-%m-%dT%H:%M:%SZ} = "
             f"{stamp.astimezone(_NEW_YORK):%a %H:%M} New York, ohlc={values}; "
             f"largest relative error of each rebuild: {'; '.join(rebuilds)}"
         )
-    return lines, len(bars)
+    return len(bars)
+
+
+def _longer_units(stamp_days: StampDays, evidence: Evidence) -> dict[str, tuple[int, int]]:
+    """Return the longer units to read and the bars expected of each, for this run's day.
+
+    The year is read from January 1 to the run's day and expects this year's unfinished
+    bar, which exists only from the year's first trading day (the first weekday after
+    January 1); before it the year unit is recorded as skipped and left out.
+
+    Returns:
+        The fewest and most bars expected, by unit.
+    """
+    units = dict(_LONGER)
+    today = stamp_days["year"][1]
+    first = date(today.year, 1, 2)
+    while first.weekday() >= 5:
+        first += timedelta(days=1)
+    if today < first:
+        evidence(f"year bars skipped: {today} is before the year's first trading day, {first}")
+        del units["year"]
+    return units
 
 
 def _record_library_index_stamps(
     session: dm.MassiveSession,
     index: str,
     *,
+    units: Collection[str],
     stamp_days: StampDays,
     library_stamps: LibraryStamps,
     evidence: Evidence,
 ) -> None:
-    """Record the library's windows of an index's 1-day and longer bars, call by call.
+    """Record the library's windows of an index's 1-day, week, and longer bars, call by call.
 
     A longer unit's history that the plan refuses (a range beyond the plan's history) is
     recorded rather than raised, so the evidence of the other calls is kept.
@@ -390,7 +404,7 @@ def _record_library_index_stamps(
         + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
     )
     evidence(f"library {index} fetch() (/prev): {library_stamps(daily.fetch)}")
-    for span in (dm.Timespan.WEEK, dm.Timespan.MONTH, dm.Timespan.QUARTER, dm.Timespan.YEAR):
+    for span in map(dm.Timespan, ("week", *units)):
         query = session.indices.bars(index, span)
         try:
             outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
@@ -407,6 +421,7 @@ def test_index_day_and_longer_bar_stamps_from_rest(
     *,
     stamp_days: StampDays,
     range_bars: RangeBars,
+    week_bars: WeekBars,
     largest_error: LargestError,
     day_bar_report: DayBarReport,
     prev_bar_report: PrevBarReport,
@@ -440,15 +455,20 @@ def test_index_day_and_longer_bar_stamps_from_rest(
         rebuilds = _day_rebuilds(range_bars, index, days)
         missing = day_bar_report(index, days, rebuilds)
         prevs = prev_bar_report(index)
-        week_lines, weeks = _week_lines(
-            index, stamp_days["week"], range_bars=range_bars, largest_error=largest_error
+        weeks = _record_weeks(
+            index,
+            stamp_days["week"],
+            week_bars=week_bars,
+            range_bars=range_bars,
+            largest_error=largest_error,
+            evidence=evidence,
         )
-        for line in week_lines:
-            evidence(line)
-        periods = period_bar_report(index, {s: stamp_days[s] for s in _LONGER}, _LONGER)
+        units = _longer_units(stamp_days, evidence)
+        periods = period_bar_report(index, {u: stamp_days[u] for u in units}, units)
         _record_library_index_stamps(
             live_session,
             index,
+            units=units,
             stamp_days=stamp_days,
             library_stamps=library_stamps,
             evidence=evidence,

@@ -92,8 +92,10 @@ The bar-stamp checks read the most recent Thanksgiving week that has ended, so t
 week reads are at most about a year and two weeks old. In the two weeks before the next
 Thanksgiving week ends, the index day and week reads sit just past one year old, and a plan
 that keeps one year of index history refuses them; the refusal is recorded, and the index
-tests fail until the new week ends. Their month, quarter, and year reads are anchored to the
-run's day instead.
+tests fail until the new week ends. Their month and quarter reads are the two whole ones
+before the run's, and the index year read runs from January 1 to the run's day, so they stay
+recent; before the year's first trading day there is no year bar yet, and the year read is
+recorded as skipped.
 
 Partner datasets (Benzinga, ETF Global, TMX, consumer spending) are $99 a month each; NOI is
 a $49 expansion ([S9]); economy data and each class's reference data are free on Basic.
