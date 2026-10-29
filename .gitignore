@@ -243,6 +243,8 @@ vendor/massive-previous/
 # rows, so they are never committed.
 live-checks.log
 live-evidence.log
+# The plans the live tests probed today; it names the key only by a digest.
+.live-plans.json
 
 # Extra project environments, such as the free-threaded one (UV_PROJECT_ENVIRONMENT=.venv-314t).
 .venv-*/

@@ -366,6 +366,7 @@ Supporting files outside the package:
 | `.github/workflows/release.yml` | Publishes to PyPI from a `v*` tag; created only when the owner turns publishing on ([section 20.1](#201-tooling-configuration)). |
 | `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST server, WebSocket server, S3, clock, and stream helpers, and the shared streaming session harness ([section 4.2](#42-test-layout)). |
+| `tests/_live/` | The logic behind the live tests' fixtures: the plans' coverage and history windows, the plan probe, the exchange calendar, the futures front contract, the choice of recent corporate actions, the delayed-feed timing, the week-window rule, and the open-questions summary ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
 `TYPE_CHECKING`. The library imports nothing from `deephaven_server`;
@@ -422,8 +423,10 @@ marker list: pytest's `strict` setting already rejects an unregistered marker.
 [`docs/live-tests.md`](../../docs/live-tests.md) is the runbook for them. The live tests that deliberately exceed Massive's subscription and connection
 limits also carry `integration_limits`, and the smoke tier (every dataset and verb once,
 checked automatically) carries `integration_smoke`: `-m integration` deselects both, and only
-`-m integration_limits` or `-m integration_smoke` runs them. `MASSIVE_LIVE_PLANS` declares the
-key's plans, and each test's `needs` marker skips it when they fall short. The exceptions to the mirror rule, and no
+`-m integration_limits` or `-m integration_smoke` runs them. The first live test of a run
+probes the key's plans (cached for the New York day in the git-ignored `.live-plans.json`;
+`MASSIVE_LIVE_PLANS` overrides the probe), and each test's `needs` marker skips it when they
+fall short. The exceptions to the mirror rule, and no
 others:
 
 - `tests/conftest.py`: starts the embedded JVM in `pytest_configure`, before collection, and
@@ -442,7 +445,18 @@ others:
   the fakes, today those of its "Split adjustment" section ([section 21](#21-examples) example
   7), and every example of section 21 once the README carries them. It mirrors `README.md`, not
   a source module.
-- `_` helper directories, of which there is one: `tests/_fakes/` (`__init__.py`, `rest.py`,
+- `_` helper directories, of which there are two, `HELPER_PACKAGES` in `tests/test_layout.py`
+  (a new one needs owner approval). The second, `tests/_live/` (`plans.py`, `probe.py`,
+  `classes.py`, `calendar.py`, `contracts.py`, `events.py`, `streams.py`, `week_windows.py`,
+  `summary.py`), holds the logic behind the live tests' fixtures: the Massive plans, what each
+  covers and keeps, the probe that finds a key's plans and its cache, which class a request
+  reads, the exchange calendar, the front futures contract, the recent splits and dividends to
+  check, when a delayed stream must deliver rows, the week-window rule, and the open-questions
+  summary. `tests/conftest.py` turns it into fixtures. It runs against Massive only in a live
+  run, so each module has a unit test against the fakes at the mirrored path
+  (`tests/live/test_plans.py`), and coverage measures it with the library. Only this helper
+  package has mirrored tests (`TESTED_HELPER_PACKAGES`). The first is
+  `tests/_fakes/` (`__init__.py`, `rest.py`,
   `ws.py`, `s3.py`, `stream.py`, `clock.py`, `gh.py`), protocol-faithful fakes, and
   `ws_session.py`, the one streaming harness every WebSocket end-to-end test shares (a real
   session whose connections reach the fake WebSocket server, offered by the `ws_session` and
@@ -5692,7 +5706,7 @@ document already reflects them.
     `m.rate_limits()` diagnostics table, one row per bucket. There is no plan enum and no
     user-created governor object: a key holds up to five tiers, and the only REST fact a tier
     carries is its limit. Live tests share one real-clock governor per key for the run, with
-    the classes `MASSIVE_LIVE_PLANS` leaves on Basic declared ([section 13.4](#134-rest),
+    the classes the run's plans leave on Basic declared ([section 13.4](#134-rest),
     [section 17](#17-diagnostics), [section 19.1](#191-the-rest-client)).
 61. **A debug log good enough to fix a bug from** (2026-10-28). Standard `logging` only, off
     by default; `DEEPHAVEN_MASSIVE_LOG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`), read at the first

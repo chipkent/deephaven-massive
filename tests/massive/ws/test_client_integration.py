@@ -65,6 +65,19 @@ _CLOSED_AT: dict[str, float] = {}
 _STATUSES, _ROWS, _FRAMES = "statuses", "rows", "frames"
 """What a probe keeps: statuses only, statuses and decoded rows, or also every raw frame."""
 
+_PLAN_REFUSALS = ("not authorized", "not entitled", "plan")
+"""Words of a status that refuses a subscription for want of a plan, in lower case."""
+
+
+def _refuses_plan(message: str) -> bool:
+    """Tell whether a status message refuses a subscription for want of a plan.
+
+    Returns:
+        True when the message names authorization, entitlement, or the plan.
+    """
+    lowered = message.lower()
+    return any(word in lowered for word in _PLAN_REFUSALS)
+
 
 @dataclass(frozen=True)
 class _Records:
@@ -284,24 +297,32 @@ def probe(live_config: MassiveConfig, monkeypatch: pytest.MonkeyPatch) -> Iterat
 
 @pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("19")
-@pytest.mark.timeout(100)
-def test_form_of_the_forex_quote_exchange_id(probe: OpenProbe, *, evidence: Evidence) -> None:
+@pytest.mark.timeout(160)
+def test_form_of_the_forex_quote_exchange_id(
+    probe: OpenProbe, *, market_status: Callable[[str], str], evidence: Evidence
+) -> None:
     """Whether a forex quote's `x` arrives as an integer or as decimal-digit text.
 
-    It is declared an integer and sampled as the text `"44"`; the library reads either. Records
-    the raw `C` frames of `C.EUR-USD` and the JSON type of `x`. Reading it: either form
-    settles the question; nothing else changes. No quote on a weekend skips: forex is closed.
+    It is declared an integer and sampled as the text `"44"`; the library reads either.
+    Subscribes `C.EUR-USD`, asserts that Massive acknowledged it, and records the raw `C`
+    frames and the JSON type of `x`. Quotes are required unless `/v1/marketstatus/now` says
+    the forex market is closed, when the test skips after the acknowledgement. Reading it:
+    either form settles the question; nothing else changes.
     """
     made = probe("forex", _FRAMES)
     made.send("subscribe", ["C.EUR-USD"])
-    records = made.wait(lambda r: bool(r.objects("C")), _WAIT)
+    acked = made.wait(lambda r: "C.EUR-USD" in r.acked(), _WAIT)
+    status = market_status("fx")
+    records = made.wait(lambda r: bool(r.objects("C")), _WAIT) if status != "closed" else acked
     quotes = records.objects("C")
     for line in records.status_lines():
         evidence(line)
     for quote in quotes[:5]:
         evidence(f"raw C: x={quote.get('x')!r} ({type(quote.get('x')).__name__}) {quote}")
-    if not quotes:
-        pytest.skip("no forex quote arrived (is the market closed?)")
+    assert "C.EUR-USD" in acked.acked(), f"not acknowledged: {acked.status_lines()}"
+    if status == "closed":
+        pytest.skip("the forex market is closed (per /v1/marketstatus/now)")
+    assert quotes, f"no forex quote arrived in {_WAIT:.0f} s of an open market"
 
 
 @pytest.mark.needs("currencies:starter")
@@ -409,7 +430,8 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
     topics, and records the acknowledgements and refusals, stopping as soon as every topic is
     answered; rows are not kept. Reading it: a refusal past 1,000 topics confirms that topics
     count; all 1,002 acknowledged means contracts count and the library's cap could be relaxed.
-    Needs an options plan with real-time WebSocket access.
+    Needs an options plan with real-time trades and quotes on the WebSocket: refused ones (a
+    Business plan without the expansion) skip, naming the plan.
     """
     far = datetime.now(UTC).date() + timedelta(days=365)
     contracts = live_rest.get(
@@ -431,6 +453,8 @@ def test_the_options_topic_cap_counts_topics_or_contracts(
     evidence(f"acknowledged {len(records.acked())} topics; status kinds {dict(kinds)}")
     evidence(f"other statuses: {others[:10]}")
     evidence(f"client states: {records.states}")
+    if not records.acked() and any(_refuses_plan(message) for message in others):
+        pytest.skip(f"not entitled: needs an options plan with trades and quotes ({others[:1]})")
     assert tickers
 
 
