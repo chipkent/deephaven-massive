@@ -13,7 +13,6 @@ from __future__ import annotations
 import functools
 import inspect
 import json
-import threading
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -29,11 +28,9 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._enums import ChannelFamily, HistorySource
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import options
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -54,14 +51,13 @@ from tests._fakes.clock import FakeClock
 from tests._fakes.rest import Reply
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping
 
     from deephaven.table import Table
 
-    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
-    from tests._fakes.ws import FakeMassiveServer
+    from tests._fakes.ws_session import WsSession
 
 R = Transport.REST
 OWNER = "namespaces/options"
@@ -838,100 +834,6 @@ def test_daily_open_close_reads_one_day_per_contract(
 
 # --- End to end: WebSocket -------------------------------------------------------------------
 
-TIMEOUT = 15.0
-REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
-
-
-class Streams:
-    """A session whose WebSocket connections reach the fake Massive server.
-
-    The host decision is fixed (no REST request decides it), and each connection's client is a
-    real `WsClient` on the fake server's endpoint of the same path, counting the frames it
-    delivers so a test waits for exactly one.
-    """
-
-    def __init__(self, server: FakeMassiveServer) -> None:
-        self.server = server
-        self.cond = threading.Condition()
-        self.frames = 0
-        self.families: list[ChannelFamily] = []
-        self.session = dm.MassiveSession(
-            dm.MassiveConfig(api_key="test-key", flush_interval=3600.0)
-        )
-        self.connections = ws.WsConnections(
-            self.session._core,
-            resolve_host=self.resolve,
-            record_verdict=lambda *_: None,
-            client_factory=self.factory,
-        )
-        cast("Any", self.session._core._ports)._streams = self.connections
-        self.session._core.on_close(self.connections.close)
-
-    def resolve(self, _: dm.AssetClass, family: ChannelFamily) -> HostDecision:
-        self.families.append(family)
-        return REALTIME
-
-    def factory(
-        self,
-        url: str,
-        *,
-        sources: Sequence[Source],
-        on_open: Callable[[int], None],
-        on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[dict[str, object]], list[Reject], DriftReport], None],
-        on_state: Callable[[WsState, float | WireError | None], None],
-    ) -> _massive.WsClient:
-        return _massive.WsClient(
-            self.server.url("/" + url.split("/", 3)[3]),
-            api_key="test-key",
-            sources=sources,
-            on_open=on_open,
-            on_status=on_status,
-            on_data=self.counting(on_data),
-            on_state=on_state,
-            reconnect_backoff=0.05,
-            max_reconnect_backoff=0.1,
-        )
-
-    def counting(self, on_data: Callable[..., None]) -> Callable[..., None]:
-        # The client's data callback, counting each frame after the library has taken it.
-        def counted(*event: object) -> None:
-            on_data(*event)
-            with self.cond:
-                self.frames += 1
-                self.cond.notify_all()
-
-        return counted
-
-    def subscribed(self, topic: str) -> None:
-        def named() -> bool:
-            frames = [json.loads(f) for f in self.server.frames()]
-            return any(
-                f["action"] == "subscribe" and topic in f["params"].split(",") for f in frames
-            )
-
-        self.server.wait_for(lambda s: bool(s.connections) and s.connections[-1].auth is not None)
-        self.server.wait_for(lambda _: named())
-
-    def send(self, frame: dict[str, object]) -> None:
-        with self.cond:
-            before = self.frames
-        self.server.send(json.dumps([frame]))
-        with self.cond:
-            assert self.cond.wait_for(lambda: self.frames > before, TIMEOUT)
-        with self.session._core.registry_lock:
-            connections = list(self.connections._connections.values())
-        for connection in connections:
-            connection.flusher.flush()
-
-
-@pytest.fixture
-def streams(fake_ws_server: FakeMassiveServer) -> Iterator[Streams]:
-    harness = Streams(fake_ws_server)
-    yield harness
-    harness.session.close()
-
-
 SPY = "O:SPY251219C00650000"
 TRADE_FRAME = {
     "ev": "T",
@@ -993,14 +895,14 @@ def bar_frame(event: str) -> dict[str, object]:
 )
 def test_a_frame_of_each_channel_lands_in_blink(
     *,
-    streams: Streams,
+    ws_session: WsSession,
     rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
     dataset: str,
     topic: str,
     frame: dict[str, object],
     expected: dict[str, Any],
 ) -> None:
-    m = streams.session
+    m = ws_session.session
     queries: dict[str, Callable[[], Any]] = {
         "trades": lambda: m.options.trades(SPY),
         "quotes": lambda: m.options.quotes(SPY),
@@ -1010,8 +912,8 @@ def test_a_frame_of_each_channel_lands_in_blink(
     }
     blink = queries[dataset]().blink()
     seen = blink_to_append_only(blink)
-    streams.subscribed(f"{topic}.{SPY}")
-    streams.send(frame)
+    ws_session.subscribed(f"{topic}.{SPY}")
+    ws_session.publish(frame)
     # Wait on a consistent snapshot, never on `size`: a size read in the middle of an update
     # cycle can count a row that a snapshot taken right after does not hold yet. The view is
     # append-only, so once a snapshot holds the row, every later one does too.
@@ -1020,7 +922,7 @@ def test_a_frame_of_each_channel_lands_in_blink(
     assert row["Symbol"] == SPY
     assert {name: row[name] for name in expected} == expected
     family = ChannelFamily.FMV if topic == "FMV" else ChannelFamily.TICK
-    assert streams.families == [family]
+    assert ws_session.decisions == [(dm.AssetClass.OPTIONS, family)]
     m.release(blink)
 
 

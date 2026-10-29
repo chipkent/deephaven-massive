@@ -12,12 +12,14 @@ lands as one row of `blink()`; and every flat-file prefix reads one day's file f
 and keeps only the requested symbols.
 """
 
+from __future__ import annotations
+
 import inspect
 import json
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pyarrow as pa
@@ -26,23 +28,18 @@ from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
-from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import NEW_YORK
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._enums import ChannelFamily, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._enums import ChannelFamily
 from deephaven_massive._massive import (
     RequestGovernor,
     RestClient,
     RestPath,
-    Source,
     Transport,
     WireType,
-    WsClient,
     source,
     to_batch,
 )
@@ -59,8 +56,12 @@ from deephaven_massive._query import (
 )
 from deephaven_massive._session import CATALOG
 from tests._fakes.rest import FakeRestServer, Reply
-from tests._fakes.s3 import FakeS3
-from tests._fakes.ws import FakeMassiveServer
+
+if TYPE_CHECKING:
+    from deephaven.table import Table
+
+    from tests._fakes.s3 import FakeS3
+    from tests._fakes.ws_session import WsSession
 
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
@@ -91,8 +92,10 @@ LIST_WITH_SYMBOLS = [
     "filings.text_8k",
     "filings.disclosures_8k",
     "filings.risk_factors",
-    "filings.insider_holdings",
+    "filings.initial_insider_ownership",
     "filings.insider_transactions",
+    "filings.insider_activity",
+    "filings.insider_holdings",
 ]
 LIST_WITHOUT_SYMBOLS = [
     "filings.institutional_holdings",
@@ -105,8 +108,10 @@ LIST_VALUED = [
     "financials.income_statements",
     "financials.cash_flow_statements",
     "filings.disclosures_8k",
-    "filings.insider_holdings",
+    "filings.initial_insider_ownership",
     "filings.insider_transactions",
+    "filings.insider_activity",
+    "filings.insider_holdings",
 ]
 STREAMED = ["trades", "quotes", "bars", "luld", "imbalances", "fmv"]
 
@@ -126,8 +131,10 @@ AXES = {
     "filings.disclosures_8k": ("filing_date", "FilingDate"),
     "filings.risk_factors": ("filing_date", "FilingDate"),
     "filings.institutional_holdings": ("filing_date", "FilingDate"),
-    "filings.insider_holdings": ("filing_date", "FilingDate"),
+    "filings.initial_insider_ownership": ("filing_date", "FilingDate"),
     "filings.insider_transactions": ("filing_date", "FilingDate"),
+    "filings.insider_activity": ("transaction_date", "TransactionDate"),
+    "filings.insider_holdings": ("last_filing_date", "LastFilingDate"),
 }
 
 # Each REST source of the namespace, its fixture, and a value for each path placeholder.
@@ -177,8 +184,10 @@ SOURCES: dict[str, tuple[str, dict[str, object]]] = {
     "/stocks/filings/8-K/vX/disclosures": ("filings_disclosures_8k.json", {}),
     "/stocks/filings/vX/risk-factors": ("filings_risk_factors.json", {}),
     "/stocks/filings/vX/13-F": ("filings_institutional_holdings.json", {}),
-    "/stocks/filings/vX/form-3": ("filings_insider_holdings.json", {}),
+    "/stocks/filings/vX/form-3": ("filings_initial_insider_ownership.json", {}),
     "/stocks/filings/vX/form-4": ("filings_insider_transactions.json", {}),
+    "/stocks/insiders/vX/activity": ("filings_insider_activity.json", {}),
+    "/stocks/insiders/vX/holdings": ("filings_insider_holdings.json", {}),
     "/stocks/taxonomies/vX/risk-factors": ("filings_risk_factor_taxonomy.json", {}),
     "/stocks/taxonomies/vX/disclosures": ("filings_disclosure_taxonomy.json", {}),
 }
@@ -320,13 +329,13 @@ def test_share_float_keeps_its_effective_date_as_a_column() -> None:
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
-def test_poll_appends_filings_upserts_ipos_and_replaces_taxonomies_and_the_rest(
+def test_poll_appends_filings_upserts_ipos_and_replaces_the_rest(
     name: str,
 ) -> None:
     expected = dm.PollMode.REPLACE
     if name == "ipos":
         expected = dm.PollMode.UPSERT  # an offering's record is revised in place
-    elif name.startswith("filings.") and "taxonomy" not in name:
+    elif name.startswith("filings.") and name not in REPLACE_KEYS:
         expected = dm.PollMode.APPEND
     assert spec_of(name).poll_mode is expected
 
@@ -363,6 +372,10 @@ REPLACE_KEYS = {
     "financials.income_statements": ("Cik", "PeriodEnd", "Timeframe"),
     "financials.cash_flow_statements": ("Cik", "PeriodEnd", "Timeframe"),
     "financials.ratios": ("Symbol", "Date"),
+    # A later filing for the same day revises that day's totals.
+    "filings.insider_activity": ("IssuerCik", "TransactionDate"),
+    # A new filing by an insider updates that insider's current position.
+    "filings.insider_holdings": ("IssuerCik", "OwnerCik"),
     "filings.risk_factor_taxonomy": ("Taxonomy", *CATEGORIES),
     "filings.disclosure_taxonomy": ("Taxonomy", *CATEGORIES),
 }
@@ -625,15 +638,66 @@ def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession)
         filings.institutional_holdings(filer_cik=cast("Any", 1067983))
 
 
-@pytest.mark.parametrize("name", ["filings.insider_holdings", "filings.insider_transactions"])
-def test_insider_forms_take_issuer_and_owner(massive_session: dm.MassiveSession, name: str) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "filings.initial_insider_ownership",
+        "filings.insider_transactions",
+        "filings.insider_holdings",
+    ],
+)
+def test_insider_datasets_take_issuer_and_owner(
+    massive_session: dm.MassiveSession, name: str
+) -> None:
     make = factory(massive_session, name)
     query = make("AAPL", issuer_cik="0000320193", owner_cik="0001214156")
     assert dict(query._request.params) == {"issuer_cik": "0000320193", "owner_cik": "0001214156"}
-    with pytest.raises(TypeError, match="issuer_cik must be a str"):
+    # A sequence of CIKs is sent as the `.any_of` form, which the paths also document.
+    query = make(issuer_cik=["0000320193", "0001045810"], owner_cik=("0001214156",))
+    assert dict(query._request.params) == {
+        "issuer_cik.any_of": ("0000320193", "0001045810"),
+        "owner_cik.any_of": ("0001214156",),
+    }
+    with pytest.raises(TypeError, match="issuer_cik must be a str, a sequence of str, or None"):
         make(issuer_cik=320193)
-    with pytest.raises(TypeError, match="owner_cik must be a str"):
+    with pytest.raises(TypeError, match="owner_cik must be a str, a sequence of str, or None"):
         make(owner_cik=1214156)
+    with pytest.raises(ValueError, match=r"issuer_cik is empty; pass None for every issuer$"):
+        make(issuer_cik=[])
+    with pytest.raises(ValueError, match=r"owner_cik is empty; pass None for every owner$"):
+        make(owner_cik=())
+    with pytest.raises(TypeError):
+        make(issuer_cik=[320193])
+    # The list forms belong to the arguments, and the refusal names the argument to use.
+    with pytest.raises(ValueError, match="its own argument, owner_cik="):
+        make(filters={"owner_cik_any_of": ["0001214156"]})
+
+
+def test_insider_activity_takes_issuers_and_no_owner(massive_session: dm.MassiveSession) -> None:
+    # The totals sum every insider of the issuer, so the path documents no owner filter.
+    activity = massive_session.stocks.filings.insider_activity
+    query = activity("NVDA", issuer_cik="0001045810")
+    assert dict(query._request.params) == {"issuer_cik": "0001045810"}
+    query = activity(issuer_cik=["0001045810", "0000320193"])
+    assert dict(query._request.params) == {"issuer_cik.any_of": ("0001045810", "0000320193")}
+    assert "owner_cik" not in inspect.signature(activity).parameters
+    with pytest.raises(TypeError, match="issuer_cik must be a str"):
+        activity(issuer_cik=cast("Any", 1045810))
+    with pytest.raises(ValueError, match="issuer_cik is empty"):
+        activity(issuer_cik=[])
+    with pytest.raises(ValueError, match="its own argument, issuer_cik="):
+        activity(filters={"issuer_cik_any_of": ["0001045810"]})
+
+
+@pytest.mark.parametrize("name", ["filings.insider_activity", "filings.insider_holdings"])
+def test_insider_aggregates_leave_no_parameter_to_filters(
+    massive_session: dm.MassiveSession, name: str
+) -> None:
+    # The arguments reserve every form of the tickers (`tickers.all_of` included), the CIKs,
+    # and the date (the exclusive bounds included), as the docstrings say, which leaves no
+    # filter; a parameter Massive adds later shows up here.
+    with pytest.raises(ValueError, match=r"valid filters: \[\]"):
+        factory(massive_session, name)(filters={"anything": "x"})
 
 
 # --- Fixtures ------------------------------------------------------------------------------------
@@ -1006,10 +1070,10 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         ("FilerCik", "0001067983"),
     ),
     (
-        "filings.insider_holdings",
-        {"issuer_cik": "0000320193"},
+        "filings.initial_insider_ownership",
+        {"symbols": ["NVDA", "GOOGL"], "issuer_cik": "0000320193"},
         "/stocks/filings/vX/form-3",
-        {"issuer_cik": "0000320193", "limit": "10000"},
+        {"tickers.any_of": "GOOGL,NVDA", "issuer_cik": "0000320193", "limit": "10000"},
         ("FilingDate", date(2026, 3, 30)),
     ),
     (
@@ -1018,6 +1082,42 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         "/stocks/filings/vX/form-4",
         {"owner_cik": "0001214156", "transaction_code": "S", "limit": "10000"},
         ("FilingDate", date(2026, 3, 30)),
+    ),
+    (
+        "filings.insider_activity",
+        {
+            "symbols": "NVDA",
+            "issuer_cik": ["0001045810", "0000320193"],
+            "start": date(2026, 9, 1),
+            "end": date(2026, 9, 30),
+        },
+        "/stocks/insiders/vX/activity",
+        {
+            "tickers.any_of": "NVDA",
+            "issuer_cik.any_of": "0001045810,0000320193",
+            "transaction_date.gte": "2026-09-01",
+            "transaction_date.lte": "2026-09-30",
+            "limit": "10000",
+        },
+        ("TransactionDate", date(2026, 9, 17)),
+    ),
+    (
+        "filings.insider_holdings",
+        {
+            "symbols": ["NVDA", "GOOGL"],
+            "owner_cik": "0001588670",
+            "start": date(2026, 1, 1),
+            "sort": "shares_owned",
+        },
+        "/stocks/insiders/vX/holdings",
+        {
+            "tickers.any_of": "GOOGL,NVDA",
+            "owner_cik": "0001588670",
+            "last_filing_date.gte": "2026-01-01",
+            "sort": "shares_owned",
+            "limit": "10000",
+        },
+        ("OwnerCik", "0001588670"),
     ),
     (
         "filings.risk_factor_taxonomy",
@@ -1070,6 +1170,61 @@ def test_limit_caps_the_rows_and_never_raises_the_page_size(
     assert [r["Symbol"] for r in out] == ["AAPL"]
 
 
+# The vendor's documented sample row of each insider dataset, as the table holds it: one
+# column per documented field in the vendor's order, dates as `LocalDate`, and each list of
+# tickers or roles as JSON text.
+INSIDER_ROWS = {
+    "filings.insider_activity": {
+        "IssuerCik": "0001045810",
+        "IssuerName": "NVIDIA CORP",
+        "LastFilingDate": date(2026, 9, 18),
+        "NetShares": -34918.0,
+        "NetValue": -7648632.45,
+        "PlannedPurchaseValue": 0.0,
+        "PlannedSaleValue": 7648632.45,
+        "PurchaseCount": 0,
+        "PurchaseShares": 0.0,
+        "PurchaseValue": 0.0,
+        "PurchaserCount": 0,
+        "SaleCount": 3,
+        "SaleShares": 34918.0,
+        "SaleValue": 7648632.45,
+        "SellerCount": 1,
+        "Tickers": '["NVDA"]',
+        "TransactionDate": date(2026, 9, 17),
+    },
+    "filings.insider_holdings": {
+        "FilingCount": 94,
+        "FirstFilingDate": date(2013, 10, 9),
+        "IssuerCik": "0001045810",
+        "IssuerName": "NVIDIA CORP",
+        "LastFilingDate": date(2026, 9, 18),
+        "OfficerTitle": "EVP & Chief Financial Officer",
+        "OldestPositionDate": date(2021, 9, 15),
+        "OwnerCik": "0001588670",
+        "OwnerName": "Kress Colette",
+        "OwnershipPct": 0.0198,
+        "PositionCount": 11,
+        "Roles": '["officer"]',
+        "SharesOwned": 4776533.0,
+        "SharesOwnedDirect": 765103.0,
+        "SharesOwnedIndirect": 4011430.0,
+        "Tickers": '["NVDA"]',
+    },
+}
+
+
+@pytest.mark.parametrize("name", list(INSIDER_ROWS))
+def test_insider_datasets_normalize_every_documented_field(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture, name: str
+) -> None:
+    path = cast("str", spec_of(name).fetch_path)
+    fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
+    table = cast("Query", factory(rest_session, name)()).fetch()
+    assert sent(fake_rest) == [(path, {"limit": "10000"})]
+    assert table_rows(table) == [INSIDER_ROWS[name]]
+
+
 def test_ipos_fan_out_one_request_per_ticker(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
@@ -1102,7 +1257,7 @@ def test_ipos_send_their_own_order_without_sort(
 
 
 def _rows_when(table: Table, count: int) -> list[dict[str, Any]]:
-    # Bounded wait for the flush thread and an update-graph cycle to apply a frame. It waits on
+    # Bounded wait for an update-graph cycle to apply a published frame. It waits on
     # a consistent snapshot of the rows, never on `size`: `size` can show a row that the cycle
     # in progress is still adding, before a snapshot taken in that cycle contains it.
     pace = threading.Event()  # never set; only paces the loop
@@ -1114,44 +1269,6 @@ def _rows_when(table: Table, count: int) -> list[dict[str, Any]]:
     rows = table_rows(table)
     assert len(rows) == count
     return rows
-
-
-@pytest.fixture
-def ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[dm.MassiveSession]:
-    # A session whose WebSocket connections reach the fake server instead of Massive.
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", flush_interval=0.01))
-
-    def client(
-        url: str,
-        *,
-        sources: Sequence[Source],
-        on_open: Callable[..., None],
-        on_status: Callable[..., None],
-        on_data: Callable[..., None],
-        on_state: Callable[..., None],
-    ) -> WsClient:
-        return WsClient(
-            fake_ws_server.url("/" + url.split("/", 3)[3]),
-            api_key="test-key",
-            sources=sources,
-            on_open=on_open,
-            on_status=on_status,
-            on_data=on_data,
-            on_state=on_state,
-            reconnect_backoff=0.05,
-            max_reconnect_backoff=0.1,
-        )
-
-    connections = ws.WsConnections(
-        m._core,
-        resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "test"),
-        record_verdict=lambda *_: None,
-        client_factory=client,
-    )
-    cast("Any", m._core._ports)._streams = connections
-    m._core.on_close(connections.close)
-    yield m
-    m.close()
 
 
 # Each streamed channel: the dataset, its call, the topic it subscribes, the vendor's documented
@@ -1308,23 +1425,17 @@ STREAM_CASES: list[
 @pytest.mark.parametrize("case", STREAM_CASES, ids=[c[0] for c in STREAM_CASES])
 def test_a_frame_lands_in_blink(
     *,
-    ws_session: dm.MassiveSession,
-    fake_ws_server: FakeMassiveServer,
+    ws_session: WsSession,
     case: tuple[str, Callable[[Any], StreamQuery], str, dict[str, object], dict[str, object]],
 ) -> None:
     _, make, topic, frame, expected = case
-    result = make(ws_session.stocks).blink()
+    result = make(ws_session.session.stocks).blink()
     seen = blink_to_append_only(result)
-    fake_ws_server.wait_for(
-        lambda s: any(
-            json.loads(f)["action"] == "subscribe" and topic in json.loads(f)["params"].split(",")
-            for f in (s.connections[-1].frames if s.connections else [])
-        )
-    )
-    fake_ws_server.send(json.dumps([frame]))
+    ws_session.subscribed(topic)
+    ws_session.publish(frame)
     (row,) = _rows_when(seen, 1)
     assert {k: row[k] for k in expected} == expected
-    ws_session.release(result)
+    ws_session.session.release(result)
 
 
 # --- End to end: flat files ----------------------------------------------------------------------
@@ -1497,7 +1608,7 @@ NULLABLE_KEYS = {
         "VotingAuthorityShared",
         "VotingAuthorityNone",
     },
-    "filings.insider_holdings": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
+    "filings.initial_insider_ownership": {"NatureOfOwnership", "ExercisePrice", "ExerciseDate"},
     "filings.insider_transactions": {
         "NatureOfOwnership",
         "ExercisePrice",

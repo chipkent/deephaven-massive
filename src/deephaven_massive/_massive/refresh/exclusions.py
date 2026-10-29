@@ -7,6 +7,18 @@ pinned snapshot; one that names an item the snapshot lacks fails the refresh as 
 list can never silently outlive the vendor's own sources. Endpoints that are absent from every
 vendor source are not listed here; the design documents them so nobody re-adds them.
 
+Every generated source must be read by a dataset; the coverage test in
+`tests/datasets/test_catalog.py` fails on one that is not. So when a refresh brings a new
+endpoint, channel, or flat-file prefix, the same pull request does one of three things:
+
+- adds a dataset that reads it;
+- excludes it here, only when the library deliberately never supports it; or
+- defers it: opens an issue, then adds a `DEFERRED` entry next to the coverage test with the
+  reason and the issue number. The refresh keeps generating a deferred item.
+
+An exclusion never means "not yet". Its reason is permanent: deprecated in practice, retired,
+undocumented, or a duplicate of another source.
+
 A path or channel the specification marks deprecated (`x-polygon-deprecation`) or draft
 (`x-polygon-draft`) is never generated and never listed here: the specification already
 accounts for it. So every item of the vendor sources is exactly one of generated, excluded,
@@ -144,18 +156,6 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
     _rest("/v1/reference/ipos", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/dev/trades/{ticker}", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/filings/10-K/vX_0/sections", _UNDOCUMENTED, undocumented=True),
-    _rest(
-        "/stocks/insiders/vX/activity",
-        "Not yet declared: documented since 2026-10-28 as daily insider buying and selling "
-        "totals per issuer, which no dataset serves; the Form 4 dataset returns the individual "
-        "filings instead. Its dataset is a separate addition.",
-    ),
-    _rest(
-        "/stocks/insiders/vX/holdings",
-        "Not yet declared: documented since 2026-10-28 as each insider's current consolidated "
-        "holding per issuer, which no dataset serves; the Form 3 dataset returns the individual "
-        "initial filings instead. Its dataset is a separate addition.",
-    ),
     _rest(
         "/v2/snapshot/locale/us/markets/stocks/tickers/{stocksTicker}",
         "Covered by the stocks snapshots dataset, which sends the `tickers` filter to the "

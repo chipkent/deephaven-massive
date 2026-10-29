@@ -191,8 +191,9 @@ class PathUse:
             documented example value needs (a value the declared type alone refuses).
         example_keys: The keys a documented example sends that the source does not declare,
             each excused by a `SAMPLE_ERRORS` entry.
-        described_keys: The wire keys of the generated fields whose `DESCRIPTION_FIXES` entry
-            the generator looked up: only these entries can take effect.
+        described_keys: The wire keys of the generated fields, and of the nested objects
+            whose notes they carry, whose `DESCRIPTION_FIXES` entry the generator looked up:
+            only these entries can take effect.
     """
 
     wire_keys: frozenset[str] = frozenset()
@@ -347,21 +348,23 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
 
 
 def unused_description_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
-    """Report the `DESCRIPTION_FIXES` entries no generated field looked up.
+    """Report the `DESCRIPTION_FIXES` entries no generated field or object note looked up.
 
     An entry takes effect only through the field it is keyed by, after any `KEY_FIXES` entry,
-    so it is checked against the keys the generators looked up (`PathUse.described_keys`),
-    not every key a source declares or an example sends: an entry under a declared key that a
-    key fix replaces, or under a key only an example sends, would otherwise be ignored
-    without a word. An entry whose quote no longer matches is reported by the generator that
-    meets its field.
+    or through the nested object it is keyed by, whose note every field below the object
+    carries. So it is checked against the keys the generators looked up
+    (`PathUse.described_keys`), not every key a source declares or an example sends: an entry
+    under a declared key that a key fix replaces, under a key only an example sends, or under
+    an object no generated field sits in, would otherwise be ignored without a word. An entry
+    whose quote no longer matches is reported by the generator that meets its field or
+    object.
 
     Args:
         hand: The hand input.
         uses: What each generated path consumed.
 
     Yields:
-        One `stale-entry` problem per entry no field looked up.
+        One `stale-entry` problem per entry no field or object note looked up.
     """
     for path, wire_key in hand.description_fixes:
         use = uses.get(path)
@@ -370,8 +373,8 @@ def unused_description_fixes(hand: HandInput, uses: Mapping[str, PathUse]) -> It
                 gate=Gate.STALE_ENTRY,
                 source=path,
                 key=wire_key,
-                message="DESCRIPTION_FIXES entry for no field the snapshot generates under that "
-                "wire key",
+                message="DESCRIPTION_FIXES entry for no field or nested object the snapshot "
+                "generates under that wire key",
             )
 
 
