@@ -900,18 +900,15 @@ def _median_seconds(work: Callable[[], None], *, repeats: int = 7, warmups: int 
     return statistics.median(times)
 
 
-# Every point carries the `benchmark` marker, so `-m benchmark` runs the whole sweep. The default
-# run measures one point, enough to keep the benchmark working. The other eight, marked
-# `benchmark(sweep=True)`, cost several seconds and record rates no test asserts on, so the
-# default `-m` expression deselects them; to run one of them by node id, add `-m benchmark`.
+# The default run measures one point, 10 streams at 2,000 rows, which keeps the benchmark
+# working. The other eight points cost several seconds and record rates no test asserts on, so
+# they carry the `benchmark` marker, which the default run deselects; `-m benchmark` runs them.
 _FAN_OUT_DEFAULT = (10, 2_000)
 _FAN_OUT_POINTS = [
     pytest.param(
         streams,
         rows,
-        marks=pytest.mark.benchmark
-        if (streams, rows) == _FAN_OUT_DEFAULT
-        else pytest.mark.benchmark(sweep=True),
+        marks=() if (streams, rows) == _FAN_OUT_DEFAULT else pytest.mark.benchmark,
         id=f"{streams}-{rows}",
     )
     for streams in (1, 10, 100)

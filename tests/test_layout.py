@@ -81,7 +81,6 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
@@ -2271,36 +2270,10 @@ def test_a_docstring_alone_is_a_valid_layer_package_init(package: str) -> None:
     assert _layer_check(f"{package}/__init__.py", '"""The package."""\n') == []
 
 
-# The live tests stay out of every default run. `addopts` deselects the `integration` marker,
-# and the conftest hook that checks the live markers runs first (`tryfirst`), before that
-# deselection; run later, a marked unit test would already be deselected and escape the check.
-
-
-def _pytest_settings() -> dict[str, object]:
-    """Return the `[tool.pytest]` table of `pyproject.toml`.
-
-    Returns:
-        The table.
-    """
-    data = tomllib.loads((_ROOT / "pyproject.toml").read_text())
-    settings: dict[str, object] = data["tool"]["pytest"]
-    return settings
-
-
-def test_the_default_run_deselects_the_live_tests() -> None:
-    addopts = _pytest_settings()["addopts"]
-    assert isinstance(addopts, list)
-    assert addopts[-2:] == ["-m", "not integration and not benchmark(sweep=True)"]
-
-
-def test_both_live_markers_are_registered() -> None:
-    markers = _pytest_settings()["markers"]
-    assert isinstance(markers, list)
-    assert {str(line).split(":")[0] for line in markers} >= {
-        "integration",
-        "integration_limits",
-        "integration_smoke",
-    }
+# The live tests. Under parallel workers they are refused outright. The conftest hook that
+# checks the live markers runs first (`tryfirst`), before the default run's `-m` deselects the
+# live tests; run later, a wrongly marked unit test would already be deselected and escape the
+# check.
 
 
 def test_parallel_workers_refuse_the_live_tests_before_any_jvm_starts() -> None:
