@@ -3364,13 +3364,14 @@ receives in one place, before anything reads it, through `net.redaction`: the RE
 response body and the WebSocket client every frame, the handshake's included
 (`Redactor.received`), and the flat-file client S3's error words (`redact`), leaving out of the
 error chain a botocore error that quotes them. Each client builds one `Redactor`, which
-precomputes the secret's spellings and a pattern of the escapes that could spell one of its
-characters. `received` replaces the secret and its JSON-escaped form, and a body or frame
-holding such an escape is decoded, cleaned string by string, and re-encoded if anything
-changed, so an echo spelled with escapes is caught too. Every row, status, error, excerpt, and
-log line built from them is then free of the secret, wherever it is built. Any other body costs
-a few substring searches and is passed on uncopied. The library never enables DEBUG on urllib3
-or botocore, and the websockets frame log stays off
+compiles, per secret, a pattern in which every character is itself or any JSON escape that
+spells it (hex digits in either case), and a cheaper pattern of only those escapes.
+`received` replaces every match in the raw text, so an echo spelled with escapes is caught
+whether the body is valid JSON, cut short, or a proxy's HTML page, and nothing is decoded or
+re-encoded. Every row, status, error, excerpt, and log line built from them is then free of the
+secret, wherever it is built. A body holding neither the secret nor such an escape costs a
+substring search per secret and one pattern search, and is passed on uncopied. The library
+never enables DEBUG on urllib3 or botocore, and the websockets frame log stays off
 ([section 19.2](#192-the-websocket-client)). The planted-secret test
 (`tests/massive/net/test_redaction.py`) runs the fakes with distinctive secrets and DEBUG on
 every logger through a 401, a 429, bodies, rows, and a status that echo the key, plainly and
@@ -3611,7 +3612,7 @@ net/                 shared by every client; imports nothing else in _massive
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
   codec.py           JSON codec: orjson when installed (logged once), else stdlib
-  redaction.py       Redactor, redact, redact_value: a client's secrets, however JSON
+  redaction.py       Redactor, redact: a client's secrets, however JSON
                      spells them, become *** in whatever it receives, before it is decoded,
                      quoted, or logged
 spec/                run-time wire vocabulary; imports nothing else in _massive
