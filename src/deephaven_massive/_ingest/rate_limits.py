@@ -167,7 +167,11 @@ def give_up_at(governor: RequestGovernor, exec_ctx: ExecutionContext) -> float:
         The time, on the governor's clock, to pass as the read's `give_up_at`.
     """
     console = on_update_graph(exec_ctx)
-    return governor.clock.monotonic() + (CONSOLE_PATIENCE if console else READ_PATIENCE)
+    patience = CONSOLE_PATIENCE if console else READ_PATIENCE
+    logger.debug(
+        "a read waits out pauses for %.0f s (update-graph lock held: %s)", patience, console
+    )
+    return governor.clock.monotonic() + patience
 
 
 def bucket_of(subscription: Subscription | None) -> str:

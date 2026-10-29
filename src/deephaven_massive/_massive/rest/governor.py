@@ -250,6 +250,7 @@ class Admission:
         """
         permit, failure = self._governor.admit(self, cancel)
         if failure is not None:
+            logger.debug("%s: the wait for a permit ends: %s", self.bucket, failure.message)
             raise WireError(failure.message, status=failure.status)
         return cast("Permit", permit)
 

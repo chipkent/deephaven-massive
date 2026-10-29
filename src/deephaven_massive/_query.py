@@ -27,6 +27,10 @@ The verbs delegate the transport work to three interfaces, one per transport, de
 `FlatFileTransport` (flat-file `history`).
 `history()` chooses its source itself (`choose_source` in `_datasets/history_source.py`) and
 then calls one transport, so the transports only do I/O.
+Each static verb (`fetch()`, `history()`) is one *call*: it takes a process-unique id from the
+session's stream-id counter and logs `call 7 start: <query>.<verb>`, then `call 7 done: <rows>
+rows in <s> s` or `call 7 failed after <s> s: <error>`, at DEBUG; the transports name their
+worker threads after it (`massive #1 call-7 rest_0`), so every line of one call can be found.
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
@@ -37,6 +41,7 @@ construct them.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
@@ -247,6 +252,58 @@ class QueryBase:
         with entered(self._core.exec_ctx):
             return describe(table, spec, schema)
 
+    def _logged_call(self, verb: str, run: Callable[[int], Table]) -> Table:
+        """Run a static verb as one call: a new call id, and its start and outcome at DEBUG.
+
+        Args:
+            verb: The verb and its arguments, for the start line, such as `"fetch()"`.
+            run: Runs the verb's work, given the call id; the id names the transport's worker
+                threads.
+
+        Returns:
+            What `run` returns.
+
+        Whatever `run` raises propagates after a `call <id> failed` line. A call on an
+        update-graph thread raises `ValueError` before it takes an id, so it logs nothing.
+        """
+        self._core.require_verb_thread()
+        call = self._core.next_stream_id()
+        logger.debug("call %d start: %r.%s", call, self, verb)
+        started = time.monotonic()
+        try:
+            table = run(call)
+        except BaseException as error:
+            elapsed = time.monotonic() - started
+            logger.debug(
+                "call %d failed after %.3f s: %s: %s",
+                call,
+                elapsed,
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
+            raise
+        if logger.isEnabledFor(logging.DEBUG):
+            elapsed = time.monotonic() - started
+            logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
+        return table
+
+    def _fetch_latest(self, call: int) -> Table:
+        """Run the `fetch()` of a "last" or previous-bar endpoint as call `call`.
+
+        Args:
+            call: The call id.
+
+        Returns:
+            The static table, one row per symbol.
+
+        Symbols of `dm.ALL` raise the `ValueError` of `_require_explicit_symbols`.
+        """
+        _require_explicit_symbols(self._spec, self._request)
+        return self._described(
+            self._core.rest_transport().fetch(self._spec, self._static_request(), call=call)
+        )
+
     def _static_request(self) -> Request:
         """Return the request with a symbol table read once, for a static verb.
 
@@ -301,9 +358,19 @@ class Query(QueryBase):
         Returns:
             A static table.
         """
-        self._core.require_verb_thread()
+        return self._logged_call("fetch()", self._fetch)
+
+    def _fetch(self, call: int) -> Table:
+        """Run `fetch()` as call `call`.
+
+        Args:
+            call: The call id.
+
+        Returns:
+            The static table.
+        """
         return self._described(
-            self._core.rest_transport().fetch(self._spec, self._static_request())
+            self._core.rest_transport().fetch(self._spec, self._static_request(), call=call)
         )
 
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
@@ -756,7 +823,25 @@ class HistoryQuery(QueryBase):
                 )
                 since = q.history("2026-01-02")  # through now
         """
-        self._core.require_verb_thread()
+        return self._logged_call(
+            f"history({start!r}, {end!r}, source={source!r})",
+            lambda call: self._history(start, end, source=source, call=call),
+        )
+
+    def _history(
+        self, start: DateLike, end: DateLike | None, *, source: HistorySource, call: int
+    ) -> Table:
+        """Run `history()` as call `call`; see `history` for everything else.
+
+        Args:
+            start: As `history` takes it.
+            end: As `history` takes it.
+            source: As `history` takes it.
+            call: The call id.
+
+        Returns:
+            The static table.
+        """
         chosen = _require_enum(source, HistorySource, "source")
         first = parse_date_like(start, "start")
         last = None if end is None else parse_date_like(end, "end")
@@ -773,7 +858,9 @@ class HistoryQuery(QueryBase):
             self._check_rest_history()
             if window.empty:
                 return self._empty()
-            return self._described(self._core.rest_transport().history(self._spec, request, window))
+            return self._described(
+                self._core.rest_transport().history(self._spec, request, window, call=call)
+            )
         dates = partition_dates(self._spec, window)
         choice = choose_source(
             self._spec, request, dates, requested=chosen, config=self._core.config
@@ -788,9 +875,13 @@ class HistoryQuery(QueryBase):
         if window.empty:
             return self._empty()
         if choice.source is HistorySource.REST:
-            return self._described(self._core.rest_transport().history(self._spec, request, window))
+            return self._described(
+                self._core.rest_transport().history(self._spec, request, window, call=call)
+            )
         return self._described(
-            self._core.flat_file_transport().history(self._spec, request, window, dates=dates)
+            self._core.flat_file_transport().history(
+                self._spec, request, window, dates=dates, call=call
+            )
         )
 
     def _empty(self) -> Table:
@@ -867,11 +958,7 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
         Returns:
             A static table in the stream's schema.
         """
-        self._core.require_verb_thread()
-        _require_explicit_symbols(self._spec, self._request)
-        return self._described(
-            self._core.rest_transport().fetch(self._spec, self._static_request())
-        )
+        return self._logged_call("fetch()", self._fetch_latest)
 
 
 class HistoryLatestQuery(HistoryQuery):
@@ -913,8 +1000,4 @@ class HistoryLatestQuery(HistoryQuery):
         Returns:
             A static table in the bars schema.
         """
-        self._core.require_verb_thread()
-        _require_explicit_symbols(self._spec, self._request)
-        return self._described(
-            self._core.rest_transport().fetch(self._spec, self._static_request())
-        )
+        return self._logged_call("fetch()", self._fetch_latest)

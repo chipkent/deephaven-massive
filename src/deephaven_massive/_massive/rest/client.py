@@ -49,6 +49,7 @@ from deephaven_massive._massive.net.http import (
     ssl_context,
 )
 from deephaven_massive._massive.net.origins import origin_of
+from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
@@ -212,12 +213,14 @@ class RestClient:
 
     The session creates one on first use, with plain arguments and the governor its API key
     shares, and closes it when the session closes. Every request is a GET with
-    `Authorization: Bearer <key>`; the key never appears in a URL or a log. Requests go to the
-    base URL's host only: a `next_url` that points elsewhere is refused. Every attempt first
-    takes a permit of its subscription's bucket from the `RequestGovernor` (which paces a
-    Basic subscription and pauses one Massive refused); transient failures are retried per
-    `net.retry`, and failures are raised as `WireError`, `WireAuthError`, or
-    `WireEntitlementError`; no urllib3 or JSON exception escapes.
+    `Authorization: Bearer <key>`; the key never appears in a URL or a log, and a response body
+    that echoes it has it replaced with `***` before it is decoded (`net.redaction`), so no row,
+    error, or log line can quote it. Requests go to the base URL's host only: a `next_url` that
+    points elsewhere is refused. Every attempt first takes a permit of its subscription's bucket
+    from the `RequestGovernor` (which paces a Basic subscription and pauses one Massive
+    refused); transient failures are retried per `net.retry`, and failures are raised as
+    `WireError`, `WireAuthError`, or `WireEntitlementError`; no urllib3 or JSON exception
+    escapes.
 
     Example:
         ::
@@ -289,6 +292,8 @@ class RestClient:
         self._governor = governor
         self._clock = governor.clock
         self._on_refused = on_refused
+        # Cleans every response body of a key the server echoes (`net.redaction`).
+        self._redactor = Redactor(api_key)
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "User-Agent": USER_AGENT,
@@ -559,12 +564,14 @@ class RestClient:
                 self._governor.release(permit)  # no connection, so nothing reached Massive
             return self._unanswered(request, error)
         elapsed = self._clock.monotonic() - started
+        # Cleaned before anything reads it, so no row, error, or log line can quote the key.
+        data = self._redactor.received(response.data)
         if response.status == HTTPStatus.TOO_MANY_REQUESTS:
-            self._refused(permit, http_error(response.status, response.data, request), response)
+            self._refused(permit, http_error(response.status, data, request), response)
             return _REFUSED
         self._governor.done(permit, answered=True)
         if response.status == HTTPStatus.OK:
-            page = decode_page(response.data, job.rest_path, request)
+            page = decode_page(data, job.rest_path, request)
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
                 request.target,
@@ -573,7 +580,7 @@ class RestClient:
                 elapsed,
             )
             return page
-        failure = http_error(response.status, response.data, request)
+        failure = http_error(response.status, data, request)
         _log.debug(
             "GET %s -> %d (request_id %s) in %.3f s",
             request.target,

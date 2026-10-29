@@ -17,6 +17,7 @@ from deephaven.dherror import DHError
 from deephaven.execution_context import ExecutionContext, get_exec_ctx
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -313,9 +314,13 @@ def test_close_fails_results_and_keeps_diagnostics_views(
     with pytest.raises(dm.MassiveError, match="is closed"):
         massive_session.streams()
     assert streams.snapshot().size == 1  # a view taken before the close keeps its rows
-    # The live table failed with the close, keeps its rows, and refuses new operations.
+    # The live table failed with the close, keeps its rows, and refuses new operations. The
+    # blink table's shutdown callback runs inside the update cycle that delivers the failure,
+    # before the cycle passes it on to the result derived from the blink table: the shared lock
+    # waits for that cycle to end.
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert result.j_table.isFailed()
+    with shared_lock(result):
+        assert bool(result.j_table.isFailed())
     assert result.snapshot().size == 0
     with pytest.raises(DHError, match="failed table"):
         result.tail(1)

@@ -105,7 +105,10 @@ def test_every_exported_enum_is_tested() -> None:
     exported = {
         getattr(dm, name)
         for name in dm.__all__
-        if isinstance(getattr(dm, name), type) and issubclass(getattr(dm, name), Enum)
+        if isinstance(getattr(dm, name), type)
+        and issubclass(getattr(dm, name), Enum)
+        # The wire enums; `LogOutput` is the debug log's, tested with it.
+        and getattr(dm, name).__module__ == "deephaven_massive._enums"
     }
     assert exported == set(EXPECTED_VALUES)
 
@@ -204,6 +207,7 @@ def _resolution_namespace() -> dict[str, object]:
         "_enums",
         "_errors",
         "_config",
+        "_debug_log",
         "_query",
         "_session",
         "_datasets.catalog",
