@@ -260,8 +260,8 @@ text would be brittle and costly to keep for little protection.
 src/deephaven_massive/
 __init__.py              public names of section 3, lazy (PEP 562); TYPE_CHECKING imports mirror __all__
 _config.py               MassiveConfig (section 5)
-_enums.py                the sixteen public enums, Recency, ChannelFamily, _require_enum,
-                         subscription_of
+_enums.py                the sixteen public enums, Recency, ChannelFamily, ClassFromPrefix, NotBars,
+                         _require_enum, subscription_of
 _types.py                Symbols, ALL/_All, DateLike, FilterValue, bars overload aliases, override
 _errors.py               MassiveError (.status, .request_id), AuthenticationError, EntitlementError,
                          from_wire
@@ -1998,7 +1998,9 @@ has the same value set as that parameter.
 | `OnError` | RAISE, NULL | `raise`, `null` | `canonicalize_symbols` (`on_error`) |
 | `UnknownSymbols` | FAIL, WARN | `fail`, `warn` | `MassiveConfig.unknown_symbols` and `MASSIVE_UNKNOWN_SYMBOLS` |
 
-Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}` and `ChannelFamily {TICK, FMV}`.
+Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
+`ClassFromPrefix {ANY}`, and `NotBars {ANY}`, the key under which a dataset that is not bars
+declares its one WebSocket channel and flat-file prefix (a bars dataset keys them by `Timespan`).
 `Transport {REST, WS, FLAT_FILES}` is defined once, in `_massive.spec.types`, and used on both
 sides of the boundary.
 

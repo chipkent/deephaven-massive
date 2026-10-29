@@ -29,6 +29,7 @@ from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
     Direction,
+    NotBars,
     Timespan,
     _require_enum,
 )
@@ -68,8 +69,8 @@ QUOTES: Final = DatasetSpec(
     kind="quotes",
     fetch_path=_LAST_QUOTE,
     history_path=_QUOTES,
-    channels={None: "C"},
-    flat_file_prefixes={None: _QUOTE_FILES},
+    channels={NotBars.ANY: "C"},
+    flat_file_prefixes={NotBars.ANY: _QUOTE_FILES},
     keys={
         # The last quote's `timestamp` is `Timestamp` after its projection onto the quotes kind.
         (_REST, _LAST_QUOTE): SourceKeys(
@@ -131,7 +132,7 @@ FMV: Final = DatasetSpec(
     summary="Massive's fair market value of each currency pair, streamed as it updates.",
     asset_class=AssetClass.FOREX,
     kind="fmv",
-    channels={None: "FMV"},
+    channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
     keys={(_WS, "forex/FMV"): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("FmvLastUpdated"))},
 )

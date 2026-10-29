@@ -16,10 +16,23 @@ from typing import Any, cast
 import pytest
 
 from deephaven_massive._datasets import catalog as catalog_module
-from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import (
+    Catalog,
+    DatasetSpec,
+    KeySpec,
+    SourceKeys,
+    timespan_key,
+)
 from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
 from deephaven_massive._datasets.schema import ColumnType, rename
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, ContractType, PollMode, Timespan
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    ContractType,
+    NotBars,
+    PollMode,
+    Timespan,
+)
 from deephaven_massive._massive import (
     Field,
     ParamKind,
@@ -61,8 +74,8 @@ STOCK_TRADES = DatasetSpec(
     kind="trades",
     fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
-    channels={None: "T"},
-    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
         (R, "/v2/last/trade/{stocksTicker}"): keys("Ticker", "SipTimestamp"),
         (R, "/v3/trades/{stockTicker}"): keys(request("stockTicker"), "SipTimestamp"),
@@ -78,8 +91,8 @@ CRYPTO_TRADES = DatasetSpec(
     kind="trades",
     fetch_path="/v1/last/crypto/{from}/{to}",
     history_path="/v3/trades/{cryptoTicker}",
-    channels={None: "XT"},
-    flat_file_prefixes={None: "global_crypto/trades_v1"},
+    channels={NotBars.ANY: "XT"},
+    flat_file_prefixes={NotBars.ANY: "global_crypto/trades_v1"},
     keys={
         (R, "/v1/last/crypto/{from}/{to}"): keys(request("from"), "Timestamp"),
         (R, "/v3/trades/{cryptoTicker}"): keys(request("cryptoTicker"), "ParticipantTimestamp"),
@@ -94,8 +107,8 @@ FUTURES_TRADES = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     kind="trades",
     history_path="/futures/v1/trades/{ticker}",
-    channels={None: "T"},
-    flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: "us_futures_{venue}/trades_v1"},
     keys={
         (R, "/futures/v1/trades/{ticker}"): keys(
             request("ticker"), "Timestamp", date="SessionEndDate"
@@ -112,8 +125,8 @@ INDEX_VALUES = DatasetSpec(
     asset_class=AssetClass.INDICES,
     kind="values",
     fetch_path="/v3/snapshot/indices",
-    channels={None: "V"},
-    flat_file_prefixes={None: "us_indices/values_v1"},
+    channels={NotBars.ANY: "V"},
+    flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
     keys={
         # `Timestamp` is a column of the snapshot only through its membership of the kind.
         (R, "/v3/snapshot/indices"): keys("Ticker", "Timestamp"),
@@ -201,7 +214,7 @@ def test_a_spec_must_match_a_query_class() -> None:
         name="test.stream",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        channels={None: "T"},
+        channels={NotBars.ANY: "T"},
     )
     with pytest.raises(
         ValueError,
@@ -255,15 +268,18 @@ def test_spec_validation() -> None:
         with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>'"):
             change(EXCHANGES, name=name)
     with pytest.raises(ValueError, match=r"test\.x: a WebSocket dataset .* needs a class"):
-        DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={None: "T"})
+        DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={NotBars.ANY: "T"})
     with pytest.raises(ValueError, match=r"^test\.x: a flat-file dataset needs a class$"):
         # A file filter looks for the spellings of one class.
         DatasetSpec(
             name="test.x",
             summary="A dataset for the tests.",
-            flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+            flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
         )
-    for transports in ({"channels": {None: "T"}}, {"flat_file_prefixes": {None: "us/x"}}):
+    for transports in (
+        {"channels": {NotBars.ANY: "T"}},
+        {"flat_file_prefixes": {NotBars.ANY: "us/x"}},
+    ):
         with pytest.raises(
             ValueError, match=r"^test\.x: symbols kept as written are for REST datasets only$"
         ):
@@ -437,9 +453,15 @@ def test_bar_channels_and_prefixes_are_keyed_by_timespan() -> None:
     )
     assert bars.sources[1:] == ((W, "stocks/A"), (W, "stocks/AM"))
     with pytest.raises(ValueError, match="must be keyed by Timespan"):
-        change(bars, channels={None: "A"})
-    with pytest.raises(ValueError, match="must be keyed by None"):
+        change(bars, channels={NotBars.ANY: "A"})
+    with pytest.raises(ValueError, match=r"must be keyed by NotBars\.ANY$"):
         change(EXCHANGES, flat_file_prefixes={Timespan.DAY: "us_stocks_sip/day_aggs_v1"})
+
+
+def test_a_request_finds_its_source_by_timespan_or_as_not_bars() -> None:
+    assert timespan_key(Timespan.MINUTE) is Timespan.MINUTE
+    assert timespan_key(None) is NotBars.ANY
+    assert STOCK_TRADES.channels[timespan_key(None)] == "T"
 
 
 def test_sources_are_listed_by_role_then_transport_without_repeats() -> None:
@@ -634,7 +656,7 @@ def test_members_of_one_group_follow_their_positions() -> None:
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
         kind="trades",
-        channels={None: "T"},
+        channels={NotBars.ANY: "T"},
         keys={(W, "stocks/T"): keys("Ticker", "SipTimestamp")},
     )
     history = DatasetSpec(
@@ -1011,7 +1033,7 @@ def test_wire_parameters_gate() -> None:
         name="stocks.luld",
         summary="A dataset for the tests.",
         asset_class=AssetClass.STOCKS,
-        channels={None: "LULD"},
+        channels={NotBars.ANY: "LULD"},
         keys={(W, "stocks/LULD"): keys("Ticker")},
         time_axis=("a", "b"),
     )
