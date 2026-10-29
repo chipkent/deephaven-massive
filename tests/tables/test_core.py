@@ -15,6 +15,7 @@ import itertools
 import logging
 import sys
 import threading
+import types
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -27,7 +28,7 @@ from deephaven.dherror import DHError
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 from deephaven.table_listener import listen
-from deephaven.update_graph import shared_lock
+from deephaven.update_graph import exclusive_lock, shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import catalog as _catalog
@@ -133,9 +134,10 @@ def _when_waiting(
         request: Request,
         key: StreamKey,
         *,
+        may_wait: bool,
         holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
-        found = claim(spec, request, key, holds=holds)
+        found = claim(spec, request, key, may_wait=may_wait, holds=holds)
         if isinstance(found, threading.Event):
             waiting.set()
         return found
@@ -174,6 +176,60 @@ def test_concurrent_verbs_on_one_key_share_one_open(
     massive_session.release(first)
     massive_session.release(waiter)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+def test_a_console_command_never_waits_for_another_threads_open(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    # Another thread's open that needs the update graph's lock, as starting a watchlist's
+    # listener does, cannot finish while a console command holds that lock. A verb in the
+    # command therefore takes the key over and opens a stream of its own instead of waiting
+    # for that open; later verbs reuse the command's stream, and the other thread's stream
+    # serves only its own caller.
+    core = massive_session._core
+    gated = _Gated(fake_streams)
+
+    def locking(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = gated.open_stream(spec, request, channel, stream_id=stream_id)
+        with shared_lock(core.exec_ctx.update_graph):  # as a watchlist's listener starts
+            return handle
+
+    monkeypatch.setattr(core, "stream_transport", transport_of(locking))
+    q = stream_query(massive_session)
+    made: list[Table] = []
+
+    def command() -> None:
+        gated.gate.set()  # the open goes on, and then waits for the lock this command holds
+        made.append(q.append_only())
+
+    waiting = threading.Event()
+    with ThreadPoolExecutor(2) as pool:
+        opener = pool.submit(q.blink)
+        assert gated.entered.wait(TIMEOUT)
+        helper = _when_waiting(core, monkeypatch, waiting.set)
+        waiter = pool.submit(q.ring, 3)  # a thread without the lock waits for the first open
+        assert waiting.wait(TIMEOUT)
+        console_command(command)
+        first = opener.result(TIMEOUT)
+        woken = waiter.result(TIMEOUT)  # woke when the first open ended, then found the new one
+    helper.join(TIMEOUT)
+    assert gated.calls == 2
+    assert [(r["StreamId"], r["HeldResults"]) for r in stream_rows()] == [(1, 1), (2, 2)]
+    reused = q.ring(5)  # the key's stream is the command's
+    assert gated.calls == 2
+    assert [(r["StreamId"], r["HeldResults"]) for r in stream_rows()] == [(1, 1), (2, 3)]
+    for result in (first, woken, reused, *made):
+        massive_session.release(result)
+    assert fake_streams.shutdown[1].wait(TIMEOUT)
+    assert fake_streams.shutdown[2].wait(TIMEOUT)
+    made.clear()
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("refused"), KeyboardInterrupt()])
@@ -310,9 +366,10 @@ def test_an_interrupt_right_after_a_reuse_claim_leaks_no_hold(
         request: Request,
         key: StreamKey,
         *,
+        may_wait: bool,
         holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
-        found = claim(spec, request, key, holds=holds)
+        found = claim(spec, request, key, may_wait=may_wait, holds=holds)
         if isinstance(found, StreamHandle):
             raise KeyboardInterrupt
         return found
@@ -1036,21 +1093,43 @@ def test_the_update_graph_check_precedes_the_closed_check(
     errors.clear()  # their tracebacks hold the session too
 
 
-def test_calls_under_the_update_graph_lock_are_rejected(
-    massive_session: dm.MassiveSession,
+def test_the_update_graph_check_refuses_only_update_graph_threads(
+    dh_exec_ctx: ExecutionContext,
 ) -> None:
-    # The same guard as on an update-graph thread, exercised on this thread (coverage tools
-    # on Python 3.11 do not see lines run on Deephaven's own threads).
-    update_graph = massive_session._core.exec_ctx.update_graph
+    # The check itself, run on this thread with an update graph that says this is one of its
+    # threads (coverage tools on Python 3.11 do not see lines run on Deephaven's own threads).
+    graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
+    update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
+    with pytest.raises(ValueError, match="must not run on a Deephaven update-graph thread"):
+        _core.refuse_update_graph_thread(cast("ExecutionContext", update_thread))
+    with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
+        _core.refuse_update_graph_thread(dh_exec_ctx)
+    _core.refuse_update_graph_thread(dh_exec_ctx)
+
+
+def test_the_lock_check_sees_either_lock(dh_exec_ctx: ExecutionContext) -> None:
+    update_graph = dh_exec_ctx.update_graph
+    assert not _core.holds_update_graph_lock(dh_exec_ctx)
     with shared_lock(update_graph):
-        for call in (
-            lambda: dm.MassiveSession(dm.MassiveConfig(api_key="k")),
-            massive_session.close,
-            massive_session._core.close,
-        ):
-            with pytest.raises(ValueError, match="update-graph lock"):
-                call()
-    assert not massive_session._core.closed
+        assert _core.holds_update_graph_lock(dh_exec_ctx)
+    with exclusive_lock(update_graph):
+        assert _core.holds_update_graph_lock(dh_exec_ctx)
+    assert not _core.holds_update_graph_lock(dh_exec_ctx)
+
+
+def test_calls_holding_the_shared_lock_work(massive_session: dm.MassiveSession) -> None:
+    # A thread holding the update graph's shared lock may open and close sessions; close()
+    # then waits for neither the diagnostics writer nor an update cycle.
+    update_graph = massive_session._core.exec_ctx.update_graph
+    writer = massive_session._core.diagnostics.thread
+    with shared_lock(update_graph):
+        other = dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+        other.close()
+        massive_session.close()
+    assert massive_session._core.closed
+    assert other._core.closed
+    writer.join(TIMEOUT)
+    assert not writer.is_alive()
 
 
 def test_a_failure_after_the_last_release_is_shown(

@@ -58,11 +58,10 @@ from deephaven_massive._namespaces.partners import _Partners
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._tables.core import (
-    ON_UPDATE_GRAPH,
     SessionCore,
     has_execution_context,
     has_script_query_scope,
-    on_update_graph,
+    refuse_update_graph_thread,
 )
 from deephaven_massive._types import override
 
@@ -212,7 +211,9 @@ class MassiveSession:
 
         When `config` is None, `MassiveConfig()` reads the environment and raises its own
         `AuthenticationError` if no API key is configured (it is not repeated under Raises
-        because this method does not raise it itself).
+        because this method does not raise it itself). On a Deephaven update-graph thread, for
+        example inside a table listener, it raises `ValueError`; a thread that holds the update
+        graph's lock, as the Deephaven console does for every command, may create a session.
 
         Args:
             config: The configuration; None means `MassiveConfig()`, which reads the API key
@@ -224,7 +225,6 @@ class MassiveSession:
                 session must be created inside a Deephaven worker), or if the context's query
                 scope is not the Python script session's own, as with
                 `make_user_exec_ctx(freeze_vars=[...])`.
-            ValueError: If called on an update-graph thread or under the update-graph lock.
         """
         if config is None:
             config = MassiveConfig()
@@ -238,8 +238,7 @@ class MassiveSession:
                 "console or an application script, or enter a context first "
                 "(with deephaven.execution_context.get_exec_ctx(): ...)."
             )
-        if on_update_graph(exec_ctx):
-            raise ValueError(ON_UPDATE_GRAPH)
+        refuse_update_graph_thread(exec_ctx)
         if not has_script_query_scope(exec_ctx):
             raise MassiveError(
                 "MassiveSession needs an ExecutionContext whose query scope is the Python script "
@@ -463,7 +462,8 @@ class MassiveSession:
         with the data; a new operation on `t` itself (`t.where(...)`) raises "Can not listen to
         failed table". `m.streams()` shows every stream `CLOSED` (one that had already failed
         keeps `FAILED`), and a `connections()` or `streams()` table taken before the close
-        keeps its final rows. The session's streams leave their WebSocket connections, and
+        keeps its final rows (in a console command, which holds the update graph's lock, once
+        the command is over). The session's streams leave their WebSocket connections, and
         every connection no other session of the same key uses is closed. "MassiveSession #1
         closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
         `connections()`, and `streams()` raise `MassiveError("MassiveSession #1 is closed")`;

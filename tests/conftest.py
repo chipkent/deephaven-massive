@@ -30,6 +30,7 @@ import time
 import types
 import weakref
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
@@ -284,6 +285,53 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
         return rows
 
     return to_pylist
+
+
+_CONSOLE_COMMAND_TIMEOUT: Final = 30.0
+"""Seconds `console_command` lets one command run before it fails the test as a deadlock."""
+
+
+@pytest.fixture
+def console_command(dh_exec_ctx: ExecutionContext) -> Callable[[Callable[[], None]], None]:
+    """Return a function that runs code the way the Deephaven console runs a command.
+
+    The console runs every command on one server thread that holds the update graph's exclusive
+    lock from the command's first line to its last, so no update cycle runs meanwhile. The
+    function runs its argument the same way: on a new thread that enters the embedded server's
+    execution context (through a fresh wrapper, as library threads do) and takes the Java
+    exclusive lock itself, as the console does, so an exception reaches the test unwrapped. A
+    command that has not returned after 30 seconds fails the test as a deadlock. Its thread then
+    still holds the lock, so no update cycle can run again, and the run ends at pytest's
+    timeout with every thread's stack.
+
+    Returns:
+        The function; it takes the command, returns once the command has returned, and
+        re-raises what the command raised.
+    """
+    liveness = importlib.import_module("deephaven_massive._tables.liveness")
+
+    def body(command: Callable[[], None]) -> None:
+        with liveness.entered(dh_exec_ctx):
+            lock = dh_exec_ctx.update_graph.j_update_graph.exclusiveLock()
+            lock.lock()
+            try:
+                command()
+            finally:
+                lock.unlock()
+
+    def run(command: Callable[[], None]) -> None:
+        pool = ThreadPoolExecutor(1, "console command")
+        done = pool.submit(body, command)
+        pool.shutdown(wait=False)  # its thread ends once the command has returned
+        try:
+            done.result(_CONSOLE_COMMAND_TIMEOUT)
+        except TimeoutError:
+            pytest.fail(
+                f"a console command did not return within {_CONSOLE_COMMAND_TIMEOUT:.0f} s: "
+                "it waits for something that needs the update graph's lock, which it holds"
+            )
+
+    return run
 
 
 @pytest.fixture

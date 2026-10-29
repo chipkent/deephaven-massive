@@ -680,10 +680,11 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
     def on_update(_update: object, _replay: bool) -> None:
         if seen.is_set():
             return
-        try:
-            queries[0].append_only()
-        except ValueError as e:
-            errors.append(e)
+        for call in (queries[0].append_only, queries[0].columns):
+            try:
+                call()
+            except ValueError as e:
+                errors.append(e)
         seen.set()
 
     scope = new_scope()
@@ -693,19 +694,24 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
     assert seen.wait(TIMEOUT)
     handle.stop()
     scope.release()
-    assert len(errors) == 1
-    assert "update-graph thread" in str(errors[0])
+    assert len(errors) == 2
+    assert all("update-graph thread" in str(error) for error in errors)
     queries.clear()
     errors.clear()  # its traceback holds the session too
 
 
-def test_verbs_raise_while_holding_the_update_graph_lock(
-    massive_session: dm.MassiveSession,
+def test_verbs_work_while_holding_the_shared_lock(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
+    # A thread holding the update graph's shared lock is not an update-graph thread: as in a
+    # console command, which holds the exclusive lock, every call works.
     q = trades(massive_session)
-    update_graph = massive_session._core.exec_ctx.update_graph
-    with shared_lock(update_graph), pytest.raises(ValueError, match="update-graph lock"):
-        q.fetch()
+    with shared_lock(massive_session._core.exec_ctx.update_graph):
+        result = q.append_only()
+        columns = q.columns()
+    assert result.is_refreshing
+    assert columns.size == len(expected_columns(massive_session, TRADES_SPEC))
+    massive_session.release(result)
 
 
 def test_verbs_raise_after_close(massive_session: dm.MassiveSession) -> None:
@@ -843,13 +849,6 @@ def test_columns_works_on_a_closed_session(
     q = trades(massive_session)
     massive_session.close()
     assert dh_to_pylist(q.columns()) == expected_columns(massive_session, TRADES_SPEC)
-
-
-def test_columns_raises_on_the_update_graph(massive_session: dm.MassiveSession) -> None:
-    q = trades(massive_session)
-    update_graph = massive_session._core.exec_ctx.update_graph
-    with shared_lock(update_graph), pytest.raises(ValueError, match="update-graph lock"):
-        q.columns()
 
 
 def test_columns_from_many_threads_at_once(

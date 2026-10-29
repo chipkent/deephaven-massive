@@ -19,7 +19,8 @@ their types, and what each one means, as a static table built without any networ
 Verbs validate their parameters synchronously on the calling thread: a wrong type raises
 `TypeError` and an invalid value raises `ValueError`. Every verb also raises `ValueError` on a
 Deephaven update-graph thread (for example inside a table listener), because verbs create tables and
-take the session's registry lock.
+take the session's registry lock. A thread that only holds the update graph's lock is not one: the
+Deephaven console runs every command holding it, and every verb works there.
 
 The verbs delegate the transport work to three interfaces, one per transport, defined in
 `_tables/core.py` and provided by the session core's factory hooks: `RestTransport` (`fetch`,
@@ -60,7 +61,7 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._tables.columns import column_table, describe
-from deephaven_massive._tables.core import ON_UPDATE_GRAPH, on_update_graph
+from deephaven_massive._tables.core import refuse_update_graph_thread
 from deephaven_massive._tables.liveness import entered
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import ALL, override
@@ -203,8 +204,8 @@ class QueryBase:
             by WebSocket, and `history()` by REST or flat files); empty for a column that only
             other datasets of the same kind supply, which this dataset always leaves null.
 
-        Raises:
-            ValueError: If called on an update-graph thread, for example from a table listener.
+        Like every verb, it raises `ValueError` on a Deephaven update-graph thread, for example
+        from a table listener.
 
         Example:
             ::
@@ -212,8 +213,7 @@ class QueryBase:
                 cols = m.stocks.trades(["AAPL"]).columns()
                 stream_only = cols.where("SuppliedBy = `WebSocket`")
         """
-        if on_update_graph(self._core.exec_ctx):
-            raise ValueError(ON_UPDATE_GRAPH)
+        refuse_update_graph_thread(self._core.exec_ctx)
         schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             return column_table(schema)

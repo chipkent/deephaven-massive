@@ -16,6 +16,7 @@ from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
+from deephaven.update_graph import exclusive_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
@@ -282,6 +283,26 @@ def test_release_applies_queued_rows_then_releases(
     assert not diagnostics.thread.is_alive()
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     diagnostics.write(_stream(stream_id=9))  # dropped: the writer has stopped
+    assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
+    keeper.release()
+
+
+def test_a_release_that_does_not_wait_lets_the_writer_finish_later(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # A caller holding the update graph's lock, as a console command does, cannot wait for the
+    # writer, whose add needs an update cycle: the release returns at once, and the writer
+    # applies the queued rows, releases the tables, and ends once the lock is let go.
+    diagnostics = Diagnostics(dh_exec_ctx, "test diagnostics")
+    keeper = new_scope()
+    keeper.manage(diagnostics.streams)
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        diagnostics.write(STREAM)
+        diagnostics.release(wait=False)
+        diagnostics.write(_stream(stream_id=9))  # dropped: released
+        assert diagnostics.barrier().is_set()  # the rows queued before are still the writer's
+    diagnostics.thread.join(TIMEOUT)
+    assert not diagnostics.thread.is_alive()
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     keeper.release()
 
