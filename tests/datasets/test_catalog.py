@@ -19,7 +19,7 @@ from deephaven_massive._datasets import catalog as catalog_module
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
 from deephaven_massive._datasets.schema import ColumnType, rename
-from deephaven_massive._enums import AssetClass, ContractType, PollMode, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, ContractType, PollMode, Timespan
 from deephaven_massive._massive import (
     Field,
     ParamKind,
@@ -256,6 +256,24 @@ def test_spec_validation() -> None:
             change(EXCHANGES, name=name)
     with pytest.raises(ValueError, match=r"test\.x: a WebSocket dataset .* needs a class"):
         DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={None: "T"})
+    with pytest.raises(ValueError, match=r"^test\.x: a flat-file dataset needs a class$"):
+        # A file filter looks for the spellings of one class.
+        DatasetSpec(
+            name="test.x",
+            summary="A dataset for the tests.",
+            flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+        )
+    for transports in ({"channels": {None: "T"}}, {"flat_file_prefixes": {None: "us/x"}}):
+        with pytest.raises(
+            ValueError, match=r"^test\.x: symbols kept as written are for REST datasets only$"
+        ):
+            DatasetSpec(
+                name="test.x",
+                summary="A dataset for the tests.",
+                asset_class=AssetClass.STOCKS,
+                symbols_as_written=True,
+                **cast("dict[str, Any]", transports),
+            )
     with pytest.raises(ValueError, match=r"test\.x: a dataset in a kind needs a class"):
         DatasetSpec(
             name="test.x",
@@ -796,7 +814,7 @@ def test_declared_keys_gate_needs_an_instrument_symbol() -> None:
     # A dataset with no class is an instrument dataset when any source declares a symbol.
     mixed = change(
         CONTRACTS,
-        asset_class=None,
+        asset_class=ClassFromPrefix.ANY,
         keys=without(CONTRACTS, (R, "/v3/reference/options/contracts")),
     )
     assert problems(mixed) == (

@@ -20,7 +20,7 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
-from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
@@ -30,6 +30,7 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
+    ClassFromPrefix,
     Direction,
     HistorySource,
     Order,
@@ -37,6 +38,7 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
+from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._massive import RestPath, Transport
@@ -44,6 +46,7 @@ from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables.core import SessionCore
 from deephaven_massive._tables.diagnostics import Diagnostics
+from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -534,9 +537,9 @@ def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> Non
     # An instant given by the caller is sent as given, even on an inclusive or exclusive
     # bound that a date would move by one unit.
     given = {"timestamp.gte": instant, "timestamp.lte": instant, "timestamp.gt": instant}
-    assert rest._filter_days(path, given, None) == given
+    assert rest._filter_days(path, given, ClassFromPrefix.ANY) == given
     dividends = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, None) == {
+    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, ClassFromPrefix.ANY) == {
         "ex_dividend_date.gte": day
     }
 
@@ -603,9 +606,267 @@ def test_a_currency_pair_path_fills_from_and_to_from_each_symbol(
         "closingTrades": [],
     }
     fake_rest.reply("/v1/open-close/crypto/BTC/USD/2025-03-03", Reply(body))
+    serve_pairs(fake_rest)
     out = fetch(session, CRYPTO_OPEN_CLOSE, symbols=["X:BTCUSD"], params={"date": date(2025, 3, 3)})
-    assert [path for path, _ in sent(fake_rest)] == ["/v1/open-close/crypto/BTC/USD/2025-03-03"]
+    assert [path for path, _ in sent(fake_rest)] == [
+        TICKERS_PATH,  # the pair's split comes from Massive's listed crypto tickers,
+        TICKERS_PATH,  # and its delisted ones
+        "/v1/open-close/crypto/BTC/USD/2025-03-03",
+    ]
     assert [(r["Symbol"], r["Open"]) for r in out] == [("X:BTCUSD", 90000.5)]
+
+
+def _ticker(symbol: str, base: str, quote: str) -> dict[str, object]:
+    # One row of /v3/reference/tickers for a crypto pair.
+    return {
+        "ticker": symbol,
+        "market": "crypto",
+        "base_currency_symbol": base,
+        "currency_symbol": quote,
+    }
+
+
+TICKERS_PATH = "/v3/reference/tickers"
+PAIRS = {
+    "X:BTCUSD": ("BTC", "USD"),
+    "X:ETHUSD": ("ETH", "USD"),
+    "X:SOLUSD": ("SOL", "USD"),
+    "X:XRPUSD": ("XRP", "USD"),
+}
+"""The crypto pairs these tests use, as Massive's crypto ticker list splits them."""
+
+
+def serve_pairs(server: FakeRestServer) -> None:
+    # Massive's crypto ticker list, which a `{from}/{to}` path reads once per session.
+    # It is read as two lists: the listed pairs, then the delisted ones (none here).
+    rows = [_ticker(symbol, base, quote) for symbol, (base, quote) in PAIRS.items()]
+    server.reply(TICKERS_PATH, Reply(envelope(rows)), Reply(envelope([])))
+
+
+def sent_data(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
+    # Every GET but the read of the crypto ticker list.
+    return [(path, query) for path, query in sent(server) if path != TICKERS_PATH]
+
+
+def split_pair(symbol: str) -> tuple[str, str]:
+    # The split of a crypto pair, as `RestReader.crypto_pair` reads it from the list.
+    return PAIRS[symbol]
+
+
+LIST_QUERY = {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of listed crypto tickers."""
+DELISTED_QUERY = {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of delisted crypto tickers."""
+
+
+def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # X:DOTUSD ends in USD and in TUSD: Massive's list says where it splits, never a guess.
+    # The whole list is read once, every page, and serves every later pair of the session.
+    second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
+    first_page = {**envelope([_ticker("X:DOTUSD", "DOT", "USD")]), "next_url": second}
+    fake_rest.reply("/v3/reference/tickers?market=crypto&active=true&limit=1000", Reply(first_page))
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?cursor=two",
+        Reply(envelope([_ticker("X:SHIBUSD", "SHIB", "USD"), _ticker("X:ETHWBTC", "ETH", "WBTC")])),
+    )
+    body = {"symbol": "DOT-USD", "isUTC": True, "day": "2025-03-03T00:00:00Z", "open": 4.5}
+    fake_rest.reply("/v1/open-close/crypto/DOT/USD/2025-03-03", Reply(body), Reply(body))
+    for _ in range(2):
+        out = fetch(
+            session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
+        )
+        assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
+    reader = cast("Any", session._core.rest_transport())._reader()
+    assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
+    # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
+    assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", {"cursor": ["two"]}),
+        ("/v3/reference/tickers", DELISTED_QUERY),
+        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),
+        ("/v1/open-close/crypto/DOT/USD/2025-03-03", {}),  # the list is kept
+    ]
+
+
+def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A past date of a delisted pair still needs its split; a ticker in both lists keeps the
+    # listed pair's currencies.
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
+        Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD")])),
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000",
+        Reply(envelope([_ticker("X:FTTUSD", "FTT", "USD"), _ticker("X:BTCUSD", "BT", "CUSD")])),
+    )
+    reader = cast("Any", session._core.rest_transport())._reader()
+    assert reader.crypto_pair("X:FTTUSD") == ("FTT", "USD")
+    assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", DELISTED_QUERY),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([], "Massive's reference data does not list it"),
+        (
+            [_ticker("X:DOTUSD", "DOT", "USDT")],
+            "Massive's reference data gives the currencies 'DOT' and 'USDT', which do not",
+        ),
+        (
+            # Another ticker's row comes first and its currencies join to X:DOTUSD as well.
+            [_ticker("X:OTHER", "DOT", "USD"), _ticker("X:DOTUSD", "DO", "TUSD")],
+            None,
+        ),
+        ([{"market": "crypto", "base_currency_symbol": "DOT"}], "Massive's reference data does"),
+    ],
+)
+def test_a_crypto_pair_lookup_never_guesses(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    rows: list[dict[str, object]],
+    message: str | None,
+) -> None:
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)), Reply(envelope([])))
+    reader = cast("Any", session._core.rest_transport())._reader()
+    if message is None:  # the row of the ticker itself decides
+        assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
+        return
+    with pytest.raises(rest.UnlistedPairError, match=rf"^'X:DOTUSD' cannot be split .*: {message}"):
+        reader.crypto_pair("X:DOTUSD")
+
+
+def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_retried(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(
+        "/v3/reference/tickers",
+        Reply({"status": "ERROR"}, status=403),
+        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+        Reply(envelope([])),
+    )
+    reader = cast("Any", session._core.rest_transport())._reader()
+    with pytest.raises(
+        dm.EntitlementError,
+        match=r"^'X:DOTUSD' cannot be split into its two currencies: reading Massive's crypto",
+    ) as raised:
+        reader.crypto_pair("X:DOTUSD")
+    assert raised.value.status == 403
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the failure was not kept
+    assert len(sent(fake_rest)) == 3  # the failed read, then both lists
+
+
+def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = cast("Any", session._core.rest_transport())._reader()
+    claimed: list[Future[Any]] = []
+
+    def pages(*_: object, **__: object) -> Iterator[Any]:
+        future, created = reader.state.crypto_future()  # what a waiter would get meanwhile
+        assert not created
+        claimed.append(future)
+        raise RuntimeError("the reader broke")
+
+    monkeypatch.setattr(reader.state.client, "pages", pages)
+    with pytest.raises(RuntimeError, match="the reader broke"):  # the reader's own error
+        reader.crypto_pair("X:DOTUSD")
+    (future,) = claimed
+    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError"):
+        future.result()  # the waiters get a MassiveError
+    assert reader.state.crypto_future()[1]  # and the failure is forgotten
+
+
+class _WatchedFuture(Future[rest.CryptoTickers]):
+    # A future that says when a caller starts waiting on it.
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = threading.Event()
+
+    @override
+    def result(self, timeout: float | None = None) -> rest.CryptoTickers:
+        self.waiting.set()
+        return super().result(timeout)
+
+
+def _wait_for_pair(
+    reader: rest.RestReader, future: _WatchedFuture
+) -> tuple[list[object], threading.Thread]:
+    # Call crypto_pair on another thread while `future` is the list being read: the thread
+    # waits on it, and puts what the call returned or raised in the list once it completes.
+    reader.state._crypto = future  # the read another thread has claimed
+    results: list[object] = []
+
+    def wait() -> None:
+        try:
+            results.append(reader.crypto_pair("X:DOTUSD"))
+        except dm.MassiveError as error:
+            results.append(error)
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    assert future.waiting.wait(30)
+    return results, waiter
+
+
+@pytest.mark.parametrize("outcome", ["fails", "succeeds"])
+def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
+    *, session: dm.MassiveSession, outcome: str
+) -> None:
+    reader = cast("Any", session._core.rest_transport())._reader()
+    future = _WatchedFuture()
+    results, waiter = _wait_for_pair(reader, future)
+    if outcome == "fails":
+        future.set_exception(dm.EntitlementError("refused", status=403))
+    else:
+        future.set_result({"X:DOTUSD": ("DOT", "USD")})
+    waiter.join(30)
+    (result,) = results
+    if outcome == "fails":
+        assert isinstance(result, dm.EntitlementError)
+        assert str(result).endswith("reading Massive's crypto tickers failed: refused")
+    else:
+        assert result == ("DOT", "USD")
+
+
+def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Static symbols are planned at the call; a symbol table's are planned each cycle, and
+    # since every later cycle would read the same list, the table fails at its first cycle.
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([])), Reply(envelope([])))
+    params = {"date": date(2025, 3, 3)}
+    static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+    assert isinstance(static, Query)
+    with pytest.raises(rest.UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+        static.poll(60)
+    watch = new_table([string_col("Symbol", ["X:DOTUSD"])])
+    q = query(session, CRYPTO_OPEN_CLOSE, symbols=watch, params=params)
+    assert isinstance(q, Query)
+    table = q.poll(60)
+    failed = threading.Event()
+    for _ in range(3000):
+        if table.j_table.isFailed():
+            failed.set()
+            break
+        failed.wait(0.01)
+    assert failed.is_set()
+    assert sent(fake_rest) == [
+        ("/v3/reference/tickers", LIST_QUERY),
+        ("/v3/reference/tickers", DELISTED_QUERY),
+    ]
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
@@ -708,9 +969,10 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         "/v1/last/crypto/BTC/USD",
         Reply({"status": "success", "request_id": "r1", "symbol": "BTC-USD", "last": last}),
     )
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
-        out = fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD"])
-    assert sorted(path for path, _ in sent(fake_rest)) == [
+        out = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
+    assert sorted(path for path, _ in sent_data(fake_rest)) == [
         "/v1/last/crypto/BTC/USD",
         "/v1/last/crypto/ETH/USD",
     ]
@@ -731,13 +993,15 @@ def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
     )
     path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
     with pytest.raises(ValueError, match="only forex and crypto symbols are currency pairs"):
-        rest.plan_calls(spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",))
+        rest.plan_calls(spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",), split=split_pair)
 
 
 def test_a_per_symbol_path_needs_explicit_symbols() -> None:
     path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
     with pytest.raises(ValueError, match="needs explicit symbols"):
-        rest.plan_calls(CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL)
+        rest.plan_calls(
+            CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL, split=split_pair
+        )
 
 
 def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
@@ -749,22 +1013,24 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
         keys={(R, "/v2/reference/news"): SourceKeys()},
     )
     path = cast("RestPath", _massive.source(R, "/v2/reference/news"))
-    calls = rest.plan_calls(news, path, Request(), symbols=("AAPL", "MSFT"))
+    calls = rest.plan_calls(news, path, Request(), symbols=("AAPL", "MSFT"), split=split_pair)
     assert [(c.symbol, dict(c.query)) for c in calls] == [
         ("AAPL", {"ticker": "AAPL"}),
         ("MSFT", {"ticker": "MSFT"}),
     ]
-    assert rest.plan_calls(news, path, Request(), symbols=()) == []
+    assert rest.plan_calls(news, path, Request(), symbols=(), split=split_pair) == []
     # A path that takes no symbols ignores them: one request.
     movers = cast("RestPath", _massive.source(R, MOVERS_PATH))
     request = Request(params=(("direction", Direction.LOSERS),))
-    (call,) = rest.plan_calls(MOVERS, movers, request, symbols=("AAPL", "MSFT"))
+    (call,) = rest.plan_calls(MOVERS, movers, request, symbols=("AAPL", "MSFT"), split=split_pair)
     assert (call.symbol, dict(call.path_params), dict(call.query)) == (
         None,
         {"direction": Direction.LOSERS},
         {},
     )
-    assert [c.symbol for c in rest.plan_calls(news, path, Request(), symbols=None)] == [None]
+    assert [
+        c.symbol for c in rest.plan_calls(news, path, Request(), symbols=None, split=split_pair)
+    ] == [None]
 
 
 def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None:
@@ -778,7 +1044,7 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     )
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A", "B"))
+    calls = rest.plan_calls(spec, path, Request(), symbols=("A", "B"), split=split_pair)
     assert [dict(c.query) for c in calls] == [{"ticker.any_of": ("A",)}, {"ticker.any_of": ("B",)}]
 
 
@@ -791,7 +1057,7 @@ def test_a_symbol_filled_into_a_query_parameter() -> None:
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
     path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A",))
+    calls = rest.plan_calls(spec, path, Request(), symbols=("A",), split=split_pair)
     assert [(c.symbol, dict(c.path_params), dict(c.query)) for c in calls] == [
         ("A", {}, {"ticker": "A"})
     ]
@@ -864,7 +1130,7 @@ def test_a_per_symbol_detail_path_serves_named_symbols(
 
 
 def test_row_symbols_are_canonical(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     body = {
         "status": "success",
@@ -879,20 +1145,46 @@ def test_row_symbols_are_canonical(
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
+    assert "RawSymbol" not in out[0]
     assert sent(fake_rest)[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
-    with caplog.at_level(logging.WARNING, LOGGER):
-        odd = fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
-    assert odd[0]["Symbol"] == "not a pair"
-    assert "not a valid symbol of its class" in caplog.text
+    # A spelling the library cannot read fails the request by default, naming it.
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the library "
+        r"cannot read as Massive's ticker\. Set MASSIVE_UNKNOWN_SYMBOLS=warn",
+    ):
+        fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
+
+
+def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_under_warn(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    monkeypatch.setattr(
+        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger(symbols.__name__), limit=5)
+    )
+    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
+    fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
+    )
+    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, symbols.__name__):
+        (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
+    assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
+    assert "forex.conversion: Massive sent the symbol '?'" in caplog.text
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([])))
-    watch = new_table([string_col("Symbol", ["SPX", "I:NDX", "not a symbol!"])])
+    watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
     assert sent(fake_rest)[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
+    with pytest.raises(ValueError, match=r"^a symbol table holds 'SPX' .*use 'I:SPX'"):
+        fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
 
 
 # --- Rows ----------------------------------------------------------------------------------------
@@ -1032,8 +1324,9 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"oops", status=500))
+    serve_pairs(fake_rest)
     with pytest.raises(dm.MassiveError, match="HTTP 500"):
-        fetch(session, CRYPTO_LAST, symbols=["BTC-USD", "ETH-USD", "SOL-USD"])
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD", "X:SOLUSD"])
 
 
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
@@ -1381,13 +1674,17 @@ def test_a_caller_direction_folded_into_sort_is_not_overridden() -> None:
         params=(("order", Order.DESC), ("sort", "window_start")),
     )
     order = rest._ascending(FUTURES_BARS, rest_path, mine)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order)
+    (call,) = rest.plan_calls(
+        FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order, split=split_pair
+    )
     assert call.query["sort"] == "window_start.desc"
     assert "order" not in call.query
     # Without a caller direction, the ascending one is sent.
     plain = Request(symbols=("ESZ5",), timespan=Timespan.MINUTE)
     order = rest._ascending(FUTURES_BARS, rest_path, plain)
-    (call,) = rest.plan_calls(FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order)
+    (call,) = rest.plan_calls(
+        FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order, split=split_pair
+    )
     assert call.query["sort"] == "window_start.asc"
 
 
@@ -1431,7 +1728,8 @@ def axis_spec(lower: str, upper: str, path: str = TRADES_PATH) -> DatasetSpec:
 
 def axis(spec: DatasetSpec, start: object, end: object) -> dict[str, object]:
     path = cast("RestPath", _massive.source(R, cast("str", spec.history_path)))
-    return rest._axis_query(spec, path, dates=(cast("Any", start), cast("Any", end)))
+    dates = (cast("Any", start), cast("Any", end))
+    return rest._axis_query(spec, path, dates=dates, asset_class=spec.asset_class)
 
 
 def test_date_axes_are_whole_days_and_shift_for_exclusive_ends() -> None:
@@ -1450,7 +1748,9 @@ def test_timestamp_axes_take_midnights_in_the_day_zone() -> None:
     assert out["timestamp.gte"] == datetime(2025, 3, 3, 5, tzinfo=UTC)
     # A dataset without an asset class bounds its days in New York.
     path = cast("RestPath", _massive.source(R, SMA_STOCK))
-    unclassed = rest._axis_query(SMA, path, dates=(date(2025, 7, 1), None))
+    unclassed = rest._axis_query(
+        SMA, path, dates=(date(2025, 7, 1), None), asset_class=SMA.asset_class
+    )
     assert unclassed == {"timestamp.gte": datetime(2025, 7, 1, 4, tzinfo=UTC)}
     assert out["timestamp.lt"] == datetime(2025, 3, 4, 5, tzinfo=UTC)
 
@@ -1500,7 +1800,10 @@ def test_an_axis_the_path_lacks_or_of_another_kind() -> None:
     assert axis(spec, date(2025, 3, 3), date(2025, 3, 4)) == {"ticker.gte": "2025-03-03"}
     assert (
         rest._axis_query(
-            MOVERS, cast("RestPath", _massive.source(R, MOVERS_PATH)), dates=(None, None)
+            MOVERS,
+            cast("RestPath", _massive.source(R, MOVERS_PATH)),
+            dates=(None, None),
+            asset_class=MOVERS.asset_class,
         )
         == {}
     )
@@ -1651,9 +1954,10 @@ def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
-            assert fetch(session, CRYPTO_LAST, symbols=["ETH-USD"]) == []
+            assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
             assert fetch(session, INDEX_VALUES, symbols=["I:VIX"]) == []
     assert caplog.text.count("X:ETHUSD has no data") == 1
     assert caplog.text.count("for I:VIX: Not entitled; the row is dropped") == 1
@@ -1671,7 +1975,7 @@ def test_a_read_fans_out_on_the_callers_pool(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
-    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols)
+    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
     with ThreadPoolExecutor(2) as pool:
         table, requests = reader.read(
             CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool
@@ -1724,8 +2028,9 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader()
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
-    request = Request(symbols=symbols)
-    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=symbols)
+    calls = rest.plan_calls(
+        CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols, split=split_pair
+    )
     # The other symbols are answered at once with HTTP 404 (no rows), so the one worker could
     # run through every queued call before the read wakes up to cancel them. Each call after
     # the failed one is held at the server until the last two calls are done, which only the
@@ -1754,6 +2059,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
         return future
 
     monkeypatch.setattr(pool, "submit", recorded)
+    request = Request(symbols=symbols)
     with pool, pytest.raises(dm.AuthenticationError):
         reader.read(CRYPTO_LAST, path, calls, request=request, limit=None, executor=pool)
     # The one worker may take the next call before the read cancels it; the rest never start.
@@ -1762,7 +2068,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
 
 def test_an_empty_symbol_tuple_plans_no_request() -> None:
     path = cast("RestPath", _massive.source(R, INDEX_SNAPSHOT_PATH))
-    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=()) == []
+    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=(), split=split_pair) == []
     assert rest.fetch_paths(SMA, ()) == [(SMA_STOCK, ())]
 
 
@@ -1777,7 +2083,9 @@ def test_futures_date_bounds_are_whole_sessions() -> None:
         keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
     rest_path = cast("RestPath", _massive.source(R, path))
-    out = rest._axis_query(spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)))
+    out = rest._axis_query(
+        spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)), asset_class=spec.asset_class
+    )
     # The session ending 2025-03-04 opens at 17:00 Chicago time on the 3rd.
     assert out == {
         "timestamp.gte": datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
@@ -1840,8 +2148,9 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
         "/v1/last/crypto/BTC/USD",
         Reply({"status": "success", "request_id": "r", "last": refused}),
     )
+    serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING, LOGGER):
-        (row,) = fetch(session, CRYPTO_LAST, symbols=["BTC-USD"])
+        (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert row["Symbol"] == "X:BTCUSD"
     assert "Massive answered NOT_ENTITLED for X:BTCUSD: Not entitled" in caplog.text
 

@@ -189,15 +189,17 @@ def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     massive_session: dm.MassiveSession,
 ) -> None:
     # Indicators, reference data, and the unified snapshot span asset classes.
-    q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "i:spx", "aapl", "C:EURUSD"])
+    q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "I:SPX", "AAPL", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
+    with pytest.raises(ValueError, match=r"'i:spx' is an index ticker \(prefix I:\)"):
+        build(massive_session, INDICATOR, symbols=["i:spx"])
 
 
 def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) -> None:
     q = build(
         massive_session,
         DIVIDENDS,
-        symbols=["msft", "AAPL"],
+        symbols=["MSFT", "AAPL"],
         start="2025-01-01",
         end="2025-06-30",
         params={"sort": "ex_dividend_date", "limit": None, "tickers": ["B", "A"]},
@@ -231,9 +233,13 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         asset_class=AssetClass.FOREX,
         channels={None: "C"},
     )
-    assert build(massive_session, fx, symbols="EUR/USD")._request.symbols == ("C:EURUSD",)
+    assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
+    with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
+        build(massive_session, fx, symbols="EUR/USD")
     # A dataset without an asset class reads the class from each prefix; none is a stock.
-    assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("AAPL",)
+    assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        build(massive_session, INDICATOR, symbols="aapl")
 
 
 def test_all_where_the_dataset_cannot_serve_it(massive_session: dm.MassiveSession) -> None:

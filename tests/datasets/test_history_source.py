@@ -34,8 +34,9 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
-from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, Timespan
 from deephaven_massive._massive import Transport
+from deephaven_massive._namespaces import indicators
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -371,7 +372,9 @@ def test_stamp_rule() -> None:
     assert stamp_rule(STOCK_BARS, request(timespan=Timespan.MINUTE, multiplier=5)) is None
     assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.SESSION)) is None
     assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.WEEK)) is None
-    assert stamp_rule(replace(STOCK_BARS, asset_class=None), day) is None
+    # A dataset of every class has no day zone of its own: the indicators pass their symbols'.
+    assert stamp_rule(indicators.SMA, day) is None
+    assert stamp_rule(indicators.SMA, day, asset_class=ClassFromPrefix.ANY) is None
     assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is None
 
 

@@ -11,7 +11,8 @@ Deephaven:
   request;
 - `timestamps`: the declared unit of every timestamp field and its conversion to nanoseconds;
 - `dates`: date parsing and the day rules of `history()` and the time-axis filters;
-- `symbols`: symbol normalization across the WebSocket, REST, and flat-file spellings;
+- `symbols`: Massive's canonical ticker grammar, the public converters, the check of the
+  symbols a query takes, and the reading of the spellings each transport sends;
 - `history_source`: the partition dates of a window and the choice between flat files and REST.
 
 Layer: datasets, above the wire (`_massive`) and the vocabulary (the root `_config`, `_enums`,

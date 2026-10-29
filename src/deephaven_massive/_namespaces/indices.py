@@ -19,7 +19,9 @@ The four datasets and what serves them:
 - `indices.daily_open_close`: one index's open, close, high, low, pre-market, and after-hours
   values for one day.
 
-Index symbols carry the `I:` prefix; a symbol without it gets one (`"SPX"` is `"I:SPX"`).
+Index symbols are Massive's tickers, with the `I:` prefix (`"I:SPX"`); `"SPX"` is refused, and
+`dm.canonical_symbol_index` adds the prefix. An index endpoint whose rows carry a ticker without
+it gets the prefix from the endpoint's class, never from the name.
 """
 
 from __future__ import annotations
@@ -203,9 +205,9 @@ class _Indices(Namespace):
         in the web UI's column tooltips, and by `columns()`.
 
         Args:
-            symbols: The indices, such as `"I:SPX"` or `["I:SPX", "I:NDX"]` (`"SPX"` becomes
-                `"I:SPX"`); a Deephaven table with a `Symbol` column, which the stream follows
-                as rows are added and removed; or `dm.ALL`.
+            symbols: The indices, such as `"I:SPX"` or `["I:SPX", "I:NDX"]` (`"SPX"` is refused); a
+                Deephaven table with a `Symbol` column, which the stream follows as rows are added
+                and removed; or `dm.ALL`.
 
         Returns:
             A query with the stream verbs, `history()`, and `fetch()`. Nothing is requested
@@ -301,8 +303,8 @@ class _Indices(Namespace):
         in the web UI's column tooltips, and by `columns()`.
 
         Args:
-            symbols: The indices, such as `"I:SPX"` or `["I:SPX", "I:NDX"]` (`"SPX"` becomes
-                `"I:SPX"`); a Deephaven table with a `Symbol` column; or `dm.ALL`.
+            symbols: The indices, such as `"I:SPX"` or `["I:SPX", "I:NDX"]` (`"SPX"` is refused); a
+                Deephaven table with a `Symbol` column; or `dm.ALL`.
             timespan: The unit of the bar window, a `dm.Timespan`; `MINUTE` by default.
                 `Timespan.SESSION` is for futures only.
             multiplier: The number of `timespan` units in one bar, a positive `int`; 1 by
@@ -364,7 +366,7 @@ class _Indices(Namespace):
         in the web UI's column tooltips, and by `columns()`.
 
         Args:
-            symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` becomes `"I:SPX"`);
+            symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` is refused);
                 a Deephaven table with a `Symbol` column, re-read on every `poll()` cycle; or
                 `dm.ALL`.
             sort: The field to sort by; Massive accepts `"ticker"`. None keeps Massive's
@@ -424,7 +426,7 @@ class _Indices(Namespace):
         in the web UI's column tooltips, and by `columns()`.
 
         Args:
-            symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` becomes `"I:SPX"`), or
+            symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` is refused), or
                 a Deephaven table with a `Symbol` column, re-read on every `poll()` cycle.
             date: The day, as an ISO-8601 date (`"2025-06-02"`) or a `date`. It is a calendar
                 date, so a `datetime` raises `ValueError`.

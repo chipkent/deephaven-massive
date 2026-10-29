@@ -41,6 +41,17 @@ TIMEOUT = 15.0
 REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
 """The host decision every stream gets unless a test passes its own `decide`."""
 
+PAIRS: dict[str, tuple[str, str]] = {
+    "X:ADAUSD": ("ADA", "USD"),
+    "X:BCDUSD": ("BCD", "USD"),
+    "X:BTCUSD": ("BTC", "USD"),
+    "X:ETHUSD": ("ETH", "USD"),
+    "X:LINKUSD": ("LINK", "USD"),
+    "X:SOLUSD": ("SOL", "USD"),
+}
+"""The crypto pairs Massive's ticker list holds for every `WsSession`, as the stream tests use
+them; a test adds others to `WsSession.pair_answers`."""
+
 
 class SpyClient(_massive.WsClient):
     """A real client that also records the loop-thread calls the library makes on it.
@@ -102,6 +113,10 @@ class WsSession:
         fetched: Each REST lookup of the futures schedule calendar, `(path, query)`, in
             order; appended under `cond`, so read it under `cond` (in a `wait` predicate) or
             once the calendar is idle.
+        pair_answers: What Massive's crypto ticker list says of each crypto ticker, as the
+            REST transport's `crypto_pair` would read it: its `(base, quote)`, or an exception
+            to raise. A ticker missing from it is refused as unlisted. Change it under `cond`,
+            or before the stream that looks the ticker up.
     """
 
     def __init__(
@@ -137,6 +152,7 @@ class WsSession:
         self._opens = 0
         self.fetched: list[tuple[str, dict[str, object]]] = []
         self.rows: dict[str, list[dict[str, object]]] = {}
+        self.pair_answers: dict[str, tuple[str, str] | Exception] = dict(PAIRS)
         self.session = dm.MassiveSession(
             dm.MassiveConfig(
                 api_key="test-key",
@@ -150,6 +166,7 @@ class WsSession:
             resolve_host=self._resolve,
             record_verdict=self._record_verdict,
             fetch_rows=self._fetch_rows,
+            crypto_pair=self._crypto_pair,
             client_factory=self.factory,
         )
         clients._streams = self.connections
@@ -172,7 +189,10 @@ class WsSession:
 
     @property
     def journal(self) -> list[tuple[object, ...]]:
-        """The `set_required` and `subscribe` calls on every client, in order."""
+        """The `set_required` and `subscribe` calls on every client, and each crypto lookup.
+
+        A lookup is `("crypto_pair", ticker, thread name)`, in order with the rest.
+        """
         with self.cond:
             return list(self._journal)
 
@@ -216,6 +236,27 @@ class WsSession:
             self.fetched.append((template, dict(query)))
             self.cond.notify_all()
             return list(self.rows.get(template, []))
+
+    def _crypto_pair(self, symbol: str) -> tuple[str, str]:
+        """Split a crypto ticker as the REST transport's lookup in the ticker list does.
+
+        Returns:
+            The ticker's `(base, quote)` from `pair_answers`.
+
+        Raises:
+            MassiveError: If `pair_answers` does not hold the ticker.
+        """
+        with self.cond:
+            self._journal.append(("crypto_pair", symbol, threading.current_thread().name))
+            answer = self.pair_answers.get(symbol)
+        if answer is None:
+            raise dm.MassiveError(
+                f"{symbol!r} cannot be split into its two currencies: Massive's reference data "
+                "does not list it"
+            )
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def _resolve(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
         """Decide a host as the REST transport's cache does: a recorded verdict wins.

@@ -41,7 +41,7 @@ from deephaven_massive._datasets.dates import (
     publish_time,
     unit_ns,
 )
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._massive import WireUnit
 
 NOW = datetime(2025, 6, 18, 15, tzinfo=UTC)
@@ -242,7 +242,7 @@ def test_flat_file_day_zone_is_the_class_zone() -> None:
     assert flat_file_published(march_3, now=later, zone=UTC, cutoff=CUTOFF)
 
 
-def _spec(asset_class: AssetClass | None) -> DatasetSpec:
+def _spec(asset_class: AssetClass | ClassFromPrefix) -> DatasetSpec:
     return DatasetSpec(
         name="x.history",
         summary="A dataset for the tests.",
@@ -392,7 +392,12 @@ def test_futures_session_rolls_at_17_chicago(moment: datetime, session: date) ->
 def test_calendar_day_refuses_a_datetime() -> None:
     # A calendar date is a whole day: which day an instant names would depend on a zone.
     late = datetime(2025, 3, 4, 2, 0, tzinfo=UTC)
-    for asset_class in (AssetClass.STOCKS, AssetClass.CRYPTO, AssetClass.FUTURES, None):
+    for asset_class in (
+        AssetClass.STOCKS,
+        AssetClass.CRYPTO,
+        AssetClass.FUTURES,
+        ClassFromPrefix.ANY,
+    ):
         with pytest.raises(ValueError, match=r"^x\.history: date is a calendar date; pass a date$"):
             calendar_day(_spec(asset_class), late, "date")
     with pytest.raises(ValueError, match="is a calendar date"):
@@ -431,22 +436,24 @@ def test_only_a_dataset_with_a_path_per_class_follows_its_symbols_class() -> Non
     # A path per symbol class: the symbols' shared class, else New York days.
     assert day_class(_INDICATOR, [crypto, crypto]) is crypto
     assert day_class(_INDICATOR, [stocks]) is stocks
-    assert day_class(_INDICATOR, [stocks, crypto]) is None
-    assert day_class(_INDICATOR) is None
+    assert day_class(_INDICATOR, [stocks, crypto]) is ClassFromPrefix.ANY
+    assert day_class(_INDICATOR) is ClassFromPrefix.ANY
     # Any other dataset without a class keeps New York days, whatever its symbols.
-    assert day_class(_spec(None), [crypto]) is None
+    assert day_class(_spec(ClassFromPrefix.ANY), [crypto]) is ClassFromPrefix.ANY
 
 
 def test_history_bounds_follow_the_symbols_class_only_with_a_path_per_class() -> None:
     crypto = bounds(_INDICATOR, "2025-03-03", None, now=NOW, classes=[AssetClass.CRYPTO])
-    unclassed = bounds(_spec(None), "2025-03-03", None, now=NOW, classes=[AssetClass.CRYPTO])
+    unclassed = bounds(
+        _spec(ClassFromPrefix.ANY), "2025-03-03", None, now=NOW, classes=[AssetClass.CRYPTO]
+    )
     late = datetime(2025, 6, 19, 1, tzinfo=UTC)  # 06-19 in UTC, still 06-18 in New York
     assert bounds(_INDICATOR, "2025-03-03", None, now=late, classes=[AssetClass.CRYPTO]) == (
         DaySpan(date(2025, 3, 3), date(2025, 6, 19))
     )
-    assert bounds(_spec(None), "2025-03-03", None, now=late, classes=[AssetClass.CRYPTO]) == (
-        DaySpan(date(2025, 3, 3), date(2025, 6, 18))
-    )
+    assert bounds(
+        _spec(ClassFromPrefix.ANY), "2025-03-03", None, now=late, classes=[AssetClass.CRYPTO]
+    ) == (DaySpan(date(2025, 3, 3), date(2025, 6, 18)))
     assert crypto == unclassed  # at NOW both zones are on 06-18
 
 
@@ -463,11 +470,11 @@ def test_text_finer_than_a_microsecond_is_refused_not_cut() -> None:
 
 
 def test_each_class_has_its_day_zone_and_day_start() -> None:
-    assert day_zone(None) is NEW_YORK
+    assert day_zone(ClassFromPrefix.ANY) is NEW_YORK
     assert day_zone(AssetClass.CRYPTO) is UTC
     assert day_zone(AssetClass.FUTURES) is CHICAGO
     assert day_start(AssetClass.FOREX, date(2025, 3, 3)) == datetime(2025, 3, 3, tzinfo=UTC)
-    assert day_start(None, date(2025, 3, 3)) == datetime(2025, 3, 3, 5, tzinfo=UTC)
+    assert day_start(ClassFromPrefix.ANY, date(2025, 3, 3)) == datetime(2025, 3, 3, 5, tzinfo=UTC)
     assert day_start(AssetClass.FUTURES, date(2025, 3, 4)) == futures_session_open(date(2025, 3, 4))
 
 
@@ -480,11 +487,11 @@ def test_an_instant_bound_keeps_a_whole_day_and_steps_back_one_unit() -> None:
         datetime(2025, 3, 3, 23, 59, 59, 999000, tzinfo=UTC)
     )
     instant = datetime(2025, 3, 3, 12, tzinfo=UTC)
-    assert instant_bound(None, "t.lt", instant, unit=None, upper=True) == instant
+    assert instant_bound(ClassFromPrefix.ANY, "t.lt", instant, unit=None, upper=True) == instant
     with pytest.raises(ValueError, match=r"^t\.gt takes nanoseconds, so it cannot bound"):
-        instant_bound(None, "t.gt", day, unit=WireUnit.NS, upper=False)
+        instant_bound(ClassFromPrefix.ANY, "t.gt", day, unit=WireUnit.NS, upper=False)
     with pytest.raises(ValueError, match=r"^t\.lte takes ISO-8601 instants of no documented"):
-        instant_bound(None, "t.lte", day, unit=None, upper=True)
+        instant_bound(ClassFromPrefix.ANY, "t.lte", day, unit=None, upper=True)
 
 
 # --- Whole bar windows ---------------------------------------------------------------------------
@@ -822,7 +829,7 @@ def test_the_last_trading_day_allows_a_weekday_more_and_one_per_five_sessions() 
 
 def test_a_trading_day_is_a_weekday_a_forex_sunday_or_any_crypto_day() -> None:
     saturday, sunday, monday = date(2025, 3, 1), date(2025, 3, 2), date(2025, 3, 3)
-    for asset_class in (AssetClass.STOCKS, AssetClass.FUTURES, None):
+    for asset_class in (AssetClass.STOCKS, AssetClass.FUTURES, ClassFromPrefix.ANY):
         assert is_trading_day(asset_class, monday)
         assert not is_trading_day(asset_class, saturday)
         assert not is_trading_day(asset_class, sunday)
@@ -838,7 +845,7 @@ def test_a_day_ends_by_its_class() -> None:
     saturday = date(2025, 3, 8)
     assert day_end(AssetClass.STOCKS, saturday) == datetime(2025, 3, 9, 5, tzinfo=UTC)
     assert day_end(AssetClass.STOCKS, sunday) == datetime(2025, 3, 10, 4, tzinfo=UTC)
-    assert day_end(None, sunday) == datetime(2025, 3, 10, 4, tzinfo=UTC)
+    assert day_end(ClassFromPrefix.ANY, sunday) == datetime(2025, 3, 10, 4, tzinfo=UTC)
     assert day_end(AssetClass.INDICES, sunday) == datetime(2025, 3, 10, 5, tzinfo=UTC)
     assert day_end(AssetClass.CRYPTO, sunday) == datetime(2025, 3, 10, tzinfo=UTC)
     assert day_end(AssetClass.FUTURES, sunday) == datetime(2025, 3, 9, 22, tzinfo=UTC)

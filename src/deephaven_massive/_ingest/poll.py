@@ -33,11 +33,14 @@ makes its requests on the poller's pool of `max_concurrency` threads. Each cycle
 table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, `SymbolCount` for a reactive
 table, and `SchemaDrift` from each page's drift.
 
-**Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, `RowDataError` (a
+**Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
+`PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
+(`SessionCore.fail_stream`), and ends the poller. The permanent errors are `RowDataError` (a
 row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
-rows), or `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks
-a parameter the caller set) fails the table through `publish_failure`, marks the row `FAILED`
-(`SessionCore.fail_stream`), and ends the poller. Any other error, also one while publishing,
+rows), `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks a
+parameter the caller set), `SymbolRowError` (a symbol table's row that is not Massive's
+ticker), and `_ingest/rest.py`'s `UnlistedPairError` (a crypto pair whose currencies Massive's
+reference data does not give). Any other error, also one while publishing,
 is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds.
 
@@ -68,13 +71,20 @@ from deephaven.stream import blink_to_append_only
 from deephaven.stream.table_publisher import table_publisher
 
 from deephaven_massive._datasets.row_times import INSERT
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalizer
+from deephaven_massive._datasets.schema import RAW_SYMBOL
+from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode
-from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+from deephaven_massive._errors import (
+    AuthenticationError,
+    EntitlementError,
+    MassiveError,
+    PermanentError,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
+from deephaven_massive._tables.watchlist import read_symbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable
@@ -99,6 +109,7 @@ __all__ = [
     "Poller",
     "Pollers",
     "RowDataError",
+    "SymbolRowError",
     "UnsupportedParameterError",
     "build_table",
     "open_poll",
@@ -114,7 +125,7 @@ LIVE_COLUMN: Final = "__MassiveLive"
 are PascalCase wire names, so none can take this name."""
 
 
-class RowDataError(MassiveError):
+class RowDataError(PermanentError):
     """A REST row that breaks its dataset's schema.
 
     A row that lacks a key the dataset requires, a value that does not convert to its field's
@@ -124,7 +135,7 @@ class RowDataError(MassiveError):
     """
 
 
-class UnsupportedParameterError(MassiveError):
+class UnsupportedParameterError(PermanentError):
     """A parameter the caller set that the path a `poll()` cycle chose does not take.
 
     A reactive symbol table can route a new symbol to a path that lacks a parameter (an
@@ -133,7 +144,15 @@ class UnsupportedParameterError(MassiveError):
     """
 
 
-_FATAL: Final = (AuthenticationError, EntitlementError, RowDataError, UnsupportedParameterError)
+class SymbolRowError(PermanentError):
+    """A row of a `poll()` table's reactive symbol table that is not Massive's exact ticker.
+
+    The table fails with it, since every later cycle would read the same row; its message
+    names `dm.canonicalize_symbols`, which converts such a table.
+    """
+
+
+_FATAL: Final = (AuthenticationError, EntitlementError, PermanentError)
 """The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""
 
 
@@ -286,6 +305,7 @@ class Poller:
         "_core",
         "_exec_ctx",
         "_interval",
+        "_key_names",
         "_keys",
         "_label",
         "_max_concurrency",
@@ -338,8 +358,9 @@ class Poller:
         self._exec_ctx = core.exec_ctx
         self._label = core.label
         self._max_concurrency = core.config.max_concurrency
-        self._schema = core.catalog.dataset_schema(spec)
+        self._schema = core.dataset_schema(spec)
         self._spec = spec
+        self._key_names = key_columns(spec, self._schema)
         self._request = request
         self._interval = interval.total_seconds()
         self._mode = mode
@@ -406,17 +427,20 @@ class Poller:
         """Return the cycle's symbols, reading a reactive table once.
 
         Returns:
-            The request's symbols, or for a reactive table the valid symbols it holds now,
-            canonical and sorted (rows that are no valid symbol of the class are ignored and
-            logged once at WARNING).
+            The request's symbols, or for a reactive table the symbols it holds now, sorted
+            (null rows are ignored).
+
+        Raises:
+            SymbolRowError: If a row of the reactive table is not Massive's exact ticker; the
+                table fails with it.
         """
         symbols = self._request.symbols
         if not isinstance(symbols, SymbolTable):
             return symbols
-        canonical = symbol_canonicalizer(self._spec.asset_class)
-        snapshot = symbols.table.snapshot()
-        found = {canonical(row[0]) for row in snapshot.iter_tuple(cols="Symbol")}
-        return tuple(sorted(symbol for symbol in found if symbol is not None))
+        try:
+            return read_symbols(self._spec, symbols.table)
+        except ValueError as error:
+            raise SymbolRowError(f"{self._spec.name} poll(): {error}") from None
 
     def _cycle(self, pool: ThreadPoolExecutor) -> bool:
         """Run one cycle: read, publish, and update the table's row.
@@ -531,7 +555,10 @@ class Poller:
         `APPEND` would append its row again every cycle. Like a missing required key, it is a
         data failure, so it fails the table. The dataset's nullable poll keys
         (`DatasetSpec.nullable_poll_keys`, such as an option's `PutCall`, empty for common
-        stock) and its revision keys are not checked: a null there is a value.
+        stock) and its revision keys are not checked: a null there is a value. Nor is `Symbol`
+        in a `WARN` session (`key_columns`): the reader refuses a row with no symbol, so a null
+        `Symbol` there is a row Massive spelled in a way the library cannot read, keyed by its
+        `RawSymbol`.
 
         Args:
             table: The cycle's rows.
@@ -543,7 +570,13 @@ class Poller:
                 published.
         """
         nullable = self._spec.nullable_poll_keys
-        for name in (key for key in self._spec.poll_keys if key not in nullable):
+        # In a WARN session the key holds RawSymbol (`key_columns`): a row's Symbol is null
+        # exactly when its RawSymbol holds the unreadable text, so neither is checked.
+        warn = RAW_SYMBOL in self._key_names
+        checked = (
+            k for k in self._key_names if k not in nullable and not (warn and k in _SYMBOL_KEYS)
+        )
+        for name in checked:
             missing = pc.is_null(table.column(name), nan_is_null=True)
             row = pc.index(missing, True).as_py()
             if row >= 0:
@@ -570,7 +603,7 @@ class Poller:
             The rows to append, and every identity of the cycle (those already held are
             harmless to add again).
         """
-        names = (*self._spec.poll_keys, *self._spec.revision_keys)
+        names = (*self._key_names, *self._spec.revision_keys)
         identities = zip(*(table.column(name).to_pylist() for name in names), strict=True)
         taken: set[tuple[Hashable, ...]] = set()
         keep = []
@@ -590,7 +623,7 @@ class Poller:
         Returns:
             The rows with the live column, then the tombstones; and the cycle's key set.
         """
-        names = self._spec.poll_keys
+        names = self._key_names
         keys = set(zip(*(table.column(name).to_pylist() for name in names), strict=True))
         gone = self._keys - keys
         rows = table.append_column(LIVE_COLUMN, pa.array([True] * table.num_rows, pa.bool_()))
@@ -619,6 +652,32 @@ class Poller:
         logger.error("%s poll() failed: %s", self._spec.name, error)
         self._publisher.publish_failure(error)
         core.fail_stream(self._stream_id, str(error))
+
+
+_SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})
+"""The key columns of a row's symbol in a `WARN` session: one of the two is always set."""
+
+
+def key_columns(spec: DatasetSpec, schema: Schema) -> tuple[str, ...]:
+    """Return the columns that identify a row of a `poll()` table: its key in every mode.
+
+    They are the dataset's poll keys (`DatasetSpec.poll_keys`), plus `RawSymbol` when they hold
+    `Symbol` and the schema has a `RawSymbol` column (a session whose `unknown_symbols` is
+    `WARN`). Such a session keeps a row whose symbol Massive spelled in a way the library cannot
+    read, with a null `Symbol` and the text in `RawSymbol`; keyed on `Symbol` alone, every such
+    row would merge into one, or fail the null-key check. With `RawSymbol` in the key, a readable
+    row is keyed by its `Symbol` (its `RawSymbol` is null) and an unreadable one by its text.
+
+    Args:
+        spec: The dataset.
+        schema: The dataset's schema in the session.
+
+    Returns:
+        The key columns, in order.
+    """
+    if "Symbol" in spec.poll_keys and RAW_SYMBOL in schema.column_names:
+        return (*spec.poll_keys, RAW_SYMBOL)
+    return spec.poll_keys
 
 
 def build_table(
@@ -652,7 +711,11 @@ def build_table(
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
-    keyed = blink.last_by(list(spec.poll_keys))
+    keys = list(key_columns(spec, schema))
+    # When every column is a key, `last_by` has no column to aggregate and Deephaven refuses
+    # it. Its rows would be the distinct key rows, which `select_distinct` of a blink table
+    # keeps across cycles. `REPLACE` never takes that branch: its hidden column is not a key.
+    keyed = blink.select_distinct(keys) if set(definitions) <= set(keys) else blink.last_by(keys)
     if not replace:
         return keyed, publisher
     return keyed.where(LIVE_COLUMN).drop_columns(LIVE_COLUMN), publisher
@@ -683,7 +746,7 @@ def _build(
         only through the publisher.
     """
     built: list[TablePublisher] = []
-    schema = core.catalog.dataset_schema(spec)
+    schema = core.dataset_schema(spec)
 
     def shape() -> Table:
         table, publisher = build_table(spec, schema, mode, stream_id=stream_id, stop=stop)

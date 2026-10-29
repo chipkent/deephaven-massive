@@ -417,7 +417,7 @@ def _days(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("46")
+@pytest.mark.settles("53")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_nvda_split_basis_before_and_on_the_split(
@@ -444,7 +444,7 @@ def test_nvda_split_basis_before_and_on_the_split(
 
 
 @pytest.mark.needs("stocks:starter", "s3")
-@pytest.mark.settles("46")
+@pytest.mark.settles("53")
 @pytest.mark.timeout(100)
 def test_nvda_day_file_before_the_split(
     flat_file_tickers: FlatFileTickers, *, evidence: Evidence
@@ -462,7 +462,7 @@ def test_nvda_day_file_before_the_split(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("47")
+@pytest.mark.settles("54")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Evidence) -> None:
@@ -498,7 +498,7 @@ def test_every_page_echoes_its_adjustment(live_rest: RestClient, *, evidence: Ev
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("48")
+@pytest.mark.settles("55")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_cash_dividends_are_never_adjusted(
@@ -521,7 +521,7 @@ def test_cash_dividends_are_never_adjusted(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("49")
+@pytest.mark.settles("56")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_stock_dividend_events_and_the_adjustment(
@@ -557,7 +557,7 @@ def test_stock_dividend_events_and_the_adjustment(
 
 
 @pytest.mark.needs("stocks:basic", "currencies:basic")
-@pytest.mark.settles("54")
+@pytest.mark.settles("61")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_daily_indicator_stamps(
@@ -600,7 +600,7 @@ def test_daily_indicator_stamps(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("55")
+@pytest.mark.settles("62")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -> None:
@@ -634,7 +634,7 @@ def test_unknown_ticker_statuses(live_rest: RestClient, *, evidence: Evidence) -
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("56")
+@pytest.mark.settles("63")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
 def test_bars_of_several_days_count_calendar_or_trading_days(

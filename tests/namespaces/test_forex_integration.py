@@ -339,7 +339,7 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
 
 
 @pytest.mark.needs("currencies:starter", "s3")
-@pytest.mark.settles("57")
+@pytest.mark.settles("64")
 @pytest.mark.timeout(100)
 def test_forex_flat_files_of_a_weekend(
     *, flat_file_tickers: FlatFileTickers, evidence: Evidence

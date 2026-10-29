@@ -18,7 +18,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -506,6 +506,7 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         prefix="us_stocks_sip/day_aggs_v1",
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -530,6 +531,7 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -626,9 +628,33 @@ def test_symbol_pushdown_keeps_only_the_requested_symbols(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    q = query(session, STOCK_TRADES, symbols=["aapl"])
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert pick(t, "Symbol", "Id") == [("AAPL", "1"), ("AAPL", "3")]
+
+
+def test_a_ticker_the_library_cannot_read_fails_the_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    every = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with pytest.raises(
+        dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
+    ):
+        every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+
+
+def test_a_ticker_the_library_cannot_read_is_kept_under_warn(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with dm.MassiveSession(config(unknown_symbols=dm.UnknownSymbols.WARN)) as m:
+        t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
+            "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES
+        )
+        assert pick(t, "Symbol", "RawSymbol", "Id") == [(None, "BRK/B", "1"), ("AAPL", None, "2")]
 
 
 @pytest.mark.parametrize("ticker", ["NA", "NULL"])
@@ -1019,7 +1045,7 @@ def test_crypto_trades_every_day(
 ) -> None:
     saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
     put(saturday, "global_crypto_trades_v1_2025-03-01.csv")
-    q = query(session, CRYPTO_TRADES, symbols=["BTC-USD"])
+    q = query(session, CRYPTO_TRADES, symbols=["X:BTCUSD"])
     t = q.history("2025-03-01", "2025-03-01", source=HistorySource.FLAT_FILES)
     assert pick(t, "Symbol", "Timestamp", "Size", "Id") == [
         ("X:BTCUSD", 1740830400000000000, 0.015, "a1")
@@ -1066,7 +1092,7 @@ def test_auto_delegates_few_symbols_to_rest(
 ) -> None:
     rest = RestRecorder()
     monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
-    q = query(session, STOCK_TRADES, symbols=["msft", "aapl"])
+    q = query(session, STOCK_TRADES, symbols=["MSFT", "AAPL"])
     with caplog.at_level(logging.INFO, logger=LOGGER):
         t = q.history("2025-03-03", "2025-03-04")
     assert pick(t, "Symbol") == [("from REST",)]
@@ -1865,7 +1891,7 @@ def test_history_runs_from_a_thread_without_an_execution_context(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    q = query(session, STOCK_TRADES, symbols=["aapl"])
+    q = query(session, STOCK_TRADES, symbols=["AAPL"])
     out: list[object] = []
 
     def run() -> None:  # a failure leaves `out` empty, which the assertion reports
@@ -1934,6 +1960,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         prefix="us_stocks_sip/trades_v1",
         request=request(dm.ALL),
         window=window,
+        unknown_symbols=dm.UnknownSymbols.FAIL,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()
@@ -2182,15 +2209,28 @@ def test_a_session_collected_unclosed_closes_its_bucket(
 
 
 def synthetic_trades(rows: int) -> str:
-    # A trades file whose rows vary like real ones; one row in a thousand is the symbol RARE.
+    # A trades file whose rows vary like real ones; one row in 100 is the symbol RARE, so at
+    # 16 KiB blocks (about 200 rows) every block holds about two RARE rows.
     moment = 1741012200000000000
     tickers = ("AAPL", "MSFT", "SPY", "NVDA")
     lines = [
         f"12,,4,{n},{moment + n * 1000},{100 + n % 997 / 7:.4f},{n},{moment + n * 1001},"
-        f"{n % 5000 + 1},3,{'RARE' if n % 1000 == 0 else tickers[n % 4]},,\n"
+        f"{n % 5000 + 1},3,{'RARE' if n % 100 == 0 else tickers[n % 4]},,\n"
         for n in range(rows)
     ]
     return TRADE_HEADER + "".join(lines)
+
+
+class ReadMemory(NamedTuple):
+    # One read's rows and memory. The peaks are the highest Python memory (tracemalloc) and
+    # Arrow pool level above where the read started. The rises are how far those running peaks
+    # climbed from a third of the way through the file to its end, so they leave out whatever
+    # the read set up before its first block.
+    rows: int
+    python_peak: int
+    arrow_peak: int
+    python_rise: int
+    arrow_rise: int
 
 
 class MemorySampler:
@@ -2226,28 +2266,24 @@ class MemorySampler:
         self.arrow[self.taken[0]] = pa.total_allocated_bytes()
         self.taken[0] += 1
 
-    def measure(self, read: Callable[[], Table]) -> tuple[int, int, int]:
-        # Runs `read` and returns its rows, and the Python and Arrow peaks above the baselines.
+    def measure(self, read: Callable[[], Table]) -> ReadMemory:
+        # Runs `read` and returns its rows and what its reader's memory did.
         self.taken[:] = [0, 0]
         arrow_baseline = pa.total_allocated_bytes()
         tracemalloc.start()
         try:
-            python_baseline = tracemalloc.get_traced_memory()[0]
             rows = read().size
-            python_peak = tracemalloc.get_traced_memory()[1] - python_baseline
+            python_peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()
-        return rows, python_peak, max(self.arrow[: self.taken[0]]) - arrow_baseline
-
-    def python_rise(self) -> int:
-        # How far the running Python peak rose from a third of the blocks to the last one.
-        blocks = self.taken[1]
-        return self.python[blocks - 1] - self.python[blocks // 3]
-
-    def arrow_rise(self) -> int:
-        # How far the Arrow pool's running maximum rose from a third of the samples to the end.
-        samples = self.taken[0]
-        return max(self.arrow[:samples]) - max(self.arrow[: samples // 3])
+        blocks, samples = self.taken[1], self.taken[0]
+        return ReadMemory(
+            rows=rows,
+            python_peak=python_peak,
+            arrow_peak=max(self.arrow[:samples]) - arrow_baseline,
+            python_rise=self.python[blocks - 1] - self.python[blocks // 3],
+            arrow_rise=max(self.arrow[:samples]) - max(self.arrow[: samples // 3]),
+        )
 
 
 def test_memory_per_reader_does_not_grow_with_the_file(
@@ -2257,11 +2293,19 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     make_csv_gz: Callable[[str], bytes],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A reader holds a window of its file, not the file: about 32 blocks of Arrow's read-ahead
+    # plus at most `_TABLE_BLOCKS` blocks of gathered rows. Small blocks give a file of about
+    # 900 blocks, cheap to build and read, in which that window fills within the first third.
     block = 16 * 1024
+    window = 32 + flatfiles._TABLE_BLOCKS
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
-    text = synthetic_trades(600_000)
+    rows = 192_000
+    text = synthetic_trades(rows)
+    blocks = len(text) // block
+    assert blocks > 15 * window  # the last two thirds of the file dwarf the window
     fake_s3.put(TRADES_0303, make_csv_gz(text))
-    sampler = MemorySampler(2 * (len(text) // block) + 1000)
+    fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
+    sampler = MemorySampler(2 * blocks + 100)
     sampler.install(monkeypatch)
     m = dm.MassiveSession(config(max_concurrency=1))
 
@@ -2271,28 +2315,37 @@ def test_memory_per_reader_does_not_grow_with_the_file(
 
     try:
         # A first read creates the client: botocore parses its service model once per client.
-        fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
-        every, python_peak, arrow_peak = sampler.measure(read(dm.ALL))
-        rare, _, _ = sampler.measure(read(["RARE"]))  # the samples kept are this read's
+        every = sampler.measure(read(dm.ALL))
+        rare = sampler.measure(read(["RARE"]))
+        fake_s3.put(TRADES_0303, make_csv_gz(synthetic_trades(rows // 4)))
+        short = sampler.measure(read(["RARE"]))
     finally:
         m.close()
-    assert (every, rare) == (600_000, 600)
-    # About 32 blocks of read-ahead and 16 of gathered rows. Small test blocks inflate the peak
-    # through fixed per-block overhead (about 75 blocks with the GIL and 150 without it at
-    # 16 KiB, against about 37 at the production 1 MiB), so 250 blocks is only a loose ceiling.
-    bound = 250 * block
-    assert len(text) > 10 * bound
-    assert python_peak < bound
-    assert arrow_peak < bound
-    # The real check is the plateau: once the read-ahead has filled, the running peak must not
-    # keep rising with the file. It is measured on the rare symbol's read, whose result is one
-    # small table: with dm.ALL the result itself (a Deephaven table, and its Python wrapper,
-    # per 16 blocks) legitimately grows with the file.
-    assert sampler.python_rise() < 32 * block
-    # Arrow's pool is invisible to tracemalloc: each small batch a selective read gathers costs
-    # allocation overhead that its byte count does not show, so the batches must be merged.
-    assert sampler.arrow_rise() < 32 * block
+    assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
+    # Python's peak includes the read-ahead's decompressed text, made on Arrow's own thread,
+    # so it varies from run to run by up to about 40 blocks; a reader that kept a little Python
+    # data per block (a copy of the compressed chunks, or of the RARE rows) adds 100 or more.
+    python_slack = 64 * block
+    # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
+    # and legitimately grow it by about 17 blocks over the last two thirds of the file (about
+    # 19 between the two files), but each small batch also costs allocation overhead that its
+    # byte count does not show: kept as one batch per block instead of merged, they grow it by
+    # about 62 (70 between the files).
+    arrow_slack = 40 * block
+    # From a third of the way through the file to its end, a reader that kept each block it
+    # read would rise by about 600 blocks. When every row survives, the result itself (a
+    # Deephaven table, and its Python wrapper, per `_TABLE_BLOCKS` blocks) legitimately grows
+    # with the file, but by far less than a block per table.
+    assert every.python_rise < python_slack
+    assert every.arrow_rise < arrow_slack
+    assert rare.python_rise < python_slack
+    assert rare.arrow_rise < arrow_slack
+    # The rises leave out whatever a read sets up before its first block, such as the whole
+    # body read or decompressed up front: reading a file four times as long must peak about as
+    # high as reading the short one.
+    assert rare.python_peak - short.python_peak < python_slack
+    assert rare.arrow_peak - short.arrow_peak < arrow_slack
 
 
 def test_the_production_block_size() -> None:

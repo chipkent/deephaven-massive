@@ -53,11 +53,7 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.symbols import (
-    SymbolTable,
-    symbol_canonicalizer,
-    symbol_class,
-)
+from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import (
     HistorySource,
     PollMode,
@@ -66,7 +62,7 @@ from deephaven_massive._enums import (
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.core import ON_UPDATE_GRAPH, on_update_graph
 from deephaven_massive._tables.liveness import entered
-from deephaven_massive._tables.watchlist import canonical_view
+from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
@@ -145,31 +141,31 @@ def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
 def _read_symbol_table(
     core: SessionCore, spec: DatasetSpec, symbols: SymbolTable
 ) -> tuple[str, ...]:
-    """Read a reactive symbol table once, for a static result (`fetch()` or `history()`).
+    """Read a reactive symbol table once, refusing a row that is not Massive's exact ticker.
 
-    The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
-    it reads, so the symbols are one consistent snapshot. Runs on the caller thread, inside the
-    session's execution context, with no library lock held. Each row is canonicalized as the
-    stream verbs do (`symbol_canonicalizer` in `_datasets/symbols.py`): a row that is not a
-    valid symbol of the class is ignored and logged once at WARNING.
+    The table is read as one consistent snapshot (`read_symbols` in `_tables/watchlist.py`),
+    on the caller thread, inside the session's execution context, with no library lock held.
+    Every live verb calls it before it starts, so a bad row fails the call; a static verb
+    (`fetch()`, `history()`) uses the symbols it returns.
 
     Args:
         core: The session core, for its execution context.
-        spec: The dataset, whose asset class canonicalizes the symbols.
+        spec: The dataset, whose asset class the rows must follow.
         symbols: The boxed reactive table.
 
     Returns:
-        The table's valid symbols, canonical, sorted, and de-duplicated.
+        The table's symbols, sorted and de-duplicated; null rows are ignored.
 
     Raises:
-        ValueError: If the table holds no valid symbol, as an empty symbol list does.
+        ValueError: If the table holds no symbol, as an empty symbol list does.
+
+    A row that is not canonical raises the `ValueError` of `read_symbols`, which names
+    `dm.canonicalize_symbols`.
     """
-    canonical_symbol = symbol_canonicalizer(spec.asset_class)
     with entered(core.exec_ctx):
-        raw = {canonical_symbol(row[0]) for row in symbols.table.iter_tuple(cols="Symbol")}
-    found = tuple(sorted(symbol for symbol in raw if symbol is not None))
+        found = read_symbols(spec, symbols.table)
     if not found:
-        raise ValueError(f"{spec.name}: the symbol table holds no valid symbols")
+        raise ValueError(f"{spec.name}: the symbol table holds no symbols")
     return found
 
 
@@ -218,7 +214,7 @@ class QueryBase:
         """
         if on_update_graph(self._core.exec_ctx):
             raise ValueError(ON_UPDATE_GRAPH)
-        schema = self._core.catalog.dataset_schema(self._spec)
+        schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             return column_table(schema)
 
@@ -246,7 +242,7 @@ class QueryBase:
             Its copy that carries the dataset's column and table descriptions.
         """
         spec = self._spec
-        schema = self._core.catalog.dataset_schema(spec)
+        schema = self._core.dataset_schema(spec)
         with entered(self._core.exec_ctx):
             return describe(table, spec, schema)
 
@@ -313,6 +309,8 @@ class Query(QueryBase):
         """Return a live table that re-runs `fetch()` every `interval`.
 
         A reactive `Table` passed as `symbols` is re-read once per cycle on the poller thread.
+        Every non-null row must be Massive's exact ticker: a bad row present at the call raises
+        `ValueError`, and one added later fails the table, naming `dm.canonicalize_symbols`.
         Fan-out endpoints issue one request per symbol per cycle, at most `max_concurrency` at a
         time. Releasing the table (`m.release`, garbage collection) stops its poller. A
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
@@ -361,6 +359,9 @@ class Query(QueryBase):
         self._core.require_verb_thread()
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
+        if isinstance(self._request.symbols, SymbolTable):
+            with entered(self._core.exec_ctx):
+                read_symbols(self._spec, self._request.symbols.table)
         return self._core.rest_transport().poll(
             self._spec, self._request, interval=period, mode=chosen
         )
@@ -410,6 +411,10 @@ class StreamQuery(QueryBase):
         The result is the shape, described last (`describe`): an append-only or ring table
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
+        A reactive symbol table is read first, so a row that is not Massive's exact ticker
+        fails the call before any stream starts. A crypto pair takes its split from Massive's
+        crypto ticker list when the stream starts (read once per session); a failed read, or a
+        pair the list does not hold, raises `MassiveError` before any topic is subscribed.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -417,9 +422,16 @@ class StreamQuery(QueryBase):
 
         Returns:
             The tracked live result.
+
+        A bad row of a symbol table raises the `ValueError` of `read_symbols` in
+        `_tables/watchlist.py`.
         """
         spec = self._spec
-        schema = self._core.catalog.dataset_schema(spec)
+        symbols = self._request.symbols
+        if isinstance(symbols, SymbolTable):
+            with entered(self._core.exec_ctx):
+                read_symbols(spec, symbols.table)
+        schema = self._core.dataset_schema(spec)
         return self._core.stream_result(
             spec,
             self._request,
@@ -483,9 +495,10 @@ class StreamQuery(QueryBase):
         removed and re-added shows its last row until it ticks again. With keys that span
         symbols (`by="Exchange"`), rows are filtered before the aggregation, so each group's
         row is the latest from a symbol that was watched when it arrived; a group keeps that
-        row after the symbol is removed, until a watched symbol ticks in the group. The table
-        may hold any accepted spelling (`EUR/USD` for `C:EURUSD`): it is matched through
-        `canonical_view` in `_tables/watchlist.py`. `last_by()` never seeds
+        row after the symbol is removed, until a watched symbol ticks in the group. Every row
+        of the table must hold Massive's exact ticker (`C:EURUSD`, not `EUR/USD`); a later row
+        that does not fails the result (convert such a table with `dm.canonicalize_symbols`
+        first). `last_by()` never seeds
         from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
         that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
         unknown column raises `ValueError`.
@@ -507,20 +520,11 @@ class StreamQuery(QueryBase):
         if not isinstance(symbols, SymbolTable):
             return self._stream(lambda blink: blink.last_by(list(keys)))
         watch = symbols.table
-        asset_class = self._spec.asset_class
         if "Symbol" in keys:
             # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
-            return self._stream(
-                lambda blink: blink.last_by(list(keys)).where_in(
-                    canonical_view(asset_class, watch), "Symbol"
-                )
-            )
+            return self._stream(lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"))
         # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
-        return self._stream(
-            lambda blink: blink.where_in(canonical_view(asset_class, watch), "Symbol").last_by(
-                list(keys)
-            )
-        )
+        return self._stream(lambda blink: blink.where_in(watch, "Symbol").last_by(list(keys)))
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:
         """Validate the `by` argument of `last_by`.
@@ -550,7 +554,7 @@ class StreamQuery(QueryBase):
         repeated = sorted({str(key) for key in keys if keys.count(key) > 1})
         if repeated:
             raise ValueError(f"by names {repeated} more than once")
-        columns = self._core.catalog.dataset_schema(self._spec).column_names
+        columns = self._core.dataset_schema(self._spec).column_names
         unknown = [key for key in keys if key not in columns]
         if unknown:
             raise ValueError(
@@ -697,7 +701,7 @@ class HistoryQuery(QueryBase):
         Example:
             ::
 
-                q = m.crypto.trades("BTC-USD")
+                q = m.crypto.trades("X:BTCUSD")
                 day = q.history("2026-01-02", "2026-01-02")  # all of that UTC day
                 hour = q.history(
                     datetime(2026, 1, 2, 14, tzinfo=UTC), datetime(2026, 1, 2, 15, tzinfo=UTC)
@@ -748,7 +752,7 @@ class HistoryQuery(QueryBase):
             A static table with every column of the dataset and no row, described as a
             result is (`_described`).
         """
-        schema = self._core.catalog.dataset_schema(self._spec)
+        schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             table = dh_arrow.to_table(schema.arrow_schema().empty_table())
         return self._described(table)

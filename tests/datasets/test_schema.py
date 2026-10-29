@@ -27,7 +27,7 @@ from deephaven_massive._datasets.schema import (
     widen,
 )
 from deephaven_massive._datasets.timestamps import TimeUnit
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
 from deephaven_massive._namespaces import crypto, forex, futures, indicators, indices, stocks
@@ -546,15 +546,64 @@ def test_the_merge_puts_the_declared_keys_first() -> None:
     )
     schema = dataset_schema(dataset, (dataset,), lookup)
     names = schema.column_names
-    assert names[:3] == ("Symbol", "AdditionalUnderlyings", "Cfi")
+    assert names[:4] == ("Symbol", "OptionRoot", "AdditionalUnderlyings", "Cfi")
     assert schema.name == "options.contracts"
-    # Only the library's columns lead; Underlying keeps its field's place in the source, and
-    # the arrival time comes last.
+    # Only Symbol leads, then the derived columns; Underlying keeps its field's place in the
+    # source, and the arrival time comes last.
     fields = [f.column for f in source(*contracts).fields if f.column != "Ticker"]
-    assert names[1:] == (
+    assert names[2:] == (
         *("Underlying" if c == "UnderlyingTicker" else c for c in fields),
         "TimestampInsert",
     )
+
+
+def test_derived_columns_follow_the_leading_keys() -> None:
+    trades = (R, "/v3/trades/{optionsTicker}")
+    rows = (R, "/v3/reference/options/contracts")
+    by_request = spec(
+        "options.trades",
+        {trades: SourceKeys(KeySpec("optionsTicker", from_request=True), KeySpec("SipTimestamp"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    from_rows = spec(
+        "options.contracts",
+        {rows: SourceKeys(KeySpec("Ticker"))},
+        asset_class=AssetClass.OPTIONS,
+    )
+    plain = dataset_schema(by_request, (by_request,), lookup)
+    assert plain.column_names[:3] == ("Symbol", "Timestamp", "OptionRoot")
+    root = plain.columns[2]
+    assert root.type is ColumnType.STRING
+    assert root.description.startswith("The OCC option root, read from `Symbol`")
+    assert root.supplied_by == plain.columns[0].supplied_by
+    assert root.wire_keys == plain.columns[0].wire_keys
+    # RawSymbol exists only where a symbol is read from rows, and only when asked for.
+    assert dataset_schema(by_request, (by_request,), lookup, raw_symbol=True) == plain
+    kept = dataset_schema(from_rows, (from_rows,), lookup, raw_symbol=True)
+    assert kept.column_names[:3] == ("Symbol", "OptionRoot", "RawSymbol")
+    assert (
+        "Present only in a session whose `unknown_symbols` is `WARN`" in kept.columns[2].description
+    )
+    assert "RawSymbol" not in dataset_schema(from_rows, (from_rows,), lookup).column_names
+
+
+def test_only_options_datasets_have_an_option_root() -> None:
+    quotes = (R, "/v3/quotes/{stockTicker}")
+    stocks = spec(
+        "stocks.quotes",
+        {quotes: SourceKeys(KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp"))},
+        asset_class=AssetClass.STOCKS,
+    )
+    assert "OptionRoot" not in dataset_schema(stocks, (stocks,), lookup).column_names
+    unkeyed = DatasetSpec(
+        name="options.contracts",
+        summary="A dataset for the tests.",
+        asset_class=AssetClass.OPTIONS,
+        fetch_path="/v3/reference/options/contracts",
+    )
+    names = dataset_schema(unkeyed, (unkeyed,), lookup, raw_symbol=True).column_names
+    assert "OptionRoot" not in names
+    assert "RawSymbol" not in names
 
 
 def test_the_merge_follows_the_membership_positions() -> None:
@@ -750,7 +799,7 @@ def test_a_dataset_takes_its_asset_class_s_description_of_a_shared_source() -> N
     )
     made = Source(key="/shared", transport=R, fields=(price,))
     found = {}
-    for asset_class in (AssetClass.OPTIONS, AssetClass.STOCKS, None):
+    for asset_class in (AssetClass.OPTIONS, AssetClass.STOCKS, ClassFromPrefix.ANY):
         dataset = DatasetSpec(
             name="reference.x",
             summary="A dataset for the tests.",
@@ -762,7 +811,7 @@ def test_a_dataset_takes_its_asset_class_s_description_of_a_shared_source() -> N
     assert found == {
         AssetClass.OPTIONS: "Per share of the underlying.",
         AssetClass.STOCKS: "Per whole share.",
-        None: "Per whole share.",
+        ClassFromPrefix.ANY: "Per whole share.",
     }
 
 
@@ -784,7 +833,7 @@ def test_a_key_column_quotes_its_asset_class_s_description() -> None:
             fetch_path="/shared",
             keys={(R, "/shared"): SourceKeys(KeySpec("Ticker"))},
         )
-        column, _ = dataset_schema(dataset, (dataset,), lambda *_: made).columns
+        column = dataset_schema(dataset, (dataset,), lambda *_: made).columns[0]  # then OptionRoot
         quoted[asset_class] = column.description.split("REST `ticker`: ")[1]
     assert quoted == {
         AssetClass.OPTIONS: '"The option contract symbol."',
@@ -893,7 +942,8 @@ def test_an_underlying_column_takes_its_own_sentence() -> None:
         c for c in dataset_schema(dataset, (dataset,), lookup).columns if c.name == "Underlying"
     )
     assert underlying.description == (
-        "The underlying instrument, in the library's canonical symbol form. From "
+        "The instrument Massive links the row to, exactly as Massive sends it; for an option, "
+        "the linked instrument, not what the contract delivers. From "
         f'REST `underlying_ticker`: "{wire(*contracts, "UnderlyingTicker").description}"'
     )
 

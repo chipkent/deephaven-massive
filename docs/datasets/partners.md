@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.partners.benzinga.analyst_insights`, `m.partners.benzinga.ratings`, `m.partners.benzinga.bulls_bears_say`, `m.partners.benzinga.guidance`, `m.partners.benzinga.earnings`, `m.partners.etf_global.analytics`, `m.partners.etf_global.constituents`, `m.partners.etf_global.fund_flows`, `m.partners.etf_global.profiles`, `m.partners.etf_global.taxonomies`, and `m.partners.tmx.corporate_events` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+
 <a id="benzinga-analysts"></a>
 
 ## `m.partners.benzinga.analysts`

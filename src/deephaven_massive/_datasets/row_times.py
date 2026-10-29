@@ -98,7 +98,7 @@ from deephaven_massive._datasets.dates import (
     unit_ns,
 )
 from deephaven_massive._datasets.timestamps import ISSUES_URL
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._errors import MassiveError, log_once
 
 if TYPE_CHECKING:
@@ -529,7 +529,7 @@ class TimeRule:
         dataset: The dataset, for messages.
         row_times: Which time columns the rows carry.
         asset_class: The class whose day rules apply (`dates.day_class`): its day zone, and
-            for futures its sessions; None for New York days.
+            for futures its sessions; `ClassFromPrefix.ANY` for New York days.
         timespan: The bar unit of a `BAR` request; `DAY` for a daily summary; None for every
             other dataset.
         multiplier: How many units one bar spans; 1 for everything but bars.
@@ -537,7 +537,7 @@ class TimeRule:
 
     dataset: str
     row_times: RowTimes
-    asset_class: AssetClass | None
+    asset_class: AssetClass | ClassFromPrefix
     timespan: Timespan | None = None
     multiplier: int = 1
 
@@ -873,7 +873,7 @@ def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:
 
 
 def time_rule(
-    spec: DatasetSpec, request: Request, *, asset_class: AssetClass | None = None
+    spec: DatasetSpec, request: Request, *, asset_class: AssetClass | ClassFromPrefix
 ) -> TimeRule:
     """Return how the time columns of a request's rows are computed.
 
@@ -881,17 +881,16 @@ def time_rule(
         spec: The dataset.
         request: The normalized arguments: for bars and indicators, the timespan and the
             multiplier.
-        asset_class: The class whose day rules the request follows (`dates.day_class`); None,
-            the default, takes the dataset's own.
+        asset_class: The class whose day rules the request follows (`dates.day_class`): the
+            dataset's own, or for a dataset of every class (the indicators) its symbols'.
 
     Returns:
         The rule: of the request's timespan and multiplier for bars and indicators, of one day
         for a daily summary, and of neither for every other dataset.
     """
     times = spec.times
-    zone_class = spec.asset_class if asset_class is None else asset_class
     if times is RowTimes.BAR:
-        return TimeRule(spec.name, times, zone_class, request.timespan, request.multiplier)
+        return TimeRule(spec.name, times, asset_class, request.timespan, request.multiplier)
     if times is RowTimes.DAY:
-        return TimeRule(spec.name, times, zone_class, Timespan.DAY)
-    return TimeRule(spec.name, times, zone_class)
+        return TimeRule(spec.name, times, asset_class, Timespan.DAY)
+    return TimeRule(spec.name, times, asset_class)

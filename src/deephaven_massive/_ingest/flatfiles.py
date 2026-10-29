@@ -130,13 +130,25 @@ from deephaven_massive._datasets.row_times import (
     time_rule,
     within,
 )
-from deephaven_massive._datasets.schema import rename, required_fields, widen
+from deephaven_massive._datasets.schema import (
+    OPTION_ROOT,
+    RAW_SYMBOL,
+    rename,
+    required_fields,
+    widen,
+)
+from deephaven_massive._datasets.symbols import (
+    WireSymbols,
+    option_roots,
+    unknown_symbol_message,
+    wire_spellings,
+)
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
     to_epoch_ns_array,
 )
-from deephaven_massive._enums import AssetClass, FuturesVenue
+from deephaven_massive._enums import AssetClass, FuturesVenue, UnknownSymbols
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -299,6 +311,8 @@ class _Transform:
             (`columns.dataset_table`).
         session_header: For futures, the header that holds the session date; None otherwise.
         prefix: The prefix the files come from, for messages.
+        symbols: How the files' tickers become canonical (`WireSymbols`), and what a spelling
+            the library cannot read does.
         times: How the rows' time columns are filled (`row_times.TimeRule`).
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
@@ -316,6 +330,7 @@ class _Transform:
     prefix: str
     times: TimeRule
     time_name: str
+    symbols: WireSymbols
     stamps: StampRule | None = None
     bars: BarBounds | None = None
 
@@ -328,6 +343,7 @@ class _Transform:
         prefix: str,
         request: Request,
         window: HistoryWindow,
+        unknown_symbols: UnknownSymbols,
         stamps: StampRule | None = None,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
@@ -343,17 +359,24 @@ class _Transform:
             prefix: The dataset's prefix for the request; a futures prefix holds `{venue}`.
             request: The normalized arguments: the canonical symbols to keep, as a tuple
                 (anything else, `dm.ALL` or None for a dataset without instruments, keeps every
-                row), and the bars' timespan and multiplier.
+                row), and the bars' timespan and multiplier. The files are filtered on every
+                spelling `symbols.canonical_from_wire` reads as one of the symbols
+                (`wire_spellings`: a forex quotes file may write `X:EUR-USD`).
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
                 every time of their files, which hold exactly the requested sessions.
+            unknown_symbols: The session's rule for a ticker spelling the library cannot
+                read; `WARN` also adds the `RawSymbol` column to the schema.
             stamps: How the bars' stamps are treated (`history_source.stamp_rule`), or None
                 to keep them; the files hold only 1-day bars of the classes that have one.
 
         Returns:
             The transform.
         """
-        schema = catalog.dataset_schema(spec)
+        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
+        # with flat files.
+        file_class = cast("AssetClass", spec.asset_class)
         source = catalog.source(Transport.FLAT_FILES, prefix)
         renamed = rename(spec, source)
         by_column = {c.column: c for c in renamed}
@@ -380,7 +403,14 @@ class _Transform:
                 for c in renamed
             ),
             symbol_header=header["Symbol"],
-            symbols=pa.array(symbols, pa.string()) if isinstance(symbols, tuple) else None,
+            symbols=(
+                pa.array(
+                    [w for s in symbols for w in wire_spellings(file_class, s)],
+                    pa.string(),
+                )
+                if isinstance(symbols, tuple)
+                else None
+            ),
             time_header=header[time_name],
             window_ns=_window_ns(window),
             to_ns=to_ns,
@@ -396,8 +426,11 @@ class _Transform:
             date_columns=schema.date_columns,
             session_header=session_header,
             prefix=prefix,
-            times=time_rule(spec, request),
+            times=time_rule(spec, request, asset_class=file_class),
             time_name=time_name,
+            symbols=WireSymbols(
+                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+            ),
             stamps=stamps,
             bars=window.bars,
         )
@@ -437,9 +470,29 @@ class _Transform:
         `timestamps.instants`.
         A 1-day bar stamped at a time of day Massive is not known to use raises the
         `MassiveError` of `timestamps.day_starts`.
+
+        Raises:
+            MassiveError: If a row's ticker is a spelling the library cannot read and the
+                session's `unknown_symbols` is `FAIL` (`symbols.unknown_symbol_message`);
+                under `WARN` the row keeps a null `Symbol` and the text in `RawSymbol`.
         """
-        arrays = [self._column(batch, column) for column in self.columns]
-        rows = pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
+        arrays: dict[str, pa.Array] = {}
+        raw = pa.nulls(batch.num_rows, pa.string())
+        for column in self.columns:
+            column_type, name, _ = column
+            if name == OPTION_ROOT:
+                values = option_roots(arrays["Symbol"])
+            elif name == RAW_SYMBOL:
+                values = raw
+            elif name == "Symbol":
+                read = self.symbols.read(batch["Symbol"], {})
+                if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
+                    raise MassiveError(unknown_symbol_message(self.dataset, read.unknown))
+                values, raw = read.symbols, read.raw
+            else:
+                values = self._column(batch, column)
+            arrays[name] = widen(values, column_type.arrow_type)
+        rows = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         filled = self.times.fill(rows, received=received)
         return filled if self.bars is None else within(filled, self.bars)
 
@@ -583,6 +636,7 @@ class FlatFileHistory:
             prefix=prefix,
             request=request,
             window=window,
+            unknown_symbols=self._core.config.unknown_symbols,
             stamps=_flat_file_stamps(spec, request),
         )
         keys = _keys(prefix, request.venue, dates)

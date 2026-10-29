@@ -1037,6 +1037,46 @@ def test_one_block_round_trips_through_the_flat_files(
         assert row["SequenceNumber"] == int(wire["sequence_number"])
 
 
+SPREAD_ROWS = (
+    "GCJ5,2025-02-04,1738540800000000000,1,1,1,1,1,1,1,1",
+    "10YN6-10YQ6,2025-02-04,1738540800000000000,2,2,2,2,2,2,2,2",
+    "BOB 02-01 U6,2025-02-04,1738540800000000000,3,3,3,3,3,3,3,3",
+    "CL:BF Q6-U6-V6,2025-02-04,1738540800000000000,4,4,4,4,4,4,4,4",
+    "6A:XF:AUDUSD:Q6,2025-02-04,1738540800000000000,5,5,5,5,5,5,5,5",
+)
+
+
+def test_a_file_of_spreads_reads_every_ticker_as_written(
+    *,
+    s3_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Loader,
+    make_csv_gz: Callable[[str], bytes],
+) -> None:
+    # Massive's own CBOT, NYMEX, and CME samples hold spreads beside single contracts; under
+    # the default, an unreadable ticker would fail the read, so every one must be read.
+    header = load_fixture(OWNER, "session_aggs_v1.csv").decode().splitlines()[0]
+    day = date(2025, 2, 4)
+    key = object_key("us_futures_{venue}/session_aggs_v1", day, "cbot")
+    fake_s3.put(key, make_csv_gz("\n".join([header, *SPREAD_ROWS]) + "\n"))
+    every = s3_session.futures.bars(dm.ALL, dm.Timespan.SESSION, venue=dm.FuturesVenue.CBOT)
+    out = rows(every.history(day, day, source=dm.HistorySource.FLAT_FILES))
+    assert [r["Symbol"] for r in out] == [row.split(",")[0] for row in SPREAD_ROWS]
+    # A spread is a symbol a dataset takes, and filters the same file.
+    one = s3_session.futures.bars("BOB 02-01 U6", dm.Timespan.SESSION, venue=dm.FuturesVenue.CBOT)
+    picked = rows(one.history(day, day, source=dm.HistorySource.FLAT_FILES))
+    assert [(r["Symbol"], r["Close"]) for r in picked] == [("BOB 02-01 U6", 3.0)]
+
+
+def test_futures_datasets_take_contracts_and_spreads(massive_session: dm.MassiveSession) -> None:
+    # Any ticker as Massive writes it, so a combo form seen on a row can be passed back.
+    q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6", "ZZ:NEW COMBO Z6"])
+    assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6", "ZZ:NEW COMBO Z6")
+    for bad in (" ESZ5", "X:ESZ5", ""):
+        with pytest.raises(ValueError, match="ticker"):
+            massive_session.futures.trades(bad)
+
+
 def test_bars_of_several_sessions_by_date_fit_under_both_readings_of_their_label(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

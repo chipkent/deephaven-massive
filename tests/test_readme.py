@@ -68,6 +68,15 @@ def _bar(day: str, close: float, volume: float) -> dict[str, object]:
     }
 
 
+def _no_crypto_pair(symbol: str) -> tuple[str, str]:
+    """Refuse a crypto lookup: the README's examples stream no crypto pair.
+
+    Raises:
+        AssertionError: Always, naming the pair.
+    """
+    raise AssertionError(f"the README's examples stream no crypto pair, but asked for {symbol}")
+
+
 @pytest.fixture
 def readme_server(
     fake_rest: FakeRestServer, fake_ws_server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch
@@ -107,6 +116,7 @@ def readme_server(
         resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "test"),
         record_verdict=lambda *_: None,
         fetch_rows=lambda *_: [],
+        crypto_pair=_no_crypto_pair,
         client_factory=client,
     )
     cast("Any", session._core._ports)._streams = connections

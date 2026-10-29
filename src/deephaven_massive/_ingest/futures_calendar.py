@@ -16,11 +16,11 @@ already trades for the next session.
   session per `session_end_date`, open from its first event (a pre-open or the open) to its
   last (the close).
 
-A spread is never looked up: its ticker is not a contract (`GCQ6-GCJ7`, `BOB 02-01 U6`,
-`BZ:BF F7-G7-H7`, `6A:XF:AUDUSD:Q6`), so `/futures/v1/contracts` would list none of them, and
-reading its legs needs the spread grammar of each product family. Any ticker holding a `-`, a
-space, or a `:` is taken for a spread; its rows keep the rule's date, which a holiday fold can
-make wrong, so the first batch that dates a spread's rows logs one WARNING for it.
+Only a single contract ticker is looked up (`symbols.is_futures_contract`). Every other futures
+ticker is a spread or combination (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`,
+`6A:XF:AUDUSD:Q6`): `/futures/v1/contracts` lists none of them, and Massive documents no grammar
+that names their legs. Their rows keep the rule's date, which a holiday fold can make wrong, so
+the first batch that dates a spread's rows logs one WARNING for it.
 
 `correct` runs on the connection's flush thread and never waits: a row inside the session the
 rule gave it is kept, a row the schedules place in another session moves there, and a row in the
@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 
 from deephaven_massive._datasets.dates import futures_session
+from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._errors import MassiveError
 
 if TYPE_CHECKING:
@@ -166,23 +167,6 @@ def _ns(text: str) -> int:
     return (moment - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1) * 1000
 
 
-_SPREAD_MARKS: Final = frozenset("- :")
-"""The characters that make a futures ticker a spread: a contract ticker holds none of them."""
-
-
-def _is_spread(symbol: str) -> bool:
-    """Tell whether a futures ticker is a spread rather than a contract.
-
-    Args:
-        symbol: A canonical futures ticker, such as `ESZ5`, `GCQ6-GCJ7`, `BOB 02-01 U6`, or
-            `6A:XF:AUDUSD:Q6`.
-
-    Returns:
-        True when it holds a `-`, a space, or a `:`.
-    """
-    return not _SPREAD_MARKS.isdisjoint(symbol)
-
-
 class FuturesCalendar:
     """The futures session calendar of one session's WebSocket streams (see the module).
 
@@ -264,7 +248,7 @@ class FuturesCalendar:
             symbols: Canonical futures symbols, contracts or spreads; spreads are not looked
                 up.
         """
-        self._ask_contracts({symbol for symbol in symbols if not _is_spread(symbol)})
+        self._ask_contracts({symbol for symbol in symbols if is_futures_contract(symbol)})
 
     def wait_idle(self, timeout: float) -> bool:
         """Wait until the worker has served every lookup queued so far, or the calendar closed.
@@ -324,7 +308,7 @@ class FuturesCalendar:
         for row, (symbol, moment, day) in enumerate(zip(names, moments, ruled, strict=True)):
             if symbol is None or moment is None or day is None:
                 continue
-            if _is_spread(symbol):
+            if not is_futures_contract(symbol):
                 batch.spreads.add(symbol)
                 continue
             fixed[row] = self._place(symbol, known, moment=moment, day=day, batch=batch)

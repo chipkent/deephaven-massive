@@ -7,10 +7,11 @@ nothing touches the network until a verb is called on the query. This module own
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
 
-A currency pair may be written in any of Massive's spellings: `EUR/USD`, `EUR-USD` (the
-WebSocket form), `EURUSD`, or `C:EURUSD` (the REST ticker). Every factory normalizes it with
-`_datasets/symbols.py`, so the `Symbol` column and the query always hold the canonical
-`C:EURUSD`, and the transports convert back to the WebSocket form for topics. The last-quote
+A currency pair is Massive's REST ticker, `C:EURUSD`: every factory takes only that form
+(`check_symbol` in `_datasets/symbols.py`; `dm.canonical_symbol_forex` converts `EUR/USD`), the
+`Symbol` column always holds it, and the transports write the WebSocket form (`EUR-USD`) for
+topics and read every spelling Massive sends back (`EUR/USD` in frames, `X:EUR-USD` in the
+quotes flat-file sample). The last-quote
 endpoint takes a pair as two path segments (`/v1/last_quote/currencies/EUR/USD`); its spec
 declares the symbol as filled from the request, so the row's `Symbol` is the whole pair.
 """
@@ -232,7 +233,7 @@ class _Forex(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            eur = m.forex.quotes(["EUR/USD", "C:GBPUSD"]).last_by()
+            eur = m.forex.quotes(["C:EURUSD", "C:GBPUSD"]).last_by()
     """
 
     __slots__ = ()
@@ -256,10 +257,9 @@ class _Forex(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#quotes.
 
         Args:
-            symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column (a live watchlist), or `dm.ALL`. Each pair may be written
-                `EUR/USD`, `EUR-USD`, `EURUSD`, or `C:EURUSD`; the `Symbol` column holds
-                `C:EURUSD`.
+            symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with a
+                `Symbol` column (a live watchlist), or `dm.ALL`. Each pair is Massive's ticker, such
+                as `C:EURUSD` (`dm.canonical_symbol_forex` converts `EUR/USD`).
 
         Returns:
             A query; nothing is requested or subscribed until one of its verbs is called.
@@ -271,7 +271,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                q = m.forex.quotes("EUR/USD")
+                q = m.forex.quotes("C:EURUSD")
                 live = q.last_by()
                 day = q.history("2026-10-20", "2026-10-20")
         """
@@ -350,8 +350,8 @@ class _Forex(Namespace):
 
         Args:
             symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column, or `dm.ALL`. Each pair may be written `EUR/USD`,
-                `EUR-USD`, `EURUSD`, or `C:EURUSD`; the `Symbol` column holds `C:EURUSD`.
+                a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
+                (`dm.canonical_symbol_forex` converts `EUR/USD`).
             timespan: The unit of one bar's window. `dm.Timespan.SESSION` is futures only.
                 Defaults to one minute.
             multiplier: The number of `timespan` units in one bar's window, a positive
@@ -371,8 +371,8 @@ class _Forex(Namespace):
         Example:
             ::
 
-                live = m.forex.bars("EUR/USD").append_only()
-                hourly = m.forex.bars(["EUR/USD"], dm.Timespan.HOUR).history(
+                live = m.forex.bars("C:EURUSD").append_only()
+                hourly = m.forex.bars(["C:EURUSD"], dm.Timespan.HOUR).history(
                     "2026-10-01", "2026-10-23"
                 )
                 yesterday = m.forex.bars("C:EURUSD", dm.Timespan.DAY).fetch()
@@ -400,8 +400,8 @@ class _Forex(Namespace):
 
         Args:
             symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
-                a `Symbol` column, or `dm.ALL`. Each pair may be written `EUR/USD`,
-                `EUR-USD`, `EURUSD`, or `C:EURUSD`; the `Symbol` column holds `C:EURUSD`.
+                a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
+                (`dm.canonical_symbol_forex` converts `EUR/USD`).
 
         Returns:
             A query; nothing is subscribed until one of its verbs is called.
@@ -413,7 +413,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                fair = m.forex.fmv(["EUR/USD", "USD/JPY"]).last_by()
+                fair = m.forex.fmv(["C:EURUSD", "C:USDJPY"]).last_by()
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
@@ -433,8 +433,8 @@ class _Forex(Namespace):
         Args:
             symbols: The currency pairs, sent as the `tickers` parameter: one pair, a sequence
                 of pairs, a Deephaven table with a `Symbol` column (re-read every poll
-                cycle), or `dm.ALL`. Each pair may be written `EUR/USD`, `EUR-USD`, `EURUSD`,
-                or `C:EURUSD`; the `Symbol` column holds `C:EURUSD`.
+                cycle), or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
+                (`dm.canonical_symbol_forex` converts `EUR/USD`).
 
         Returns:
             A query; nothing is requested until `fetch()` or `poll()` is called.
@@ -446,7 +446,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                board = m.forex.snapshots(["EUR/USD", "GBP/USD"]).poll(5)
+                board = m.forex.snapshots(["C:EURUSD", "C:GBPUSD"]).poll(5)
                 market = m.forex.snapshots(dm.ALL).fetch()
         """
         return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))

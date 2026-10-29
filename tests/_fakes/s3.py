@@ -52,6 +52,20 @@ _FAILURES: Final = frozenset({"unreachable"})
 """The failures `FakeS3.fail` raises by name before any response."""
 
 
+class _CopyingStream(io.BytesIO):
+    """A response stream whose every read returns new bytes, as a socket read does.
+
+    A plain `io.BytesIO` built from a bytes object hands that very object back from a read of
+    the whole stream, so a reader that read a whole body at once would cost no memory in a
+    test. Copying on each read, rather than once when the stream is made, gives each read the
+    cost it has against a real connection.
+    """
+
+    @override
+    def read(self, size: int | None = -1, /) -> bytes:
+        return bytes(memoryview(super().read(size)))
+
+
 class _DroppedStream(io.BytesIO):
     """A response stream that serves its bytes and then fails as a dropped connection does."""
 
@@ -303,7 +317,7 @@ class FakeS3:
             return _ok(self._body(key, _DroppedStream(dropped), len(dropped) + 1))
         if data is None:
             return _error(404, "NoSuchKey", "The specified key does not exist.")
-        return _ok(self._body(key, io.BytesIO(data), len(data)))
+        return _ok(self._body(key, _CopyingStream(data), len(data)))
 
     def _body(self, key: str, raw: io.BytesIO, length: int) -> StreamingBody:
         def closed() -> None:

@@ -65,7 +65,7 @@ from deephaven_massive._datasets.dates import (
 )
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.timestamps import day_starts
-from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, Timespan
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -107,8 +107,8 @@ _ONE_DAY: Final = timedelta(days=1)
 _SESSION_DATE: Final = "session_end_date"
 """The futures parameter that names a session; `history()` sets it for sessions named by date."""
 
-_PARTITION_ZONES: Final[Mapping[AssetClass | None, tzinfo]] = dict(
-    [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (None, NEW_YORK)]
+_PARTITION_ZONES: Final[Mapping[AssetClass | ClassFromPrefix, tzinfo]] = dict(
+    [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (ClassFromPrefix.ANY, NEW_YORK)]
 )
 """The zone whose calendar dates name a class's files and start its publication clock.
 
@@ -436,7 +436,10 @@ _DAYS_OR_LONGER: Final = frozenset(
 
 
 def stamp_rule(
-    spec: DatasetSpec, request: Request, *, asset_class: AssetClass | None = None
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    asset_class: AssetClass | ClassFromPrefix = ClassFromPrefix.ANY,
 ) -> StampRule | None:
     """Return how the transports stamp a request's bars, or None to keep the stamps as sent.
 
@@ -461,7 +464,7 @@ def stamp_rule(
     Args:
         spec: The dataset.
         request: The normalized arguments.
-        asset_class: For a dataset without a class whose rows are bars (the indicators), the
+        asset_class: For a dataset of every class whose rows are bars (the indicators), the
             class of the request's symbols (`dates.day_class`); ignored for every other
             dataset.
 
@@ -472,11 +475,10 @@ def stamp_rule(
     """
     indicator = not spec.is_bars and spec.times is RowTimes.BAR
     cls = asset_class if indicator else spec.asset_class
-    # `is None` first narrows the type for the lookups below.
     if (
         not (spec.is_bars or indicator)
         or request.timespan not in _DAYS_OR_LONGER
-        or cls is None
+        or not isinstance(cls, AssetClass)
         or cls not in DAY_ZONES
     ):
         return None

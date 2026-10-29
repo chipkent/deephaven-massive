@@ -195,7 +195,8 @@ def test_a_watched_contract_is_asked_for_once(calendar: FuturesCalendar, fetch: 
 
 
 @pytest.mark.parametrize(
-    "spread", ["ZCK4-ZCN4", "BOB 02-01 U6", "BZ:BF F7-G7-H7", "6A:XF:AUDUSD:Q6"]
+    "spread",
+    ["ZCK4-ZCN4", "BOB 02-01 U6", "BZ:BF F7-G7-H7", "6A:XF:AUDUSD:Q6", "ZZ:NEW COMBO Z6"],
 )
 def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
     *,

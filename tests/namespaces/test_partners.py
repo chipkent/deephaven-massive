@@ -21,7 +21,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import Order, PollMode
+from deephaven_massive._enums import ClassFromPrefix, Order, PollMode
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import partners
 from deephaven_massive._namespaces.base import Namespace, query_class
@@ -183,7 +183,7 @@ def test_news_keeps_its_tickers_and_is_timed_by_publication() -> None:
     assert types["Timestamp"] is ColumnType.INSTANT
     assert "Published" not in types
     assert types["Tickers"] is ColumnType.STRING  # the JSON list, never a Symbol
-    assert spec.asset_class is None
+    assert spec.asset_class is ClassFromPrefix.ANY
     assert spec.time_axis == ("published.gte", "published.lt")
     assert spec.symbol_param == "tickers.any_of"
 
@@ -296,7 +296,7 @@ def test_every_poll_key_tells_fixture_rows_apart(
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_list_factories_build_the_request(massive_session: dm.MassiveSession, name: str) -> None:
-    q = factory(massive_session, name)(["msft", "AAPL"], sort="date", order=Order.DESC, limit=10)
+    q = factory(massive_session, name)(["MSFT", "AAPL"], sort="date", order=Order.DESC, limit=10)
     assert type(q) is Query
     assert q._spec is spec_of(name)
     request = q._request
@@ -343,8 +343,24 @@ def test_all_is_refused_by_list_datasets(massive_session: dm.MassiveSession, nam
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_stock_datasets_refuse_another_class(massive_session: dm.MassiveSession, name: str) -> None:
-    with pytest.raises(ValueError, match="prefix of another asset class"):
+    # The TMX calendar keeps tickers as written, but no class prefix passes there either.
+    message = (
+        "is not a ticker as Massive writes it"
+        if name == "partners.tmx.corporate_events"
+        else "is a crypto ticker; this dataset takes stock tickers"
+    )
+    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {message}"):
         factory(massive_session, name)("X:BTCUSD")
+
+
+def test_the_tmx_calendar_takes_and_keeps_global_tickers_as_written(
+    massive_session: dm.MassiveSession,
+) -> None:
+    q = factory(massive_session, "partners.tmx.corporate_events")(["ERIC B", "7203"])
+    assert q._request.symbols == ("7203", "ERIC B")
+    assert partners.TMX_CORPORATE_EVENTS.symbols_as_written
+    others = [s.name for s in partners.DATASETS if s.symbols_as_written]
+    assert others == ["partners.tmx.corporate_events"]
 
 
 @pytest.mark.parametrize("name", WITH_SYMBOLS)
@@ -364,7 +380,7 @@ def test_an_exhausted_generator_is_refused(massive_session: dm.MassiveSession, n
 
 
 def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.partners.benzinga.consensus_ratings(["msft", "AAPL"])
+    q = massive_session.partners.benzinga.consensus_ratings(["MSFT", "AAPL"])
     assert type(q) is Query
     assert q._request.symbols == ("AAPL", "MSFT")
     assert q._request.params == ()
@@ -614,7 +630,7 @@ def test_list_requests_send_symbols_sort_filters_and_page(
 ) -> None:
     fake_rest.reply("/benzinga/v1/ratings", Reply(envelope([])))
     rest_session.partners.benzinga.ratings(
-        ["msft", "AAPL"],
+        ["MSFT", "AAPL"],
         sort="date",
         order=Order.DESC,
         limit=10,
@@ -704,7 +720,7 @@ def test_consensus_ratings_send_one_request_per_symbol(
     for ticker, row in echoes.items():
         fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
     table = rest_session.partners.benzinga.consensus_ratings(
-        ["msft", "brk.b"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
+        ["MSFT", "BRK.B"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
     ).fetch()
     window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
     assert sorted(sent(fake_rest)) == [
@@ -753,6 +769,32 @@ def test_an_event_without_a_ticker_has_a_null_symbol(
         {"Symbol": "ROL", "Isin": "US7757111049", "TmxRecordId": "A1"},
         {"Symbol": None, "Isin": "CA0000000001", "TmxRecordId": "B2"},
     ]
+
+
+def test_tmx_rows_keep_global_tickers_as_written(
+    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default FAIL, a ticker outside the US stock grammar would fail the request; the
+    # global calendar keeps it as Massive writes it.
+    def event(ticker: str, record: str, venue: str) -> dict[str, object]:
+        return {
+            "company_name": "A company",
+            "date": "2025-07-23",
+            "name": "Q2 2025 Earnings Announcement",
+            "status": "confirmed",
+            "ticker": ticker,
+            "tmx_company_id": "2208",
+            "tmx_record_id": record,
+            "trading_venue": venue,
+            "type": "earnings_announcement_date",
+        }
+
+    rows_ = [event("ERIC B", "R1", "XSTO"), event("7203", "R2", "XTKS")]
+    fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows_)))
+    table = rest_session.partners.tmx.corporate_events(symbols=["ERIC B", "7203"]).fetch()
+    assert sorted(row[0] for row in table.iter_tuple(cols="Symbol")) == ["7203", "ERIC B"]
+    ((_, query),) = sent(fake_rest)
+    assert query["ticker.any_of"] == ["7203,ERIC B"]
 
 
 def test_the_vendor_analyst_insights_sample_without_a_ticker_has_a_null_symbol(

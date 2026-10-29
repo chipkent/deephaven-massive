@@ -133,17 +133,19 @@ def test_the_library_owns_its_time_columns() -> None:
 
 def test_a_rule_follows_the_dataset_and_the_request() -> None:
     request = Request(timespan=T.HOUR, multiplier=4)
-    assert time_rule(stocks.BARS, request) == TimeRule(
+    assert time_rule(stocks.BARS, request, asset_class=A.STOCKS) == TimeRule(
         "stocks.bars", RowTimes.BAR, A.STOCKS, T.HOUR, 4
     )
-    assert time_rule(stocks.DAILY_OPEN_CLOSE, Request()) == TimeRule(
+    assert time_rule(stocks.DAILY_OPEN_CLOSE, Request(), asset_class=A.STOCKS) == TimeRule(
         "stocks.daily_open_close", RowTimes.DAY, A.STOCKS, T.DAY
     )
-    assert time_rule(stocks.TRADES, Request()) == TimeRule("stocks.trades", RowTimes.TICK, A.STOCKS)
+    assert time_rule(stocks.TRADES, Request(), asset_class=A.STOCKS) == TimeRule(
+        "stocks.trades", RowTimes.TICK, A.STOCKS
+    )
     # An indicator follows its symbol's class.
     sma = time_rule(indicators.SMA, Request(timespan=T.DAY), asset_class=A.CRYPTO)
     assert (sma.row_times, sma.asset_class, sma.timespan) == (RowTimes.BAR, A.CRYPTO, T.DAY)
-    assert time_rule(stocks.SNAPSHOTS, Request()).row_times is RowTimes.NONE
+    assert time_rule(stocks.SNAPSHOTS, Request(), asset_class=A.STOCKS).row_times is RowTimes.NONE
 
 
 # --- Arrival time ---------------------------------------------------------------------------
@@ -536,11 +538,13 @@ def test_a_daily_summary_covers_its_date() -> None:
 
 
 def test_the_real_futures_datasets_get_their_session_rule() -> None:
-    assert time_rule(futures.TRADES, Request()).asset_class is A.FUTURES
+    assert time_rule(futures.TRADES, Request(), asset_class=A.FUTURES).asset_class is A.FUTURES
     assert (
         date(2025, 3, 3).isoformat()
         in fill(
-            time_rule(futures.BARS, Request(timespan=T.SESSION, multiplier=1)),
+            time_rule(
+                futures.BARS, Request(timespan=T.SESSION, multiplier=1), asset_class=A.FUTURES
+            ),
             bars(["2025-03-02T23:00:00"], dates=["2025-03-03"]),
         )[DATE]
     )
