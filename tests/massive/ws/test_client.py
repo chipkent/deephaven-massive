@@ -36,6 +36,7 @@ from deephaven_massive._massive.ws.protocol import Status, StatusKind
 # Imported directly, as the REST client's tests do: each client needs its own clock, built
 # with the client inside the factory fixture below, which a shared fixture cannot provide.
 from tests._fakes.clock import FakeClock
+from tests._fakes.ws import NoReply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -313,7 +314,7 @@ def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
     # upgrade and the greeting have all the time they need; then it jumps past the deadline,
     # so the timeout cuts off the silent server at once. The held backoff wait stops a second
     # attempt.
-    fake_ws_server.auth_replies.append(None)
+    fake_ws_server.auth_replies.append(NoReply.TO_KEY)
     h = make_client(free_waits=0, start=False)
     loop = h.client.loop
     true_time = loop.time

@@ -14,17 +14,18 @@ The server logs through its own logger at WARNING, so its DEBUG frame log (which
 the client's authentication frame) never reaches a test that captures every logger.
 
 Tests script the next connections before they happen (`reject_next`, `greet_next`, and
-`auth_replies`, whose entries are a status, a `(status, message)` pair, a raw frame, or `None`
-for a server that never answers the key) and act on the live one (`send`, `close`) from the
-test thread. Everything the server observes is kept under one lock, and `wait_for` blocks on a
-condition until a predicate over it holds, so tests synchronize with the client's thread
-deterministically, never by sleeping. Built by the `fake_ws_server` fixture in
+`auth_replies`, whose entries are a status, a `(status, message)` pair, a raw frame, or
+`NoReply.TO_KEY` for a server that never answers the key) and act on the live one (`send`,
+`close`) from the test thread. Everything the server observes is kept under one lock, and
+`wait_for` blocks on a condition until a predicate over it holds, so tests synchronize with the
+client's thread deterministically, never by sleeping. Built by the `fake_ws_server` fixture in
 `tests/conftest.py`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import logging
 import threading
@@ -55,6 +56,14 @@ _MESSAGES = {
         "limit for your account."
     ),
 }
+
+
+class NoReply(enum.Enum):
+    """A scripted reply that is no reply: the server reads the frame and never answers it."""
+
+    TO_KEY = "to_key"
+    """The server reads the authentication frame and stays silent until the client closes, so
+    only the client's handshake timeout ends the attempt."""
 
 
 def status_frame(status: str, message: str | None = None) -> str:
@@ -145,8 +154,8 @@ class FakeMassiveServer:
         self.connections: list[Connection] = []
         # Each reply is a status, sent with Massive's message for it; a (status, message) pair;
         # bytes, sent as they are in a binary frame, as a server that broke protocol would; or
-        # None, for a server that never answers the key.
-        self.auth_replies: list[str | tuple[str, str] | bytes | None] = []
+        # NoReply.TO_KEY, for a server that never answers the key.
+        self.auth_replies: list[str | tuple[str, str] | bytes | NoReply] = []
         self.auto_ack = True
         self.combined_acks = False
         self.close_after_refusal = True
@@ -334,7 +343,7 @@ class FakeMassiveServer:
                 record.auth = str(auth)
                 reply = self.auth_replies.pop(0) if self.auth_replies else "auth_success"
                 self._lock.notify_all()
-            if reply is None:  # silent: the client's handshake timeout must end it
+            if reply is NoReply.TO_KEY:  # the client's handshake timeout must end it
                 await ws.wait_closed()
                 return
             frame, status = _auth_reply(reply)
