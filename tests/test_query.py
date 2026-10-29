@@ -610,7 +610,9 @@ def test_bar_channels_follow_the_timespan(
 
 
 def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSession) -> None:
-    q = trades(massive_session)
+    # The JVM holds the listener, and so its closure, until it collects it: the closure reaches
+    # the session through lists emptied below.
+    queries = [trades(massive_session)]
     errors: list[BaseException] = []
     seen = threading.Event()
 
@@ -618,7 +620,7 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
         if seen.is_set():
             return
         try:
-            q.append_only()
+            queries[0].append_only()
         except ValueError as e:
             errors.append(e)
         seen.set()
@@ -632,6 +634,8 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
     scope.release()
     assert len(errors) == 1
     assert "update-graph thread" in str(errors[0])
+    queries.clear()
+    errors.clear()  # its traceback holds the session too
 
 
 def test_verbs_raise_while_holding_the_update_graph_lock(
