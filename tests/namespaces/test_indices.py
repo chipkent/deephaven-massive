@@ -26,6 +26,7 @@ from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
+from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import Recency
@@ -682,31 +683,57 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     ranged = rows(q.history(day, day, source=dm.HistorySource.REST))
     assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
     assert [r["TimestampStart"] for r in rows(q.fetch())] == [MIDNIGHT_MS * MS]
-    # A week bar stamped 01:00 on the Sunday before its week covers that Monday-to-Friday
-    # week: it starts at Monday's midnight and ends an hour after Saturday's.
+    # A week bar stamped 01:00 on the Sunday before its week covers that week: it starts at
+    # Monday's midnight, and since an index can update around the clock, it ends an hour after
+    # the next Monday's midnight. A range must reach that Sunday to keep it.
     saturday, sunday = MIDNIGHT_MS - 2 * DAY_MS, MIDNIGHT_MS - DAY_MS
-    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{saturday}/{MIDNIGHT_MS + 5 * DAY_MS - 1}"
+    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{saturday}/{MIDNIGHT_MS + 7 * DAY_MS - 1}"
     fake_rest.reply(
         quote(week_path), bars_reply(sunday + HOUR_MS), bars_reply(sunday + 16 * HOUR_MS)
     )
     week = rest_session.indices.bars("I:SPX", dm.Timespan.WEEK)
-    friday = date(2025, 6, 6)
-    weeks = rows(week.history(day, friday, source=dm.HistorySource.REST))
+    last = date(2025, 6, 8)
+    weeks = rows(week.history(day, last, source=dm.HistorySource.REST))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in weeks] == [
-        (None, MIDNIGHT_MS * MS, (MIDNIGHT_MS + 5 * DAY_MS + HOUR_MS) * MS)
+        (None, MIDNIGHT_MS * MS, (MIDNIGHT_MS + 7 * DAY_MS + HOUR_MS) * MS)
     ]
     # A week bar at the close, or a day bar at 02:00, is another cut: each fails loudly.
     with pytest.raises(
         dm.MassiveError, match=r"^indices\.bars: a bar from .* is stamped 2025-06-01T20:00:00"
     ):
-        week.history(day, friday, source=dm.HistorySource.REST)
+        week.history(day, last, source=dm.HistorySource.REST)
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
     with pytest.raises(
         dm.MassiveError,
         match=r"^indices\.bars: a 1-day bar from /v2/aggs/ticker/\{indicesTicker\}/range/.* is "
-        r"stamped 2025-06-02T06:00:00\+00:00 \(2025-06-02T02:00:00-04:00 in America/New_York\)",
+        r"stamped 2025-06-02T06:00:00\+00:00 \(2025-06-02T02:00:00-04:00 in America/New_York\)"
+        r".*; read the 1-day flat files with source=dm\.HistorySource\.FLAT_FILES if S3 "
+        r"credentials are configured, and report",
     ):
         q.history(day, day, source=dm.HistorySource.REST)
+
+
+@pytest.mark.parametrize(("minutes", "kept"), [(30, 0), (60, 1)], ids=["00:30", "01:00"])
+def test_an_index_day_bar_is_kept_once_its_end_has_passed(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    minutes: int,
+    kept: int,
+) -> None:
+    # An index day bar ends at 01:00 New York time the next day, so at 00:30 it is still
+    # open and `history()` leaves it out, as a join on its end would.
+    now = datetime.fromtimestamp((MIDNIGHT_MS + DAY_MS) / 1000 + minutes * 60, UTC)
+    monkeypatch.setattr(history_source, "_now", lambda: now)
+    day = date(2025, 6, 2)
+    # An open end reads through the end of today.
+    path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + 2 * DAY_MS - 1}"
+    fake_rest.reply(quote(path), bars_reply(MIDNIGHT_MS + HOUR_MS))
+    q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
+    out = rows(q.history(day, None, source=dm.HistorySource.REST))
+    assert [p for p, _ in sent(fake_rest)] == [path]
+    assert [r["TimestampEnd"] for r in out] == [(MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS] * kept
 
 
 def test_daily_open_close_fetches_each_index_for_the_day(

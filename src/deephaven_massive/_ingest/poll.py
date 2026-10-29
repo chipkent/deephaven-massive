@@ -63,7 +63,6 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from deephaven import arrow as dh_arrow
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 from deephaven.stream.table_publisher import table_publisher
@@ -73,7 +72,7 @@ from deephaven_massive._datasets.symbols import SymbolTable, symbol_canonicalize
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
 from deephaven_massive._massive import Transport
-from deephaven_massive._tables.columns import col_defs, describe
+from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
 
@@ -515,7 +514,7 @@ class Poller:
             table, identities = self._fresh(table)
             published = table.num_rows
         if table.num_rows:
-            self._publisher.add(dh_arrow.to_table(table))
+            self._publisher.add(dataset_table(table, self._schema.date_columns))
         # The key state changes only once the cycle is published: if it failed, the next
         # cycle still tombstones the keys this one dropped, or appends the rows it skipped.
         if keys is not None:

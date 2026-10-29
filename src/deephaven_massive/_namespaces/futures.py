@@ -463,10 +463,14 @@ class _Futures(Namespace):
         when its session is in the range and it has ended, a bar of a session or a longer period
         (`WEEK`, Monday to Friday, to `YEAR`) when every session of its period is in the range
         and has ended. A bar of several sessions or periods is kept only when it fits the range
-        under both readings of its label, as its first session's and as its last's, so
+        under both readings of its label, as its first session's and as its last's. Every bar
+        must also have ended, by its `TimestampEnd`, by 17:00 Chicago time on the last date and
+        by now. A bar of several sessions ends as late as holidays could push its sessions (one
+        weekday more, and one more for every five further sessions), so
         `bars(..., Timespan.SESSION, multiplier=2).history("2025-02-03", "2025-02-07")` keeps
-        the bars labelled Tuesday to Thursday. Datetimes keep the bars whose whole window, from
-        Massive's window start, lies in the range.
+        the bars opening Monday and Tuesday evening: the one opening Wednesday evening could
+        end on the next Monday. Datetimes keep the bars whose whole window, from Massive's
+        window start to `TimestampEnd`, lies in the range.
 
         `dm.ALL` streams every contract and reads every contract from flat files; REST history
         needs explicit symbols. There is no `limit`: `history()` pages internally.

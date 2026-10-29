@@ -11,7 +11,9 @@ import threading
 from collections.abc import Callable
 from typing import Any, cast
 
+import pyarrow as pa
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import double_col, string_col
 from deephaven.execution_context import ExecutionContext
@@ -28,6 +30,7 @@ from deephaven_massive._tables.columns import (
     COLUMN_TABLE_DESCRIPTIONS,
     col_defs,
     column_table,
+    dataset_table,
     describe,
     dh_type,
 )
@@ -301,3 +304,24 @@ def test_the_column_table_lists_every_column(
     assert list(COLUMN_TABLE_DESCRIPTIONS) == ["Name", "Type", "Description", "SuppliedBy"]
     with pytest.raises(TypeError):  # read-only: no caller can change the header text
         cast("dict[str, str]", COLUMN_TABLE_DESCRIPTIONS)["Name"] = "changed"
+
+
+def _string_objects(table: Table, column: str) -> int:
+    # Identity is read inside Deephaven: a string crossing to Python is copied.
+    ids = table.update(f"Id = java.lang.System.identityHashCode({column})")
+    return ids.where(f"!isNull({column})").select_distinct("Id").size
+
+
+def test_a_dataset_table_shares_one_string_per_date(dh_exec_ctx: object) -> None:
+    days = [None if n % 7 == 0 else f"2025-03-0{1 + n % 3}" for n in range(30_000)]
+    rows = pa.table({"Date": pa.array(days), "Note": pa.array(days)})
+    table = dataset_table(rows, ("Date",))
+    # The date column holds one string per distinct date; any other text column is as made.
+    assert _string_objects(table, "Date") == 3
+    assert _string_objects(table, "Note") > 3
+    assert dh_arrow.to_arrow(table).column("Date").to_pylist() == days
+
+
+def test_a_dataset_table_without_dates_is_converted_as_is(dh_exec_ctx: object) -> None:
+    table = dataset_table(pa.table({"Price": pa.array([1.5])}), ())
+    assert table.size == 1

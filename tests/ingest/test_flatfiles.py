@@ -31,7 +31,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, DaySpan
+from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
@@ -42,6 +42,7 @@ from deephaven_massive._massive import Field, Source, Transport, WireType, WireU
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
@@ -491,6 +492,34 @@ def synthetic_catalog() -> Catalog:
     return Catalog((SYNTHETIC,), source_tables=lambda t: tables.get(t, {}))
 
 
+@pytest.mark.parametrize(("hours", "kept"), [(23, 0), (24, 1)], ids=["open", "ended"])
+def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, kept: int) -> None:
+    midnight = datetime(2025, 3, 3, 5, tzinfo=UTC)  # 00:00 in New York
+    times = TimeRange(midnight, midnight + timedelta(days=1))
+    day = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
+    window = HistoryWindow(day, times, None, times, midnight + timedelta(hours=hours))
+    transform = flatfiles._Transform.build(
+        CATALOG,
+        STOCK_BARS,
+        prefix="us_stocks_sip/day_aggs_v1",
+        request=request(timespan=Timespan.DAY, adjusted=False),
+        window=window,
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["AAPL"],
+            "Volume": [1.0],
+            "Open": [1.0],
+            "Close": [1.0],
+            "High": [1.0],
+            "Low": [1.0],
+            "TimestampStart": [epoch_ns(midnight)],
+            "Transactions": [1],
+        }
+    )
+    assert transform.apply(batch, received=7).num_rows == kept
+
+
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
@@ -621,13 +650,13 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 0
@@ -733,13 +762,13 @@ def test_each_file_becomes_one_table(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     put(TRADES_0305, "us_stocks_sip_trades_v1_2025-03-05.csv")
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)  # several blocks per file
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-05")
     assert t.size == 6
@@ -772,13 +801,13 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
 ) -> None:
     blocks = many_blocks(TRADES_0303)
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 2)
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     assert pick(t, "Id")[:3] == [("0",), ("1",), ("2",)]  # still in file order
@@ -1472,13 +1501,13 @@ def test_a_dropped_connection_is_read_again_from_the_start(
 ) -> None:
     many_blocks(TRADES_0303)
     converted: list[int] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
 
-    def counted(data: pa.Table) -> Table:
+    def counted(data: pa.Table, dates: Sequence[str]) -> Table:
         converted.append(data.num_rows)
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", counted)
+    monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 1)  # a table per block, so drops leave some
     size = len(fake_s3.data(TRADES_0303))
     fake_s3.drop(TRADES_0303, times=2, at=size // 2)
@@ -1775,15 +1804,15 @@ def test_reader_threads_enter_the_session_context(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     seen: list[tuple[str, bool]] = []
-    convert = dh_arrow.to_table
+    convert = columns.dataset_table
     expected = session._core.exec_ctx.j_exec_ctx
 
-    def recorded(data: pa.Table) -> Table:
+    def recorded(data: pa.Table, dates: Sequence[str]) -> Table:
         context = get_exec_ctx().j_exec_ctx.equals(expected)
         seen.append((threading.current_thread().name, context))
-        return convert(data)
+        return convert(data, dates)
 
-    monkeypatch.setattr(flatfiles, "to_table", recorded)
+    monkeypatch.setattr(flatfiles, "dataset_table", recorded)
     query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
     reader = f"{session._core.label} flat files"
     assert all(context for _, context in seen)
@@ -2133,7 +2162,7 @@ class MemorySampler:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         batches = _massive.FlatFile.batches
-        convert = dh_arrow.to_table
+        convert = columns.dataset_table
 
         def sampled_batches(
             file: _massive.FlatFile, plan: _massive.ReadPlan
@@ -2144,12 +2173,12 @@ class MemorySampler:
                 self.taken[1] += 1
                 yield batch
 
-        def sampled_convert(data: pa.Table) -> Table:
+        def sampled_convert(data: pa.Table, dates: Sequence[str]) -> Table:
             self.sample_arrow()
-            return convert(data)
+            return convert(data, dates)
 
         monkeypatch.setattr(_massive.FlatFile, "batches", sampled_batches)
-        monkeypatch.setattr(flatfiles, "to_table", sampled_convert)
+        monkeypatch.setattr(flatfiles, "dataset_table", sampled_convert)
 
     def sample_arrow(self) -> None:
         self.arrow[self.taken[0]] = pa.total_allocated_bytes()
@@ -2504,3 +2533,19 @@ def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
         q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES)
     assert fake_s3.requests == []
+
+
+def test_every_row_of_a_day_shares_one_stored_date(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    header = "ticker,volume,open,close,high,low,window_start,transactions\n"
+    minutes = [epoch_ns(datetime(2025, 3, 3, 15, m, tzinfo=UTC)) for m in range(20)]
+    body = "".join(f"AAPL,1,1.0,1.0,1.0,1.0,{m},1\n" for m in minutes)
+    key = "us_stocks_sip/minute_aggs_v1/2025/03/2025-03-03.csv.gz"
+    fake_s3.put(key, make_csv_gz(header + body))
+    q = query(session, STOCK_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=False)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert t.size == 20
+    # Counted inside Deephaven: a string crossing to Python is copied.
+    refs = t.update("DateRef = java.lang.System.identityHashCode(Date)").select_distinct("DateRef")
+    assert refs.size == 1

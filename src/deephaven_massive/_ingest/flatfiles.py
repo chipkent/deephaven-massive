@@ -113,7 +113,6 @@ from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 from deephaven import merge
-from deephaven.arrow import to_table
 
 from deephaven_massive._datasets.dates import TimeRange
 from deephaven_massive._datasets.history_source import (
@@ -123,7 +122,13 @@ from deephaven_massive._datasets.history_source import (
     stamp_rule,
     within_publication_grace,
 )
-from deephaven_massive._datasets.row_times import DATE, TimeRule, time_column, time_rule
+from deephaven_massive._datasets.row_times import (
+    DATE,
+    TimeRule,
+    ended_by,
+    time_column,
+    time_rule,
+)
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
@@ -147,13 +152,14 @@ from deephaven_massive._massive import (
     WireType,
     object_key,
 )
+from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.liveness import entered
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from concurrent.futures import Future
-    from datetime import date
+    from datetime import date, datetime
 
     from deephaven.table import Table
 
@@ -289,23 +295,29 @@ class _Transform:
         columns: Per schema column, in order: its type, its name, and the source column that
             fills it, or None for a column the files do not carry (null).
         arrow_schema: The dataset's Arrow schema.
+        date_columns: The dataset's calendar-date columns, stored one shared string per date
+            (`columns.dataset_table`).
         session_header: For futures, the header that holds the session date; None otherwise.
         prefix: The prefix the files come from, for messages.
         times: How the rows' time columns are filled (`row_times.TimeRule`).
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
             zone (`history_source.stamp_rule`); None otherwise.
+        latest_end: For bars, the latest `TimestampEnd` a kept bar may have
+            (`HistoryWindow.ended_by`); None otherwise.
     """
 
     dataset: str
     plan: ReadPlan
     columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
     arrow_schema: pa.Schema
+    date_columns: tuple[str, ...]
     session_header: str | None
     prefix: str
     times: TimeRule
     time_name: str
     stamps: StampRule | None = None
+    latest_end: datetime | None = None
 
     @classmethod
     def build(
@@ -381,11 +393,13 @@ class _Transform:
             plan=plan,
             columns=tuple((c.type, c.name, by_column.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
+            date_columns=schema.date_columns,
             session_header=session_header,
             prefix=prefix,
             times=time_rule(spec, request),
             time_name=time_name,
             stamps=stamps,
+            latest_end=window.ended_by,
         )
 
     def plan_for(self, key: _Key) -> ReadPlan:
@@ -409,7 +423,7 @@ class _Transform:
         columns the prefix does not carry, and the library's time columns
         (`row_times.TimeRule.fill`). The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
-        reader.
+        reader. A bar whose `TimestampEnd` is after `latest_end` is dropped.
 
         Args:
             batch: One block's surviving rows, with the plan's columns.
@@ -426,7 +440,7 @@ class _Transform:
         """
         arrays = [self._column(batch, column) for column in self.columns]
         rows = pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
-        return self.times.fill(rows, received=received)
+        return ended_by(self.times.fill(rows, received=received), self.latest_end)
 
     def _column(
         self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]
@@ -633,7 +647,8 @@ class FlatFileHistory:
             )
         with entered(self._core.exec_ctx):
             # Merging onto an empty table in the schema keeps every column when no row matched.
-            return merge([to_table(transform.arrow_schema.empty_table()), *tables])
+            empty = transform.arrow_schema.empty_table()
+            return merge([dataset_table(empty, transform.date_columns), *tables])
 
     def _roll_forward(
         self,
@@ -1007,7 +1022,8 @@ def _public(error: WireError, key: _Key) -> MassiveError:
 def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:
     """Turn a file's gathered surviving rows into one static Deephaven table.
 
-    Runs on a reader thread inside the session's execution context.
+    Runs on a reader thread inside the session's execution context; every calendar-date
+    column stores one shared string per distinct date (`columns.dataset_table`).
 
     Args:
         batches: Blocks in the dataset's schema, each with at least one row.
@@ -1016,7 +1032,9 @@ def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:
     Returns:
         The static table.
     """
-    return to_table(pa.Table.from_batches(batches, schema=transform.arrow_schema))
+    return dataset_table(
+        pa.Table.from_batches(batches, schema=transform.arrow_schema), transform.date_columns
+    )
 
 
 def _outcome(future: Future[list[Table] | None]) -> list[Table] | None:

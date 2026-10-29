@@ -8,7 +8,9 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   days or sessions, or exact instants; `dates.bounds`), the rows to keep (on `Timestamp`, or a
   bar's `TimestampStart`, and for futures named by date on their session, `Date`), and the
   instants a REST request covers. Bars are kept only when their whole window lies inside the
-  range and has ended (`dates.bar_starts`, `dates.bar_sessions`).
+  range and has ended: a request selects them by their start (`dates.bar_starts`,
+  `dates.bar_sessions`), and a bar whose `TimestampEnd` lies after the range's end or after
+  now is dropped once its time columns are filled (`HistoryWindow.ended_by`).
 - `partition_dates` turns a window into the dates of the flat files it needs, in the asset
   class's day zone; a futures date names a trading session.
 - `rest_history_problem` says why REST cannot serve a request, if it cannot: the dataset has
@@ -48,15 +50,18 @@ from deephaven_massive._datasets.dates import (
     bar_starts,
     bounds,
     day_class,
+    day_end,
     day_zone,
     flat_file_published,
     futures_bar_request,
     futures_session,
     futures_session_before,
+    futures_session_end,
     intraday,
     publish_time,
     trades_at_weekends,
 )
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.timestamps import day_starts
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._types import _All
@@ -137,12 +142,18 @@ class HistoryWindow:
             aggregates' `{from}` (where the first fitting bar's period begins) and `{to}`;
             None for futures trades and quotes named by date, which are requested one
             session at a time.
+        ended_by: For bars, the latest `TimestampEnd` a kept bar may have: the earlier of
+            now and the range's end, which for dates is the last day's end
+            (`dates.day_end`: for futures, 17:00 Chicago on the last session's date). The
+            transports drop every later bar once its time columns are filled
+            (`row_times.ended_by`). None for ticks.
     """
 
     span: TimeRange | DaySpan
     times: TimeRange | None
     sessions: DaySpan | None
     requested: TimeRange | None
+    ended_by: datetime | None = None
 
     @property
     def empty(self) -> bool:
@@ -166,10 +177,13 @@ def history_window(
     The bounds follow `dates.bounds`: two dates are whole days (for futures, sessions), two
     datetimes a half-open range of instants, and an `end` of None reads through now. Ticks are
     kept inside the range. A bar is kept only when its whole window lies inside the range and
-    has ended by now (`dates.bar_starts`); for futures named by date, a bar of a session or
-    longer is kept by its session label, `Date` (`dates.bar_sessions`, over the sessions
-    finished by now, under both readings of the label of a bar of several units), and an
-    intraday bar by its session and its end.
+    has ended by now: its start must fit (`dates.bar_starts`; for futures named by date, a bar
+    of a session or longer by its session label, `Date`, under both readings of the label of
+    a bar of several units, `dates.bar_sessions`, and an intraday bar by its session), and its
+    `TimestampEnd` must be no later than `HistoryWindow.ended_by`. The end is conservative, so
+    a bar whose window might reach past the range is left out: an index day bar ends at 01:00
+    New York time, and a bar of several trading days allows for holidays
+    (`dates.last_trading_day`).
 
     Args:
         spec: The dataset.
@@ -202,7 +216,8 @@ def history_window(
     # starts where the first whole period's days begin, so the bar of that period is returned
     # whether Massive selects bars by their stamp or builds them from `{from}`.
     requested = instants if futures else TimeRange(keep.start, instants.end)
-    return HistoryWindow(span, keep, None, requested)
+    last = instants.end if isinstance(span, TimeRange) else day_end(asset_class, span.last)
+    return HistoryWindow(span, keep, None, requested, min(last, moment))
 
 
 def _futures_sessions(
@@ -236,15 +251,16 @@ def _futures_sessions(
             )
         return HistoryWindow(span, None, span, None)
     requested = futures_bar_request(span)
+    latest = min(futures_session_end(span.last), now)
     if intraday(timespan):
         ended = TimeRange(requested.start, min(requested.end, now))
         keep = bar_starts(
             AssetClass.FUTURES, ended, timespan=timespan, multiplier=request.multiplier
         )
-        return HistoryWindow(span, keep, span, requested)
+        return HistoryWindow(span, keep, span, requested, latest)
     finished = DaySpan(span.first, min(span.last, futures_session(now) - _ONE_DAY))
     sessions = bar_sessions(finished, timespan=timespan, multiplier=request.multiplier)
-    return HistoryWindow(span, None, sessions, requested)
+    return HistoryWindow(span, None, sessions, requested, latest)
 
 
 def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...]:
@@ -306,7 +322,7 @@ class StampRule:
         zone: The class day zone; every bar is stamped at 00:00 there of the day it starts on.
         known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
             the class's bars of this length on some source; each moves to 00:00 of its day.
-        what: The kind of bar, for messages: `"1-day bar"` or `"bar"`.
+        what: The kind of row, for messages: `"1-day bar"`, `"bar"`, or `"indicator value"`.
         weekdays: For week bars, the weekdays (Monday is 0) a bar may be stamped on in `zone`;
             empty for every other timespan.
         months: For month, quarter, and year bars, the months whose 1st a bar may be stamped
@@ -390,9 +406,11 @@ _LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.FOREX: frozenset(),
     AssetClass.CRYPTO: frozenset(),
 }
-"""Per class with a day zone, the times of day besides 00:00 accepted for a bar of several
-days, a week, or longer, which only the aggregates range serves. No sample shows one; the
-indices range's midnight in Chicago is presumed from its 1-day bars."""
+"""Per class with a day zone, the times of day besides 00:00 at which the aggregates range
+stamps its bars: accepted for a bar of several days, a week, or longer, which only the range
+serves, and for an indicator value of a day or longer, which is computed over the range's
+bars. The indices range's midnight in Chicago is that of its 1-day bars and of the index
+indicator samples' underlying aggregates."""
 
 _WEEK_STAMP_DAYS: Final = frozenset({5, 6, 0})
 """The days a week bar of a class that does not trade at weekends may be stamped on: the
@@ -413,7 +431,9 @@ _DAYS_OR_LONGER: Final = frozenset(
 )
 
 
-def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule | None:
+def stamp_rule(
+    spec: DatasetSpec, request: Request, *, asset_class: AssetClass | None = None
+) -> StampRule | None:
     """Return how the transports stamp a request's bars, or None to keep the stamps as sent.
 
     One `history()` call returns the same rows whichever source answers it, so every bar of a
@@ -428,38 +448,45 @@ def stamp_rule(spec: DatasetSpec, request: Request) -> StampRule | None:
     also be stamped on the day its period starts, or the whole-window rule would place it in
     another period.
 
-    The indicators' values are per bar too, but their stamps are not checked: Massive
-    documents none of their times (its samples sit at arbitrary milliseconds), and no other
-    source serves them, so an indicator value of a day or longer is labelled with the day its
-    stamp falls on (`row_times.TimeRule`).
+    The indicators' values are computed over the aggregates range's bars and carry those
+    bars' stamps (Massive's samples show the underlying aggregates at 00:00 New York time for
+    stocks and 01:00 for indices), so an indicator value of a day or longer is checked by the
+    range's rule for its symbols' class: 00:00 of its day, or the indices' midnight in
+    Chicago, on its period's first day. A value stamped otherwise fails like a bar.
 
     Args:
         spec: The dataset.
         request: The normalized arguments.
+        asset_class: For a dataset without a class whose rows are bars (the indicators), the
+            class of the request's symbols (`dates.day_class`); ignored for every other
+            dataset.
 
     Returns:
-        The rule, with no `remedy` yet, for bars of a day or longer of stocks, options,
-        indices, forex, and crypto; None for intraday bars, futures bars, and every dataset
-        that is not bars.
+        The rule, with no `remedy` yet, for bars and indicator values of a day or longer of
+        stocks, options, indices, forex, and crypto; None for intraday bars, futures bars,
+        and every dataset whose rows are not bars.
     """
-    asset_class = spec.asset_class
+    indicator = not spec.is_bars and spec.times is RowTimes.BAR
+    cls = asset_class if indicator else spec.asset_class
     # `is None` first narrows the type for the lookups below.
     if (
-        not spec.is_bars
+        not (spec.is_bars or indicator)
         or request.timespan not in _DAYS_OR_LONGER
-        or asset_class is None
-        or asset_class not in DAY_ZONES
+        or cls is None
+        or cls not in DAY_ZONES
     ):
         return None
-    zone = DAY_ZONES[asset_class]
+    zone = DAY_ZONES[cls]
     timespan = request.timespan
-    if timespan is Timespan.DAY and request.multiplier == 1:
-        return StampRule(zone, _ONE_DAY_STAMPS[asset_class], "1-day bar")
-    known = _LONGER_STAMPS[asset_class]
+    single = timespan is Timespan.DAY and request.multiplier == 1
+    if single and not indicator:
+        return StampRule(zone, _ONE_DAY_STAMPS[cls], "1-day bar")
+    known = _LONGER_STAMPS[cls]
+    what = "indicator value" if indicator else "bar"
     if timespan is Timespan.WEEK:
-        weekdays = _MONDAY if trades_at_weekends(asset_class) else _WEEK_STAMP_DAYS
-        return StampRule(zone, known, "bar", weekdays=weekdays)
-    return StampRule(zone, known, "bar", months=_PERIOD_MONTHS.get(timespan, frozenset()))
+        weekdays = _MONDAY if trades_at_weekends(cls) else _WEEK_STAMP_DAYS
+        return StampRule(zone, known, what, weekdays=weekdays)
+    return StampRule(zone, known, what, months=_PERIOD_MONTHS.get(timespan, frozenset()))
 
 
 def within_publication_grace(

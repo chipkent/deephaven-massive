@@ -43,13 +43,14 @@ become `Date`.
   `Date` is the day.
 - **n-day, week, month, quarter, or year bar.** 00:00 of the window's first day (a week's
   Monday; for stocks, options, and indices a period's first weekday) to 00:00 after its last
-  day (last weekday for stocks, options, and indices; one hour later for indices); `Date` is
-  null.
+  day (last weekday for stocks and options; for indices, which can update around the clock,
+  the period's last calendar day and one hour more); stock, option, and index days count as
+  trading days with a holiday allowance (`dates.last_trading_day`); `Date` is null.
 - **Futures session bar.** Massive's `window_start` to 17:00 Chicago time on its session date;
   `Date` is that date.
-- **Futures bar of several sessions.** `window_start` to 17:00 Chicago time on the last of its
-  sessions, counted as weekdays from its start, plus four days for holidays
-  (`FUTURES_HOLIDAY_MARGIN`); `Date` is null.
+- **Futures bar of several sessions.** `window_start` to 17:00 Chicago time on the latest day
+  its sessions can end on, counted from its start with the same holiday allowance
+  (`dates.last_trading_day`), or on its label if that is later; `Date` is null.
 - **Futures week or longer.** `window_start` to 17:00 Chicago time on the last weekday of the
   latest period its label allows; `Date` is null.
 - **Daily open-close.** As a 1-day bar of its date.
@@ -83,18 +84,19 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.dates import (
     CHICAGO,
-    FUTURES_HOLIDAY_MARGIN,
-    add_weekdays,
     bar_days,
+    day_end,
     day_zone,
     futures_period_last,
     futures_session,
     futures_session_end,
     intraday,
+    last_trading_day,
     unit_ns,
 )
+from deephaven_massive._datasets.timestamps import ISSUES_URL
 from deephaven_massive._enums import AssetClass, Timespan
-from deephaven_massive._errors import log_once
+from deephaven_massive._errors import MassiveError, log_once
 
 if TYPE_CHECKING:
     from datetime import tzinfo
@@ -112,6 +114,7 @@ __all__ = [
     "RowTimes",
     "SessionDates",
     "TimeRule",
+    "ended_by",
     "local_dates",
     "time_column",
     "time_rule",
@@ -149,11 +152,9 @@ _SATURDAY: Final = 5
 _SUNDAY: Final = 6
 _NEVER: Final = 2**62
 """An instant later than any bounded timestamp: a day whose clock never changes."""
-_INDEX_DAY_END: Final = timedelta(hours=1)
-"""How much later an index bar of a day or longer ends: 01:00 New York time, midnight in
-Chicago, since whether an index day bar covers the New York or the Chicago day is not
-verified."""
 _INSTANT: Final = pa.timestamp("ns", tz="UTC")
+_UTC_FLAG: Final = "IsUtc"
+"""The column in which a daily summary (the crypto open-close) says its times are UTC."""
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 _Rows = TypeVar("_Rows", pa.RecordBatch, pa.Table)
@@ -413,6 +414,28 @@ def _ns(moment: datetime) -> int:
     return (moment - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
+def ended_by(rows: _Rows, latest: datetime | None) -> _Rows:
+    """Keep the rows whose `TimestampEnd` is no later than an instant.
+
+    `history()` keeps a bar only when its window has ended by the end of the range and by
+    now, judged by the same `TimestampEnd` a join on the end uses, so a bar a join would not
+    yet attach is never returned. A row whose end is unknown (a futures bar sent without its
+    start) is kept, its `TimestampEnd` null.
+
+    Args:
+        rows: Rows with their time columns filled (`TimeRule.fill`).
+        latest: The latest end to keep (`HistoryWindow.ended_by`); None keeps every row.
+
+    Returns:
+        The rows kept, in order.
+    """
+    if latest is None or END not in rows.schema.names:
+        return rows
+    ends = rows.column(END)
+    keep = pc.less_equal(ends, pa.scalar(_ns(latest), ends.type))
+    return rows.filter(pc.fill_null(keep, fill_value=True))
+
+
 def _midnight(day: date, zone: tzinfo) -> datetime:
     """Return the first instant of a calendar day in a zone.
 
@@ -464,12 +487,6 @@ class TimeRule:
         timespan: The bar unit of a `BAR` request; `DAY` for a daily summary; None for every
             other dataset.
         multiplier: How many units one bar spans; 1 for everything but bars.
-        stamped: True when the stamps of bars of a day or longer were checked against the
-            times and days Massive is known to use, so each lies on its period's first day
-            (`history_source.stamp_rule`). False for the indicators, whose stamps Massive does
-            not document: a week, month, quarter, or year value then ends at the latest end a
-            window holding its stamp's day can have, `multiplier` periods after that day, so
-            a join on its end never sees it early.
     """
 
     dataset: str
@@ -477,7 +494,6 @@ class TimeRule:
     asset_class: AssetClass | None
     timespan: Timespan | None = None
     multiplier: int = 1
-    stamped: bool = True
 
     def __post_init__(self) -> None:
         """Reject a bar rule without a timespan.
@@ -521,6 +537,9 @@ class TimeRule:
         Returns:
             The rows, of the same type and schema, with `Date`, `TimestampStart`,
             `TimestampEnd`, and `TimestampInsert` filled as the dataset has them.
+
+        A daily summary whose `IsUtc` is false (the crypto open-close) raises the
+        `MassiveError` of `_daily`: its day would not be the UTC day its window is filled with.
         """
         arrived = (
             pa.repeat(pa.scalar(received, _INSTANT), rows.num_rows)
@@ -583,9 +602,20 @@ class TimeRule:
 
         Returns:
             The batch with `TimestampStart` and `TimestampEnd`.
+
+        Raises:
+            MassiveError: If a row's `IsUtc` (the crypto open-close's) is false: its day is
+                filled as the UTC day, which would then cover other hours than Massive's.
         """
+        if _UTC_FLAG in rows.schema.names:
+            flags = _column(rows, _UTC_FLAG)
+            if pc.any(pc.invert(pc.fill_null(flags, fill_value=True))).as_py():
+                raise MassiveError(
+                    f"{self.dataset}: Massive sent a day summary with isUTC false, so its day "
+                    "is not the UTC day whose window the library gives it; report it at "
+                    f"{ISSUES_URL}"
+                )
         zone = self._zone()
-        later = _INDEX_DAY_END if self.asset_class is AssetClass.INDICES else timedelta(0)
         labels = _column(rows, DATE)
         distinct = pc.unique(labels)
         starts: list[int | None] = []
@@ -597,7 +627,7 @@ class TimeRule:
                 continue
             day = date.fromisoformat(text)
             starts.append(_ns(_midnight(day, zone)))
-            ends.append(_ns(_midnight(day + timedelta(days=1), zone) + later))
+            ends.append(_ns(day_end(self.asset_class, day)))
         index = pc.index_in(labels, value_set=distinct)
         rows = _set(rows, START, _instants(starts).take(index))
         return _set(rows, END, _instants(ends).take(index))
@@ -691,7 +721,6 @@ class TimeRule:
             The batch with `Date`, `TimestampStart`, and `TimestampEnd`.
         """
         zone = self._zone()
-        later = _INDEX_DAY_END if self.asset_class is AssetClass.INDICES else timedelta(0)
         single = timespan is Timespan.DAY and self.multiplier == 1
         ns = _to_int(rows.column(START))
         distinct = pc.unique(ns)
@@ -708,10 +737,15 @@ class TimeRule:
             first, after = bar_days(
                 self.asset_class, day, timespan=timespan, multiplier=self.multiplier
             )
-            if not self.stamped and timespan is not Timespan.DAY:
-                after = max(after, _periods_after(day, timespan, self.multiplier))
+            if self.asset_class is AssetClass.INDICES and timespan is not Timespan.DAY:
+                # An index can update around the clock: its periods may hold their weekends,
+                # so it ends after the calendar period that begins with its first day.
+                _, every = bar_days(
+                    None, first, timespan=timespan, multiplier=self.multiplier, every_day=True
+                )
+                after = max(after, every)
             starts.append(_ns(_midnight(first, zone)))
-            ends.append(_ns(_midnight(after, zone) + later))
+            ends.append(_ns(day_end(self.asset_class, after - timedelta(days=1))))
             dates.append(day.isoformat() if single else None)
         index = pc.index_in(ns, value_set=distinct)
         rows = _set(rows, START, _instants(starts).take(index))
@@ -722,9 +756,9 @@ class TimeRule:
         """Fill a futures bar of a session or longer from its start and its session label.
 
         One session: it ends at 17:00 Chicago time on its date, which is its `Date`. Several
-        sessions: the later reading of its label, 17:00 Chicago on the last of its sessions
-        counted as weekdays from its start, plus `FUTURES_HOLIDAY_MARGIN` for the holidays
-        that move a session later. A week or longer: 17:00 Chicago on the last weekday of the
+        sessions: 17:00 Chicago on the latest day its sessions can end on, counted from its
+        start's session with a holiday allowance (`dates.last_trading_day`), or on its label
+        when that is later. A week or longer: 17:00 Chicago on the last weekday of the
         latest period its label allows (`dates.futures_period_last`). Only a one-session bar
         keeps its `Date`.
 
@@ -771,33 +805,8 @@ class TimeRule:
             return _ns(futures_session_end(session))
         if start is None:
             return None
-        counted = add_weekdays(futures_session(_instant(start)), self.multiplier - 1)
-        return _ns(futures_session_end(max(session, counted + FUTURES_HOLIDAY_MARGIN)))
-
-
-def _periods_after(day: date, timespan: Timespan, multiplier: int) -> date:
-    """Return the day `multiplier` weeks, months, quarters, or years after another.
-
-    A window of that many periods that holds `day` ends no later than this day, whichever day
-    of the window `day` is, so it is the conservative end of a value whose stamp's place in its
-    window is not known.
-
-    Args:
-        day: The day.
-        timespan: `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
-        multiplier: How many periods.
-
-    Returns:
-        The day; a month shift that lands past a short month's end moves to the 1st after it.
-    """
-    if timespan is Timespan.WEEK:
-        return day + timedelta(weeks=multiplier)
-    months = {Timespan.MONTH: 1, Timespan.QUARTER: 3}.get(timespan, 12) * multiplier
-    total = day.year * 12 + day.month - 1 + months
-    year, month = divmod(total, 12)
-    first = date(year, month + 1, 1)
-    following = date(year + (month + 1) // 12, (month + 1) % 12 + 1, 1)
-    return min(first.replace(day=1) + timedelta(days=day.day - 1), following)
+        last = last_trading_day(futures_session(_instant(start)), self.multiplier)
+        return _ns(futures_session_end(max(session, last)))
 
 
 def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:
@@ -835,14 +844,7 @@ def time_rule(
     times = spec.times
     zone_class = spec.asset_class if asset_class is None else asset_class
     if times is RowTimes.BAR:
-        return TimeRule(
-            spec.name,
-            times,
-            zone_class,
-            request.timespan,
-            request.multiplier,
-            stamped=spec.is_bars,
-        )
+        return TimeRule(spec.name, times, zone_class, request.timespan, request.multiplier)
     if times is RowTimes.DAY:
         return TimeRule(spec.name, times, zone_class, Timespan.DAY)
     return TimeRule(spec.name, times, zone_class)

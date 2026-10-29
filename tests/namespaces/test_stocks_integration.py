@@ -517,30 +517,42 @@ def test_stock_dividend_events_and_the_adjustment(
 
 @pytest.mark.needs("stocks:basic", "currencies:basic")
 @pytest.mark.settles("53")
-@pytest.mark.requests(2)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_daily_indicator_stamps(
     live_session: dm.MassiveSession,
     *,
+    rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
     """At which time of day Massive stamps daily indicator values, for a stock and for crypto.
 
-    Records a week of daily SMA values of AAPL and `X:BTCUSD`: each value's `TimestampStart`
-    and `Date`, which the library takes from the stamp's day. Reading it: stamps at 00:00 New
-    York time (AAPL) and 00:00 UTC (crypto) mean the day labels are right; stamps elsewhere in
-    a day say which day each value belongs to, and the labels must follow.
+    Records a week of daily SMA values of AAPL and `X:BTCUSD` as Massive sent them, then the
+    library's answer to the same request: each value's `TimestampStart` and `Date`, or the
+    `MassiveError` its stamp check raised. The library checks a daily value as its class's
+    range bars, 00:00 New York time for a stock and 00:00 UTC for crypto. Reading it: raw
+    stamps there mean the check and the labels are right; stamps elsewhere make the library
+    refuse the values, and say which day each value really belongs to.
     """
     found = 0
-    for symbol in ("AAPL", "X:BTCUSD"):
-        rows = table_rows(
-            live_session.indicators.sma(
-                symbol, 5, start="2026-03-02", end="2026-03-09", timespan=dm.Timespan.DAY
-            ).fetch()
+    paths = {"AAPL": ("stockTicker", "AAPL"), "X:BTCUSD": ("cryptoTicker", "X:BTCUSD")}
+    for symbol, (name, ticker) in paths.items():
+        query = {"timespan": "day", "window": 5, "limit": 50}
+        query |= {"timestamp.gte": "2026-03-02", "timestamp.lt": "2026-03-09"}
+        raw = rest_rows(f"/v1/indicators/sma/{{{name}}}", {name: ticker}, query)
+        found += len(raw)
+        sent = [instant_text(r["timestamp"] * _MS) for r in raw]
+        evidence(f"{symbol} daily SMA stamps as sent: {sent}")
+        q = live_session.indicators.sma(
+            symbol, 5, start="2026-03-02", end="2026-03-09", timespan=dm.Timespan.DAY
         )
-        found += len(rows)
+        try:
+            rows = table_rows(q.fetch())
+        except dm.MassiveError as error:
+            evidence(f"{symbol} daily SMA refused by the library: {error}")
+            continue
         stamps = [(instant_text(r["TimestampStart"]), r["Date"]) for r in rows]
         evidence(f"{symbol} daily SMA (TimestampStart, Date): {stamps}")
     assert found
@@ -592,7 +604,7 @@ def test_bars_of_several_days_count_calendar_or_trading_days(
     Records AAPL's 2-day and 1-day bars from Monday 2026-03-02 to Friday 2026-03-13. Reading
     it: a 2-day bar from a Friday whose volume equals Friday's alone counts calendar days; one
     whose volume equals Friday's and Monday's counts trading days, the reading the library's
-    `TimestampEnd` already allows for.
+    `TimestampEnd` allows for, with one weekday more for a holiday.
     """
     bounds = (date(2026, 3, 2), date(2026, 3, 13))
     two = _bars(rest_rows, "day", multiplier=2, bounds=bounds)

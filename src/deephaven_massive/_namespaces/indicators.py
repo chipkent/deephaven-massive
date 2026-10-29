@@ -15,9 +15,11 @@ to a path that declares it, so it raises `ValueError` for a crypto symbol; Massi
 echo the basis of an indicator, so it cannot be checked. Each row is one indicator value of
 one bar of the requested `Symbol`: the bar's window, `TimestampStart` to the exclusive
 `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class (UTC for
-crypto and forex, New York otherwise), as for that class's bars. Massive documents no stamp
-of a daily or longer value, so such a value's window is the period of the day its stamp falls
-on.
+crypto and forex, New York otherwise), as for that class's bars. A value of a day or longer
+carries the stamp of the aggregate it is computed over, which the aggregates range puts at
+00:00 of the period's first day (01:00 New York time for indices), so it is checked as that
+class's bars are: `fetch()` and `poll()` raise `MassiveError` for a value stamped otherwise,
+since it may cover other days than its label.
 
 Each dataset is one factory method on `_Indicators` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. This module owns the

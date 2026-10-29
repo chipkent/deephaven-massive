@@ -8,8 +8,15 @@ the dataset's table shape:
 - `ColumnType`, the closed set of Deephaven column types (`Instant`, `double`, `long`, `int`,
   `String`, `boolean`, `int[]`), each with its Arrow type, and `COLUMN_TYPES`, the fixed map
   from a field's `WireType` to its column type. Every calendar date is ISO `yyyy-MM-dd` text,
-  a `String`: Deephaven stores a repeated string once and an integer per row, and a date joins
-  and compares as text.
+  a `String`, so a date joins and compares as text; `Column.calendar_date` marks those
+  columns, and the Deephaven side stores one shared `String` per distinct date
+  (`_tables/columns.py` `dataset_table`), so a date costs a reference per row. A date is a
+  stored column, never a `LocalDate` and never a view computed on read; instants stay
+  `Instant`. The library's time columns (`row_times.py`) own their names: no vendor field
+  keeps `Timestamp` or any `Timestamp<Qualifier>` outside a declared key, and on a tick, bar,
+  or daily-summary dataset none keeps `Date` either (a vendor `date` stays `Date` only on a
+  dataset without the library's `Date`, such as the economy data); no refresh `NAMES` entry
+  may coin one.
 - `Schema`, an ordered set of typed columns that turns row dictionaries into an Arrow table
   (used by the diagnostics tables, whose rows are built in Python).
 - `rename`, the run-time key rename of one source for one dataset: the source's fields, through the
@@ -40,7 +47,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -198,6 +205,9 @@ class Column:
         wire_keys: For each transport of `supplied_by`, the distinct wire keys behind the
             column, in the order of the dataset's sources, before any projection renames
             them; None stands for a key filled from the request. Excluded from hashing.
+        calendar_date: True for a calendar date, ISO `yyyy-MM-dd` text (`Date`, a vendor
+            `date` field): the Deephaven side stores one shared string per distinct date in
+            such a column (`_tables/columns.py`, `dataset_table`).
     """
 
     name: str
@@ -207,6 +217,7 @@ class Column:
     wire_keys: Mapping[Transport, tuple[str | None, ...]] = dataclass_field(
         default_factory=lambda: MappingProxyType({}), hash=False
     )
+    calendar_date: bool = False
 
 
 _INTEGER_TYPES: Final = frozenset({ColumnType.LONG, ColumnType.INT})
@@ -314,6 +325,11 @@ class Schema:
     def column_names(self) -> tuple[str, ...]:
         """The column names, in table order."""
         return tuple(column.name for column in self.columns)
+
+    @property
+    def date_columns(self) -> tuple[str, ...]:
+        """The calendar-date columns (`Column.calendar_date`), in table order."""
+        return tuple(column.name for column in self.columns if column.calendar_date)
 
     def arrow_schema(self) -> pa.Schema:
         """Return the Arrow schema whose tables `deephaven.arrow.to_table` converts to this one.
@@ -1162,14 +1178,17 @@ def dataset_schema(
     return Schema(
         spec.name,
         tuple(
-            _column(
-                spec,
-                name,
-                column_type=COLUMN_TYPES[types[name]],
-                own=own.get(name, ()),
-                suppliers=suppliers.get(name, ()),
-                library=name in described and (name in _KEY_SENTENCES or name in library),
-                filled=transports if name in library else (),
+            replace(
+                _column(
+                    spec,
+                    name,
+                    column_type=COLUMN_TYPES[types[name]],
+                    own=own.get(name, ()),
+                    suppliers=suppliers.get(name, ()),
+                    library=name in described and (name in _KEY_SENTENCES or name in library),
+                    filled=transports if name in library else (),
+                ),
+                calendar_date=types[name] is WireType.DATE,
             )
             for name in order
         ),

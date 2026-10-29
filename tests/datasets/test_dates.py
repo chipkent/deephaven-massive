@@ -23,6 +23,7 @@ from deephaven_massive._datasets.dates import (
     calendar_day,
     check_order,
     day_class,
+    day_end,
     day_start,
     day_zone,
     flat_file_published,
@@ -34,6 +35,7 @@ from deephaven_massive._datasets.dates import (
     futures_session_open,
     instant_bound,
     intraday,
+    last_trading_day,
     parse_date_like,
     publish_time,
     unit_ns,
@@ -767,6 +769,67 @@ def test_add_weekdays_skips_weekends_both_ways() -> None:
     assert add_weekdays(date(2024, 3, 28), 3) == date(2024, 4, 2)  # no holiday calendar
 
 
+# Weekday closures of the New York Stock Exchange, 2024 to 2026, including the national day of
+# mourning on 2025-01-09.
+NYSE_CLOSED = frozenset(
+    {
+        date(2024, 1, 1), date(2024, 1, 15), date(2024, 2, 19), date(2024, 3, 29),
+        date(2024, 5, 27), date(2024, 6, 19), date(2024, 7, 4), date(2024, 9, 2),
+        date(2024, 11, 28), date(2024, 12, 25),
+        date(2025, 1, 1), date(2025, 1, 9), date(2025, 1, 20), date(2025, 2, 17),
+        date(2025, 4, 18), date(2025, 5, 26), date(2025, 6, 19), date(2025, 7, 4),
+        date(2025, 9, 1), date(2025, 11, 27), date(2025, 12, 25),
+        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
+        date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
+        date(2026, 11, 26), date(2026, 12, 25),
+    }
+)  # fmt: skip
+# Weekdays on which the CME equity and interest-rate futures hold no session of their own: the
+# trading folds into the next session's date.
+CME_FOLDED = NYSE_CLOSED - {date(2025, 1, 9)}
+
+
+@pytest.mark.parametrize("closed", [NYSE_CLOSED, CME_FOLDED], ids=["nyse", "cme"])
+def test_the_last_trading_day_bounds_every_window_of_the_calendar(closed: frozenset[date]) -> None:
+    # Every start date from 2024 to 2026 and every count up to a quarter of sessions: the day
+    # the n-th session falls on is never after the bound.
+    day, trading = date(2024, 1, 1), []
+    while day.year < 2027:
+        if day.weekday() < 5 and day not in closed:
+            trading.append(day)
+        day += timedelta(days=1)
+    for first in range(len(trading)):
+        for n in range(1, 64):
+            if first + n > len(trading):
+                break
+            assert trading[first + n - 1] <= last_trading_day(trading[first], n), (
+                trading[first],
+                n,
+            )
+
+
+def test_the_last_trading_day_allows_a_weekday_more_and_one_per_five_sessions() -> None:
+    thursday = date(2025, 3, 6)
+    assert last_trading_day(thursday, 1) == date(2025, 3, 7)
+    assert last_trading_day(thursday, 2) == date(2025, 3, 10)
+    assert last_trading_day(thursday, 6) == date(2025, 3, 17)
+    # From 2024-12-24 the New York exchange is shut on 12-25, 01-01, and 01-09: the sixth and
+    # eleventh sessions fall on the bound itself.
+    assert last_trading_day(date(2024, 12, 24), 6) == date(2025, 1, 2)
+    assert last_trading_day(date(2024, 12, 24), 11) == date(2025, 1, 10)
+
+
+def test_a_day_ends_by_its_class() -> None:
+    sunday = date(2025, 3, 9)  # New York clocks move forward overnight into Monday
+    saturday = date(2025, 3, 8)
+    assert day_end(AssetClass.STOCKS, saturday) == datetime(2025, 3, 9, 5, tzinfo=UTC)
+    assert day_end(AssetClass.STOCKS, sunday) == datetime(2025, 3, 10, 4, tzinfo=UTC)
+    assert day_end(None, sunday) == datetime(2025, 3, 10, 4, tzinfo=UTC)
+    assert day_end(AssetClass.INDICES, sunday) == datetime(2025, 3, 10, 5, tzinfo=UTC)
+    assert day_end(AssetClass.CRYPTO, sunday) == datetime(2025, 3, 10, tzinfo=UTC)
+    assert day_end(AssetClass.FUTURES, sunday) == datetime(2025, 3, 9, 22, tzinfo=UTC)
+
+
 def test_bar_days_cover_each_period_s_window() -> None:
     sunday, monday = date(2025, 3, 2), date(2025, 3, 3)
     stock_week = (monday, date(2025, 3, 8))
@@ -778,7 +841,7 @@ def test_bar_days_cover_each_period_s_window() -> None:
     )
     assert bar_days(AssetClass.STOCKS, monday, timespan=Timespan.DAY, multiplier=3) == (
         monday,
-        date(2025, 3, 6),
+        date(2025, 3, 7),
     )
     # June 2024 starts on a Saturday: its stock window starts Monday the 3rd and ends Friday
     # the 28th; forex keeps the whole month.

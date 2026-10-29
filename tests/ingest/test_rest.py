@@ -802,11 +802,13 @@ def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
 ) -> None:
     fake_rest.reply(
         "/v1/indicators/sma/AAPL",
-        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 185.0}]})),
+        # 2024-01-03 00:00 New York time: a stock's day value carries its day's start.
+        Reply(envelope({"values": [{"timestamp": 1704258000000, "value": 185.0}]})),
     )
     fake_rest.reply(
         "/v1/indicators/sma/X%3ABTCUSD",
-        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 97000.0}]})),
+        # 2024-01-03 00:00 UTC: a crypto pair's day is the UTC day.
+        Reply(envelope({"values": [{"timestamp": 1704240000000, "value": 97000.0}]})),
     )
     out = fetch(
         session,
@@ -1193,6 +1195,24 @@ def test_futures_trades_by_date_read_each_session_by_its_date(
     ]
     # A row of another session is dropped.
     assert [r["Timestamp"] for r in out] == [sunday["timestamp"], tuesday["timestamp"]]
+
+
+def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Each session is its own request series, so a 404 on a later session after rows of an
+    # earlier one is that session's: it has no data, and the call goes on.
+    trade = futures_trade(datetime(2025, 1, 21, 10, tzinfo=CHICAGO), "2025-01-21")
+    fake_rest.reply(session_target("ESH5", "2025-01-21"), Reply(envelope([trade])))
+    fake_rest.reply(session_target("ESH5", "2025-01-22"), Reply(status=404))
+    fake_rest.reply(session_target("ESH5", "2025-01-23"), Reply(status=404))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        out = history(
+            session, FUTURES_TRADES, start="2025-01-21", end="2025-01-23", symbols=["ESH5"]
+        )
+    assert [r["Timestamp"] for r in out] == [trade["timestamp"]]
+    for day in ("2025-01-22", "2025-01-23"):
+        assert caplog.text.count(f"ESH5 has no data for the session {day} (HTTP 404") == 1
 
 
 def test_futures_sessions_skip_weekends_and_come_in_date_order(
@@ -2018,12 +2038,14 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         adjusted=True,
     )
     assert [(r["Symbol"], r["TimestampStart"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
-    # A stamp at midnight New York time is another day cut: it fails loudly.
+    # A stamp at midnight New York time is another day cut: it fails loudly. The flat files
+    # hold only as-traded bars, so the way out for adjusted bars says to pass adjusted=False.
     with pytest.raises(
         dm.MassiveError,
         match=r"^forex\.bars: a 1-day bar from /v2/aggs/grouped/locale/global/market/fx/\{date\} "
         r"is stamped 2025-03-03T05:00:00\+00:00, which .*; read the 1-day flat files with "
-        r"source=dm\.HistorySource\.FLAT_FILES if S3 credentials are configured, and report",
+        r"source=dm\.HistorySource\.FLAT_FILES and adjusted=False \(as-traded prices; the files "
+        r"hold no adjusted bars\) if S3 credentials are configured, and report",
     ):
         history(
             session,
@@ -2169,9 +2191,18 @@ def test_a_tick_dataset_dates_each_row_in_its_day_zone(
     # 03:00 UTC on March 4 is still March 3 in New York.
     late = epoch_ns(datetime(2025, 3, 4, 3, tzinfo=UTC))
     snapshot = {"ticker": "I:SPX", "value": 1.0, "last_updated": late}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot])))
-    (row,) = fetch(session, INDEX_VALUES, symbols=["I:SPX"])
+    other = {"ticker": "I:NDX", "value": 2.0, "last_updated": late}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot, other])))
+    q = query(session, INDEX_VALUES, symbols=["I:NDX", "I:SPX"])
+    assert isinstance(q, Query)
+    table = q.fetch()
+    row = rows(table)[0]
     assert (row["Symbol"], row["Date"], row["Timestamp"]) == ("I:SPX", "2025-03-03", late)
+    # The two rows share one stored `Date` string (counted inside Deephaven).
+    ids = table.update("DateRef = java.lang.System.identityHashCode(Date)").select_distinct(
+        "DateRef"
+    )
+    assert ids.size == 1
 
 
 def test_a_symbol_with_no_data_returns_no_rows(
@@ -2310,7 +2341,8 @@ def test_futures_bars_of_two_sessions_named_by_dates_fit_both_readings_of_their_
 ) -> None:
     # Monday 03-25 to Friday 03-29, 2024. Whether a two-session bar is labelled with its first
     # or its last session is not documented, so only the labels that fit the week either way
-    # are kept: Tuesday to Thursday.
+    # are requested and kept: Tuesday to Thursday. A bar must also end by the range's end,
+    # 17:00 Chicago on Friday, with its sessions counted with the holiday allowance.
     def bar(label: str, opens: datetime) -> dict[str, object]:
         return {"ticker": "ESM4", "session_end_date": label, "window_start": epoch_ns(opens)}
 
@@ -2327,11 +2359,11 @@ def test_futures_bars_of_two_sessions_named_by_dates_fit_both_readings_of_their_
         multiplier=2,
     )
     assert sent(fake_rest)[0][1]["resolution"] == ["2session"]
-    # The label is not the bar's day: a bar of two sessions has no `Date`. Its end is the
-    # later reading's last session, Wednesday or Friday, plus four days for holidays.
+    # The label is not the bar's day: a bar of two sessions has no `Date`. The bar opening
+    # Monday evening may end as late as Thursday's session, so it is kept; the one opening
+    # Wednesday evening may end on Monday 04-01 (Good Friday folds), after the range.
     assert [(r["Date"], r["TimestampEnd"]) for r in out] == [
-        (None, epoch_ns(datetime(2024, 3, 31, 17, tzinfo=CHICAGO))),
-        (None, epoch_ns(datetime(2024, 4, 2, 17, tzinfo=CHICAGO))),
+        (None, epoch_ns(datetime(2024, 3, 28, 17, tzinfo=CHICAGO))),
     ]
 
 

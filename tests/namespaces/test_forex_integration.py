@@ -5,8 +5,9 @@ the evidence, not a pass, answers the question. Raw rows come from the wire REST
 clients, because the library moves the very stamps in question; the library's own answer to
 the same request is recorded beside them. How to run these tests is in `docs/live-tests.md`.
 
-The library's rule under test: a forex 1-day bar is moved to 00:00 UTC of the UTC day its
-stamp falls on, whatever the source, without a check.
+The library's rule under test: a forex 1-day bar stamped at 00:00 UTC or at its UTC day's last
+millisecond is moved to 00:00 UTC of that day, whatever the source, and any other stamp fails
+the call with `MassiveError`.
 """
 
 from __future__ import annotations

@@ -784,6 +784,21 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
     assert json.loads(row["OpenTrades"])[0]["i"] == "511235746"
 
 
+def test_a_day_summary_not_in_utc_fails(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # Its day would not be the UTC day the window is filled with, so its end could be early.
+    path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
+    body = json.loads(load_fixture(OWNER, "open_close.json"))
+    serve(fake_rest, path, json.dumps({**body, "isUTC": False}).encode())
+    q = rest_session.crypto.daily_open_close("BTC-USD", "2020-10-09")
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^crypto\.daily_open_close: Massive sent a day summary with isUTC false",
+    ):
+        q.fetch()
+
+
 # --- End to end: WebSocket -----------------------------------------------------------------------
 
 TIMEOUT = 15.0

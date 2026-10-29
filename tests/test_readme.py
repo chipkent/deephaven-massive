@@ -1,24 +1,33 @@
-"""Tests that the Python examples of `README.md` run, against the fake REST server.
+"""Tests that the Python examples of `README.md` run, against the fake REST and WebSocket servers.
 
 Each example block of a README section runs, in order, in one namespace, as a reader would
 paste them into the Deephaven console one after another. `dm.MassiveSession()` builds a session
-whose REST client talks to the fake server, so nothing reaches Massive; the fake answers each
-request the examples make with Massive's documented shapes, holding NVDA's 10-for-1 split of
-2024-06-10. The tests then check that the tables hold what the README says they hold.
+whose REST client talks to the fake REST server and whose streams connect to the fake
+WebSocket server, so nothing reaches Massive; the fakes answer each request the examples make
+with Massive's documented shapes, holding NVDA's 10-for-1 split of 2024-06-10. The tests then
+check that the tables hold what the README says they hold, and call the functions it defines.
 """
 
+import json
 import re
 import runpy
-from collections.abc import Callable, Iterator
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets.request import HostDecision
+from deephaven_massive._enums import Recency
+from deephaven_massive._ingest import ws
+from deephaven_massive._massive import Source, WsClient
 from tests._fakes.rest import FakeRestServer, Reply, envelope
+from tests._fakes.ws import FakeMassiveServer
 
 README = Path(__file__).resolve().parent.parent / "README.md"
 
@@ -61,14 +70,47 @@ def _bar(day: str, close: float, volume: float) -> dict[str, object]:
 
 @pytest.fixture
 def readme_server(
-    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+    fake_rest: FakeRestServer, fake_ws_server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[FakeRestServer]:
-    """Make `dm.MassiveSession()` open a session on the fake REST server, closed afterwards.
+    """Make `dm.MassiveSession()` open a session on the fake servers, closed afterwards.
 
     Yields:
-        The fake server the examples' session talks to, for scripting its replies.
+        The fake REST server the examples' session talks to, for scripting its replies; its
+        streams connect to `fake_ws_server`.
     """
-    session = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, flush_interval=0.01)
+    session = dm.MassiveSession(config)
+
+    def client(
+        url: str,
+        *,
+        sources: Sequence[Source],
+        on_open: Callable[..., None],
+        on_status: Callable[..., None],
+        on_data: Callable[..., None],
+        on_state: Callable[..., None],
+    ) -> WsClient:
+        return WsClient(
+            fake_ws_server.url("/" + url.split("/", 3)[3]),
+            api_key="test-key",
+            sources=sources,
+            on_open=on_open,
+            on_status=on_status,
+            on_data=on_data,
+            on_state=on_state,
+            reconnect_backoff=0.05,
+            max_reconnect_backoff=0.1,
+        )
+
+    connections = ws.WsConnections(
+        session._core,
+        resolve_host=lambda *_: HostDecision("socket.test", Recency.REALTIME, "test"),
+        record_verdict=lambda *_: None,
+        fetch_rows=lambda *_: [],
+        client_factory=client,
+    )
+    cast("Any", session._core._ports)._streams = connections
+    session._core.on_close(connections.close)
 
     def opened(*_args: object, **_kwargs: object) -> dm.MassiveSession:
         return session
@@ -79,9 +121,12 @@ def readme_server(
 
 
 def test_the_split_adjustment_examples_run(
+    *,
     readme_server: FakeRestServer,
+    fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The whole New York days of 2024-06-03 to 2024-06-14, as the range path's `{from}/{to}`.
     path = (
@@ -147,4 +192,56 @@ def test_the_split_adjustment_examples_run(
         "adjusted=true&limit=50000&sort=asc",
         "adjusted=false&limit=50000&sort=asc",
     ]
-    assert callable(names["history_and_live"])
+    _history_and_live_merges_history_with_live_bars(
+        readme_server=readme_server,
+        fake_ws_server=fake_ws_server,
+        history_and_live=names["history_and_live"],
+        dh_to_pylist=dh_to_pylist,
+        monkeypatch=monkeypatch,
+    )
+
+
+def _history_and_live_merges_history_with_live_bars(
+    *,
+    readme_server: FakeRestServer,
+    fake_ws_server: FakeMassiveServer,
+    history_and_live: Callable[[str, str], Table],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 2024-06-14 at 15:00 New York time: history reads that day's finished minutes over REST,
+    # then the stream appends the live ones.
+    now = datetime(2024, 6, 14, 19, tzinfo=UTC)
+    monkeypatch.setattr(history_source, "_now", lambda: now)
+    opened = _ms("2024-06-14T13:30:00")  # 09:30 New York time
+    # An open end reads through the end of today; the bars not yet ended are dropped.
+    path = (
+        f"/v2/aggs/ticker/NVDA/range/1/minute/{_ms('2024-06-14T04:00:00')}/"
+        f"{_ms('2024-06-15T04:00:00') - 1}"
+    )
+    minute = {**_bar("2024-06-14", 131.0, 1_000), "t": opened}
+    readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="NVDA")))
+    table = history_and_live("NVDA", "2024-06-14")
+    fake_ws_server.wait_for(
+        lambda server: any(
+            "AM.NVDA" in json.loads(frame).get("params", "")
+            for connection in server.connections
+            for frame in connection.frames
+        )
+    )
+    live = {"ev": "AM", "sym": "NVDA", "v": 5, "o": 132.0, "c": 132.0, "h": 132.0, "l": 132.0}
+    live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
+    fake_ws_server.send(json.dumps([live]))
+    # Bounded wait for the flush thread and an update-graph cycle to append the live bar.
+    pace = threading.Event()  # never set; only paces the loop
+    rows = dh_to_pylist(table)
+    for _ in range(500):
+        if len(rows) == 2:
+            break
+        pace.wait(0.02)
+        rows = dh_to_pylist(table)
+    assert [(r["Symbol"], r["Close"]) for r in rows] == [("NVDA", 131.0), ("NVDA", 132.0)]
+    assert [r["TimestampStart"] for r in rows] == [
+        datetime(2024, 6, 14, 13, 30, tzinfo=UTC),
+        datetime(2024, 6, 14, 19, tzinfo=UTC),
+    ]

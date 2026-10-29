@@ -475,21 +475,24 @@ class _Options(Namespace):
         one-minute and one-day bars with `adjusted=False`, the `us_options_opra/minute_aggs_v1`
         and `us_options_opra/day_aggs_v1` flat files. There is no `limit`: `history()` pages
         internally and returns the whole range. It returns only the bars whose whole window
-        lies inside the range and has ended, so the current day's bar never appears.
+        lies inside the range and has ended, judged by `TimestampEnd`, so the current day's bar
+        never appears.
 
         `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed bars;
-        it is not when Massive published the bar. An intraday bar ends its length after its
-        start. A bar of a day or longer runs from 00:00 New York time of its window's first day
-        to 00:00 after its last, whatever the source: the range and the day files stamp a 1-day
-        bar at the day's start, while `/prev` stamps it at the 16:00 session close (13:00 on a
-        short trading day; 16:15 or 13:15 for index options such as SPXW), which is moved to
-        the day's start. A week runs Monday to Friday and a longer period from its first to its
-        last weekday. A longer bar must be stamped at 00:00 on the day its period starts: a
-        week on its Monday or the Saturday or Sunday before, a month, quarter, or year on its
-        1st. Any other stamp fails the call with `MassiveError` naming the source, since the
-        bar may cover other days than its label. `Date` is null for a bar that spans more than
-        one date.
+        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed
+        bars; it is not when Massive published the bar. An intraday bar ends its length
+        after its start. A bar of a day or longer runs from 00:00 New York time of its
+        window's first day to 00:00 after its last, whatever the source: the range and the
+        day files stamp a 1-day bar at the day's start, while `/prev` stamps it at the 16:00
+        session close (13:00 on a short trading day; 16:15 or 13:15 for index options such
+        as SPXW), which is moved to the day's start. A week runs Monday to Friday and a
+        longer period from its first to its last weekday. A bar of several days counts
+        trading days, ending as late as holidays could push it (one weekday more, and one
+        more for every five further days), since there is no holiday calendar. A longer bar
+        must be stamped at 00:00 on the day its period starts: a week on its Monday or the
+        Saturday or Sunday before, a month, quarter, or year on its 1st. Any other stamp
+        fails the call with `MassiveError` naming the source, since the bar may cover other
+        days than its label. `Date` is null for a bar that spans more than one date.
 
         Prices and volumes are adjusted for splits of the underlying only when `adjusted` is
         True, the default, and only REST serves adjusted bars; Massive never adjusts for cash

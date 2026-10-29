@@ -45,8 +45,9 @@ m = dm.MassiveSession()
 # NVDA split 10 for 1 on 2024-06-10, so its 2024-06-07 close reads about 120.9.
 adjusted = m.stocks.bars("NVDA", dm.Timespan.DAY).history("2024-06-03", "2024-06-14")
 
-# As traded: its 2024-06-07 close reads about 1208. Flat files can serve these too, and
-# dm.ALL needs adjusted=False, since only REST adjusts and REST needs explicit symbols.
+# As traded: its 2024-06-07 close reads about 1208. Flat files can serve these too. Daily
+# bars of dm.ALL come adjusted from REST's grouped daily bars; intraday bars of dm.ALL need
+# adjusted=False, since only REST adjusts and its intraday bars need explicit symbols.
 traded = m.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
     "2024-06-03", "2024-06-14"
 )
@@ -56,7 +57,10 @@ traded = m.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
 `HistoricalAdjustmentFactor`. Massive's rule: for a price on date D, take the first split whose
 `ExecutionDate` is after D and multiply the price by its factor (and divide the volume by it).
 `Date` and `ExecutionDate` are both ISO `yyyy-MM-dd` text, so a reverse as-of join finds that
-split. A null factor means no later split, so a factor of 1.
+split. A null factor means no later split, so a factor of 1. The recipe applies every row of
+the splits dataset, stock dividends (`AdjustmentType` `stock_dividend`) included; whether
+Massive's `adjusted=True` applies those too is not documented, so the two can differ around a
+stock dividend.
 
 ```python
 splits = m.stocks.splits("NVDA").fetch()

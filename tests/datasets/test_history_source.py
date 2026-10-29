@@ -239,6 +239,26 @@ def test_unfinished_bars_are_left_out() -> None:
     assert future.empty  # March has not ended
 
 
+def test_a_bar_must_end_by_the_range_s_end_and_by_now() -> None:
+    # Ticks have no end to check.
+    assert window(STOCK_TRADES, "2025-03-03", "2025-03-04").ended_by is None
+    # Dates end with their last day: midnight after it, 01:00 New York time for indices.
+    stocks = window(STOCK_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
+    assert stocks.ended_by == datetime(2025, 3, 5, tzinfo=NEW_YORK)
+    indices = window(INDEX_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
+    assert indices.ended_by == datetime(2025, 3, 5, 1, tzinfo=NEW_YORK)
+    # Datetimes end at their end; an open end, or one after now, at now.
+    end = datetime(2025, 3, 5, 9, 30, tzinfo=NEW_YORK)
+    exact = window(STOCK_BARS, "2025-03-03T00:00:00-05:00", end, timespan=Timespan.DAY)
+    assert exact.ended_by == end
+    assert window(STOCK_BARS, "2025-03-03", None, timespan=Timespan.DAY).ended_by == NOW
+    # Futures dates end at 17:00 Chicago on the last session's date.
+    span = ("2025-03-03", "2025-03-05")
+    for timespan in (Timespan.MINUTE, Timespan.SESSION):
+        sessions = window(FUTURES_BARS, *span, timespan=timespan)
+        assert sessions.ended_by == datetime(2025, 3, 5, 17, tzinfo=CHICAGO)
+
+
 def test_futures_trades_by_date_are_whole_sessions_requested_one_at_a_time() -> None:
     sessions = window(FUTURES_TRADES, "2025-03-03", "2025-03-05")
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))

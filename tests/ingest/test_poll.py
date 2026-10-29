@@ -1157,3 +1157,21 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
     rendered = row["Error"].removeprefix(prefix)
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
+
+
+def test_polled_rows_share_one_stored_string_per_date(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers, clock: FakeClock
+) -> None:
+    data = [
+        {"Symbol": symbol, "CashAmount": 1.0, "PayDate": "2025-03-14", "Id": symbol}
+        for symbol in ("AAPL", "MSFT", "IBM")
+    ]
+    script.outcomes.put(pa.Table.from_pylist(data, schema=script.schema))
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, mode=PollMode.UPSERT
+    )
+    until(lambda: table.size == 3)
+    # Counted inside Deephaven: a string crossing to Python is copied.
+    refs = table.update("DateRef = java.lang.System.identityHashCode(PayDate)")
+    assert refs.select_distinct("DateRef").size == 1
+    massive_session.release(table)

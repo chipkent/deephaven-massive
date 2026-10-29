@@ -564,9 +564,10 @@ def _refuse(
         return
     bad = _instant(pc.filter(values.cast(pa.int64()), odd)[0].as_py())
     local = "" if zone is UTC else f" ({bad.astimezone(zone).isoformat()} in {zone})"
+    article = "an" if what[:1] in "aeiou" else "a"
     raise MassiveError(
-        f"{label}: a {what} from {source} is stamped {bad.isoformat()}{local}, which is not a "
-        f"stamp Massive is known to use for such a bar ({expected}), so it may cover other days "
-        f"than the one it would be labelled with; {remedy}, and report the stamp at "
+        f"{label}: {article} {what} from {source} is stamped {bad.isoformat()}{local}, which is "
+        f"not a stamp Massive is known to use for such a bar ({expected}), so it may cover "
+        f"other days than the one it would be labelled with; {remedy}, and report the stamp at "
         f"{ISSUES_URL} so the day cut can be settled"
     )

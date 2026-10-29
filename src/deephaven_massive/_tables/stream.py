@@ -63,7 +63,6 @@ from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import new_table
-from deephaven.arrow import to_table
 from deephaven.column import string_col
 from deephaven.stream.table_publisher import table_publisher
 
@@ -73,7 +72,7 @@ from deephaven_massive._datasets.symbols import SymbolTable, canonical
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
 from deephaven_massive._errors import MassiveError, log_once
 from deephaven_massive._massive import Transport, WireType
-from deephaven_massive._tables.columns import col_defs
+from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.liveness import StreamHandle, entered, new_scope
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -204,6 +203,8 @@ class ChannelPlan:
             rows that fills it (None for a column the channel does not carry, which is null), and
             the unit of an epoch column (None for any other).
         arrow_schema: The dataset's Arrow schema.
+        date_columns: The dataset's calendar-date columns, stored one shared string per date
+            (`columns.dataset_table`).
         symbol_field: The long-form column of the rows that holds the raw symbol.
         required: The long-form columns a row must carry: the dataset's keys for the channel's
             source, excluding keys filled from a request (`set_required`).
@@ -219,6 +220,7 @@ class ChannelPlan:
     wire_schema: pa.Schema
     columns: tuple[tuple[ColumnType, str, str | None, TimeUnit | None], ...]
     arrow_schema: pa.Schema
+    date_columns: tuple[str, ...]
     symbol_field: str
     required: frozenset[str]
     times: TimeRule
@@ -270,6 +272,7 @@ class ChannelPlan:
                 for c in schema.columns
             ),
             arrow_schema=schema.arrow_schema(),
+            date_columns=schema.date_columns,
             symbol_field=symbol_field.column,
             required=frozenset(f.column for f in required_fields(spec, source)),
             times=TimeRule(spec.name, spec.times, asset_class, timespan),
@@ -951,7 +954,7 @@ class Flusher:
                     sink.fail(core, error)
         if not converted.batch.num_rows:
             return
-        table = to_table(converted.batch)
+        table = dataset_table(converted.batch, plan.date_columns)
         for sink in readers:
             if sink.publish(table, converted):
                 found = updates.get(sink.stream_id, StreamUpdate())

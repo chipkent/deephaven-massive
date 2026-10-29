@@ -732,3 +732,29 @@ def test_benchmark_fan_out(
             f"shared batch {shared_rate:,.0f} rows/s, "
             f"Python grouping {grouped_rate:,.0f} rows/s\n"
         )
+
+
+def test_streamed_rows_of_one_day_share_one_stored_date(massive_session: dm.MassiveSession) -> None:
+    core = massive_session._core
+    spec = core.catalog.by_name["stocks.trades"]
+    plan = ChannelPlan.build(core.catalog, spec, "T")
+    flusher = Flusher(core, "test-flush", interval=3600.0)
+    opened = open_stream_tables(
+        plan,
+        core.catalog.dataset_schema(spec),
+        ALL,
+        stream_id=1,
+        host="socket.test",
+        path="/stocks",
+        on_shutdown=lambda: None,
+        on_symbols=lambda *_: None,
+    )
+    shown = blink_to_append_only(opened.handle.blink)
+    flusher.routes.add("T", opened.sink)
+    flusher.rows("T", [trade("AAPL"), trade("MSFT"), trade("IBM")])
+    flusher.flush()
+    flusher.stop()
+    wait_for(lambda: shown.size == 3)
+    # Counted inside Deephaven: a string crossing to Python is copied.
+    refs = shown.update("DateRef = java.lang.System.identityHashCode(Date)")
+    assert refs.select_distinct("DateRef").size == 1

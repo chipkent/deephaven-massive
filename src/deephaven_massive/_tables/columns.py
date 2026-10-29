@@ -27,6 +27,7 @@ import logging
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
+from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.jcompat import j_hashmap
@@ -35,12 +36,21 @@ from deephaven.table import Table
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS, ColumnType
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
+
+    import pyarrow as pa
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.schema import Schema
 
-__all__ = ["COLUMN_TABLE_DESCRIPTIONS", "col_defs", "column_table", "describe", "dh_type"]
+__all__ = [
+    "COLUMN_TABLE_DESCRIPTIONS",
+    "col_defs",
+    "column_table",
+    "dataset_table",
+    "describe",
+    "dh_type",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +106,35 @@ def col_defs(schema: Schema) -> dict[str, dtypes.DType]:
         `table_publisher(col_defs=...)` and `input_table(col_defs=...)` take it.
     """
     return {column.name: dh_type(column.type) for column in schema.columns}
+
+
+def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
+    """Convert rows of a dataset's schema to a static Deephaven table, one string per date.
+
+    `deephaven.arrow.to_table` makes one Java `String` per row of a text column, so a
+    column of a million rows of one date would hold a million copies of it. Every
+    calendar-date column (`Schema.date_columns`: the library's `Date` and every vendor date,
+    ISO `yyyy-MM-dd` text) is therefore stored again through `String.intern()`, so every row
+    of one date refers to one shared `String`: a stored date costs a reference per row, not a
+    string. On a million rows of five dates the column holds five `String`s instead of a
+    million, for about 0.15 seconds more per million rows once the formula is compiled. Every
+    transport converts its rows through here.
+
+    Runs on any thread inside the session's execution context; the table is static and is
+    created in the liveness scope at the top of the calling thread's stack. A schema without
+    a date column is converted as is.
+
+    Args:
+        rows: The rows, an Arrow table in the dataset's schema.
+        dates: The dataset's calendar-date columns (`Schema.date_columns`).
+
+    Returns:
+        The static table, with every column of `rows`.
+    """
+    table = dh_arrow.to_table(rows)
+    if not dates:
+        return table
+    return table.update([f"{name} = {name} == null ? null : {name}.intern()" for name in dates])
 
 
 def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:

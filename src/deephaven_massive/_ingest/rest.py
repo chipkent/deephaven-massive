@@ -79,12 +79,17 @@ from urllib.parse import urlsplit
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.catalog import filter_key, takes_instants
 from deephaven_massive._datasets.dates import day_class, instant_bound, trades_at_weekends
 from deephaven_massive._datasets.history_source import StampRule, partition_dates, stamp_rule
-from deephaven_massive._datasets.row_times import DATE, time_column, time_rule
+from deephaven_massive._datasets.row_times import (
+    DATE,
+    RowTimes,
+    ended_by,
+    time_column,
+    time_rule,
+)
 from deephaven_massive._datasets.schema import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
@@ -107,6 +112,7 @@ from deephaven_massive._massive import (
     WireError,
     to_batch,
 )
+from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.liveness import entered
 from deephaven_massive._types import _All
@@ -1139,7 +1145,7 @@ class RestReader:
         template = converter.rest_path.template
         own = _own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
-        stamps = _with_remedy(stamp_rule(spec, request), remedy)
+        stamps = _with_remedy(stamp_rule(spec, request, asset_class=zone_class), remedy)
         times = time_rule(spec, request, asset_class=zone_class)
         try:
             for page in self.state.client.pages(
@@ -1158,8 +1164,14 @@ class RestReader:
                 # not be dropped unseen by `_keep`.
                 if stamps is not None:
                     batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
+                latest = None if window is None else window.ended_by
                 kept.extend(
-                    times.fill(_keep(batch, window, time=converter.time_name), received=received)
+                    ended_by(
+                        times.fill(
+                            _keep(batch, window, time=converter.time_name), received=received
+                        ),
+                        latest,
+                    )
                     for batch in batches
                 )
         except WireError as error:
@@ -1172,11 +1184,15 @@ class RestReader:
                         status=error.status,
                         request_id=error.request_id,
                     ) from error
-                if self.state.first("missing", spec.name, call.symbol):
+                # A futures session is requested on its own: a 404 there is that session's.
+                session = call.query.get(_SESSION_DATE)
+                scope = "" if session is None else f" for the session {session}"
+                if self.state.first("missing", spec.name, call.symbol, scope):
                     logger.warning(
-                        "%s: %s has no data (HTTP 404 from %s); it is left out",
+                        "%s: %s has no data%s (HTTP 404 from %s); it is left out",
                         spec.name,
                         call.symbol,
+                        scope,
                         template,
                     )
                 return _Outcome(tuple(kept), requests + 1)
@@ -1473,7 +1489,7 @@ class RestReader:
                 calls,
                 request=request,
                 limit=request.limit,
-                remedy=_FETCH_REMEDY,
+                remedy=_fetch_remedy(spec),
                 record=record,
                 executor=executor,
             )
@@ -1513,17 +1529,22 @@ class RestEndpoints:
         core = self._core
         return RestReader(self._state, core.catalog, core.drift, core.config.max_concurrency)
 
-    def _static(self, table: pa.Table) -> Table:
+    def _static(self, spec: DatasetSpec, table: pa.Table) -> Table:
         """Convert rows to a static Deephaven table, inside the session's execution context.
 
+        Every calendar-date column stores one shared string per distinct date
+        (`columns.dataset_table`).
+
         Args:
+            spec: The dataset, whose schema names its date columns.
             table: The rows.
 
         Returns:
             The static table, with every column of the schema even without rows.
         """
+        dates = self._core.catalog.dataset_schema(spec).date_columns
         with entered(self._core.exec_ctx):
-            return dh_arrow.to_table(table)
+            return dataset_table(table, dates)
 
     def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
         """Decide the WebSocket host of a (class, family), once per session, single-flight.
@@ -1682,7 +1703,7 @@ class RestEndpoints:
         except MassiveError as error:
             _report(error)
             raise
-        return self._static(table)
+        return self._static(spec, table)
 
     def history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
@@ -1747,7 +1768,7 @@ class RestEndpoints:
             _report(error)
             raise
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
-        return self._static(table)
+        return self._static(spec, table)
 
     def poll(
         self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
@@ -1985,13 +2006,39 @@ _FLAT_FILES_REMEDY: Final = (
     "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES if S3 credentials are "
     "configured"
 )
-"""What a `history()` caller of 1-day bars can do when a REST stamp is refused."""
+"""What a `history()` caller of unadjusted 1-day bars can do when a REST stamp is refused."""
+
+_UNADJUSTED_REMEDY: Final = (
+    "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES and adjusted=False "
+    "(as-traded prices; the files hold no adjusted bars) if S3 credentials are configured"
+)
+"""What a `history()` caller of adjusted 1-day bars can do when a REST stamp is refused: the
+flat files serve only unadjusted bars, so the way out names the price basis it changes."""
 
 _LONGER_REMEDY: Final = "request 1-day bars; no other source serves these"
 """What a `history()` caller of longer or multiplied bars can do: only REST serves them."""
 
 _FETCH_REMEDY: Final = "use history() for that day"
 """What a `fetch()` or `poll()` caller can do when `/prev`'s stamp is refused."""
+
+_INDICATOR_REMEDY: Final = "compute the indicator from bars().history() of the same timespan"
+"""What an indicator caller can do when a value's stamp is refused: no other source serves the
+values, but the bars they are computed over are checked and labelled the same way."""
+
+
+def _fetch_remedy(spec: DatasetSpec) -> str:
+    """Return what a `fetch()` or `poll()` caller can do when a stamp is refused.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        Computing the indicator from bars for an indicator; reading `history()` for the day
+        for `/prev`'s bars.
+    """
+    if not spec.is_bars and spec.times is RowTimes.BAR:
+        return _INDICATOR_REMEDY
+    return _FETCH_REMEDY
 
 
 def _history_remedy(request: Request) -> str:
@@ -2001,11 +2048,12 @@ def _history_remedy(request: Request) -> str:
         request: The normalized arguments.
 
     Returns:
-        Reading the 1-day flat files for 1-day bars; asking for 1-day bars otherwise, since no
-        flat file holds longer or multiplied bars.
+        For 1-day bars, reading the 1-day flat files, which for adjusted bars (`adjusted`
+        True) means passing adjusted=False as well; for longer or multiplied bars, asking for
+        1-day bars, since no flat file holds them.
     """
     if request.timespan is Timespan.DAY and request.multiplier == 1:
-        return _FLAT_FILES_REMEDY
+        return _UNADJUSTED_REMEDY if request.adjusted is True else _FLAT_FILES_REMEDY
     return _LONGER_REMEDY
 
 

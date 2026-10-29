@@ -20,6 +20,7 @@ from deephaven_massive._datasets.row_times import (
     TIMESTAMP,
     RowTimes,
     TimeRule,
+    ended_by,
     local_dates,
     time_column,
     time_rule,
@@ -84,6 +85,21 @@ def iso(values: pa.Array | pa.ChunkedArray) -> list[str | None]:
     return [None if v is None else v.isoformat() for v in values.to_pylist()]
 
 
+def test_only_rows_ended_by_an_instant_are_kept() -> None:
+    rule = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 1)
+    filled = rule.fill(bars(["2025-03-03T05:00:00", "2025-03-04T05:00:00"]), received=7)
+    latest = datetime(2025, 3, 4, 5, tzinfo=UTC)
+    assert iso(ended_by(filled, latest).column(START)) == ["2025-03-03T05:00:00+00:00"]
+    assert ended_by(filled, None) is filled
+    # A row whose end is unknown is kept; rows without an end column are all kept.
+    unknown = filled.set_column(
+        filled.schema.get_field_index(END), END, pa.nulls(2, filled.schema.field(END).type)
+    )
+    assert ended_by(unknown, latest).num_rows == 2
+    ticks = pa.RecordBatch.from_pydict({"Price": [1.0]})
+    assert ended_by(ticks, latest) is ticks
+
+
 def fill(rule: TimeRule, rows: pa.RecordBatch) -> dict[str, list[object]]:
     filled = rule.fill(rows, received=7)
     assert filled.schema == rows.schema
@@ -115,9 +131,6 @@ def test_a_rule_follows_the_dataset_and_the_request() -> None:
     # An indicator follows its symbol's class.
     sma = time_rule(indicators.SMA, Request(timespan=T.DAY), asset_class=A.CRYPTO)
     assert (sma.row_times, sma.asset_class, sma.timespan) == (RowTimes.BAR, A.CRYPTO, T.DAY)
-    # Its stamps are not checked, unlike the bars'.
-    assert not sma.stamped
-    assert time_rule(stocks.BARS, request).stamped
     assert time_rule(stocks.SNAPSHOTS, Request()).row_times is RowTimes.NONE
 
 
@@ -308,6 +321,9 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     }
     # June 2024 starts on a Saturday: its stock month starts on Monday the 3rd.
     month = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.MONTH, 1)
+    index_month = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.MONTH, 1)
+    # An index month ends an hour after the calendar month does, weekend or not.
+    assert fill(index_month, bars(["2024-06-03T04:00:00"]))[END] == ["2024-07-01T05:00:00+00:00"]
     assert fill(month, bars(["2024-06-01T04:00:00"]))[START] == ["2024-06-03T04:00:00+00:00"]
     assert fill(month, bars(["2024-06-01T04:00:00"]))[END] == ["2024-06-29T04:00:00+00:00"]
     # Crypto weeks are calendar weeks, in UTC.
@@ -318,44 +334,34 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     assert fill(days, bars(["2025-03-03T05:00:00"])) == {
         DATE: [None],
         START: ["2025-03-03T05:00:00+00:00"],
-        END: ["2025-03-06T05:00:00+00:00"],
+        END: ["2025-03-07T05:00:00+00:00"],
     }
+    # An index can update around the clock, so its week may hold its weekend: it ends an hour
+    # after the next Monday begins.
     indices = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.WEEK, 1)
-    assert fill(indices, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-08T06:00:00+00:00"]
+    assert fill(indices, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-10T05:00:00+00:00"]
+    index_days = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.DAY, 2)
+    assert fill(index_days, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-06T06:00:00+00:00"]
 
 
-def test_stock_bars_of_several_days_count_weekdays() -> None:
-    # Whether Massive counts calendar or trading days is not documented: a 2-day stock bar from
-    # a Friday holds the Monday too, the later reading. Crypto trades every day.
+def test_stock_bars_of_several_days_count_trading_days_with_a_holiday_allowance() -> None:
+    # Whether Massive counts calendar or trading days is not documented, so a bar of n days
+    # ends after the latest day n trading days can reach: a 2-day stock bar from a Friday may
+    # hold the Monday, or the Tuesday when Monday is a holiday. Crypto trades every day.
     days = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 2)
-    assert fill(days, bars(["2025-03-07T05:00:00"]))[END] == ["2025-03-11T04:00:00+00:00"]
+    assert fill(days, bars(["2025-03-07T05:00:00"]))[END] == ["2025-03-12T04:00:00+00:00"]
     one = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 1)
     assert fill(one, bars(["2025-03-07T05:00:00"]))[END] == ["2025-03-08T05:00:00+00:00"]
     crypto = TimeRule("crypto.bars", RowTimes.BAR, A.CRYPTO, T.DAY, 2)
     assert fill(crypto, bars(["2025-03-07T00:00:00"]))[END] == ["2025-03-09T00:00:00+00:00"]
 
 
-def test_an_indicator_value_of_a_week_or_longer_ends_at_its_latest_window() -> None:
-    # A crypto week value stamped on a Sunday: were Massive's week to start that Sunday, it
-    # would end on the Sunday after, so that is the end, not the calendar week's Monday.
-    week = TimeRule("indicators.sma", RowTimes.BAR, A.CRYPTO, T.WEEK, 1, stamped=False)
-    assert fill(week, bars(["2025-03-02T00:00:00"])) == {
-        DATE: [None],
-        START: ["2025-02-24T00:00:00+00:00"],
-        END: ["2025-03-09T00:00:00+00:00"],
-    }
-    # Stamped on its window's first day, the calendar rule already gives the latest end.
+def test_an_indicator_value_ends_where_a_bar_of_its_period_ends() -> None:
+    # Indicator stamps are checked like the bars', so a value covers its bar's window.
+    week = TimeRule("indicators.sma", RowTimes.BAR, A.CRYPTO, T.WEEK, 1)
     assert fill(week, bars(["2025-03-03T00:00:00"]))[END] == ["2025-03-10T00:00:00+00:00"]
-    # A month from the 31st ends no later than the 1st after the next month.
-    month = TimeRule("indicators.sma", RowTimes.BAR, A.CRYPTO, T.MONTH, 1, stamped=False)
-    assert fill(month, bars(["2025-01-31T00:00:00"]))[END] == ["2025-03-01T00:00:00+00:00"]
-    quarter = TimeRule("indicators.sma", RowTimes.BAR, A.STOCKS, T.QUARTER, 1, stamped=False)
-    assert fill(quarter, bars(["2025-02-15T05:00:00"]))[END] == ["2025-05-15T04:00:00+00:00"]
-    year = TimeRule("indicators.sma", RowTimes.BAR, A.STOCKS, T.YEAR, 1, stamped=False)
-    assert fill(year, bars(["2024-12-02T05:00:00"]))[END] == ["2025-12-02T05:00:00+00:00"]
-    # A day value is labelled by its stamp's day as always.
-    day = TimeRule("indicators.sma", RowTimes.BAR, A.STOCKS, T.DAY, 1, stamped=False)
-    assert fill(day, bars(["2025-03-03T09:00:00"]))[END] == ["2025-03-04T05:00:00+00:00"]
+    day = TimeRule("indicators.sma", RowTimes.BAR, A.STOCKS, T.DAY, 1)
+    assert fill(day, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-04T05:00:00+00:00"]
 
 
 # --- Futures bars of a session or longer ----------------------------------------------------
@@ -374,16 +380,16 @@ def test_a_futures_session_bar_ends_at_17_chicago_on_its_date() -> None:
 def test_a_futures_bar_of_several_sessions_ends_at_its_latest_possible_close() -> None:
     rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SESSION, 2)
     # Labelled Thursday 2024-03-28 before Good Friday: counted as weekdays it ends with
-    # Friday's session, but the holiday moved that trading to Monday 04-01, so the end allows
-    # four days more.
+    # Friday's session, but the holiday moved that trading to Monday 04-01, which the holiday
+    # allowance of one weekday covers.
     sent = bars(["2024-03-27T22:00:00"], dates=["2024-03-28"])
-    end = datetime(2024, 4, 2, 17, tzinfo=CHICAGO).astimezone(UTC)
+    end = datetime(2024, 4, 1, 17, tzinfo=CHICAGO).astimezone(UTC)
     assert fill(rule, sent) == {
         DATE: [None],
         START: ["2024-03-27T22:00:00+00:00"],
         END: [end.isoformat()],
     }
-    # A label later than the counted sessions plus the margin is the end.
+    # A label later than the counted sessions and their allowance is the end.
     late = bars(["2024-03-27T22:00:00"], dates=["2024-04-08"])
     assert fill(rule, late)[END] == [
         datetime(2024, 4, 8, 17, tzinfo=CHICAGO).astimezone(UTC).isoformat()
