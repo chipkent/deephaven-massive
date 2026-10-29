@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven.table import Table
 
@@ -70,7 +70,10 @@ if TYPE_CHECKING:
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
 __all__ = [
+    "ADJUSTED_PRICE",
+    "ADJUSTED_VOLUME",
     "Namespace",
+    "adjustment_notes",
     "bar_query_class",
     "build_query",
     "list_params",
@@ -81,6 +84,45 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+ADJUSTED_PRICE: Final = (
+    "Split-adjusted when the query's adjusted is True, the default, served only by REST: a "
+    "price from before a split is restated in the split's terms (divided by its ratio), so it "
+    "is not the price that traded. With adjusted=False, from the flat files, and on the "
+    "WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts "
+    "for cash dividends."
+)
+"""The note on every price column of a dataset with a split-adjustment choice."""
+
+ADJUSTED_VOLUME: Final = (
+    "Split-adjusted like the prices when the query's adjusted is True, the default, served only "
+    "by REST: a volume from before a split is restated in the split's terms (multiplied by its "
+    "ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded."
+)
+"""The note on every volume column of a dataset with a split-adjustment choice."""
+
+
+def adjustment_notes(prices: Iterable[str], volumes: Iterable[str]) -> Mapping[str, str]:
+    """Return the column notes of a dataset whose prices may be split-adjusted.
+
+    Massive adjusts stock and option prices and volumes for splits when a request says
+    `adjusted=true`, but no vendor description says so, and the same column holds either basis
+    depending on the query; each such column's description therefore ends with a note
+    (`DatasetSpec.column_notes`), which the column tooltips, `columns()`, and the column
+    reference show. Only columns REST fills take a note: a column only the WebSocket sends is
+    always as traded.
+
+    Args:
+        prices: The dataset's price columns REST fills, such as `"Close"`.
+        volumes: Its volume columns REST fills, such as `"Volume"`.
+
+    Returns:
+        `ADJUSTED_PRICE` for each price column and `ADJUSTED_VOLUME` for each volume column.
+    """
+    return {
+        **dict.fromkeys(prices, ADJUSTED_PRICE),
+        **dict.fromkeys(volumes, ADJUSTED_VOLUME),
+    }
 
 
 class Namespace:

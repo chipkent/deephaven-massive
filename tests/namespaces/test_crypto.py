@@ -178,6 +178,7 @@ def test_trades_schema() -> None:
     # is `Symbol`.
     assert columns(crypto.TRADES) == [
         ("Symbol", "String"),
+        ("Date", "String"),
         ("Timestamp", "Instant"),
         ("Conditions", "int[]"),
         ("Exchange", "long"),
@@ -185,6 +186,7 @@ def test_trades_schema() -> None:
         ("Price", "double"),
         ("Size", "double"),
         ("ReceivedTimestamp", "Instant"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
@@ -192,6 +194,7 @@ def test_quotes_schema() -> None:
     # The stream's `bp` and `ap` take the quotes kind's names through its projection.
     assert columns(crypto.QUOTES) == [
         ("Symbol", "String"),
+        ("Date", "String"),
         ("Timestamp", "Instant"),
         ("BidPrice", "double"),
         ("BidSize", "double"),
@@ -199,13 +202,17 @@ def test_quotes_schema() -> None:
         ("AskSize", "double"),
         ("Exchange", "long"),
         ("ReceivedTimestamp", "Instant"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
 def test_bars_schema() -> None:
+    # The stream's window end `e` is the declared end key: `TimestampEnd`, recomputed.
     assert columns(crypto.BARS) == [
         ("Symbol", "String"),
-        ("Timestamp", "Instant"),
+        ("Date", "String"),
+        ("TimestampStart", "Instant"),
+        ("TimestampEnd", "Instant"),
         ("Volume", "double"),
         ("Open", "double"),
         ("Close", "double"),
@@ -213,16 +220,18 @@ def test_bars_schema() -> None:
         ("Low", "double"),
         ("Transactions", "long"),
         ("Vwap", "double"),
-        ("EndTimestamp", "Instant"),
         ("AverageTradeSize", "long"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
 def test_fmv_schema() -> None:
     assert columns(crypto.FMV) == [
         ("Symbol", "String"),
+        ("Date", "String"),
         ("Timestamp", "Instant"),
         ("Fmv", "double"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
@@ -232,23 +241,29 @@ def test_snapshot_schemas(spec: DatasetSpec) -> None:
     # A snapshot row is keyed by its pair only; its update time keeps its own column.
     assert found[0] == ("Symbol", "String")
     assert ("Updated", "Instant") in found
-    assert "Timestamp" not in dict(found)
+    assert {"Timestamp", "Date"}.isdisjoint(dict(found))
     assert ("LastTradeId", "String") in found
     assert ("LastTradeParticipantTimestamp", "Instant") in found
     assert ("LastMinuteWindowStart", "Instant") in found
-    assert len(found) == 31
+    # A snapshot's only library time column is when it arrived.
+    assert found[-1] == ("TimestampInsert", "Instant")
+    assert len(found) == 32
 
 
 def test_daily_open_close_schema() -> None:
-    # The body's own `symbol` is the key; its day is a calendar date, not a time key.
+    # The body's own `symbol` is the key; its `day` is the row's `Date`, an ISO UTC day, from
+    # which the library sets the day's window.
     assert columns(crypto.DAILY_OPEN_CLOSE) == [
         ("Symbol", "String"),
+        ("Date", "String"),
+        ("TimestampStart", "Instant"),
+        ("TimestampEnd", "Instant"),
         ("Close", "double"),
         ("ClosingTrades", "String"),
-        ("Day", "LocalDate"),
         ("IsUtc", "boolean"),
         ("Open", "double"),
         ("OpenTrades", "String"),
+        ("TimestampInsert", "Instant"),
     ]
 
 
@@ -585,6 +600,7 @@ def test_trades_fetch_reads_the_last_trade_of_each_pair(
     [row] = out
     supplied = {
         "Symbol": "X:BTCUSD",
+        "Date": "2020-11-16",  # the UTC day of the trade
         "Timestamp": 1605560885027 * MS,
         "Conditions": [1],
         "Exchange": 4,
@@ -595,7 +611,8 @@ def test_trades_fetch_reads_the_last_trade_of_each_pair(
     # The trades kind's other columns (the trade ID, the received time, and the columns other
     # asset classes supply) are null: the last-trade endpoint does not carry them.
     assert {"Id", "ReceivedTimestamp"} <= set(row)
-    assert all(row[name] is None for name in set(row) - set(supplied))
+    assert row["TimestampInsert"] is not None  # when the page arrived
+    assert all(row[name] is None for name in set(row) - {*supplied, "TimestampInsert"})
 
 
 def test_trades_history_over_rest_bounds_the_utc_day(
@@ -646,10 +663,11 @@ def test_daily_bars_fetch_reads_the_previous_day(
         serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", restamp(prev, stamp))
     for _ in range(2):
         out = rows(rest_session.crypto.bars("X:BTCUSD", dm.Timespan.DAY).fetch())
-        # Either cut of the UTC day is stamped at its start.
-        assert [(r["Symbol"], r["Timestamp"], r["Close"], r["Vwap"]) for r in out] == [
-            ("X:BTCUSD", NOV_15 * MS, 16035.9, 15954.2111)
-        ]
+        # Either cut of the UTC day gives the whole UTC day as the bar's window.
+        assert [
+            (r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"])
+            for r in out
+        ] == [("X:BTCUSD", "2020-11-15", NOV_15 * MS, (NOV_15 + DAY_MS) * MS, 16035.9)]
 
 
 def test_a_daily_bar_stamped_inside_its_utc_day_fails_loudly(
@@ -694,10 +712,11 @@ def test_bars_history_over_rest_fills_the_range_in_utc_milliseconds(
     q = rest_session.crypto.bars(symbol, dm.Timespan.DAY)
     out = rows(q.history("2020-06-01", "2020-06-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
-    assert [(r["Symbol"], r["Timestamp"], r["Open"], r["Transactions"]) for r in out] == [
-        (symbol, start * MS, 9557.9, 1),
-        (symbol, (start + DAY_MS) * MS, 10096.87, 1),
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Open"]) for r in out] == [
+        (symbol, "2020-06-01", start * MS, 9557.9),
+        (symbol, "2020-06-02", (start + DAY_MS) * MS, 10096.87),
     ]
+    assert [r["TimestampEnd"] for r in out] == [(start + DAY_MS) * MS, (start + 2 * DAY_MS) * MS]
 
 
 def test_every_pairs_daily_bars_read_the_grouped_day(
@@ -710,9 +729,9 @@ def test_every_pairs_daily_bars_read_the_grouped_day(
     q = rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     out = rows(q.history("2020-02-02", "2020-02-02", source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {})]
-    assert [(r["Symbol"], r["Timestamp"], r["Transactions"]) for r in out] == [
-        ("X:ARDRUSD", day * MS, 18388),
-        ("X:NGCUSD", day * MS, 18),
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Transactions"]) for r in out] == [
+        ("X:ARDRUSD", "2020-02-02", day * MS, 18388),
+        ("X:NGCUSD", "2020-02-02", day * MS, 18),
     ]
 
 
@@ -771,14 +790,33 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
         (path, {}),
     ]
     # The body's `BTC-USD` is canonical in `Symbol`; the trades stay JSON text.
-    assert (row["Symbol"], row["Day"], row["Open"], row["Close"], row["IsUtc"]) == (
+    day = int(datetime(2020, 10, 9, tzinfo=UTC).timestamp()) * NS
+    # The `day` is the row's `Date`; its window is that whole UTC day.
+    assert (row["TimestampStart"], row["TimestampEnd"]) == (day, day + 86_400 * NS)
+    assert (row["Symbol"], row["Date"], row["Open"], row["Close"], row["IsUtc"]) == (
         "X:BTCUSD",
-        date(2020, 10, 9),
+        "2020-10-09",
         10932.44,
         11050.64,
         True,
     )
     assert json.loads(row["OpenTrades"])[0]["i"] == "511235746"
+
+
+def test_a_day_summary_not_in_utc_fails(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+) -> None:
+    # Its day would not be the UTC day the window is filled with, so its end could be early.
+    path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
+    body = json.loads(load_fixture(OWNER, "open_close.json"))
+    serve(fake_rest, path, json.dumps({**body, "isUTC": False}).encode())
+    serve_pairs(fake_rest)
+    q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^crypto\.daily_open_close: Massive sent a day summary with isUTC false",
+    ):
+        q.fetch()
 
 
 # --- End to end: WebSocket -----------------------------------------------------------------------
@@ -853,7 +891,10 @@ def test_a_documented_frame_lands_in_blink(
     stop()
     [row] = seen()
     assert {name: row[name] for name in expected} == expected
-    assert row["Timestamp"] is not None
+    time = "TimestampStart" if dataset.startswith("bars") else "Timestamp"
+    assert row[time] is not None
+    assert row["Date"] is not None
+    assert row["TimestampInsert"] is not None
     ws_session.session.release(blink)
 
 
@@ -930,8 +971,10 @@ def test_one_flat_file_block_round_trips(
     )
     q = make(s3_session.crypto)
     table = q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES)
-    price = "Price" if "trades" in prefix else "Close"
-    assert [(r["Symbol"], r["Timestamp"], r[price]) for r in rows(table)] == expected
+    price, time = ("Price", "Timestamp") if "trades" in prefix else ("Close", "TimestampStart")
+    found = rows(table)
+    assert [(r["Symbol"], r[time], r[price]) for r in found] == expected
+    assert {r["Date"] for r in found} == {"2023-03-28"}
 
 
 def test_a_flat_file_day_bar_stamped_inside_its_utc_day_fails_loudly(

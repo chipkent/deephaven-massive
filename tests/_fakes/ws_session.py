@@ -28,7 +28,7 @@ from deephaven_massive._query import StreamQuery
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._enums import AssetClass, ChannelFamily
@@ -108,6 +108,11 @@ class WsSession:
         session: The session; build queries from its namespaces (`session.stocks.trades`).
         connections: The session's WebSocket transport.
         cond: The condition every recorded event is written and notified under.
+        rows: The rows the futures schedule calendar's REST lookups get, by path template;
+            a path not listed answers no rows.
+        fetched: Each REST lookup of the futures schedule calendar, `(path, query)`, in
+            order; appended under `cond`, so read it under `cond` (in a `wait` predicate) or
+            once the calendar is idle.
         pair_answers: What Massive's crypto ticker list says of each crypto ticker, as the
             REST transport's `crypto_pair` would read it: its `(base, quote)`, or an exception
             to raise. A ticker missing from it is refused as unlisted. Change it under `cond`,
@@ -145,6 +150,8 @@ class WsSession:
         self._statuses: list[Status] = []
         self._states: list[WsState] = []
         self._opens = 0
+        self.fetched: list[tuple[str, dict[str, object]]] = []
+        self.rows: dict[str, list[dict[str, object]]] = {}
         self.pair_answers: dict[str, tuple[str, str] | Exception] = dict(PAIRS)
         self.config = dm.MassiveConfig(
             api_key="test-key", flush_interval=flush_interval, **cast("dict[str, Any]", config)
@@ -155,6 +162,7 @@ class WsSession:
             self.session._core,
             resolve_host=self._resolve,
             record_verdict=self._record_verdict,
+            fetch_rows=self._fetch_rows,
             crypto_pair=self._crypto_pair,
             client_factory=self.factory,
         )
@@ -214,6 +222,17 @@ class WsSession:
         """How many times a client has opened a connection."""
         with self.cond:
             return self._opens
+
+    def _fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Answer a futures schedule calendar lookup from `rows`, recording it.
+
+        Returns:
+            The rows listed for the path, or none.
+        """
+        with self.cond:
+            self.fetched.append((template, dict(query)))
+            self.cond.notify_all()
+            return list(self.rows.get(template, []))
 
     def _crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Split a crypto ticker as the REST transport's lookup in the ticker list does.

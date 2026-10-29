@@ -36,11 +36,10 @@ dependency never points from the tables up to the code that does the I/O.
 and by nothing else. The module's live set holds every core whose stream registry, `poll()`
 registry, or count of held diagnostics views is non-empty; every method that changes one of
 them updates the set in the same `registry_lock` section (`_sync_live`). Everything else in the
-library refers to a core weakly (connections, pollers, the clients, and the owner callbacks of
-result records), or only through a registered stream (a stream's sink, which its flusher
-routes), which keeps the core in the set anyway; so an unused session is freed by reference
-counting, at once, and a session whose stream a derived table keeps running stays alive as
-long as that table.
+library refers to a core weakly (connections, stream sinks, pollers, the clients, and the
+owner callbacks of result records), so an unused session is freed by reference counting, at
+once, and a session whose stream a derived table keeps running stays alive as long as that
+table.
 A core that leaves the set is handed to the reaper as a job argument, so its last reference
 is not dropped under a lock; the thread that took it out may still drop it last, which is safe
 because the core's finalizer only queues work on the reaper. On a free-threaded build, a
@@ -264,6 +263,18 @@ class RestTransport(Protocol):
             asset_class: The asset class of the connection.
             family: The channel family.
             decision: The new decision.
+        """
+        ...
+
+    def fetch_rows(self, template: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Return every raw JSON row of a REST path for a query, following its pages.
+
+        For the library's own lookups (the futures schedule calendar of the WebSocket
+        streams), which read a few fields and build no table.
+
+        Args:
+            template: The path template; it takes no path parameter.
+            query: The query parameters, by wire name.
         """
         ...
 
@@ -792,8 +803,9 @@ class SessionCore:
         `RuntimeError` from the described copy; that error is wrapped in the same
         `MassiveError`. Either way `m.streams()` shows `FAILED`. A session that closes while
         the result is built is checked once more after the result is tracked: the result is
-        released and the closed session's `MassiveError` raised, so no verb returns a table
-        whose close failure would land a cycle later.
+        released and the closed session's `MassiveError` raised, so a close that started before
+        that check never leaves the verb returning a table about to fail; a close that starts
+        after it fails the returned table like any other.
 
         The result record's owner callback holds the core weakly (`_call`); the stream's
         record, and through it the live set, keeps the session alive while the stream runs.

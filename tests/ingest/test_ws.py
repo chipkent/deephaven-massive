@@ -30,7 +30,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._ingest import futures_calendar, ws
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
@@ -892,6 +892,7 @@ def spare_connection(ws_session: WsSession, host: str) -> ws.Connection:
         asset_class=AssetClass.STOCKS,
         family=ChannelFamily.TICK,
         decision=REALTIME,
+        sessions=None,
     )
 
 
@@ -1117,6 +1118,7 @@ def test_an_index_value_refusal_names_the_business_host(ws_session: WsSession) -
         asset_class=AssetClass.INDICES,
         family=ChannelFamily.TICK,
         decision=REALTIME,
+        sessions=None,
     )
     connection._refused(("V.I:SPX",), "not authorized")
     assert connection._last_error is not None
@@ -1735,6 +1737,7 @@ def join(ws_session: WsSession) -> dm.MassiveSession:
         session._core,
         resolve_host=ws_session._resolve,
         record_verdict=ws_session._record_verdict,
+        fetch_rows=ws_session._fetch_rows,
         crypto_pair=ws_session._crypto_pair,
         client_factory=ws_session.factory,
     )
@@ -2109,6 +2112,141 @@ def test_an_ended_connection_holds_no_stream(
     assert connection._streams == {}
     other.close()  # its stream's release finds the loop gone
     ws_session.session.release(mine)
+    del theirs
+
+
+# --- The futures schedule calendar --------------------------------------------------------------
+
+
+def looked_up(ws_session: WsSession, *tickers: str) -> None:
+    # Wait until the calendar has asked Massive's contracts for every ticker.
+    def asked() -> bool:
+        sent = {
+            ticker
+            for path, query in ws_session.fetched
+            if path == "/futures/v1/contracts"
+            for ticker in cast("tuple[str, ...]", query["ticker.any_of"])
+        }
+        return set(tickers) <= sent
+
+    ws_session.wait(lambda _: asked())
+
+
+def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSession) -> None:
+    result = ws_session.query(FUTURES, ["ESZ5", "GCQ6-GCJ7"]).blink()
+    looked_up(ws_session, "ESZ5")
+    calendar = ws_session.connections.futures_calendar()
+    assert calendar is ws_session.connections.futures_calendar()
+    assert calendar.wait_idle(15.0)
+    # A spread is not a contract: it is never looked up.
+    sent = [q["ticker.any_of"] for path, q in ws_session.fetched if path == "/futures/v1/contracts"]
+    assert sent == [("ESZ5",)]
+    ws_session.session.release(result)
+
+
+def test_a_futures_watchlist_looks_up_the_contracts_it_adds(ws_session: WsSession) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
+    result = ws_session.query(FUTURES, watchlist).blink()
+    looked_up(ws_session, "ESZ5")
+    watchlist.add(new_table([string_col("Symbol", ["NQZ5"])]))
+    looked_up(ws_session, "NQZ5")
+    ws_session.session.release(result)
+
+
+def test_a_stock_stream_makes_no_calendar(ws_session: WsSession) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    assert ws_session.connections.group._calendar is None
+    ws_session.session.release(result)
+
+
+def test_one_calendar_wins_a_race_and_closes_with_the_connections(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[futures_calendar.FuturesCalendar] = []
+    real = futures_calendar.FuturesCalendar
+
+    def racing(
+        fetch: Callable[..., list[dict[str, object]]],
+        *,
+        contracts_path: str,
+        schedules_path: str,
+        label: str,
+    ) -> futures_calendar.FuturesCalendar:
+        def make() -> futures_calendar.FuturesCalendar:
+            return real(
+                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+            )
+
+        calendar = make()
+        created.append(calendar)
+        if len(created) == 1:  # another caller installs its calendar meanwhile
+            winner = make()
+            created.append(winner)
+            ws_session.connections.group._calendar = winner
+        return calendar
+
+    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesCalendar", racing)
+    found = ws_session.connections.futures_calendar()
+    loser, winner = created
+    assert found is winner
+    assert not loser._thread.is_alive()  # the loser was closed at once
+    ws_session.close()
+    assert not winner._thread.is_alive()
+
+
+def test_no_calendar_outlives_a_closed_transport(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[futures_calendar.FuturesCalendar] = []
+    real = futures_calendar.FuturesCalendar
+
+    def closing(
+        fetch: Callable[..., list[dict[str, object]]],
+        *,
+        contracts_path: str,
+        schedules_path: str,
+        label: str,
+    ) -> futures_calendar.FuturesCalendar:
+        def make() -> futures_calendar.FuturesCalendar:
+            return real(
+                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+            )
+
+        calendar = make()
+        created.append(calendar)
+        ws_session.connections.close()  # the session closes while the calendar starts
+        return calendar
+
+    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesCalendar", closing)
+    with pytest.raises(dm.MassiveError, match="connection group has closed"):
+        ws_session.connections.futures_calendar()
+    assert not created[0]._thread.is_alive()  # closed at once, never installed
+    # Once closed, no calendar is even created.
+    with pytest.raises(dm.MassiveError, match="is closed"):
+        ws_session.connections.futures_calendar()
+    assert len(created) == 1
+
+
+def test_the_calendar_outlives_the_session_that_made_it(ws_session: WsSession) -> None:
+    # A shared futures connection keeps dating the other session's rows: the calendar is the
+    # group's, and reads through whichever session is still open.
+    other = join(ws_session)
+    mine = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    looked_up(ws_session, "ESZ5")
+    calendar = ws_session.connections.futures_calendar()
+    theirs = ws_session.query(FUTURES, ["NQZ5"], other).blink()
+    ws_session.close()
+    del mine
+    assert calendar._thread.is_alive()
+    group = ws_session.connections.group
+    assert group.futures_calendar(contracts_path="x", schedules_path="y") is calendar
+    looked_up(ws_session, "NQZ5")  # read through the open session
+    other.close()
+    assert not calendar._thread.is_alive()  # the group's last session closed it
+    with pytest.raises(dm.MassiveError, match="connection group has closed"):
+        group._fetch_rows("/futures/v1/contracts", {})
     del theirs
 
 

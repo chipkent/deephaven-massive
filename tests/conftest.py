@@ -214,6 +214,39 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     return to_pylist
 
 
+@pytest.fixture
+def string_objects() -> Callable[[Table, str], int]:
+    """Return a function that counts the distinct Java string objects of a column's values.
+
+    Identity is read inside Deephaven, since a string crossing to Python is copied. The formula
+    goes straight to Java: the Python `Table.update` copies the calling frame's locals into the
+    query scope through jpy, where they would live until the JVM collected them, keeping a
+    result (and through it its session) alive.
+
+    Returns:
+        A function of a table and a column name, counting the objects among non-null values.
+    """
+    liveness = importlib.import_module("deephaven.liveness_scope")
+    jpy = importlib.import_module("jpy")
+    update_graph = importlib.import_module("deephaven.update_graph")
+    java_table = jpy.get_type("io.deephaven.engine.table.Table")
+
+    def count(table: Table, column: str) -> int:
+        # The derived tables live in a scope of their own, released at once: a refreshing table
+        # derived from a live result would keep its stream or poll running.
+        scope = liveness.LivenessScope()
+        try:
+            # Java calls: the Python wrappers would copy this frame's locals.
+            with scope.open(), update_graph.shared_lock(table):
+                refs = table.j_table.update(f"Ref = java.lang.System.identityHashCode({column})")
+                distinct = refs.where(f"!isNull({column})").selectDistinct("Ref")
+                return int(jpy.cast(distinct, java_table).size())
+        finally:
+            scope.release()
+
+    return count
+
+
 _ROWS_WHEN_TIMEOUT = 15.0
 """Seconds `rows_when` waits for a live table's rows to match."""
 

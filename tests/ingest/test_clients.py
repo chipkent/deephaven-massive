@@ -140,6 +140,23 @@ def test_host_decisions_go_through_the_rest_transport(
     ]
 
 
+def test_the_futures_calendar_reads_through_the_rest_transport(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The WebSocket transport's schedule calendar fetches rows through the session's REST.
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Rows:
+        def fetch_rows(self, template: str, query: dict[str, object]) -> list[dict[str, object]]:
+            calls.append((template, query))
+            return [{"ticker": "ESZ5", "product_code": "ES"}]
+
+    monkeypatch.setattr(SessionClients, "rest", lambda _: Rows())
+    rows = clients_of(session)._fetch_rows("/futures/v1/contracts", {"ticker.any_of": ("ESZ5",)})
+    assert rows == [{"ticker": "ESZ5", "product_code": "ES"}]
+    assert calls == [("/futures/v1/contracts", {"ticker.any_of": ("ESZ5",)})]
+
+
 def test_the_connections_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
     # The connections live as long as the session and their close is a session closer, which the
     # session's finalizer holds: a strong reference to the core would keep it alive forever.
@@ -220,12 +237,14 @@ def test_racing_first_stream_calls_keep_one_set_of_connections(
         *,
         resolve_host: Callable[..., HostDecision],
         record_verdict: Callable[..., None],
+        fetch_rows: Callable[..., list[dict[str, object]]],
         crypto_pair: Callable[[str], tuple[str, str]],
     ) -> ws.WsConnections:
         connections = real(
             core,
             resolve_host=resolve_host,
             record_verdict=record_verdict,
+            fetch_rows=fetch_rows,
             crypto_pair=crypto_pair,
         )
         built.append(connections)

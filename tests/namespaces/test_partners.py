@@ -204,7 +204,7 @@ def test_only_news_has_a_timestamp(name: str) -> None:
 )
 def test_a_calendar_date_keeps_its_own_column(name: str, column: str) -> None:
     types = {c.name: c.type for c in CATALOG.dataset_schema(spec_of(name)).columns}
-    assert types[column] is ColumnType.LOCAL_DATE
+    assert types[column] is ColumnType.STRING  # every date is ISO text
 
 
 @pytest.mark.parametrize("name", DATASETS)
@@ -573,9 +573,7 @@ def sent(server: FakeRestServer) -> list[tuple[str, dict[str, list[str]]]]:
 
 
 def expected_value(value: object, column_type: ColumnType) -> object:
-    # A wire value as the result table holds it.
-    if column_type is ColumnType.LOCAL_DATE:
-        return date.fromisoformat(cast("str", value))
+    # A wire value as the result table holds it; a date stays its ISO text.
     if column_type is ColumnType.INSTANT:
         return datetime.fromisoformat(cast("str", value))
     if column_type is ColumnType.DOUBLE:

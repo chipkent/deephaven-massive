@@ -15,6 +15,7 @@ Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `from` parameter; REST: the request's `cryptoTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The crypto pair." | REST, flat files, WebSocket | request | `ticker` | `pair` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp."; REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp`, `participant_timestamp` | `participant_timestamp` | `t` |
 | `Conditions` | int[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `conditions` | `conditions` | `c` |
 | `Correction` | long | Always null for `crypto.trades`; supplied by `stocks.trades`, `options.trades`, `futures.trades`. |  |  |  |  |
@@ -29,9 +30,9 @@ Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 | `TrfTimestamp` | Instant | Always null for `crypto.trades`; supplied by `stocks.trades`, `options.trades`. |  |  |  |  |
 | `DecimalSize` | String | Always null for `crypto.trades`; supplied by `stocks.trades`. |  |  |  |  |
 | `ReportSequence` | long | Always null for `crypto.trades`; supplied by `futures.trades`. |  |  |  |  |
-| `SessionEndDate` | LocalDate | Always null for `crypto.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `Channel` | long | Always null for `crypto.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | The nanosecond accuracy timestamp of when the tick was received by Massive. | REST, WebSocket | `received_timestamp` |  | `r` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -49,6 +50,7 @@ Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `pair`: "The crypto pair." | WebSocket | `pair` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS." | WebSocket | `t` |
 | `AskExchange` | long | Always null for `crypto.quotes`; supplied by `stocks.quotes`, `options.quotes`, `forex.quotes`. |  |  |
 | `AskPrice` | double | The ask price. | WebSocket | `ap` |
@@ -65,10 +67,10 @@ Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 | `ReportSequence` | long | Always null for `crypto.quotes`; supplied by `futures.quotes`. |  |  |
 | `AskTimestamp` | Instant | Always null for `crypto.quotes`; supplied by `futures.quotes`. |  |  |
 | `BidTimestamp` | Instant | Always null for `crypto.quotes`; supplied by `futures.quotes`. |  |  |
-| `SessionEndDate` | LocalDate | Always null for `crypto.quotes`; supplied by `futures.quotes`. |  |  |
 | `Channel` | long | Always null for `crypto.quotes`; supplied by `futures.quotes`. |  |  |
 | `Exchange` | long | The crypto exchange ID. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a list of exchanges and their IDs. | WebSocket | `x` |
 | `ReceivedTimestamp` | Instant | The timestamp that the tick was received by Massive. | WebSocket | `r` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
 Massive's documentation of this dataset:
 
@@ -83,7 +85,9 @@ Open, high, low, close, and volume bars of crypto pairs, over any time window.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `cryptoTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The crypto pair." | REST, flat files, WebSocket | `T`, request | `ticker` | `pair` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the UTC date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
+| `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 UTC of its window's first day (a week's Monday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 UTC after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -98,11 +102,10 @@ Open, high, low, close, and volume bars of crypto pairs, over any time window.
 | `OfficialOpen` | double | Always null for `crypto.bars`; supplied by `stocks.bars`, `options.bars`, `indices.bars`. |  |  |  |  |
 | `DayVwap` | double | Always null for `crypto.bars`; supplied by `stocks.bars`, `options.bars`. |  |  |  |  |
 | `AverageTradeSize` | long | The average trade size for this aggregate window. | WebSocket |  |  | `z` |
-| `EndTimestamp` | Instant | The end timestamp of this aggregate window in Unix Milliseconds. | WebSocket |  |  | `e` |
-| `SessionEndDate` | LocalDate | Always null for `crypto.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `DollarVolume` | double | Always null for `crypto.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `SettlementPrice` | double | Always null for `crypto.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `Exchange` | long | Always null for `crypto.bars`; supplied by `futures.bars`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -123,8 +126,10 @@ Massive's fair market value of crypto pairs, streamed as it updates.
 | Column | Deephaven type | Description | Supplied by | WebSocket field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
 Massive's documentation of this dataset:
 
@@ -169,6 +174,7 @@ The current state of crypto pairs: today's, the last minute's, and yesterday's b
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -213,6 +219,7 @@ The 20 crypto pairs that gained or lost the most since the previous day's close.
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
 | `TodaysChangePerc` | double | The percentage change since the previous day. | REST | `todaysChangePerc` |
 | `Updated` | Instant | The last updated timestamp. | REST | `updated` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -227,12 +234,15 @@ The open and close prices of crypto pairs on one UTC day, with the trades behind
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The symbol pair that was evaluated from the request." | REST | `symbol` |
+| `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a UTC calendar day. From REST `day`: "The date requested." | REST | `day` |
+| `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 UTC of `Date`. | REST |  |
+| `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 UTC of the next day. | REST |  |
 | `Close` | double | The close price for the symbol in the given time period. | REST | `close` |
 | `ClosingTrades` | String | An array of results containing the requested data. | REST | `closingTrades` |
-| `Day` | LocalDate | The date requested. | REST | `day` |
 | `IsUtc` | boolean | Whether or not the timestamps are in UTC timezone. | REST | `isUTC` |
 | `Open` | double | The open price for the symbol in the given time period. | REST | `open` |
 | `OpenTrades` | String | An array of results containing the requested data. | REST | `openTrades` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 

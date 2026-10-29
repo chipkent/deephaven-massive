@@ -14,8 +14,10 @@ and their units come from the generated schemas.
 Futures differ from the other asset classes in three ways that show here:
 
 - **Sessions.** A futures trading day is a session that ends at 17:00 America/Chicago, and every
-  REST and flat-file row of trades, quotes, and bars carries its `SessionEndDate`, which the
-  specs declare as the `session` key (every flat file is checked against it).
+  REST and flat-file row of trades, quotes, and bars carries its `session_end_date`, which the
+  specs declare as the `date` key, so it is the row's `Date` (every flat file is checked against
+  it). WebSocket messages carry none: the WebSocket transport dates a streamed row by the 17:00
+  Chicago rule, corrected by Massive's futures schedules.
 - **Venues.** Flat files are published per exchange (`us_futures_cme/...`), so `trades`,
   `quotes`, and `bars` take a `venue` that picks the flat-file prefix. Streams always use the
   `/futures` cluster path, whatever the venue.
@@ -75,9 +77,10 @@ def _tick_keys(time: str) -> SourceKeys:
         time: The source's column that holds the row's primary instant.
 
     Returns:
-        The keys; every such source carries its ticker and session in its rows.
+        The keys; every such source carries its ticker and session in its rows, the session
+        (`session_end_date`) as the row's `Date`.
     """
-    return SourceKeys(symbol=_TICKER, time=KeySpec(time), session=_SESSION)
+    return SourceKeys(symbol=_TICKER, time=KeySpec(time), date=_SESSION)
 
 
 _PRODUCT_CODE_ARGUMENT: Final = {"product_code.any_of": "product_code"}
@@ -101,16 +104,17 @@ def _product_codes(product_code: object) -> dict[str, object]:
     return one_or_any_of("product_code", product_code, every="every product")
 
 
-def _stream_keys(time: str) -> SourceKeys:
+def _stream_keys(time: str, *, end: str | None = None) -> SourceKeys:
     """Return the keys of a WebSocket channel, whose messages carry no session date.
 
     Args:
         time: The channel's column that holds the row's primary instant.
+        end: For a bars channel, the column of the window's end `e`; None for ticks.
 
     Returns:
-        The ticker and time keys.
+        The ticker and time keys, and a bar's end.
     """
-    return SourceKeys(symbol=_TICKER, time=KeySpec(time))
+    return SourceKeys(symbol=_TICKER, time=KeySpec(time), end=None if end is None else KeySpec(end))
 
 
 TRADES: Final = DatasetSpec(
@@ -158,8 +162,8 @@ BARS: Final = DatasetSpec(
     flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.SESSION: _SESSION_FILES},
     keys={
         (_REST, _BARS_PATH): _tick_keys("WindowStart"),
-        (_WS, "futures/A"): _stream_keys("WindowStart"),
-        (_WS, "futures/AM"): _stream_keys("WindowStart"),
+        (_WS, "futures/A"): _stream_keys("WindowStart", end="EndTimestamp"),
+        (_WS, "futures/AM"): _stream_keys("WindowStart", end="EndTimestamp"),
         (_FLAT_FILES, _MINUTE_FILES): _tick_keys("WindowStart"),
         (_FLAT_FILES, _SESSION_FILES): _tick_keys("WindowStart"),
     },
@@ -212,6 +216,9 @@ MARKET_STATUS: Final = DatasetSpec(
     summary="Futures market status: whether each futures product is trading right now.",
     asset_class=AssetClass.FUTURES,
     fetch_path=_MARKET_STATUS_PATH,
+    # The time of the product's latest market event is the row's time: `Timestamp` is the
+    # library's name, so it comes from a declared key.
+    keys={(_REST, _MARKET_STATUS_PATH): SourceKeys(time=KeySpec("Timestamp"))},
     poll_keys=("ProductCode", "TradingVenue"),
     page_size=100,
     # The time of the product's latest market event: an explicit APPEND poll appends each
@@ -224,6 +231,9 @@ SCHEDULES: Final = DatasetSpec(
     summary="Futures schedules: the timed events of each product's trading sessions.",
     asset_class=AssetClass.FUTURES,
     fetch_path=_SCHEDULES_PATH,
+    # The event's time is the row's time: `Timestamp` is the library's name, so it comes from
+    # a declared key.
+    keys={(_REST, _SCHEDULES_PATH): SourceKeys(time=KeySpec("Timestamp"))},
     time_axis=("session_end_date.gte", "session_end_date.lte"),
     poll_keys=("ProductCode", "TradingVenue", "Timestamp", "Event"),
     page_size=1_000,
@@ -269,16 +279,21 @@ class _Futures(Namespace):
     def trades(self, symbols: Symbols, *, venue: FuturesVenue | None = None) -> StreamHistoryQuery:
         """Trades of futures contracts, tick by tick.
 
-        Each row is one trade: its price, its size, and the exchange's sequence numbers. Live
+        Each row is one trade: its price, its size, and the exchange's sequence numbers. Each
+        row also carries its time, `Timestamp`, its session, `Date` (ISO `yyyy-MM-dd` text:
+        Massive's `session_end_date`; on the WebSocket, which sends none, the session that ends
+        at the next 17:00 Chicago time, a weekend's moving to Monday, corrected by Massive's
+        futures schedules, a row they cannot place keeping that date and showing the miss in its
+        stream's `m.streams()` row), and `TimestampInsert`, when the library received it. Live
         trades stream over the WebSocket `T` channel of the `/futures` cluster. `history()`
-        reads the REST endpoint `/futures/v1/trades/{ticker}`, one contract per request, or
-        the flat files `us_futures_<venue>/trades_v1` (`venue`, or all four venues when it is
-        None). A date bound of `history()` is a whole trading session, the session whose
-        `SessionEndDate` is that date, requested over REST one session at a time
-        (`session_end_date=<date>`, weekdays only, whatever hours a holiday added to it).
-        Datetime bounds are exact instants on `Timestamp`. Futures have no "last trade"
-        endpoint, so there is no `fetch()`; `m.futures.snapshots(symbols).fetch()` gives the
-        latest trade of each contract in one request.
+        reads the REST endpoint `/futures/v1/trades/{ticker}`, one contract per request, or the
+        flat files `us_futures_<venue>/trades_v1` (`venue`, or all four venues when it is None).
+        A date bound of `history()` is a whole trading session, the session whose `Date` is that
+        date, requested over REST one session at a time (`session_end_date=<date>`, weekdays
+        only, whatever hours a holiday added to it). Datetime bounds are exact instants on
+        `Timestamp`. Futures have no "last trade" endpoint, so there is no `fetch()`;
+        `m.futures.snapshots(symbols).fetch()` gives the latest trade of each contract in one
+        request.
 
         `dm.ALL` streams every contract and reads every contract from flat files; REST history
         needs explicit symbols. There is no `limit`: `history()` pages internally.
@@ -321,14 +336,18 @@ class _Futures(Namespace):
         """Quotes of futures contracts: every change of the best bid and offer.
 
         Each row is one top-of-book update: bid and ask prices, sizes, and the time of each
-        side. Live quotes stream over the WebSocket `Q` channel of the `/futures` cluster.
-        `history()` reads the REST endpoint `/futures/v1/quotes/{ticker}`, one contract per
-        request, or the flat files `us_futures_<venue>/quotes_v1` (`venue`, or all four venues
-        when it is None). A date bound of `history()` is a whole trading session, requested over
-        REST one session at a time as for `trades`. Datetime bounds are exact instants on
-        `Timestamp`. There is no
-        `fetch()`: `m.futures.snapshots(symbols).fetch()` gives the latest quote of each
-        contract in one request.
+        side. Each row also carries its time, `Timestamp`, its session, `Date` (ISO `yyyy-MM-dd`
+        text: Massive's `session_end_date`; on the WebSocket, which sends none, the session that
+        ends at the next 17:00 Chicago time, a weekend's moving to Monday, corrected by
+        Massive's futures schedules, a row they cannot place keeping that date and showing the
+        miss in its stream's `m.streams()` row), and `TimestampInsert`, when the library
+        received it. Live quotes stream over the WebSocket `Q` channel of the `/futures`
+        cluster. `history()` reads the REST endpoint `/futures/v1/quotes/{ticker}`, one contract
+        per request, or the flat files `us_futures_<venue>/quotes_v1` (`venue`, or all four
+        venues when it is None). A date bound of `history()` is a whole trading session,
+        requested over REST one session at a time as for `trades`. Datetime bounds are exact
+        instants on `Timestamp`. There is no `fetch()`: `m.futures.snapshots(symbols).fetch()`
+        gives the latest quote of each contract in one request.
 
         `dm.ALL` streams every contract and reads every contract from flat files; REST history
         needs explicit symbols. There is no `limit`: `history()` pages internally.
@@ -391,9 +410,21 @@ class _Futures(Namespace):
     ) -> HistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
-        Each row is one bar spanning `multiplier` units of `timespan`, starting at its
-        `Timestamp`, with the session it belongs to (`SessionEndDate`). The timespan decides
-        the transports, and so the query class:
+        Each row is one bar spanning `multiplier` units of `timespan`: its window, from
+        `TimestampStart` (Massive's window start) to the exclusive `TimestampEnd`, its session
+        `Date` (ISO `yyyy-MM-dd` text: Massive's `session_end_date`, or on the WebSocket the
+        session as for `trades`), and `TimestampInsert`, when the library received it.
+        `TimestampEnd` is the first instant at which the bar is complete, so join on it
+        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed bars:
+        an intraday bar ends its length after its start (a one-second WebSocket bar at the
+        later of that and Massive's `e`); a session bar at 17:00 Chicago time on its session
+        date. Massive does not document whether a bar of several sessions, or of a week or
+        longer, is labelled with its first session or its last, so such a bar ends at the
+        later of the two readings: 17:00 Chicago time on the last weekday its label allows,
+        plus four days for a holiday that moves a session for a bar of several sessions.
+        `Date` is null for a bar of several sessions, a week or longer, or an intraday bar that
+        crosses 17:00 Chicago time. Futures have no corporate actions, so their bars are never
+        adjusted. The timespan decides the transports, and so the query class:
 
         - `Timespan.SECOND` or `Timespan.MINUTE` with `multiplier=1` stream over the
           WebSocket `A` (per second) or `AM` (per minute) channel of the `/futures` cluster,
@@ -409,15 +440,20 @@ class _Futures(Namespace):
         17:00 America/Chicago, so daily bars are `Timespan.SESSION`; there is no
         `Timespan.DAY` and no previous-session `fetch()`.
 
-        A date bound of `history()` is a whole trading session. Bars are requested from four days
-        before the first session's regular open (a holiday can open a session early) to 18:00
-        Chicago time on the last date, and kept by `SessionEndDate`: an intraday bar when its
-        session is in the range and it has ended, a bar of a session or a longer period
+        A date bound of `history()` is a whole trading session. Bars are requested from four
+        days before the first session's regular open (a holiday can open a session early) to
+        18:00 Chicago time on the last date, and kept by their session label: an intraday bar
+        when its session is in the range and it has ended, a bar of a session or a longer period
         (`WEEK`, Monday to Friday, to `YEAR`) when every session of its period is in the range
-        and has ended. Bars of a session or longer with `multiplier` above 1 cannot be selected
-        by dates, since the session Massive labels them with is not verified: `history()`
-        raises `ValueError` for them; pass datetimes, which keep the bars whose whole window lies
-        in the range.
+        and has ended. A bar of several sessions or periods is kept only when it fits the range
+        under both readings of its label, as its first session's and as its last's. Every bar
+        must also have ended, by its `TimestampEnd`, by 17:00 Chicago time on the last date and
+        by now. A bar of several sessions ends as late as holidays could push its sessions (one
+        weekday more, and one more for every five further sessions), so
+        `bars(..., Timespan.SESSION, multiplier=2).history("2025-02-03", "2025-02-07")` keeps
+        the bars opening Monday and Tuesday evening: the one opening Wednesday evening could
+        end on the next Monday. Datetimes keep the bars whose whole window, from Massive's
+        window start to `TimestampEnd`, lies in the range.
 
         `dm.ALL` streams every contract and reads every contract from flat files; REST history
         needs explicit symbols. There is no `limit`: `history()` pages internally.
@@ -760,9 +796,9 @@ class _Futures(Namespace):
     ) -> Query:
         """Futures schedules: the timed events of each product's trading sessions.
 
-        Each row is one scheduled event of one product's session (`Event`, such as
-        `pre_open`, `open`, or `close`), at its instant (`Timestamp`), with the session it
-        belongs to (`SessionEndDate`) and the trading venue, from the REST endpoint
+        Each row is one scheduled event of one product's session (`Event`, such as `pre_open`,
+        `open`, or `close`), at its instant (`Timestamp`), with the session it belongs to
+        (`SessionEndDate`, ISO `yyyy-MM-dd` text) and the trading venue, from the REST endpoint
         `/futures/v1/schedules`. It shows session hours, intraday breaks, and holiday
         adjustments. The dataset takes no symbols and has no `Symbol` column.
 

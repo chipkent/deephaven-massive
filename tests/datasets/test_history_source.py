@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
+import pyarrow as pa
 import pytest
 
 import deephaven_massive as dm
@@ -13,6 +14,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import (
     CHICAGO,
+    DAY_ZONES,
     DaySpan,
     TimeRange,
     futures_bar_request,
@@ -31,8 +33,10 @@ from deephaven_massive._datasets.history_source import (
     within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, Timespan
 from deephaven_massive._massive import Transport
+from deephaven_massive._namespaces import indicators
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -45,7 +49,7 @@ def files(
 ) -> dict[tuple[Transport, str], SourceKeys]:
     # The keys every flat-file prefix declares: its ticker, its time, and a futures session.
     keys = SourceKeys(
-        KeySpec("Ticker"), KeySpec(time), session=KeySpec("SessionEndDate") if session else None
+        KeySpec("Ticker"), KeySpec(time), date=KeySpec("SessionEndDate") if session else None
     )
     return {(FF, prefix): keys for prefix in prefixes.values()}
 
@@ -126,6 +130,7 @@ FUTURES_TRADES = DatasetSpec(
     name="futures.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
+    row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
     flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
     keys=files({None: "us_futures_{venue}/trades_v1"}, "Timestamp", session=True),
@@ -235,6 +240,49 @@ def test_unfinished_bars_are_left_out() -> None:
     assert future.empty  # March has not ended
 
 
+def test_a_bar_must_lie_in_the_range_and_end_by_now() -> None:
+    # Ticks have no bar window.
+    assert window(STOCK_TRADES, "2025-03-03", "2025-03-04").bars is None
+    # Dates start with their first day and end with their last: midnight after it, 01:00 New
+    # York time for indices.
+    stocks = window(STOCK_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
+    assert stocks.bars == BarBounds(
+        datetime(2025, 3, 3, tzinfo=NEW_YORK),
+        datetime(2025, 3, 5, tzinfo=NEW_YORK),
+        StartRule.RANGE,
+    )
+    indices = window(INDEX_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
+    assert cast("BarBounds", indices.bars).latest == datetime(2025, 3, 5, 1, tzinfo=NEW_YORK)
+    # Datetimes end at their end; an open end, or one after now, at now.
+    end = datetime(2025, 3, 5, 9, 30, tzinfo=NEW_YORK)
+    exact = window(STOCK_BARS, "2025-03-03T00:00:00-05:00", end, timespan=Timespan.DAY)
+    assert cast("BarBounds", exact.bars).latest == end
+    open_end = window(STOCK_BARS, "2025-03-03", None, timespan=Timespan.DAY)
+    assert cast("BarBounds", open_end.bars).latest == NOW
+    # Futures dates end at 17:00 Chicago on the last session's date, and are kept by their
+    # label, not their start: a folded session opens before its first date.
+    span = ("2025-03-03", "2025-03-05")
+    for timespan in (Timespan.MINUTE, Timespan.SESSION):
+        sessions = window(FUTURES_BARS, *span, timespan=timespan)
+        assert sessions.bars == BarBounds(
+            datetime(2025, 3, 2, 17, tzinfo=CHICAGO),
+            datetime(2025, 3, 5, 17, tzinfo=CHICAGO),
+            StartRule.LABEL,
+        )
+
+
+def test_an_index_month_covers_its_weekend_days_for_its_start_too() -> None:
+    # June 2024 starts on a Saturday. A stock's month starts Monday the 3rd, so a range from
+    # the 3rd holds it; an index can update at weekends, so its month starts on the 1st, and
+    # only a range from the 1st holds it.
+    stock = window(STOCK_BARS, "2024-06-03", "2024-06-30", timespan=Timespan.MONTH)
+    index = window(INDEX_BARS, "2024-06-03", "2024-06-30", timespan=Timespan.MONTH)
+    whole = window(INDEX_BARS, "2024-06-01", "2024-06-30", timespan=Timespan.MONTH)
+    assert not stock.empty
+    assert index.empty
+    assert not whole.empty
+
+
 def test_futures_trades_by_date_are_whole_sessions_requested_one_at_a_time() -> None:
     sessions = window(FUTURES_TRADES, "2025-03-03", "2025-03-05")
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))
@@ -252,9 +300,10 @@ def test_futures_bars_by_date() -> None:
     # A session bar of a session still trading is left out: the session of 03-10 opened at
     # 17:00 Chicago on 03-09, and NOW is 11:00 Chicago on 03-10.
     sessions = window(FUTURES_BARS, "2025-03-06", None, timespan=Timespan.SESSION)
-    assert sessions.sessions == DaySpan(date(2025, 3, 6), date(2025, 3, 9))
+    # No session ends on a Saturday or Sunday, so the files read are Thursday's and Friday's.
+    assert sessions.sessions == DaySpan(date(2025, 3, 6), date(2025, 3, 7))
     assert sessions.times is None
-    assert partition_dates(FUTURES_BARS, sessions) == tuple(date(2025, 3, d) for d in (6, 7, 8, 9))
+    assert partition_dates(FUTURES_BARS, sessions) == (date(2025, 3, 6), date(2025, 3, 7))
     # So is an intraday bar that has not ended.
     live = window(FUTURES_BARS, "2025-03-10", None, timespan=Timespan.MINUTE)
     assert live.times is not None
@@ -274,17 +323,82 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
 
 
 def test_stamp_rule() -> None:
+    # 1-day bars accept each class's known closes; longer bars only their period's start.
     day = request(timespan=Timespan.DAY)
-    assert stamp_rule(FOREX_BARS, day) is StampRule.UTC_DAY
-    assert stamp_rule(CRYPTO_BARS, day) is StampRule.UTC_DAY_CHECKED
-    assert stamp_rule(STOCK_BARS, day) is StampRule.KEEP
-    assert stamp_rule(FOREX_BARS, request(timespan=Timespan.MINUTE)) is StampRule.KEEP
-    assert stamp_rule(FOREX_BARS, request(timespan=Timespan.DAY, multiplier=2)) is (StampRule.KEEP)
-    for timespan, multiplier in ((Timespan.DAY, 2), (Timespan.WEEK, 1), (Timespan.YEAR, 1)):
-        longer = request(timespan=timespan, multiplier=multiplier)
-        assert stamp_rule(CRYPTO_BARS, longer) is StampRule.UTC_MIDNIGHT
-    assert stamp_rule(CRYPTO_BARS, request(timespan=Timespan.HOUR)) is StampRule.KEEP
-    assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is (StampRule.KEEP)
+    close, early, chicago = time(16), time(13), time(1)
+    last_ms = time(23, 59, 59, 999_000)
+    options_bars = replace(STOCK_BARS, asset_class=AssetClass.OPTIONS)
+    stock_closes = frozenset({early, close})
+    option_closes = frozenset({early, close, time(13, 15), time(16, 15)})
+    assert stamp_rule(STOCK_BARS, day) == StampRule(NEW_YORK, stock_closes, "1-day bar")
+    assert stamp_rule(options_bars, day) == StampRule(NEW_YORK, option_closes, "1-day bar")
+    assert stamp_rule(INDEX_BARS, day) == StampRule(
+        NEW_YORK, frozenset({chicago, early, close}), "1-day bar"
+    )
+    assert stamp_rule(FOREX_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
+    assert stamp_rule(CRYPTO_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
+    # Several days: only 00:00 (01:00 for indices), on any day.
+    two_days = request(timespan=Timespan.DAY, multiplier=2)
+    assert stamp_rule(STOCK_BARS, two_days) == StampRule(NEW_YORK, frozenset(), "bar")
+    assert stamp_rule(options_bars, two_days) == StampRule(NEW_YORK, frozenset(), "bar")
+    assert stamp_rule(INDEX_BARS, two_days) == StampRule(NEW_YORK, frozenset({chicago}), "bar")
+    assert stamp_rule(FOREX_BARS, two_days) == StampRule(UTC, frozenset(), "bar")
+    # A week on its Monday, or for the classes closed at weekends the Saturday or Sunday before.
+    for multiplier in (1, 2):
+        week = request(timespan=Timespan.WEEK, multiplier=multiplier)
+        weekend = frozenset({5, 6, 0})
+        assert stamp_rule(STOCK_BARS, week) == StampRule(
+            NEW_YORK, frozenset(), "bar", weekdays=weekend
+        )
+        assert stamp_rule(INDEX_BARS, week) == StampRule(
+            NEW_YORK, frozenset({chicago}), "bar", weekdays=weekend
+        )
+        monday = frozenset({0})
+        assert stamp_rule(FOREX_BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
+        assert stamp_rule(CRYPTO_BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
+    # A month, quarter, or year on its 1st.
+    for timespan, months in (
+        (Timespan.MONTH, frozenset(range(1, 13))),
+        (Timespan.QUARTER, frozenset({1, 4, 7, 10})),
+        (Timespan.YEAR, frozenset({1})),
+    ):
+        longer = request(timespan=timespan, multiplier=3)
+        assert stamp_rule(options_bars, longer) == StampRule(
+            NEW_YORK, frozenset(), "bar", months=months
+        )
+        assert stamp_rule(CRYPTO_BARS, longer) == StampRule(UTC, frozenset(), "bar", months=months)
+    # Intraday bars, futures bars, and datasets that are not bars keep their stamps.
+    assert stamp_rule(CRYPTO_BARS, request(timespan=Timespan.HOUR)) is None
+    assert stamp_rule(STOCK_BARS, request(timespan=Timespan.MINUTE, multiplier=5)) is None
+    assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.SESSION)) is None
+    assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.WEEK)) is None
+    # A dataset of every class has no day zone of its own: the indicators pass their symbols'.
+    assert stamp_rule(indicators.SMA, day) is None
+    assert stamp_rule(indicators.SMA, day, asset_class=ClassFromPrefix.ANY) is None
+    assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is None
+
+
+def test_every_class_with_a_day_zone_has_its_stamps() -> None:
+    # The column descriptions call a class stamped when it has a day zone; so does the rule.
+    tables = (history_source._ONE_DAY_STAMPS, history_source._LONGER_STAMPS)
+    assert all(set(table) == set(DAY_ZONES) for table in tables)
+
+
+def test_a_stamp_rule_stamps_through_the_timestamp_routine() -> None:
+    rule = stamp_rule(STOCK_BARS, request(timespan=Timespan.DAY))
+    assert rule is not None
+    rule = replace(rule, remedy="try the other source")
+    # The 16:00 close, and the 13:00 close of a short day (July 3), move to the day's start.
+    close = datetime(2025, 7, 1, 16, tzinfo=NEW_YORK)
+    early = datetime(2025, 7, 3, 13, tzinfo=NEW_YORK)
+    values = pa.array([close, early], pa.timestamp("ns", "UTC"))
+    moved = rule.stamp("stocks.bars", values, source="s").to_pylist()
+    assert moved == [datetime(2025, 7, 1, tzinfo=NEW_YORK), datetime(2025, 7, 3, tzinfo=NEW_YORK)]
+    afternoon = close.replace(hour=14, minute=30)
+    with pytest.raises(
+        dm.MassiveError, match=r"^stocks\.bars: a 1-day bar from s is stamped .*; try the other"
+    ):
+        rule.stamp("stocks.bars", pa.array([afternoon], values.type), source="s")
 
 
 def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -416,7 +530,9 @@ def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
         "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
         "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY); "
         "stocks.bars flat files hold only 1-minute, 1-day bars; "
-        "flat-file bars are unadjusted; pass adjusted=False; "
+        "flat-file bars are unadjusted (as traded) and one history() never mixes adjusted and "
+        "unadjusted prices, so adjusted bars come only from REST; pass adjusted=False for the "
+        "flat files; "
         "the file for 2025-03-03 is not yet published; flat files land ~11:00 ET next day "
         "(a day's file counts as published from 11:30 New York time after the day ends). "
         "REST: stocks.bars history over REST needs explicit symbols."
@@ -625,14 +741,18 @@ def test_crypto_and_forex_day_bars_follow_the_usual_auto_rule() -> None:
     assert choose(CRYPTO_BARS, crypto, dates=unpublished) is HistorySource.REST
 
 
-def test_futures_bars_of_several_sessions_by_date_are_refused() -> None:
-    for timespan in (Timespan.SESSION, Timespan.WEEK, Timespan.MONTH):
-        with pytest.raises(
-            ValueError,
-            match=rf"^futures\.bars: bars of 2 {timespan.value}s cannot be selected by session "
-            r"dates, .*; pass datetimes, or multiplier=1$",
-        ):
-            window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=timespan, multiplier=2)
+def test_futures_bars_of_several_sessions_by_date_fit_under_both_label_readings() -> None:
+    # Whether Massive labels such a bar with its first or last session is not documented, so
+    # the dates keep the labels whose bar fits either way.
+    sessions = window(
+        FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.SESSION, multiplier=2
+    )
+    assert sessions.sessions == DaySpan(date(2025, 3, 4), date(2025, 3, 6))
+    assert sessions.times is None
+    months = window(FUTURES_BARS, "2024-11-01", "2025-01-31", timespan=Timespan.MONTH, multiplier=2)
+    assert months.sessions == DaySpan(date(2024, 12, 1), date(2024, 12, 31))
+    weeks = window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.WEEK, multiplier=2)
+    assert weeks.empty
     # Datetimes, multiplier 1, and intraday multiples are fine.
     start = datetime(2025, 3, 2, 17, tzinfo=CHICAGO)
     assert not window(

@@ -15,8 +15,10 @@ Index levels, tick by tick, as computed by the index providers.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Ticker of asset queried."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `T`: "The assigned ticker of the index." | REST, flat files, WebSocket | `ticker` | `ticker` | `T` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `last_updated`: "The nanosecond timestamp of when this information was updated."; flat files `timestamp`: "The timestamp in Unix MS."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `last_updated` | `timestamp` | `t` |
 | `Value` | double | Value of Index. | REST, flat files, WebSocket | `value` | `value` | `val` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -33,7 +35,9 @@ Open, high, low, and close index levels over fixed windows of time.
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `indicesTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The symbol representing the given index." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
+| `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
+| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. | REST, flat files, WebSocket |  |  | `e` |
 | `Volume` | double | Always null for `indices.bars`; supplied by `stocks.bars`, `options.bars`, `futures.bars`, `forex.bars`, `crypto.bars`. |  |  |  |  |
 | `Open` | double | The open value for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close value for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -48,11 +52,10 @@ Open, high, low, and close index levels over fixed windows of time.
 | `OfficialOpen` | double | Today's official opening value. | WebSocket |  |  | `op` |
 | `DayVwap` | double | Always null for `indices.bars`; supplied by `stocks.bars`, `options.bars`. |  |  |  |  |
 | `AverageTradeSize` | long | Always null for `indices.bars`; supplied by `stocks.bars`, `options.bars`, `crypto.bars`. |  |  |  |  |
-| `EndTimestamp` | Instant | The end timestamp of this aggregate window in Unix Milliseconds. | WebSocket |  |  | `e` |
-| `SessionEndDate` | LocalDate | Always null for `indices.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `DollarVolume` | double | Always null for `indices.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `SettlementPrice` | double | Always null for `indices.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `Exchange` | long | Always null for `indices.bars`; supplied by `futures.bars`. |  |  |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
@@ -87,6 +90,7 @@ The current state of each index: its level, its session so far, and its status.
 | `Timeframe` | String | The time relevance of the data. | REST | `timeframe` |
 | `Type` | String | The indices market. | REST | `type` |
 | `Value` | double | Value of Index. | REST | `value` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 
@@ -101,13 +105,16 @@ One day's opening, closing, high, and low levels of each index.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `symbol`: "The exchange symbol that this item is traded under." | REST | `symbol` |
+| `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a New York calendar day. From REST `from`: "The requested date." | REST | `from` |
+| `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. | REST |  |
+| `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. | REST |  |
 | `AfterHours` | double | The close value of the ticker symbol in after hours trading. | REST | `afterHours` |
 | `Close` | double | The close value for the symbol in the given time period. | REST | `close` |
-| `From` | LocalDate | The requested date. | REST | `from` |
 | `High` | double | The highest value for the symbol in the given time period. | REST | `high` |
 | `Low` | double | The lowest value for the symbol in the given time period. | REST | `low` |
 | `Open` | double | The open value for the symbol in the given time period. | REST | `open` |
 | `PreMarket` | double | The open value of the ticker symbol in pre-market trading. | REST | `preMarket` |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
 

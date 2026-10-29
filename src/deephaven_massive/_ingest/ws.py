@@ -73,6 +73,7 @@ from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
+from deephaven_massive._ingest.futures_calendar import FuturesCalendar
 from deephaven_massive._ingest.subscriptions import (
     Sender,
     Subscriptions,
@@ -107,6 +108,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.liveness import StreamHandle
+    from deephaven_massive._tables.stream import FuturesSessionDates
 
 __all__ = [
     "CONNECTION_SETTINGS",
@@ -257,6 +259,7 @@ class Connection:
         asset_class: AssetClass,
         family: ChannelFamily,
         decision: HostDecision,
+        sessions: FuturesSessionDates | None,
     ) -> None:
         """Create the connection, its client, and its flush thread; nothing starts yet.
 
@@ -268,6 +271,8 @@ class Connection:
             asset_class: The cluster's class.
             family: The family of the stream that created it.
             decision: The host decision behind `url`.
+            sessions: For a futures connection, the group's schedule calendar, which corrects
+                its rows' session dates; None otherwise.
         """
         self.url: Final = url
         self.asset_class: Final = asset_class
@@ -291,8 +296,12 @@ class Connection:
         self._started = False
         self._closing = False
         self._timer: threading.Timer | None = None
+        self.sessions: Final = sessions
         self.flusher: Final = Flusher(
-            exec_ctx, f"massive-flush {decision.host}{self.path}", interval=group.flush_interval
+            exec_ctx,
+            f"massive-flush {decision.host}{self.path}",
+            interval=group.flush_interval,
+            sessions=sessions,
         )
         cluster = f"{asset_class.value}/"
         sources = [s for k, s in _massive.sources(Transport.WS).items() if k.startswith(cluster)]
@@ -1280,6 +1289,7 @@ class ConnectionGroup:
         self.owners: dict[int, WsConnections] = {}
         self.sessions: set[WsConnections] = set()
         self._no_acked: set[tuple[str, str]] = set()
+        self._calendar: FuturesCalendar | None = None
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.
         self.pairs: dict[str, tuple[str, str]] = {}
@@ -1333,13 +1343,84 @@ class ConnectionGroup:
     def detach(self, owner: WsConnections) -> None:
         """Take a closed session out of the group; the last one takes the group out of the registry.
 
+        The last session also closes the group's futures schedule calendar, outside the locks
+        (its close waits a bounded time for its worker).
+
         Args:
             owner: The session's `WsConnections`, after its `close`.
         """
+        calendar = None
         with _groups_lock, self.lock:
             self.sessions.discard(owner)
             if not self.sessions:
                 del _groups[self.key]
+                calendar, self._calendar = self._calendar, None
+        if calendar is not None:
+            calendar.close()
+
+    def futures_calendar(self, *, contracts_path: str, schedules_path: str) -> FuturesCalendar:
+        """Return the group's futures schedule calendar, creating it on first use.
+
+        The calendar dates the streamed futures rows of every session on the group's futures
+        connections, so it belongs to the group, not to the session that first needed it: it
+        lives until the group's last session leaves, and reads Massive's contracts and
+        schedules through the REST client of any session still open (`_fetch_rows`); they
+        are the same vendor facts for every session of the key. The calendar starts its worker
+        thread when it is created, outside the lock; a calendar a racing caller installed
+        first wins, and the other is closed at once. Never waits on the network.
+
+        Args:
+            contracts_path: The `futures.contracts` dataset's REST path.
+            schedules_path: The `futures.schedules` dataset's REST path.
+
+        Returns:
+            The calendar.
+
+        Raises:
+            MassiveError: If every session has left the group meanwhile.
+        """
+        with self.lock:
+            found = self._calendar
+        if found is not None:
+            return found
+        candidate = FuturesCalendar(
+            self._fetch_rows,
+            contracts_path=contracts_path,
+            schedules_path=schedules_path,
+            label="massive connection group",
+        )
+        with self.lock:
+            found = self._calendar
+            if found is None and self.sessions:
+                found = self._calendar = candidate
+        if found is not candidate:
+            candidate.close()
+        if found is None:
+            raise MassiveError("every session of the WebSocket connection group has closed")
+        return found
+
+    def _fetch_rows(self, path: str, query: Mapping[str, object]) -> list[dict[str, object]]:
+        """Read every row of a REST path through an open session of the group.
+
+        The futures schedule calendar's worker calls it. A session that closes while it reads
+        fails that read, which the calendar treats as a failed lookup; the next read goes
+        through another session.
+
+        Args:
+            path: The REST path.
+            query: Its query.
+
+        Returns:
+            The rows.
+
+        Raises:
+            MassiveError: If no session of the group is open, or the read fails.
+        """
+        with self.lock:
+            open_ = [owner for owner in self.sessions if not owner.closed]
+        if not open_:
+            raise MassiveError("every session of the WebSocket connection group has closed")
+        return open_[0].fetch_rows(path, query)
 
     def first_no_ack(self, path: str, topic: str) -> bool:
         """Record a topic's `NO_ACK`; tell whether it is the topic's first on the cluster.
@@ -1441,7 +1522,11 @@ class ConnectionGroup:
         """
         asset_class = connection.asset_class
         with self.lock:
-            users = [owner for owner in connection.users if not owner.closed]
+            users = [
+                owner
+                for owner in connection.users
+                if not owner.closed and owner.core() is not None  # a freed one is closing
+            ]
         for owner in users:
             try:
                 owner.record_verdict(asset_class, ChannelFamily.TICK, decision)
@@ -1455,6 +1540,7 @@ class ConnectionGroup:
             asset_class=asset_class,
             family=ChannelFamily.TICK,
             decision=decision,
+            sessions=connection.sessions,
         )
         successor: Connection | None = None
         moved: list[int] = []
@@ -1515,6 +1601,11 @@ class WsConnections:
     session's streams, the connection whose row it shows for each class and family, the
     closed flag, and the channel plans) is guarded by the group's lock.
 
+    Its futures connections use their group's schedule calendar (`FuturesCalendar`,
+    `ConnectionGroup.futures_calendar`), which dates streamed futures rows by their trading
+    session; a futures stream's explicit symbols, and those a reactive table adds, are looked up
+    as soon as the stream opens.
+
     Example:
         ::
 
@@ -1530,6 +1621,7 @@ class WsConnections:
         *,
         resolve_host: Callable[[AssetClass, ChannelFamily], HostDecision],
         record_verdict: Callable[[AssetClass, ChannelFamily, HostDecision], None],
+        fetch_rows: Callable[[str, Mapping[str, object]], list[dict[str, object]]],
         crypto_pair: Callable[[str], tuple[str, str]],
         client_factory: ClientFactory | None = None,
     ) -> None:
@@ -1541,6 +1633,9 @@ class WsConnections:
                 transport's `resolve_host`, which may make one REST request.
             record_verdict: Replaces the cached decision of a (class, family) with the one the
                 server's real-time verdict implies; the REST transport's `record_verdict`.
+            fetch_rows: Returns every row of a REST path for a query; the REST transport's
+                `fetch_rows`, through which the group's futures schedule calendar reads while
+                the session is open.
             crypto_pair: Returns the base and quote of a crypto ticker from Massive's crypto
                 ticker list, which the session reads once; the REST
                 transport's `crypto_pair`, which may make one REST request.
@@ -1552,7 +1647,14 @@ class WsConnections:
         self._label = core.label
         self._resolve = resolve_host
         self.record_verdict = record_verdict
+        self.fetch_rows = fetch_rows
         self._crypto_pair = crypto_pair
+        # The futures schedule calendar reads the paths of the futures reference datasets.
+        by_name = core.catalog.by_name
+        self._calendar_paths: Final = (
+            cast("str", by_name["futures.contracts"].fetch_path),
+            cast("str", by_name["futures.schedules"].fetch_path),
+        )
         self.group: Final = ConnectionGroup.attach(
             self, config=core.config, exec_ctx=core.exec_ctx, client_factory=client_factory
         )
@@ -1628,6 +1730,8 @@ class WsConnections:
         decision = self._resolve(asset_class, spec.family)
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
+            if asset_class is AssetClass.FUTURES and wanted:
+                self.futures_calendar().watch(wanted)
             if created:
                 connection.start()
             opened = open_stream_tables(
@@ -1736,6 +1840,7 @@ class WsConnections:
                         group.owners[stream_id] = self
                         self._mine.add(stream_id)
                         return connection, created
+                futures = asset_class is AssetClass.FUTURES
                 candidate = Connection(
                     group,
                     exec_ctx=core.exec_ctx,
@@ -1743,6 +1848,7 @@ class WsConnections:
                     asset_class=asset_class,
                     family=spec.family,
                     decision=decision,
+                    sessions=self.futures_calendar() if futures else None,
                 )
         finally:
             if candidate is not None:  # lost the race, or refused: never registered
@@ -1897,6 +2003,8 @@ class WsConnections:
             connection = self.group.streams.get(stream_id)
         if connection is None:
             return
+        if connection.asset_class is AssetClass.FUTURES and added:
+            self.futures_calendar().watch(added)
         if connection.asset_class is not AssetClass.CRYPTO:
             connection.post(connection.change_symbols, stream_id, added, removed)
             return
@@ -1976,6 +2084,20 @@ class WsConnections:
             return dict(self.group.pairs)
 
     # --- rows (connections call these) ----------------------------------------------------------
+
+    def futures_calendar(self) -> FuturesCalendar:
+        """Return the group's futures schedule calendar, creating it on first use.
+
+        A closed session raises the `MassiveError` of `_check_open`.
+
+        Returns:
+            The calendar every futures connection's flusher corrects its rows' dates with
+            (`ConnectionGroup.futures_calendar`).
+        """
+        with self._lock:
+            self._check_open()
+        contracts, schedules = self._calendar_paths
+        return self.group.futures_calendar(contracts_path=contracts, schedules_path=schedules)
 
     def owns_row(self, connection: Connection, family: ChannelFamily) -> bool:
         """Tell whether the session shows a connection's row for its class and a family.
