@@ -12,6 +12,7 @@ import json
 import re
 import runpy
 import threading
+import types
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -209,6 +210,12 @@ def test_the_split_adjustment_examples_run(
         dh_to_pylist=dh_to_pylist,
         monkeypatch=monkeypatch,
     )
+    # The scripts' functions hold their module globals, which hold the functions and the
+    # session: a cycle, which clearing those globals breaks, so the session goes with the test.
+    for value in names.values():  # a function the scripts defined, not one they imported
+        if isinstance(value, types.FunctionType) and value.__module__ == "<run_path>":
+            value.__globals__.clear()
+    names.clear()
 
 
 def _history_and_live_merges_history_with_live_bars(

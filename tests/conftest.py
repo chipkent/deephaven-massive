@@ -381,7 +381,9 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     look after the first collects with `gc.DEBUG_SAVEALL`, which keeps what it would free in
     `gc.garbage`: a session found there is reachable only through a reference cycle, which
     reference counting never frees, and the test fails with "freed only by the cyclic
-    collector", unless the cycle is an exception's traceback (`_held_by_tracebacks`).
+    collector", unless the cycle is an exception's traceback (`_held_by_tracebacks`). A session
+    still alive after a second, though out of the live set, may be one a test's formula handed
+    to the JVM, so the check asks the JVM to collect once before it waits on.
     """
     before = _running()
     yield
@@ -394,19 +396,28 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
     gc.disable()
     try:
         cyclic: set[str] = set()
-        deadline = time.monotonic() + 30.0
+        started = time.monotonic()
+        deadline = started + 30.0
         pause = threading.Event()  # never set; only paces the bounded wait
-        first = True
+        next_collect = started + 0.04  # after a first look, then at most once a second: slow
+        jvm_collected = False
         while True:
             _drop_logged_objects(request.node)  # a library thread may still be logging
-            if not first:
+            if time.monotonic() > next_collect:
                 cyclic |= _collect_cycles(before)
-            first = False
+                next_collect = time.monotonic() + 1.0
             sessions, alive, groups, threads = _new(before)
             if not sessions and not alive and not groups and not threads:
                 break
             if time.monotonic() > deadline:
                 pytest.fail(f"left running after the test: {_left(before)}")
+            if alive and not sessions and not jvm_collected and time.monotonic() > started + 1.0:
+                # A formula a test ran (`t.update("...")`) copies its frame's locals into the
+                # query scope through jpy, and a session among them lives until the JVM
+                # collects them: that is Deephaven's, not a leak of the library.
+                jpy = importlib.import_module("jpy")
+                jpy.get_type("java.lang.System").gc()
+                jvm_collected = True
             for thread in threads:  # wait on the threads themselves, briefly each
                 thread.join(0.05)
             if not threads:
