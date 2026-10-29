@@ -140,18 +140,6 @@ def test_a_query_name_must_be_a_query_parameter(name: str) -> None:
 # next_url.
 
 
-def test_origin_of_fills_the_default_port_and_lowers_the_host() -> None:
-    assert query.origin_of("https://API.Massive.com") == _ORIGIN
-    assert query.origin_of("http://127.0.0.1:8080/x") == ("http", "127.0.0.1", 8080)
-    assert query.origin_of("HTTP://h") == ("http", "h", 80)
-
-
-@pytest.mark.parametrize("url", ["/v3/trades", "ftp://h/x", "https://", "api.massive.com"])
-def test_origin_of_refuses_anything_but_an_absolute_http_url(url: str) -> None:
-    with pytest.raises(ValueError, match="is not an absolute http or https URL"):
-        query.origin_of(url)
-
-
 def test_next_url_keeps_the_query_byte_for_byte_and_drops_api_key() -> None:
     url = "https://api.massive.com:443/v3/trades/AAPL?cursor=YXA9MTA%3D&apiKey=secret&limit=5"
     assert query.next_target(url, _ORIGIN) == "/v3/trades/AAPL?cursor=YXA9MTA%3D&limit=5"

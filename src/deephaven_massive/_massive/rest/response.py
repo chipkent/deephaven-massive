@@ -136,7 +136,7 @@ class Page:
     Example:
         ::
 
-            page = client.get(trades, {"stockTicker": "AAPL"}, {"limit": 1000})
+            page = client.get(trades, {"stockTicker": "AAPL"}, {"limit": 1000}, bucket="stocks")
             batch, drift = to_batch(page.rows, trades, required={"SipTimestamp"})
     """
 

@@ -194,6 +194,7 @@ def _option(client: RestClient) -> str:
             source(Transport.REST, "/v3/reference/options/contracts"),
             {},
             {"underlying_ticker": "AAPL", "expiration_date.gte": later, "limit": 1},
+            bucket="options",
         ).rows
         assert rows, "no listed AAPL option contract"
         _FOUND["options"] = str(rows[0]["ticker"])

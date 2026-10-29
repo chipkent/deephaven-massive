@@ -28,21 +28,34 @@ classifiers = [
 ]
 dependencies = [
     "deephaven-core>=42.0",
-    # 16 is the first release that works with deephaven-core 42.0: 15 lacks pa.ListViewType,
-    # which deephaven-core needs, and 14 fails to import against numpy 2.
-    "pyarrow>=16",
-    "boto3>=1.28.63",  # the boto3 release paired with the botocore floor below
-    # 1.31.63 is the first release that works with urllib3 2 without a warning: 1.31.62 accepts
-    # urllib3 2 but still passes its pools the `strict` argument, which urllib3 2.0 deprecates
-    # with a DeprecationWarning on every new connection pool. Config(proxies=...),
-    # proxies_config, and retries={"total_max_attempts": ..., "mode": ...} are older.
-    "botocore>=1.31.63",
-    # 2.0 is the first release with inline type information; ProxyManager is older.
-    "urllib3>=2.0",
-    # 2022.6.15.1 is the first release that finds its bundle with importlib.resources.files;
-    # earlier releases call the deprecated importlib.resources.path. It has inline type
-    # information (py.typed), which 2022.5.18 introduced.
-    "certifi>=2022.6.15.1",
+    # 23.0.1 is the first release that fixes a use-after-free when reading an Arrow IPC file
+    # (GHSA-rgxp-2hwp-jwgg); the library never reads IPC files itself. deephaven-core puts
+    # no bound on pyarrow. pa.ListViewType, which deephaven-core needs, and numpy 2 support
+    # are older.
+    "pyarrow>=23.0.1",
+    "boto3>=1.34.63",  # the boto3 release paired with the botocore floor below
+    # 1.34.63 is the first release that accepts urllib3 2.1 or later (on Python 3.10 and up);
+    # 1.34.62 caps urllib3 below 2.1, which would hold urllib3 under its own floor below.
+    # Config(proxies=...), proxies_config, and retries={"total_max_attempts": ..., "mode": ...}
+    # are older.
+    "botocore>=1.34.63",
+    # 2.8.0 is the first release that fixes all of these advisories. It strips headers and
+    # bodies from cross-origin and 303 redirects (GHSA-g4mx-q9vg-27p4, GHSA-34jh-p97f-mpxf,
+    # GHSA-qccp-gfcp-xxvc; the REST client never follows a redirect, but botocore's S3
+    # requests do), honors redirects disabled when a PoolManager is created
+    # (GHSA-pq67-6m6q-mj2v), limits chained Content-Encoding (GHSA-gm62-xv2j-4w53), bounds
+    # decompression and chunk sizes in the streaming API that botocore reads S3 objects
+    # through (GHSA-2xpw-w6gg-jr37, GHSA-38jv-5279-wg99, GHSA-mf9v-mfxr-j63j,
+    # GHSA-vxq7-64xx-v4gw), and keeps an HTTPS proxy's TLS settings apart from the target's
+    # (GHSA-8988-9cw3-xx77). Inline type information and ProxyManager are older.
+    "urllib3>=2.8.0",
+    # 2026.10.19 is the release that advisory GHSA-6q48-6c7w-9gw2 recommends. It no longer
+    # trusts emSign ECC Root CA - G3, under which the private keys of eight intermediate CAs
+    # were compromised: with one of them, an on-path attacker could forge a certificate for
+    # any host. Earlier releases also trust the withdrawn TrustCor, e-Tugra and GLOBALTRUST
+    # roots. Finding the bundle with importlib.resources.files and inline type information
+    # (py.typed) are older.
+    "certifi>=2026.10.19",
     # 17.1 is the first release that defines process_exception, the public rule for which
     # connection failures to retry, in websockets.client (17.0 and earlier define it only in
     # websockets.asyncio.client, which does not export it). Proxy support from the environment
@@ -52,9 +65,11 @@ dependencies = [
 
 [project.optional-dependencies]
 orjson = [
-    # 3.9.15 is the first release that rejects JSON nested deeper than 1,024 levels; the codec
-    # relies on that limit to keep deep or hostile bodies from exhausting the C stack.
-    "orjson>=3.9.15",
+    # 3.11.6 is the first release that limits recursion in orjson.dumps for deeply nested
+    # objects (GHSA-hx9q-6w63-j58v); the codec only decodes, so the fix does not reach it.
+    # Rejecting JSON nested deeper than 1,024 levels while decoding, which the codec relies on
+    # to keep deep or hostile bodies from exhausting the C stack, is older.
+    "orjson>=3.11.6",
 ]
 
 [project.urls]
@@ -67,7 +82,9 @@ dev = [
     "ruff>=0.17.2",
     "mypy>=2.4",
     "types-boto3[s3]>=1.43",
-    "pytest>=9",
+    # 9.0.3 is the first release that stops trusting a /tmp/pytest-of-{user} directory another
+    # local user could have created first (GHSA-6w46-j5rx-g56g).
+    "pytest>=9.0.3",
     "pytest-cov>=7",
     "pytest-timeout>=2.4",
     "pytest-xdist>=3.8",
@@ -210,18 +227,23 @@ typeCheckingMode = "standard"
 [tool.pytest]
 strict = true
 filterwarnings = ["error"]
-# `-m "not integration"` keeps the live tests out of every default run, CI's included; a later
-# `-m integration` on the command line replaces it, so `uv run pytest -m integration` runs only
-# them (each also skips itself without `MASSIVE_API_KEY`).
-addopts = ["-ra", "--import-mode=importlib", "-m", "not integration"]
+# The options every pytest run starts with, CI's included. `-ra` lists each skipped or failed
+# test at the end of the run. `--import-mode=importlib` imports test files without adding their
+# directories to sys.path. `-m` picks which tests run: it leaves out the live tests, which call
+# Massive's real servers, and the benchmark sweep, which only prints timings. Pass your own `-m`
+# to replace it: `uv run pytest -m integration` runs only the live tests (each skips itself
+# unless MASSIVE_API_KEY is set), and `uv run pytest -m benchmark` runs only the sweep.
+addopts = ["-ra", "--import-mode=importlib", "-m", "not integration and not benchmark"]
+# Each entry is `name(arguments): what the marker means`, shown by `uv run pytest --markers`.
 markers = [
-    "integration: a live test against Massive (tests/**/test_*_integration.py); deselected by default, run with -m integration and MASSIVE_API_KEY set",
-    "integration_limits: deliberately exceeds Massive's subscription and connection limits; also marked integration, and run only with -m integration_limits",
-    "integration_smoke: calls every dataset and verb once and checks its columns, unattended; also marked integration, and run only with -m integration_smoke",
-    "needs(*plans): the plans a live test needs, each <class>:<plan>, s3, or some:basic; it skips unless MASSIVE_LIVE_PLANS declares them",
-    "settles(*items): the open verification items a live test settles, for the run's summary",
-    "requests(count): the REST requests a live test makes, which scale its timeout when its class is on Basic",
-    "jvm_held: a test whose own formula hands its frame's locals to the JVM; its leak check asks the JVM to collect once",
+    "integration: a live test, one that calls Massive's real servers. Every test in a file named test_*_integration.py has this marker, and no other test does. A plain run leaves these tests out; run them with -m integration and MASSIVE_API_KEY set.",
+    "integration_limits: a live test that deliberately goes over the number of subscriptions or connections Massive allows. It also has the integration marker, but -m integration leaves it out; run it with -m integration_limits.",
+    "integration_smoke: a live test that calls every dataset with every kind of query once and checks the columns that come back, so it can run unattended. It also has the integration marker, but -m integration leaves it out; run it with -m integration_smoke.",
+    "needs(*plans): the Massive plans a live test requires. Write each plan as <asset class>:<plan>, such as stocks:starter; as s3, for the flat-file credentials; or as some:basic, for at least one asset class left on the free Basic plan. The test is skipped unless MASSIVE_LIVE_PLANS declares them.",
+    "settles(*items): the open questions a live test answers. The summary at the end of the run counts how many of them passing tests have answered.",
+    "requests(count): how many REST requests a live test makes. When the test's asset class is on the free Basic plan, which allows 5 requests a minute, its time limit grows with this count.",
+    "jvm_held: a test whose own Deephaven formula passes the test's local variables to the JVM. Before the leak check fails the test, it asks the JVM to free unused memory once.",
+    "benchmark: one point of a benchmark sweep, a test that prints timings and never fails on them. A plain run leaves these tests out; run them with -m benchmark.",
 ]
 testpaths = ["tests"]
 # Puts the repository root on sys.path, which --import-mode=importlib does not do itself, so

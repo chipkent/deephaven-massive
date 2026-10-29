@@ -22,7 +22,7 @@ tested without a socket; `ws.client` owns the socket and calls in here:
   whole at DEBUG on this module's logger, once, where it is decoded.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
-  one must wait at least. The overrides use the shared `net.retry` helpers: `is_tls_failure`
+  one must wait at least. The overrides use the shared `net` helpers: `is_tls_failure`
   and the `Retry-After` reader.
 
 Topics are exact strings throughout: nothing here matches one topic as a prefix of another.
@@ -46,8 +46,8 @@ from websockets.client import process_exception
 from websockets.exceptions import InvalidStatus
 
 from deephaven_massive._massive.net import codec
-from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.net.retry import is_tls_failure, retry_after_seconds
+from deephaven_massive._massive.net.errors import WireError, is_tls_failure
+from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
     convert_field,

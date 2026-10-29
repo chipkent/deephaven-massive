@@ -208,6 +208,7 @@ class MassiveSession:
             m.stocks  # <MassiveSession #1 stocks>, the namespace of stock datasets
             conns = m.connections()  # live diagnostics: connections and host decisions
             streams = m.streams()  # live diagnostics: one row per stream
+            limits = m.rate_limits()  # live diagnostics: REST pace and pauses per subscription
             m.close()  # live tables fail (keeping their rows); verbs now raise MassiveError
 
             with dm.MassiveSession() as m2:  # closes on exit
@@ -455,6 +456,30 @@ class MassiveSession:
         """
         return self._core.diagnostics_view(self._core.diagnostics.streams)
 
+    def rate_limits(self) -> Table:
+        """Return the live diagnostics table of REST rate limits, one row per subscription.
+
+        Massive limits REST requests per subscription (5 per minute on the free Basic tier,
+        none on a paid one), counted across every key and session of the account. Each row
+        shows one subscription's bucket, or `other` for the datasets Massive assigns to none:
+        its `State` (`READY`, `PACED` while requests wait for a slot, `PAUSED` after a 429,
+        `REFUSED` while requests fail because Massive refused them for longer than the library
+        waits), `RequestsPerMinute` and `LimitSource` (`DECLARED` in
+        `MassiveConfig.rest_basic_subscriptions`, or `LEARNED` from Massive's refusal), the
+        requests in flight, waiting, and in the last window, totals of requests and refusals,
+        `PausedUntil`, and the latest refusal. Sessions of this process that use the same API
+        key share one governor, so their tables show the same rows. Each call returns a new
+        view, a live result like any other: while it is held it keeps the session running and
+        current, and after `close()` it keeps showing the final rows.
+
+        Returns:
+            A view of the `rate_limits` table, keyed by `Bucket`; its columns are `RATE_LIMITS`
+            in `_tables/diagnostics.py`.
+
+        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
+        """
+        return self._core.diagnostics_view(self._core.diagnostics.rate_limits)
+
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
@@ -493,8 +518,9 @@ class MassiveSession:
         keeps its final rows. The session's streams leave their WebSocket connections, and
         every connection no other session of the same key uses is closed. "MassiveSession #1
         closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
-        `connections()`, and `streams()` raise `MassiveError("MassiveSession #1 is closed")`;
-        building queries, reaching namespaces, and `release()` keep working. On an
+        `connections()`, `streams()`, and `rate_limits()` raise
+        `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
+        and `release()` keep working. On an
         update-graph thread it raises `ValueError`, even when the session is already closed.
 
         Example:

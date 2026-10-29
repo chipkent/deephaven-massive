@@ -18,6 +18,9 @@ from deephaven_massive._massive.rest import batch, client, response
 from deephaven_massive._massive.spec import types, values
 
 EXPECTED_INTERFACE = [
+    "BASIC_REQUESTS_PER_MINUTE",
+    "BucketState",
+    "Cancel",
     "DriftReport",
     "DriftSample",
     "Field",
@@ -26,9 +29,11 @@ EXPECTED_INTERFACE = [
     "Page",
     "ParamKind",
     "Provenance",
+    "RATE_WINDOW",
     "ReadColumn",
     "ReadPlan",
     "Reject",
+    "RequestGovernor",
     "RestClient",
     "RestPath",
     "Source",
@@ -44,6 +49,7 @@ EXPECTED_INTERFACE = [
     "WsState",
     "encode_value",
     "object_key",
+    "origin_of",
     "provenance",
     "source",
     "sources",

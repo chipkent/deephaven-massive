@@ -4,14 +4,14 @@ import datetime as dt
 import hashlib
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Self
 
 import pytest
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.refresh import fetch
-from tests._fakes.rest import REFUSED_PORT
+from tests._fakes.rest import REFUSED_PORT, LoopbackHTTPServer
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -196,7 +196,7 @@ class _Server:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.http = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(
             target=self.http.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
         )

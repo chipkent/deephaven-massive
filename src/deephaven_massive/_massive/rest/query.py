@@ -8,7 +8,7 @@ wrong type is refused here instead of reaching Massive as surprising text.
 
 Names arrive in wire form (`"timestamp.gte"`); the library's filter spelling is translated
 before the client. The functions are pure and never modify their arguments, so they are safe
-from any thread. This module imports only the standard library and `spec`.
+from any thread. This module imports only the standard library, `net.origins`, and `spec`.
 """
 
 from __future__ import annotations
@@ -16,40 +16,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
+from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.spec.values import encode_value
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from deephaven_massive._massive.net.origins import Origin
     from deephaven_massive._massive.spec.types import RestPath
 
-__all__ = ["Origin", "next_target", "origin_of", "request_target"]
-
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-Origin = tuple[str, str, int]
-"""A URL's scheme, lower-case host name, and port (the scheme's default when not written)."""
-
-
-def origin_of(url: str) -> Origin:
-    """Return the origin of an absolute URL, for comparing where two URLs point.
-
-    Args:
-        url: An absolute `http` or `https` URL, such as `"https://api.massive.com"`.
-
-    Returns:
-        `(scheme, host, port)`, with the scheme and host lower-cased and the scheme's default
-        port filled in.
-
-    Raises:
-        ValueError: If `url` is not an absolute `http` or `https` URL with a host, or its port
-            is not a number.
-    """
-    parts = urlsplit(url)
-    scheme = parts.scheme.lower()
-    if scheme not in _DEFAULT_PORTS or not parts.hostname:
-        raise ValueError(f"{url!r} is not an absolute http or https URL")
-    return scheme, parts.hostname, parts.port or _DEFAULT_PORTS[scheme]
+__all__ = ["next_target", "request_target"]
 
 
 def request_target(
