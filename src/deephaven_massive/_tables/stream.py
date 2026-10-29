@@ -128,7 +128,7 @@ class FuturesSessionDates(Protocol):
     """The schedule calendar that corrects streamed futures rows' session dates.
 
     The WebSocket transport gives a futures connection's flusher one
-    (`_ingest/futures_sessions.py`); `ChannelPlan.convert` hands it the rule's dates of every
+    (`_ingest/futures_calendar.py`); `ChannelPlan.convert` hands it the rule's dates of every
     futures row. It never waits on the network: what its schedules do not cover yet keeps the
     rule's date.
     """

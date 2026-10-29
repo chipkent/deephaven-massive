@@ -9,7 +9,7 @@ futures plan) settle: a holiday folds its trading into the next session, which t
 days early, and a product whose pre-open starts before 17:00 Chicago time (16:45 on CBOT)
 already trades for the next session.
 
-`FuturesSessions` keeps, per session:
+`FuturesCalendar` keeps, per session:
 
 - the product of each contract (`/futures/v1/contracts`, looked up by `ticker.any_of`), and
 - each product's sessions from a week back to ten days ahead (`/futures/v1/schedules`): one
@@ -66,20 +66,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
 __all__ = [
-    "CONTRACTS_PATH",
     "LOAD_PATIENCE",
     "RELOAD_SPACING",
-    "SCHEDULES_PATH",
-    "FuturesSessions",
-    "Session",
+    "FuturesCalendar",
+    "ScheduledSession",
 ]
 
 logger = logging.getLogger(__name__)
-
-CONTRACTS_PATH: Final = "/futures/v1/contracts"
-"""The REST path that maps a contract ticker to its product."""
-SCHEDULES_PATH: Final = "/futures/v1/schedules"
-"""The REST path of each product's timed session events."""
 
 RELOAD_SPACING: Final = timedelta(minutes=10)
 """The least time between two loads of one product's schedule, or two lookups of one
@@ -119,7 +112,7 @@ class _Known:
     """
 
     products: Mapping[str, str | None]
-    sessions: Mapping[str, tuple[Session, ...]]
+    sessions: Mapping[str, tuple[ScheduledSession, ...]]
     failed: Mapping[str, str]
     stale: frozenset[str]
     late: frozenset[str]
@@ -131,7 +124,7 @@ class _Batch:
 
     Attributes:
         misses: The batch's misses, `(symbol, key, rule date, reason)`, each once; their
-            messages are built and logged once per call (`FuturesSessions._report`).
+            messages are built and logged once per call (`FuturesCalendar._report`).
         spreads: The spreads the batch holds, which are never looked up.
         contracts: The contracts to look up.
         products: The products whose schedules to load.
@@ -146,7 +139,7 @@ class _Batch:
 
 
 @dataclass(frozen=True, slots=True)
-class Session:
+class ScheduledSession:
     """One futures session of one product, from Massive's schedule.
 
     Attributes:
@@ -190,7 +183,7 @@ def _is_spread(symbol: str) -> bool:
     return not _SPREAD_MARKS.isdisjoint(symbol)
 
 
-class FuturesSessions:
+class FuturesCalendar:
     """The futures session calendar of one session's WebSocket streams (see the module).
 
     Created by the session's `WsConnections` with its first futures connection, and closed
@@ -200,7 +193,12 @@ class FuturesSessions:
     Example:
         ::
 
-            sessions = FuturesSessions(rest.fetch_rows, label="MassiveSession #1")
+            sessions = FuturesCalendar(
+                rest.fetch_rows,
+                contracts_path="/futures/v1/contracts",
+                schedules_path="/futures/v1/schedules",
+                label="MassiveSession #1",
+            )
             sessions.watch(["ESZ5"])  # looks up ESZ5's product and its schedule
             sessions.wait_idle(5.0)  # in a test: the lookups are done
             dates, misses = sessions.correct(symbols, instants, rule_dates)
@@ -211,6 +209,8 @@ class FuturesSessions:
         self,
         fetch: Callable[[str, Mapping[str, object]], list[dict[str, object]]],
         *,
+        contracts_path: str,
+        schedules_path: str,
         label: str,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -219,10 +219,16 @@ class FuturesSessions:
         Args:
             fetch: Returns every row of a REST path for a query, following its pages, on the
                 session's REST client; it raises `MassiveError` on a failure.
+            contracts_path: The REST path that maps a contract ticker to its product, the
+                `futures.contracts` dataset's (`/futures/v1/contracts`).
+            schedules_path: The REST path of each product's timed session events, the
+                `futures.schedules` dataset's (`/futures/v1/schedules`).
             label: The session's label, for the worker's name and messages.
             clock: The current time in seconds since the epoch; tests replace it.
         """
         self._fetch = fetch
+        self._contracts_path = contracts_path
+        self._schedules_path = schedules_path
         self._label = label
         self._clock = clock
         self._lock = threading.Lock()
@@ -230,7 +236,7 @@ class FuturesSessions:
         self._idle = threading.Condition(self._lock)
         # Guarded by the lock; each map is immutable and replaced whole.
         self._products: Mapping[str, str | None] = MappingProxyType({})
-        self._sessions: Mapping[str, tuple[Session, ...]] = MappingProxyType({})
+        self._sessions: Mapping[str, tuple[ScheduledSession, ...]] = MappingProxyType({})
         self._loaded: dict[str, float] = {}  # product -> when its schedule last loaded
         self._asked: dict[str, float] = {}  # contract or product -> when last queued
         self._failed: dict[str, str] = {}  # contract or product -> why its load failed
@@ -563,7 +569,7 @@ class FuturesSessions:
             for start in range(0, len(ordered), _TICKERS_PER_REQUEST):
                 chunk = ordered[start : start + _TICKERS_PER_REQUEST]
                 query = {"ticker.any_of": tuple(chunk), "limit": _PAGE}
-                for row in self._fetch(CONTRACTS_PATH, query):
+                for row in self._fetch(self._contracts_path, query):
                     ticker, product = row.get("ticker"), row.get("product_code")
                     if isinstance(ticker, str) and isinstance(product, str) and ticker in found:
                         found[ticker] = found[ticker] or product
@@ -600,7 +606,7 @@ class FuturesSessions:
             "limit": _PAGE,
         }
         try:
-            rows = self._fetch(SCHEDULES_PATH, query)
+            rows = self._fetch(self._schedules_path, query)
         except MassiveError as error:
             self._failure(products, f"loading its schedule failed: {error}")
             return
@@ -613,7 +619,8 @@ class FuturesSessions:
                 events[product].setdefault(date.fromisoformat(day), []).append(_ns(stamp))
         loaded = {
             product: tuple(
-                Session(day, min(stamps), max(stamps)) for day, stamps in sorted(found.items())
+                ScheduledSession(day, min(stamps), max(stamps))
+                for day, stamps in sorted(found.items())
             )
             for product, found in events.items()
         }
@@ -653,7 +660,7 @@ _NOT_LOADED: Final = f"its schedule was not loaded after {LOAD_PATIENCE.seconds}
 """The reason of a miss whose contract or product is still loading after `LOAD_PATIENCE`."""
 
 
-def _outside(product: str, sessions: tuple[Session, ...], *, before: bool) -> str:
+def _outside(product: str, sessions: tuple[ScheduledSession, ...], *, before: bool) -> str:
     """Return why a row outside a product's loaded sessions is a miss.
 
     The text names the loaded schedule's first or last session, not the row's instant, so the

@@ -76,6 +76,7 @@ __all__ = [
     "DAY_ZONE_NAMES",
     "FUTURES_BAR_CLOSE",
     "FUTURES_HOLIDAY_MARGIN",
+    "FUTURES_SESSION_ROLL",
     "MIXED_BOUNDS",
     "NEW_YORK",
     "DaySpan",
@@ -100,12 +101,14 @@ __all__ = [
     "futures_session_open",
     "instant_bound",
     "intraday",
+    "is_trading_day",
     "last_trading_day",
     "parse_date_like",
     "publish_time",
     "require_aware",
     "trades_at_weekends",
     "unit_ns",
+    "weekday_on_or_after",
 ]
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
@@ -447,8 +450,10 @@ def bounds(
     return DaySpan(first, last)
 
 
-_SESSION_ROLL: Final = timedelta(hours=7)
-"""Adding this to a Chicago time moves 17:00, when the next futures session opens, to midnight."""
+FUTURES_SESSION_ROLL: Final = timedelta(hours=7)
+"""Adding this to a Chicago time moves 17:00, when the next futures session opens, to midnight:
+the one constant of the 17:00 Chicago session rule, which `futures_session` applies to an
+instant and `row_times` to a column of them."""
 
 FUTURES_SESSION_END: Final = time(17)
 """The Chicago wall-clock time a futures session is over by: the next session opens then, and the
@@ -494,8 +499,12 @@ def add_weekdays(day: date, count: int) -> date:
     return moved
 
 
-def _weekday_on_or_after(day: date) -> date:
+def weekday_on_or_after(day: date) -> date:
     """Return the day itself on a weekday, else the Monday after it.
+
+    No futures session ends on a Saturday or Sunday: what trades from Friday 17:00 Chicago time,
+    and from the Sunday open, belongs to Monday's session, so this rolls `futures_session` onto
+    the session a row is dated with.
 
     Args:
         day: Any day.
@@ -535,7 +544,7 @@ def futures_session_open(session: date) -> datetime:
         The aware instant, in Chicago time.
     """
     midnight = datetime(session.year, session.month, session.day, tzinfo=CHICAGO)
-    return midnight - _SESSION_ROLL
+    return midnight - FUTURES_SESSION_ROLL
 
 
 def futures_session(moment: datetime) -> date:
@@ -552,7 +561,7 @@ def futures_session(moment: datetime) -> date:
     Returns:
         The session's end date.
     """
-    return (moment.astimezone(CHICAGO) + _SESSION_ROLL).date()
+    return (moment.astimezone(CHICAGO) + FUTURES_SESSION_ROLL).date()
 
 
 def futures_session_before(end: datetime) -> date:
@@ -588,6 +597,23 @@ def futures_bar_request(span: DaySpan) -> TimeRange:
     lower = futures_session_open(span.first) - FUTURES_HOLIDAY_MARGIN
     upper = datetime.combine(span.last, FUTURES_BAR_CLOSE, tzinfo=CHICAGO)
     return TimeRange(lower.astimezone(UTC), upper.astimezone(UTC))
+
+
+def is_trading_day(asset_class: AssetClass | None, day: date) -> bool:
+    """Tell whether a day can hold a class's trading, without a holiday calendar.
+
+    Every weekday can; a Saturday or Sunday only for a class that trades at weekends
+    (`trades_at_weekends`: forex and crypto). A futures session ends on weekdays only. The
+    one test the transports use to skip a weekend request or a weekend's missing file.
+
+    Args:
+        asset_class: The class, or None for data of no class.
+        day: The day; for futures, a session date.
+
+    Returns:
+        True for a weekday, or any day of a class that trades at weekends.
+    """
+    return day.weekday() < _SATURDAY or trades_at_weekends(asset_class)
 
 
 def trades_at_weekends(asset_class: AssetClass | None) -> bool:
@@ -821,7 +847,7 @@ class _Periods:
             `multiplier - 1` weekdays before the last weekday on or before `last`.
         """
         if self.sessions:
-            low = _weekday_on_or_after(first)
+            low = weekday_on_or_after(first)
             return low, add_weekdays(_weekday_on_or_before(last), 1 - multiplier)
         low = self.anchor(first)
         if self.window_start(low) < first:
@@ -976,7 +1002,7 @@ def bar_days(
     Returns:
         The window's first day, and the day after its last day.
     """
-    periods = _Periods(None if every_day else asset_class, timespan, multiplier, every_day)
+    periods = _Periods(asset_class, timespan, multiplier, every_day)
     anchor = periods.period_of(day)
     if periods.sessions:
         return anchor, last_trading_day(anchor, multiplier) + _ONE_DAY

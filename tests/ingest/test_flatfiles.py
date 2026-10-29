@@ -15,6 +15,7 @@ import weakref
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
@@ -965,6 +966,25 @@ def test_a_missing_last_date_after_a_day_is_skipped_as_a_holiday(
             f"stocks.trades: {TRADES_0304} does not exist; skipping 2025-03-04 (a market holiday?)",
         ),
         (logging.INFO, "stocks.trades history: source=S3 files=1 skipped=2025-03-04"),
+    ]
+
+
+def test_a_missing_weekend_file_of_a_class_that_trades_at_weekends_warns(
+    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Forex trades from Sunday evening UTC, so its weekend day is a trading day like crypto's:
+    # a missing Sunday file is reported as a possible holiday, never skipped silently.
+    transport = session._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    forex = replace(CRYPTO_TRADES, name="forex.trades", asset_class=AssetClass.FOREX)
+    key = "global_forex/trades_v1/2025/03/2025-03-02.csv.gz"
+    sunday = flatfiles._Key(key, date(2025, 3, 2), None)
+    stocks = replace(forex, name="stocks.trades", asset_class=AssetClass.STOCKS)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        transport._skip_missing(forex, [sunday], last=date(2025, 3, 3))
+        transport._skip_missing(stocks, [sunday], last=date(2025, 3, 3))
+    assert caplog.messages == [
+        f"forex.trades: {key} does not exist; skipping 2025-03-02 (a market holiday?)"
     ]
 
 

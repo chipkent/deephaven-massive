@@ -114,7 +114,7 @@ from typing import TYPE_CHECKING, Final, cast
 import pyarrow as pa
 from deephaven import merge
 
-from deephaven_massive._datasets.dates import TimeRange
+from deephaven_massive._datasets.dates import TimeRange, is_trading_day
 from deephaven_massive._datasets.history_source import (
     NOT_PUBLISHED,
     StampRule,
@@ -184,7 +184,6 @@ _TABLE_BLOCKS: Final = 16
 blocks of Arrow data, and at the end of the file. Fewer, larger tables cost far less JVM heap
 than one per block (each table carries a fixed overhead), while memory stays bounded."""
 
-_SATURDAY: Final = 5
 
 ROLL_LIMIT: Final = timedelta(days=7)
 """How far past the first missing day of a futures range's end the next session file is sought.
@@ -440,7 +439,8 @@ class _Transform:
         """
         arrays = [self._column(batch, column) for column in self.columns]
         rows = pa.RecordBatch.from_arrays(arrays, schema=self.arrow_schema)
-        return ended_by(self.times.fill(rows, received=received), self.latest_end)
+        filled = self.times.fill(rows, received=received)
+        return filled if self.latest_end is None else ended_by(filled, self.latest_end)
 
     def _column(
         self, batch: pa.RecordBatch, column: tuple[ColumnType, str, SourceColumn | None]
@@ -703,11 +703,13 @@ class FlatFileHistory:
                 if key not in missing:
                     break
                 run.append(key)
-            if not any(key.day.weekday() < _SATURDAY for key in run):
+            if not any(is_trading_day(spec.asset_class, key.day) for key in run):
                 continue
             name = None if venue is None else venue.value
             # The run is newest first; name its first missing weekday, the likely holiday.
-            holiday = next(key for key in reversed(run) if key.day.weekday() < _SATURDAY)
+            holiday = next(
+                key for key in reversed(run) if is_trading_day(spec.asset_class, key.day)
+            )
             day, limit = own[-1].day, run[-1].day + ROLL_LIMIT
             while True:
                 day += timedelta(days=1)
@@ -919,8 +921,9 @@ class FlatFileHistory:
     def _skip_missing(self, spec: DatasetSpec, missing: Sequence[_Key], *, last: date) -> None:
         """Apply the missing-file rules to the files that did not exist.
 
-        A weekend file is skipped silently (except for crypto, which trades every day); a
-        weekday file is skipped with a WARNING (most likely a market holiday). The file for the
+        A weekend file is skipped silently, except for a class that trades at weekends (forex
+        and crypto, `dates.is_trading_day`); a trading day's file is skipped with a WARNING
+        (most likely a market holiday). The file for the
         last requested date may instead be late, so within `PUBLICATION_GRACE` (in
         `_datasets/history_source.py`) after its publication time it raises; after that it is
         skipped with a WARNING too.
@@ -937,8 +940,7 @@ class FlatFileHistory:
         """
         cutoff = self._core.config.flat_file_publish_cutoff
         for key in missing:
-            trading = spec.asset_class is AssetClass.CRYPTO or key.day.weekday() < _SATURDAY
-            if not trading:
+            if not is_trading_day(spec.asset_class, key.day):
                 continue
             day = key.day.isoformat()
             if key.day == last and within_publication_grace(spec, key.day, cutoff=cutoff):

@@ -81,7 +81,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.catalog import filter_key, takes_instants
-from deephaven_massive._datasets.dates import day_class, instant_bound, trades_at_weekends
+from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
 from deephaven_massive._datasets.history_source import StampRule, partition_dates, stamp_rule
 from deephaven_massive._datasets.row_times import (
     DATE,
@@ -159,7 +159,6 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
-_SATURDAY: Final = 5
 _SESSION_DATE: Final = "session_end_date"
 """The futures date parameter that names a trading session, not a calendar day."""
 
@@ -1165,14 +1164,12 @@ class RestReader:
                 if stamps is not None:
                     batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
                 latest = None if window is None else window.ended_by
-                kept.extend(
-                    ended_by(
-                        times.fill(
-                            _keep(batch, window, time=converter.time_name), received=received
-                        ),
-                        latest,
-                    )
+                filled = (
+                    times.fill(_keep(batch, window, time=converter.time_name), received=received)
                     for batch in batches
+                )
+                kept.extend(
+                    filled if latest is None else (ended_by(rows, latest) for rows in filled)
                 )
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
@@ -1297,7 +1294,7 @@ class RestReader:
         """Return every raw JSON row of a REST path for a query, following its pages.
 
         For the library's own lookups, such as the futures schedule calendar of the WebSocket
-        streams (`_ingest/futures_sessions.py`), which reads a few fields and keeps no table.
+        streams (`_ingest/futures_calendar.py`), which reads a few fields and keeps no table.
 
         Args:
             template: The path template, such as `"/futures/v1/schedules"`; it takes no path
@@ -1745,7 +1742,7 @@ class RestEndpoints:
             days = [
                 day
                 for day in partition_dates(spec, window)
-                if day.weekday() < _SATURDAY or trades_at_weekends(spec.asset_class)
+                if is_trading_day(spec.asset_class, day)
             ]
             calls = [Call({**path, "date": day}, query) for day in days]
             _announce(spec, len(calls), sessions=False)
@@ -1921,7 +1918,7 @@ def _history_calls(
         return [
             call
             for day in sessions.days()
-            if day.weekday() < _SATURDAY
+            if is_trading_day(spec.asset_class, day)
             for call in plan_calls(
                 spec,
                 rest_path,

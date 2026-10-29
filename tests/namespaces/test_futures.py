@@ -939,7 +939,7 @@ def test_one_frame_lands_in_blink(
     live = build(ws_session.session.futures).blink()
     seen = blink_to_append_only(live)
     # The stream's contract is looked up as it opens; its schedule places its rows.
-    assert ws_session.connections.futures_sessions().wait_idle(15.0)
+    assert ws_session.connections.futures_calendar().wait_idle(15.0)
     ws_session.subscribed(topic)
     assert ws_session.urls == ["wss://socket.test/futures"]  # every venue streams on /futures
     ws_session.publish(frame)

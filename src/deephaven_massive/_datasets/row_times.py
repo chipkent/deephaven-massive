@@ -73,6 +73,7 @@ a futures WebSocket bar whose end disagrees with its length.
 
 from __future__ import annotations
 
+import calendar
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -84,6 +85,7 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.dates import (
     CHICAGO,
+    FUTURES_SESSION_ROLL,
     bar_days,
     day_end,
     day_zone,
@@ -141,15 +143,11 @@ name only on a dataset without the library's `Date`), and no `NAMES` entry of th
 coin one."""
 
 _DAY_NS: Final = 86_400 * 10**9
-_HOUR_NS: Final = 3_600 * 10**9
 _SECOND_NS: Final = 10**9
-_ROLL_NS: Final = 7 * _HOUR_NS
-"""Adding this to a Chicago wall-clock time moves 17:00, when the next futures session opens,
-to midnight."""
-_THURSDAY: Final = 3
+_ROLL_NS: Final = FUTURES_SESSION_ROLL // timedelta(microseconds=1) * 1000
+"""`dates.FUTURES_SESSION_ROLL` in nanoseconds, for the column form of the session rule."""
+_EPOCH_WEEKDAY: Final = calendar.THURSDAY
 """The weekday (Monday is 0) of 1970-01-01, day 0 of the epoch."""
-_SATURDAY: Final = 5
-_SUNDAY: Final = 6
 _NEVER: Final = 2**62
 """An instant later than any bounded timestamp: a day whose clock never changes."""
 _INSTANT: Final = pa.timestamp("ns", tz="UTC")
@@ -360,8 +358,9 @@ def local_dates(ns: pa.Array, zone: tzinfo) -> pa.Array:
 def _session_days(ns: pa.Array) -> pa.Array:
     """Return the futures session of each instant by the 17:00 Chicago rule, as epoch days.
 
-    The session ends on the Chicago date of the instant plus seven hours, so an instant from
-    17:00 Chicago time on belongs to the next day's session (`dates.futures_session`).
+    The column form of `dates.futures_session`, from the same constant: the session ends on the
+    Chicago date of the instant plus `FUTURES_SESSION_ROLL`, so an instant from 17:00 Chicago
+    time on belongs to the next day's session.
 
     Args:
         ns: Epoch nanoseconds, `int64`.
@@ -375,8 +374,8 @@ def _session_days(ns: pa.Array) -> pa.Array:
 def _weekday_sessions(days: pa.Array) -> pa.Array:
     """Move session dates that fall on a weekend to the Monday after.
 
-    No futures session ends on a Saturday or Sunday: what trades from Friday 17:00 Chicago
-    time, and from the Sunday open, belongs to Monday's session.
+    The column form of `dates.weekday_on_or_after`: no futures session ends on a Saturday or
+    Sunday.
 
     Args:
         days: Session dates, days since the epoch, `int64`.
@@ -384,9 +383,10 @@ def _weekday_sessions(days: pa.Array) -> pa.Array:
     Returns:
         The dates, every one a weekday.
     """
-    shifted = pc.add(days, _THURSDAY)
+    shifted = pc.add(days, _EPOCH_WEEKDAY)
     weekday = pc.subtract(shifted, pc.multiply(pc.divide(shifted, 7), 7))
-    move = pc.if_else(pc.equal(weekday, _SATURDAY), 2, pc.if_else(pc.equal(weekday, _SUNDAY), 1, 0))
+    saturday, sunday = pc.equal(weekday, calendar.SATURDAY), pc.equal(weekday, calendar.SUNDAY)
+    move = pc.if_else(saturday, 2, pc.if_else(sunday, 1, 0))
     return pc.add(days, move)
 
 
@@ -414,7 +414,7 @@ def _ns(moment: datetime) -> int:
     return (moment - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
-def ended_by(rows: _Rows, latest: datetime | None) -> _Rows:
+def ended_by(rows: _Rows, latest: datetime) -> _Rows:
     """Keep the rows whose `TimestampEnd` is no later than an instant.
 
     `history()` keeps a bar only when its window has ended by the end of the range and by
@@ -424,12 +424,12 @@ def ended_by(rows: _Rows, latest: datetime | None) -> _Rows:
 
     Args:
         rows: Rows with their time columns filled (`TimeRule.fill`).
-        latest: The latest end to keep (`HistoryWindow.ended_by`); None keeps every row.
+        latest: The latest end to keep (`HistoryWindow.ended_by`).
 
     Returns:
-        The rows kept, in order.
+        The rows kept, in order; every row of a batch without `TimestampEnd`.
     """
-    if latest is None or END not in rows.schema.names:
+    if END not in rows.schema.names:
         return rows
     ends = rows.column(END)
     keep = pc.less_equal(ends, pa.scalar(_ns(latest), ends.type))
@@ -741,7 +741,11 @@ class TimeRule:
                 # An index can update around the clock: its periods may hold their weekends,
                 # so it ends after the calendar period that begins with its first day.
                 _, every = bar_days(
-                    None, first, timespan=timespan, multiplier=self.multiplier, every_day=True
+                    self.asset_class,
+                    first,
+                    timespan=timespan,
+                    multiplier=self.multiplier,
+                    every_day=True,
                 )
                 after = max(after, every)
             starts.append(_ns(_midnight(first, zone)))

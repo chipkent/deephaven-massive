@@ -13,12 +13,14 @@ description:
   so every verb returns the columns in the order `columns()` lists them.
 - `column_table` builds the static table a query's `columns()` returns: one row per column,
   with its type, description, and transports.
+- `dataset_table` turns a dataset's Arrow rows into a Deephaven table, storing one shared
+  string per distinct calendar date (`Schema.date_columns`).
 
 Keeping this here, beside the other code that creates tables, leaves `_datasets` free of
 Deephaven calls. `dh_type` and `col_defs` are pure; `describe` and `column_table` create a
 table, so they run where the caller wants the table managed (inside a result's liveness scope
 for `describe`), on a thread inside the session's execution context. All four are
-thread-safe.
+thread-safe; `dataset_table` creates a table too.
 """
 
 from __future__ import annotations

@@ -58,7 +58,7 @@ from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.symbols import SymbolTable, canonical
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
-from deephaven_massive._ingest.futures_sessions import FuturesSessions
+from deephaven_massive._ingest.futures_calendar import FuturesCalendar
 from deephaven_massive._ingest.subscriptions import (
     Sender,
     Subscriptions,
@@ -256,7 +256,7 @@ class Connection:
             core,
             f"massive-flush {decision.host}{self.path}",
             interval=config.flush_interval,
-            sessions=transport.futures_sessions() if asset_class is AssetClass.FUTURES else None,
+            sessions=transport.futures_calendar() if asset_class is AssetClass.FUTURES else None,
         )
         cluster = f"{asset_class.value}/"
         sources = [s for k, s in _massive.sources(Transport.WS).items() if k.startswith(cluster)]
@@ -978,7 +978,7 @@ class WsConnections:
     URL, the connection of each stream, the connection that owns each diagnostics key, the
     `NO_ACK` topics, and the channel plans) are guarded by the session's `registry_lock`.
 
-    Its futures connections share one schedule calendar (`FuturesSessions`), created with the
+    Its futures connections share one schedule calendar (`FuturesCalendar`), created with the
     first of them and closed with the connections, which dates streamed futures rows by their
     trading session; a futures stream's explicit symbols, and those a reactive table adds, are
     looked up as soon as the stream opens.
@@ -1021,6 +1021,12 @@ class WsConnections:
         self._resolve = resolve_host
         self._record_verdict = record_verdict
         self._fetch_rows = fetch_rows
+        # The futures schedule calendar reads the paths of the futures reference datasets.
+        by_name = core.catalog.by_name
+        self._calendar_paths: Final = (
+            cast("str", by_name["futures.contracts"].fetch_path),
+            cast("str", by_name["futures.schedules"].fetch_path),
+        )
         self._factory = client_factory or _WsClientFactory(
             config.api_key,
             backoff=config.reconnect_backoff,
@@ -1034,7 +1040,7 @@ class WsConnections:
         self._row_owners: dict[tuple[AssetClass, ChannelFamily], Connection] = {}
         self._no_acked: set[tuple[str, str]] = set()
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
-        self._sessions: FuturesSessions | None = None
+        self._calendar: FuturesCalendar | None = None
         self._closed = False
 
     # --- opening -------------------------------------------------------------------------------
@@ -1080,7 +1086,7 @@ class WsConnections:
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
             if asset_class is AssetClass.FUTURES and wanted:
-                self.futures_sessions().watch(wanted)
+                self.futures_calendar().watch(wanted)
             if created:
                 connection.start()
             opened = open_stream_tables(
@@ -1323,12 +1329,12 @@ class WsConnections:
             connection = self._streams.get(stream_id)
         if connection is not None:
             if connection.asset_class is AssetClass.FUTURES and added:
-                self.futures_sessions().watch(added)
+                self.futures_calendar().watch(added)
             connection.post(connection.change_symbols, stream_id, added, removed)
 
     # --- registry (connections call these) ------------------------------------------------------
 
-    def futures_sessions(self) -> FuturesSessions:
+    def futures_calendar(self) -> FuturesCalendar:
         """Return the session's futures schedule calendar, creating it on first use.
 
         The calendar starts its worker thread when it is created, outside `registry_lock`;
@@ -1343,17 +1349,23 @@ class WsConnections:
             MassiveError: If the transport is closed and has no calendar (`"... is closed"`).
         """
         with self._lock:
-            found = self._sessions
+            found = self._calendar
             if found is None:
                 self._check_open()
         if found is not None:
             return found
-        candidate = FuturesSessions(self._fetch_rows, label=self._label)
+        contracts, schedules = self._calendar_paths
+        candidate = FuturesCalendar(
+            self._fetch_rows,
+            contracts_path=contracts,
+            schedules_path=schedules,
+            label=self._label,
+        )
         with self._lock:
-            found = self._sessions
+            found = self._calendar
             closed = self._is_closed()
             if found is None and not closed:
-                found = self._sessions = candidate
+                found = self._calendar = candidate
         if found is not candidate:
             candidate.close()
         if found is None:
@@ -1536,9 +1548,9 @@ class WsConnections:
             connections = list(self._connections.values())
             self._connections.clear()
             self._streams.clear()
-            sessions = self._sessions
-        if sessions is not None:
-            sessions.close()
+            calendar = self._calendar
+        if calendar is not None:
+            calendar.close()
         for connection in connections:
             connection.close()
         for connection in connections:

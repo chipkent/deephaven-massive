@@ -1,4 +1,4 @@
-"""Tests for the futures session calendar of streamed rows (`_ingest/futures_sessions.py`).
+"""Tests for the futures session calendar of streamed rows (`_ingest/futures_calendar.py`).
 
 The calendar's worker makes its requests through an injected `fetch`, here a scripted fake that
 records each call and can hold the requests of one path open, and reads the time from an
@@ -12,25 +12,27 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
 import pytest
 
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._ingest import futures_sessions
-from deephaven_massive._ingest.futures_sessions import (
-    CONTRACTS_PATH,
+from deephaven_massive._ingest.futures_calendar import (
     LOAD_PATIENCE,
     RELOAD_SPACING,
-    SCHEDULES_PATH,
-    FuturesSessions,
+    FuturesCalendar,
 )
+from deephaven_massive._namespaces import futures
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
 TIMEOUT = 15.0
+CONTRACTS_PATH = cast("str", futures.CONTRACTS.fetch_path)
+SCHEDULES_PATH = cast("str", futures.SCHEDULES.fetch_path)
+PATHS = {"contracts_path": CONTRACTS_PATH, "schedules_path": SCHEDULES_PATH}
+"""The paths the session passes: those of the futures reference datasets."""
 SPACING = RELOAD_SPACING.total_seconds()
 PATIENCE = LOAD_PATIENCE.total_seconds()
 
@@ -133,15 +135,15 @@ def clock() -> Clock:
 
 
 @pytest.fixture
-def calendar(fetch: FakeFetch, clock: Clock) -> Iterator[FuturesSessions]:
-    sessions = FuturesSessions(fetch, label="test", clock=clock)
+def calendar(fetch: FakeFetch, clock: Clock) -> Iterator[FuturesCalendar]:
+    sessions = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
     yield sessions
     fetch.release.set()
     sessions.close()
 
 
 def correct(
-    calendar: FuturesSessions, rows: list[tuple[str | None, str | None, str | None]]
+    calendar: FuturesCalendar, rows: list[tuple[str | None, str | None, str | None]]
 ) -> tuple[list[str | None], list[tuple[str, str]]]:
     symbols = pa.array([s for s, _, _ in rows], pa.string())
     instants = pa.array([None if t is None else instant(t) for _, t, _ in rows], pa.int64())
@@ -150,11 +152,11 @@ def correct(
     return fixed.to_pylist(), misses
 
 
-def idle(calendar: FuturesSessions) -> None:
+def idle(calendar: FuturesCalendar) -> None:
     assert calendar.wait_idle(TIMEOUT)
 
 
-def watched(calendar: FuturesSessions, *symbols: str) -> None:
+def watched(calendar: FuturesCalendar, *symbols: str) -> None:
     calendar.watch(symbols)
     idle(calendar)
 
@@ -165,7 +167,7 @@ FOLDED = ("ESM4", "2024-03-28T23:00:00", "2024-03-29")
 
 
 def test_watch_looks_up_products_then_loads_their_schedules(
-    calendar: FuturesSessions, fetch: FakeFetch
+    calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
     watched(calendar, "ESM4", "ZCK4", "ESU4")
     contracts, schedules = fetch.calls[0], fetch.calls[1]
@@ -186,7 +188,7 @@ def test_watch_looks_up_products_then_loads_their_schedules(
     assert fetch.paths() == [CONTRACTS_PATH, SCHEDULES_PATH]
 
 
-def test_a_watched_contract_is_asked_for_once(calendar: FuturesSessions, fetch: FakeFetch) -> None:
+def test_a_watched_contract_is_asked_for_once(calendar: FuturesCalendar, fetch: FakeFetch) -> None:
     watched(calendar, "ESM4")
     watched(calendar, "ESM4")  # known: no new request
     assert fetch.paths() == [CONTRACTS_PATH, SCHEDULES_PATH]
@@ -197,7 +199,7 @@ def test_a_watched_contract_is_asked_for_once(calendar: FuturesSessions, fetch: 
 )
 def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
     *,
-    calendar: FuturesSessions,
+    calendar: FuturesCalendar,
     fetch: FakeFetch,
     caplog: pytest.LogCaptureFixture,
     spread: str,
@@ -213,7 +215,7 @@ def test_a_spread_is_never_looked_up_and_keeps_the_rule_date(
 
 
 def test_a_long_watchlist_is_looked_up_in_chunks(
-    calendar: FuturesSessions, fetch: FakeFetch
+    calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
     tickers = [f"C{n:03d}" for n in range(101)]
     watched(calendar, *tickers)
@@ -222,7 +224,7 @@ def test_a_long_watchlist_is_looked_up_in_chunks(
 
 
 def test_what_is_queued_while_a_request_runs_is_served_together(
-    calendar: FuturesSessions, fetch: FakeFetch
+    calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
     fetch.hold(CONTRACTS_PATH)
     calendar.watch(["ESM4"])
@@ -235,19 +237,19 @@ def test_what_is_queued_while_a_request_runs_is_served_together(
     assert contracts[1]["ticker.any_of"] == ("ZCK4", "ZCN4")
 
 
-def test_rows_inside_their_session_keep_the_rule_date(calendar: FuturesSessions) -> None:
+def test_rows_inside_their_session_keep_the_rule_date(calendar: FuturesCalendar) -> None:
     watched(calendar, "ESM4")
     dates, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     assert (dates, misses) == (["2024-03-28"], [])
 
 
-def test_a_holiday_fold_moves_the_row_to_the_next_session(calendar: FuturesSessions) -> None:
+def test_a_holiday_fold_moves_the_row_to_the_next_session(calendar: FuturesCalendar) -> None:
     watched(calendar, "ESM4")
     dates, misses = correct(calendar, [FOLDED])
     assert (dates, misses) == (["2024-04-01"], [])
 
 
-def test_a_pre_open_before_the_roll_moves_to_the_next_session(calendar: FuturesSessions) -> None:
+def test_a_pre_open_before_the_roll_moves_to_the_next_session(calendar: FuturesCalendar) -> None:
     watched(calendar, "ZCK4")
     # 16:50 CT: before 17:00, so the rule keeps today; the 16:45 pre-open began tomorrow's.
     dates, _ = correct(calendar, [("ZCK4", "2024-03-27T21:50:00", "2024-03-27")])
@@ -255,7 +257,7 @@ def test_a_pre_open_before_the_roll_moves_to_the_next_session(calendar: FuturesS
 
 
 def test_a_row_between_sessions_keeps_the_rule_date(
-    calendar: FuturesSessions, caplog: pytest.LogCaptureFixture
+    calendar: FuturesCalendar, caplog: pytest.LogCaptureFixture
 ) -> None:
     watched(calendar, "ESM4")
     with caplog.at_level(logging.ERROR):
@@ -264,7 +266,7 @@ def test_a_row_between_sessions_keeps_the_rule_date(
     assert not caplog.records
 
 
-def test_rows_without_a_value_are_left_alone(calendar: FuturesSessions) -> None:
+def test_rows_without_a_value_are_left_alone(calendar: FuturesCalendar) -> None:
     dates, misses = correct(
         calendar,
         [
@@ -277,7 +279,7 @@ def test_rows_without_a_value_are_left_alone(calendar: FuturesSessions) -> None:
 
 
 def test_an_unknown_contract_keeps_the_rule_date_silently_and_is_looked_up(
-    calendar: FuturesSessions, fetch: FakeFetch
+    calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
     assert correct(calendar, [FOLDED]) == (["2024-03-29"], [])
     idle(calendar)
@@ -288,7 +290,7 @@ def test_an_unknown_contract_keeps_the_rule_date_silently_and_is_looked_up(
 @pytest.mark.parametrize("path", [CONTRACTS_PATH, SCHEDULES_PATH])
 def test_a_lookup_still_loading_after_a_minute_makes_misses(
     *,
-    calendar: FuturesSessions,
+    calendar: FuturesCalendar,
     fetch: FakeFetch,
     clock: Clock,
     caplog: pytest.LogCaptureFixture,
@@ -323,7 +325,7 @@ def test_a_lookup_still_loading_after_a_minute_makes_misses(
 
 
 def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
-    *, calendar: FuturesSessions, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
+    *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     watched(calendar, "ESM4")
     row = ("ESM4", "2024-04-01T22:00:00", "2024-04-02")
@@ -363,7 +365,7 @@ def test_a_row_past_the_loaded_sessions_is_a_miss_logged_once(
     assert fetch.paths().count(SCHEDULES_PATH) == 2
 
 
-def test_a_row_at_the_last_close_is_past_the_loaded_sessions(calendar: FuturesSessions) -> None:
+def test_a_row_at_the_last_close_is_past_the_loaded_sessions(calendar: FuturesCalendar) -> None:
     # A session's close is its first instant without trading: a row stamped exactly at the
     # close of the last loaded session lies past every loaded session.
     watched(calendar, "ESM4")
@@ -377,14 +379,14 @@ def test_a_row_at_the_last_close_is_past_the_loaded_sessions(calendar: FuturesSe
     )
 
 
-def test_a_row_before_the_loaded_sessions_is_a_miss(calendar: FuturesSessions) -> None:
+def test_a_row_before_the_loaded_sessions_is_a_miss(calendar: FuturesCalendar) -> None:
     watched(calendar, "ESM4")
     _, misses = correct(calendar, [("ESM4", "2024-03-20T15:00:00", "2024-03-20")])
     assert "its loaded schedule (ES) begins with the session of 2024-03-28" in misses[0][1]
 
 
 def test_a_contract_massive_does_not_list_is_a_miss_and_asked_again(
-    calendar: FuturesSessions, fetch: FakeFetch, clock: Clock
+    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
 ) -> None:
     watched(calendar, "NOPE5")
     _, misses = correct(calendar, [("NOPE5", "2024-03-28T15:00:00", "2024-03-28")])
@@ -407,7 +409,7 @@ def test_a_contract_massive_does_not_list_is_a_miss_and_asked_again(
 
 
 def test_a_failed_lookup_is_logged_and_its_rows_are_misses(
-    *, calendar: FuturesSessions, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
+    *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     fetch.answers[CONTRACTS_PATH] = MassiveError("HTTP 500")
     with caplog.at_level(logging.ERROR):
@@ -429,7 +431,7 @@ def test_a_failed_lookup_is_logged_and_its_rows_are_misses(
 
 
 def test_a_failed_schedule_is_logged_its_rows_are_misses_and_it_is_retried(
-    *, calendar: FuturesSessions, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
+    *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 429")
     with caplog.at_level(logging.ERROR):
@@ -445,7 +447,7 @@ def test_a_failed_schedule_is_logged_its_rows_are_misses_and_it_is_retried(
 
 
 def test_a_day_old_schedule_is_loaded_again(
-    calendar: FuturesSessions, fetch: FakeFetch, clock: Clock
+    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
 ) -> None:
     watched(calendar, "ESM4")
     correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
@@ -460,7 +462,7 @@ def test_a_day_old_schedule_is_loaded_again(
 def test_close_stops_the_worker_once_and_queues_nothing_after(
     fetch: FakeFetch, clock: Clock
 ) -> None:
-    calendar = FuturesSessions(fetch, label="test", clock=clock)
+    calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
     calendar.close()
     calendar.close()
     assert "test futures schedules" not in {t.name for t in threading.enumerate()}
@@ -480,7 +482,7 @@ def test_a_lookup_cut_short_by_close_is_not_logged(
 ) -> None:
     # The session closes while a request is on the wire; the request then fails against the
     # closed client, in whatever way. That is no failure to report.
-    calendar = FuturesSessions(fetch, label="test", clock=clock)
+    calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
     fetch.answers[CONTRACTS_PATH] = failure
     fetch.hold(CONTRACTS_PATH)
     calendar.watch(["ESM4"])
@@ -497,7 +499,7 @@ def test_a_lookup_cut_short_by_close_is_not_logged(
 
 
 def test_a_schedule_without_events_for_a_product_places_nothing(
-    calendar: FuturesSessions, fetch: FakeFetch
+    calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
     fetch.answers[SCHEDULES_PATH] = [
         event("XX", "2024-03-28", "2024-03-27T22:00:00"),  # another product's
@@ -508,13 +510,8 @@ def test_a_schedule_without_events_for_a_product_places_nothing(
     assert "its loaded schedule (ES) holds no session;" in misses[0][1]
 
 
-def test_the_module_names_its_paths() -> None:
-    assert futures_sessions.CONTRACTS_PATH == "/futures/v1/contracts"
-    assert futures_sessions.SCHEDULES_PATH == "/futures/v1/schedules"
-
-
 def test_the_worker_outlives_an_unexpected_error(
-    *, calendar: FuturesSessions, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
+    *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     # An answer the calendar cannot read (here a defect's ValueError) is a failed lookup: its
     # rows are misses, and the worker keeps serving later lookups.

@@ -278,7 +278,7 @@ _ingest/                 the only holder of wire clients
                          converted, 403/429 policy, drift routing, host-decision cache
                          (single-flight)
   hosts.py               host resolution from REST evidence (section 13.2)
-  futures_sessions.py    the futures schedule calendar that dates streamed futures rows by
+  futures_calendar.py    the futures schedule calendar that dates streamed futures rows by
                          their trading session (section 12)
   poll.py                poll(): REPLACE/UPSERT/APPEND, fan-out, data failures -> publish_failure
   subscriptions.py       topics and the reconcile loop of one connection: wildcards,
@@ -1981,36 +1981,38 @@ descriptions of `Date` and `TimestampEnd` say so.
 **Futures dates on the WebSocket.** Massive's REST and flat-file futures rows carry their
 session; WebSocket futures messages carry none. The flush dates each streamed futures row by the
 rule the library uses everywhere, the session that ends at the next 17:00 Chicago time
-(`dates.futures_session`; a Saturday's or Sunday's moves to Monday), and corrects it with the
-session's futures schedule calendar (`_ingest/futures_sessions.py`, `FuturesSessions`), since
-the rule is wrong after a holiday, which folds its trading into the next session and opens it
-days early, and for a product whose pre-open starts before 17:00 Chicago time (16:45 on CBOT).
-The calendar looks up each contract's product (`/futures/v1/contracts`, `ticker.any_of`) and
-each product's sessions from a week back to ten days ahead (`/futures/v1/schedules`, on every
-futures plan, records from 2025-03-17): one session per `session_end_date`, open from its first
-event (a pre-open or the open) to its last (the close). A row inside the session the rule gave
-it keeps it; a row the schedules place in another session moves there; a row between a close and
-the next session's first event keeps the rule's date. One worker thread per session makes every
-request, through the session's REST client, when a futures stream opens with explicit symbols,
-when a reactive table adds some, and when an unknown contract first streams (a `dm.ALL` stream's
-contracts are looked up as they arrive); the flush never waits on it. A spread is never looked
-up: its ticker is not a contract (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`,
-`6A:XF:AUDUSD:Q6` in the vendor's files), so the contracts endpoint lists none, and reading its
-legs needs each product family's spread grammar. Any ticker holding a `-`, a space, or a `:`
-counts as a spread; its rows keep the rule's date, with one DEBUG line per spread. What is still
-loading keeps the rule's date silently for up to a minute (`LOAD_PATIENCE`), so a stream's start
-shows no error; a contract or product still not loaded a minute after it was first asked for (a
-stalled or rate-limited lookup) is a miss, "its schedule was not loaded after 60 s". A row the
-loaded schedules cannot place (past the last loaded session, a contract Massive's contracts do
-not list, a failed lookup) is a **miss** too: it keeps the rule's date, the miss is logged at
-ERROR once per product (or contract) and date, and the `Error` of every stream that receives the
-contract shows it in `m.streams()` until a later batch of the stream's rows all place; the
-stream keeps running. An answer the calendar cannot read, or any other failure of a lookup, is a
-miss of its contracts' rows too, and the worker carries on. A miss past the loaded sessions asks
-for a reload of its product, at most once per 10 minutes (`RELOAD_SPACING`, so a stream of
-misses never spends a Basic key's 5 requests a minute), and a product's sessions are reloaded
-once a day as the dates move on. Subscribing never waits on the calendar and never refuses a
-product it lacks.
+(`dates.futures_session` and `dates.weekday_on_or_after`, one constant, `FUTURES_SESSION_ROLL`,
+which the column form in `row_times` applies too, and a test checks the two agree; a Saturday's
+or Sunday's moves to Monday), and corrects it with the session's futures schedule calendar
+(`_ingest/futures_calendar.py`, `FuturesCalendar`, which reads the paths of the
+`futures.contracts` and `futures.schedules` datasets), since the rule is wrong after a holiday,
+which folds its trading into the next session and opens it days early, and for a product whose
+pre-open starts before 17:00 Chicago time (16:45 on CBOT). The calendar looks up each contract's
+product (`/futures/v1/contracts`, `ticker.any_of`) and each product's sessions from a week back
+to ten days ahead (`/futures/v1/schedules`, on every futures plan, records from 2025-03-17): one
+session per `session_end_date`, open from its first event (a pre-open or the open) to its last
+(the close). A row inside the session the rule gave it keeps it; a row the schedules place in
+another session moves there; a row between a close and the next session's first event keeps the
+rule's date. One worker thread per session makes every request, through the session's REST
+client, when a futures stream opens with explicit symbols, when a reactive table adds some, and
+when an unknown contract first streams (a `dm.ALL` stream's contracts are looked up as they
+arrive); the flush never waits on it. A spread is never looked up: its ticker is not a contract
+(`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`, `6A:XF:AUDUSD:Q6` in the vendor's files), so the
+contracts endpoint lists none, and reading its legs needs each product family's spread grammar.
+Any ticker holding a `-`, a space, or a `:` counts as a spread; its rows keep the rule's date,
+with one DEBUG line per spread. What is still loading keeps the rule's date silently for up to a
+minute (`LOAD_PATIENCE`), so a stream's start shows no error; a contract or product still not
+loaded a minute after it was first asked for (a stalled or rate-limited lookup) is a miss, "its
+schedule was not loaded after 60 s". A row the loaded schedules cannot place (past the last
+loaded session, a contract Massive's contracts do not list, a failed lookup) is a **miss** too:
+it keeps the rule's date, the miss is logged at ERROR once per product (or contract) and date,
+and the `Error` of every stream that receives the contract shows it in `m.streams()` until a
+later batch of the stream's rows all place; the stream keeps running. An answer the calendar
+cannot read, or any other failure of a lookup, is a miss of its contracts' rows too, and the
+worker carries on. A miss past the loaded sessions asks for a reload of its product, at most
+once per 10 minutes (`RELOAD_SPACING`, so a stream of misses never spends a Basic key's 5
+requests a minute), and a product's sessions are reloaded once a day as the dates move on.
+Subscribing never waits on the calendar and never refuses a product it lacks.
 
 **Price adjustment.** Massive adjusts stock and option prices and volumes for splits (forward
 and reverse; whether it also adjusts for `stock_dividend` events is
@@ -2757,34 +2759,34 @@ An `AUTO` call logs its choice and the reason once, for example
 `stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`. Each
 transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>`
 (`skipped=none` when nothing was missing), the REST transport `source=REST requests=<n>`.
-Missing keys on non-trading dates are skipped. A missing weekday key logs a WARNING. The
-source choice has already required every partition to be past its `publish_time`, so a missing
-key for the last requested date is either late or a market holiday (there is no holiday
-calendar). Within one day after its `publish_time` it raises
-`MassiveError("<dataset>: <key> does not exist: <date> is not yet published (flat files land
-~11:00 ET next day), or was a market holiday")`. After that window it is treated as a holiday:
-a WARNING, and the date is skipped like any other missing weekday, so the rest of the range is
-returned. A futures range named by datetimes that ends on a holiday reads the next session's
-file, or raises, as [section 12](#12-timestamp-units-and-day-boundaries) describes. No data is
-no data: a range in which no file exists, whatever the reason (a weekend, a holiday, a range
-before the dataset's first file), returns an empty table with every column, and its missing
-weekdays log their WARNINGs as above. A missing file is a 404 whose body is S3's XML error
-with the code `NoSuchKey`. Any other 404 (another S3 code, no code, or a body that is not S3's,
-such as the HTML "Massive 404 Not Found" page Massive's front end serves for a path it does
-not route, which is what a wrong `s3_bucket` meets) raises `MassiveError` naming
-`s3://<bucket>/<key> at <endpoint>` and adding "check MassiveConfig s3_bucket and
-s3_endpoint_url": `cannot read s3://flatfile/<key> at https://files.massive.com: HTTP 404 (404:
-Not Found); check MassiveConfig s3_bucket and s3_endpoint_url`. A connection that drops
-part-way through a file's body makes the read start that file again from its first byte, at
-most `MAX_RETRIES` (3) more times, after the waits of the shared retry schedule (0.5, 1, 2 s
-plus jitter). The rows already read from that file are discarded, and freed before the wait,
-which is safe because no row leaves a file's read before the file ends. The last failure
-raises `MassiveError` naming the file. Futures
-`venue=None` reads four prefixes per date; a 403 on any prefix raises
-`EntitlementError` naming the venue and the `venue=` parameter. A 403 whose S3 error code says
-the credentials themselves are wrong (`InvalidAccessKeyId`, `SignatureDoesNotMatch`) raises
-`AuthenticationError` instead, for every asset class, naming `s3_access_key_id` and
-`s3_secret_access_key`.
+Missing keys on non-trading dates are skipped. A trading date is a weekday, or any day of a
+class that trades at weekends (forex and crypto), by the one test `dates.is_trading_day` that
+the REST transport's weekend skipping uses too. A missing key on a trading date logs a WARNING.
+The source choice has already required every partition to be past its `publish_time`, so a
+missing key for the last requested date is either late or a market holiday (there is no holiday
+calendar). Within one day after its `publish_time` it raises `MassiveError("<dataset>: <key>
+does not exist: <date> is not yet published (flat files land ~11:00 ET next day), or was a
+market holiday")`. After that window it is treated as a holiday: a WARNING, and the date is
+skipped like any other missing weekday, so the rest of the range is returned. A futures range
+named by datetimes that ends on a holiday reads the next session's file, or raises, as [section
+12](#12-timestamp-units-and-day-boundaries) describes. No data is no data: a range in which no
+file exists, whatever the reason (a weekend, a holiday, a range before the dataset's first
+file), returns an empty table with every column, and its missing weekdays log their WARNINGs as
+above. A missing file is a 404 whose body is S3's XML error with the code `NoSuchKey`. Any other
+404 (another S3 code, no code, or a body that is not S3's, such as the HTML "Massive 404 Not
+Found" page Massive's front end serves for a path it does not route, which is what a wrong
+`s3_bucket` meets) raises `MassiveError` naming `s3://<bucket>/<key> at <endpoint>` and adding
+"check MassiveConfig s3_bucket and s3_endpoint_url": `cannot read s3://flatfile/<key> at
+https://files.massive.com: HTTP 404 (404: Not Found); check MassiveConfig s3_bucket and
+s3_endpoint_url`. A connection that drops part-way through a file's body makes the read start
+that file again from its first byte, at most `MAX_RETRIES` (3) more times, after the waits of
+the shared retry schedule (0.5, 1, 2 s plus jitter). The rows already read from that file are
+discarded, and freed before the wait, which is safe because no row leaves a file's read before
+the file ends. The last failure raises `MassiveError` naming the file. Futures `venue=None`
+reads four prefixes per date; a 403 on any prefix raises `EntitlementError` naming the venue and
+the `venue=` parameter. A 403 whose S3 error code says the credentials themselves are wrong
+(`InvalidAccessKeyId`, `SignatureDoesNotMatch`) raises `AuthenticationError` instead, for every
+asset class, naming `s3_access_key_id` and `s3_secret_access_key`.
 
 Flat files are read through `_massive.FlatFileClient` and `FlatFile`
 ([section 19.3](#193-the-flat-file-client)); `_ingest/flatfiles.py` builds each file's `ReadPlan`.
@@ -2905,7 +2907,7 @@ without the GIL.
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
-| futures schedules, one per session with a futures stream (`FuturesSessions`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the session's REST client; swaps in each new map whole under its leaf lock | call Deephaven; hold its lock while it waits on the network |
+| futures schedules, one per session with a futures stream (`FuturesCalendar`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the session's REST client; swaps in each new map whole under its leaf lock | call Deephaven; hold its lock while it waits on the network |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
 | reaper, one per session | library | `scope.release()`; stream held-result counts | anything else |

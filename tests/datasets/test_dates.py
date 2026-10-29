@@ -35,6 +35,7 @@ from deephaven_massive._datasets.dates import (
     futures_session_open,
     instant_bound,
     intraday,
+    is_trading_day,
     last_trading_day,
     parse_date_like,
     publish_time,
@@ -817,6 +818,15 @@ def test_the_last_trading_day_allows_a_weekday_more_and_one_per_five_sessions() 
     # eleventh sessions fall on the bound itself.
     assert last_trading_day(date(2024, 12, 24), 6) == date(2025, 1, 2)
     assert last_trading_day(date(2024, 12, 24), 11) == date(2025, 1, 10)
+
+
+def test_a_trading_day_is_a_weekday_or_any_day_of_a_class_that_trades_at_weekends() -> None:
+    saturday, monday = date(2025, 3, 1), date(2025, 3, 3)
+    for asset_class in (AssetClass.STOCKS, AssetClass.FUTURES, None):
+        assert is_trading_day(asset_class, monday)
+        assert not is_trading_day(asset_class, saturday)
+    for asset_class in (AssetClass.FOREX, AssetClass.CRYPTO):
+        assert is_trading_day(asset_class, saturday)
 
 
 def test_a_day_ends_by_its_class() -> None:

@@ -27,7 +27,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._ingest import futures_sessions, ws
+from deephaven_massive._ingest import futures_calendar, ws
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
@@ -1450,8 +1450,8 @@ def looked_up(ws_session: WsSession, *tickers: str) -> None:
 def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSession) -> None:
     result = ws_session.query(FUTURES, ["ESZ5", "GCQ6-GCJ7"]).blink()
     looked_up(ws_session, "ESZ5")
-    calendar = ws_session.connections.futures_sessions()
-    assert calendar is ws_session.connections.futures_sessions()
+    calendar = ws_session.connections.futures_calendar()
+    assert calendar is ws_session.connections.futures_calendar()
     assert calendar.wait_idle(15.0)
     # A spread is not a contract: it is never looked up.
     sent = [q["ticker.any_of"] for path, q in ws_session.fetched if path == "/futures/v1/contracts"]
@@ -1472,29 +1472,38 @@ def test_a_futures_watchlist_looks_up_the_contracts_it_adds(ws_session: WsSessio
 def test_a_stock_stream_makes_no_calendar(ws_session: WsSession) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
-    assert ws_session.connections._sessions is None
+    assert ws_session.connections._calendar is None
     ws_session.session.release(result)
 
 
 def test_one_calendar_wins_a_race_and_closes_with_the_connections(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    created: list[futures_sessions.FuturesSessions] = []
-    real = futures_sessions.FuturesSessions
+    created: list[futures_calendar.FuturesCalendar] = []
+    real = futures_calendar.FuturesCalendar
 
     def racing(
-        fetch: Callable[..., list[dict[str, object]]], *, label: str
-    ) -> futures_sessions.FuturesSessions:
-        calendar = real(fetch, label=label)
+        fetch: Callable[..., list[dict[str, object]]],
+        *,
+        contracts_path: str,
+        schedules_path: str,
+        label: str,
+    ) -> futures_calendar.FuturesCalendar:
+        def make() -> futures_calendar.FuturesCalendar:
+            return real(
+                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+            )
+
+        calendar = make()
         created.append(calendar)
         if len(created) == 1:  # another caller installs its calendar meanwhile
-            winner = real(fetch, label=label)
+            winner = make()
             created.append(winner)
-            ws_session.connections._sessions = winner
+            ws_session.connections._calendar = winner
         return calendar
 
-    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesSessions", racing)
-    found = ws_session.connections.futures_sessions()
+    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesCalendar", racing)
+    found = ws_session.connections.futures_calendar()
     loser, winner = created
     assert found is winner
     assert not loser._thread.is_alive()  # the loser was closed at once
@@ -1505,22 +1514,31 @@ def test_one_calendar_wins_a_race_and_closes_with_the_connections(
 def test_no_calendar_outlives_a_closed_transport(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    created: list[futures_sessions.FuturesSessions] = []
-    real = futures_sessions.FuturesSessions
+    created: list[futures_calendar.FuturesCalendar] = []
+    real = futures_calendar.FuturesCalendar
 
     def closing(
-        fetch: Callable[..., list[dict[str, object]]], *, label: str
-    ) -> futures_sessions.FuturesSessions:
-        calendar = real(fetch, label=label)
+        fetch: Callable[..., list[dict[str, object]]],
+        *,
+        contracts_path: str,
+        schedules_path: str,
+        label: str,
+    ) -> futures_calendar.FuturesCalendar:
+        def make() -> futures_calendar.FuturesCalendar:
+            return real(
+                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+            )
+
+        calendar = make()
         created.append(calendar)
         ws_session.connections.close()  # the session closes while the calendar starts
         return calendar
 
-    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesSessions", closing)
+    monkeypatch.setattr("deephaven_massive._ingest.ws.FuturesCalendar", closing)
     with pytest.raises(dm.MassiveError, match="is closed"):
-        ws_session.connections.futures_sessions()
+        ws_session.connections.futures_calendar()
     assert not created[0]._thread.is_alive()  # closed at once, never installed
     # Once closed, no calendar is even created.
     with pytest.raises(dm.MassiveError, match="is closed"):
-        ws_session.connections.futures_sessions()
+        ws_session.connections.futures_calendar()
     assert len(created) == 1

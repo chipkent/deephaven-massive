@@ -2,14 +2,19 @@
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pyarrow as pa
 import pytest
 
 from deephaven_massive import _errors
 from deephaven_massive._datasets import row_times
-from deephaven_massive._datasets.dates import CHICAGO, NEW_YORK
+from deephaven_massive._datasets.dates import (
+    CHICAGO,
+    NEW_YORK,
+    futures_session,
+    weekday_on_or_after,
+)
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import (
     DATE,
@@ -90,7 +95,6 @@ def test_only_rows_ended_by_an_instant_are_kept() -> None:
     filled = rule.fill(bars(["2025-03-03T05:00:00", "2025-03-04T05:00:00"]), received=7)
     latest = datetime(2025, 3, 4, 5, tzinfo=UTC)
     assert iso(ended_by(filled, latest).column(START)) == ["2025-03-03T05:00:00+00:00"]
-    assert ended_by(filled, None) is filled
     # A row whose end is unknown is kept; rows without an end column are all kept.
     unknown = filled.set_column(
         filled.schema.get_field_index(END), END, pa.nulls(2, filled.schema.field(END).type)
@@ -181,6 +185,19 @@ def test_local_dates_follow_the_clock_change_inside_a_day() -> None:
     late = pa.array([ns("2025-11-03T04:59:59"), ns("2025-11-03T05:00:00")], pa.int64())
     assert local_dates(late, NEW_YORK).to_pylist() == ["2025-11-02", "2025-11-03"]
     assert local_dates(late, UTC).to_pylist() == ["2025-11-03", "2025-11-03"]
+
+
+def test_the_column_session_rule_agrees_with_the_scalar_one() -> None:
+    # Every quarter hour of 2024 to 2026, both daylight-saving changes of each year included,
+    # and the instants either side of each 17:00 Chicago roll.
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    moments = [start + timedelta(minutes=15 * k) for k in range(3 * 366 * 96)]
+    moments += [m - timedelta(microseconds=1) for m in moments]
+    column = pa.array([int(m.timestamp() * 10**6) * 1000 for m in moments], pa.int64())
+    days = row_times._weekday_sessions(row_times._session_days(column)).to_pylist()
+    epoch = date(1970, 1, 1)
+    expected = [(weekday_on_or_after(futures_session(m)) - epoch).days for m in moments]
+    assert days == expected
 
 
 def test_the_wall_clock_takes_the_new_offset_at_the_change_itself() -> None:
