@@ -3294,7 +3294,7 @@ without the GIL.
 | caller (console, script, user thread) | user | verbs; the host-resolution REST call; Deephaven table creation inside the result scope; registry mutation; waits, outside every lock, for another thread's open of the same stream key; fails a new stream whose connection failed while it opened (`publish_failure`, outside every lock) | hold the registry lock while calling Deephaven or waiting |
 | WS client, one per connection | library | `asyncio.run` of the connection's `WsClient` (section 19.2): socket, handshake, frames, backoff; decode each frame once against `ws.json`; route status events, rejects, and drift; append rows to per-channel `SimpleQueue`s; the reconcile loop and watchdogs; idle close | any JVM call; blocking waits |
 | flush, one per connection | library | every `flush_interval`: drain queues, Arrow to Java once per channel, `where_in` and `publisher.add` per stream, `publish_failure` of failed streams; enqueue diagnostics row snapshots | touch loop-owned state directly |
-| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under the connection group's lock; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
+| verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (the first TLS context of a certificate setting loads from disk); moving the streams' leases under the connection group's lock; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | futures schedules, one per connection group with a futures stream (`FuturesCalendar`) | library | REST requests of `/futures/v1/contracts` and `/futures/v1/schedules` through the REST client of any session of the group still open; swaps in each new map whole under its leaf lock; closed when the group's last session leaves | call Deephaven; hold its lock while it waits on the network |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
@@ -3339,6 +3339,9 @@ without the GIL.
     the reader threads. The session's `SessionClients` creates the `FlatFileClient` on the
     session's first flat-file read, under `registry_lock` (the constructor only stores
     settings), and registers its close after releasing the lock;
+  - the `net.http` TLS-context cache, one per process, which builds each consumer's context
+    for a certificate setting once (reading the bundle from local disk) and looks it up
+    afterwards; the certificate file and directory are examined before the lock is taken;
   - the `_massive.spec` loaders, which load each generated file once;
   - `RestClient`'s not-before instant (section 19.1);
   - the session's `DriftRegistry`, whose WARNINGs are logged after the lock is released;
@@ -3462,7 +3465,8 @@ __init__.py          lazy interface: __all__ and re-exports only
 net/                 shared by every client; imports nothing else in _massive
   __init__.py        USER_AGENT; re-exports
   errors.py          WireError, WireAuthError, WireEntitlementError
-  http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); proxy from HTTPS_PROXY/NO_PROXY
+  http.py            CA bundle (SSL_CERT_FILE/SSL_CERT_DIR, else certifi); one shared TLS context
+                     per process, consumer, and certificate setting; proxy from HTTPS_PROXY/NO_PROXY
   retry.py           the retry schedule (0.5/1/2 s, +20 % jitter; Retry-After; 15/30/60 s for 429),
                      retryable classification; TLS never retried; Clock (injectable, tests
                      never sleep); an unusable Retry-After is logged at WARNING, never 0
@@ -3635,7 +3639,20 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `Proxy-Authorization` and never the bearer key. A proxy reached over `https` is verified
   with the same `net.http.ssl_context()` as Massive. The CA bundle is the
   system default when `SSL_CERT_FILE` or `SSL_CERT_DIR` is set (an
-  `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise.
+  `ssl.create_default_context()` honours both) and `certifi`'s bundle otherwise. One context is
+  built per process for each consumer (urllib3 or `websockets`) and certificate setting, under
+  a lock, and shared by every client of that consumer and every connection: building one parses
+  the bundle, a few milliseconds each, and a configured `SSLContext` is safe to share between
+  threads (CPython guards each context's OpenSSL state with its own lock). The certificate
+  setting is the values of `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `SSLKEYLOGFILE`, plus the
+  modification time, size, and inode of the file and directory the first two name (nothing
+  when the path does not exist), so a bundle created, replaced, or edited at runtime, the
+  recovery the certificate error messages advise, takes effect for the next client without a
+  restart. urllib3 and `websockets` never share a context because urllib3 writes its
+  verification mode and ALPN list onto the context it is given before every connection. The
+  proxy settings do not shape the context, so they are not part of its key. Every context
+  offers ALPN `http/1.1`: REST and the WebSocket upgrade are both HTTP/1.1, and live handshakes
+  with Massive's REST, real-time, and delayed hosts select it over verified TLS 1.3.
 - **Query encoding.** Path parameters are encoded like query values, then percent-encoded
   whole into the template. Values, by the parameter's `ParamKind`: an enum by its value (one of
   `Param.values`), `bool` as `true`/`false` (never for an integer or number), a `date` as
