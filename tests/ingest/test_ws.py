@@ -10,6 +10,7 @@ flush interval is an hour unless a test needs the flush thread itself.
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import importlib
 import json
@@ -1002,8 +1003,6 @@ def test_a_verdict_is_taken_once(make_ws_session: Callable[..., WsSession]) -> N
     result = custom_session.query(FUTURES, ["ESZ5"]).blink()
     other = custom_session.query(TRADES, ["AAPL"]).blink()  # a stream the move leaves alone
     connection = custom_session.connection("wss://socket.test/futures")
-    with custom_session.connections.group.lock:  # a fatal failure retired it meanwhile
-        del custom_session.connections.group.connections[connection.url]
     assert custom_session.on_loop(
         connection, lambda: custom_session.connections.group.reroute(connection, "x")
     )
@@ -1409,6 +1408,123 @@ def test_a_move_whose_old_loop_ended_releases_the_successor(
     del result
 
 
+DELAYED = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
+
+
+def test_a_move_after_the_last_session_left_moves_nothing(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    # The session closed between the verdict and the move: its close took the connection out
+    # of the registry but had not closed it yet. The move must not open a successor that would
+    # carry the closed session's stream for ever.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    group = custom_session.connections.group
+    with group.lock:
+        custom_session.connections._closed = True
+        custom_session.connections._leave()  # what close() does first, under the lock
+    group._move(old, DELAYED)
+    assert "wss://delayed.test/futures" not in group.connections
+    assert old.join(TIMEOUT)  # the move closed it
+    group.detach(custom_session.connections)  # what close() does last
+    del result
+
+
+def test_a_hand_over_leaves_a_stream_whose_lease_is_gone(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    # A stream whose lease was returned after the move (its session closed, or it shut down)
+    # stays behind: the successor never subscribes it nor waits for it.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    kept = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    gone = custom_session.query(FUTURES, ["NQZ5"]).blink()
+    custom_session.subscribed("T.ESZ5", "T.NQZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    group = custom_session.connections.group
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        held.set()
+        assert release.wait(TIMEOUT)
+
+    assert old.post(hold)  # the hand-over waits behind it
+    assert held.wait(TIMEOUT)
+    group._move(old, DELAYED)
+    successor = custom_session.connection("wss://delayed.test/futures")
+    with group.lock:
+        assert successor.awaiting == {1, 2}
+        custom_session.connections._forget(2)  # its lease is returned; no release is posted
+    release.set()
+    wait_for(lambda: not successor.awaiting)
+    assert custom_session.on_loop(successor, lambda: sorted(successor._streams)) == [1]
+    assert [s.stream_id for s in successor.flusher.routes.sinks()] == [1]
+    custom_session.session.release(kept)
+    del gone
+
+
+def test_an_open_that_fails_during_a_move_returns_the_moved_lease(
+    make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    kept = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    group = custom_session.connections.group
+
+    def move_then_fail(*_: object, **__: object) -> object:
+        group._move(old, DELAYED)  # the verdict moves the lease while the stream opens
+        raise RuntimeError("the tables could not be built")
+
+    monkeypatch.setattr(ws, "open_stream_tables", move_then_fail)
+    with pytest.raises(RuntimeError, match="could not be built"):
+        custom_session.query(FUTURES, ["NQZ5"]).blink()
+    successor = custom_session.connection("wss://delayed.test/futures")
+    with group.lock:
+        assert set(group.streams) == {1}
+        assert successor.leases == 1  # only the kept stream's
+        assert successor.awaiting <= {1}
+    custom_session.session.release(kept)
+
+
+def test_a_moved_options_stream_counts_against_the_cap_until_adopted(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    contract = "O:SPY251219C00600000"
+    result = ws_session.query(OPTIONS, [contract]).blink()
+    ws_session.subscribed(f"T.{contract}")
+    old = ws_session.connection("wss://socket.test/options")
+    ws_session.on_loop(old, lambda: None)  # the admitted set is published
+    group = ws_session.connections.group
+    group.reconnect_backoff = 0.01
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        held.set()
+        assert release.wait(TIMEOUT)
+
+    assert old.post(hold)  # the successor has not adopted the stream yet
+    assert held.wait(TIMEOUT)
+    group._move(old, HostDecision("delayed.test", Recency.DELAYED, "server verdict: x"))
+    successor = ws_session.connection("wss://delayed.test/options")
+    with group.lock:
+        assert successor.cap_pending == {1: frozenset({f"T.{contract}"})}
+    with pytest.raises(ValueError, match="1 new option topics and 1 in use exceed"):
+        ws_session.query(OPTIONS, ["O:SPY251219C00610000"]).blink()  # the cap still holds
+    release.set()
+    wait_for(lambda: not successor.awaiting)
+    ws_session.on_loop(successor, lambda: None)
+    with group.lock:
+        assert successor.cap_pending == {}
+        assert successor.cap_admitted == frozenset({f"T.{contract}"})
+    del result
+
+
 def test_a_hand_over_applies_what_the_old_flusher_queued(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
@@ -1532,28 +1648,53 @@ def test_closing_the_last_session_on_a_connection_closes_it(ws_session: WsSessio
     del forex
 
 
-def test_only_sessions_with_equal_settings_share_connections() -> None:
-    def group_of(session: dm.MassiveSession) -> ws.ConnectionGroup:
-        transport = cast("ws.WsTransport", session._core.stream_transport())
-        return transport._connections.group
+def _group_of(session: dm.MassiveSession) -> ws.ConnectionGroup:
+    transport = cast("ws.WsTransport", session._core.stream_transport())
+    return transport._connections.group
 
+
+def test_sessions_with_equal_settings_share_one_group() -> None:
     first = dm.MassiveSession(dm.MassiveConfig(api_key="group-key"))
     second = dm.MassiveSession(dm.MassiveConfig(api_key="group-key"))
-    apart = dm.MassiveSession(dm.MassiveConfig(api_key="group-key", reconnect_backoff=45.0))
-    other_key = dm.MassiveSession(dm.MassiveConfig(api_key="another-key"))
     try:
-        shared = group_of(first)
-        assert group_of(second) is shared
-        assert group_of(apart) is not shared  # never another session's settings
-        assert group_of(other_key) is not shared
-        assert shared.reconnect_backoff == 30.0
-        assert group_of(apart).reconnect_backoff == 45.0
+        shared = _group_of(first)
+        assert _group_of(second) is shared
+        assert "group-key" not in repr(shared.key)  # the key holds a digest, not the secret
         first.close()
         assert ws._groups.get(shared.key) is shared  # the group stays with its last session
     finally:
-        for session in (first, second, apart, other_key):
-            session.close()
+        first.close()
+        second.close()
     assert shared.key not in ws._groups
+
+
+# One value differing from the default for each connection setting.
+OTHER_SETTINGS: dict[str, object] = {
+    "api_key": "another-key",
+    "ws_hosts": {AssetClass.STOCKS: "pinned.test"},
+    "ack_timeout": 7.0,
+    "reconnect_backoff": 45.0,
+    "max_reconnect_backoff": 300.0,
+    "flush_interval": 0.2,
+}
+
+
+def test_every_connection_setting_has_a_case() -> None:
+    assert set(OTHER_SETTINGS) == set(ws.CONNECTION_SETTINGS)
+
+
+@pytest.mark.parametrize("setting", sorted(OTHER_SETTINGS))
+def test_a_session_with_any_other_connection_setting_gets_its_own_group(setting: str) -> None:
+    # Never another session's settings: every setting that shapes a connection keeps them apart.
+    base = dm.MassiveConfig(api_key="group-key")
+    first = dm.MassiveSession(base)
+    changes: dict[str, Any] = {setting: OTHER_SETTINGS[setting]}
+    apart = dm.MassiveSession(dataclasses.replace(base, **changes))
+    try:
+        assert _group_of(apart) is not _group_of(first)
+    finally:
+        first.close()
+        apart.close()
 
 
 def test_a_stream_waiting_for_a_slot_says_so(
@@ -1617,8 +1758,10 @@ def test_an_inline_sessions_derived_table_keeps_running(
     # connection that nothing else uses.
     derived.clear()
     scope.release()
-    assert connection.join(TIMEOUT)
+    # Wait in Python, not in join(): a free-threaded build merges a reference dropped on another
+    # thread into its owner's count only while the owner runs Python code.
     wait_for(lambda: core() is None)
+    assert connection.join(TIMEOUT)
     assert WsState.CLOSED in ws_session.states
 
 

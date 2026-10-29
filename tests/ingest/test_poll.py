@@ -19,6 +19,7 @@ from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
 from deephaven.execution_context import ExecutionContext
+from deephaven.stream.table_publisher import table_publisher
 from deephaven.table import Table
 
 import deephaven_massive as dm
@@ -446,6 +447,37 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     del table
 
 
+def test_a_failed_symbol_table_fails_its_poll(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # A failed table's rows never change again: polling them would look live but follow
+    # nothing, so the poll fails, naming the cause.
+    scope = new_scope()
+    with scope.open():
+        watch, publisher = table_publisher("watchlist", {"Symbol": dtypes.string})
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    publisher.publish_failure(RuntimeError("the watchlist broke"))
+    until(lambda: bool(watch.j_table.isFailed()))
+    clock.advance(60)
+    poller_of(pollers).thread.join(TIMEOUT)
+    (row,) = stream_rows()
+    assert (row["State"], row["Error"]) == (
+        "FAILED",
+        "stocks.dividends poll(): its symbol table failed, so the poll can no longer follow it",
+    )
+    until(lambda: bool(table.j_table.isFailed()))
+    scope.release()
+
+
 # --- Lifetime ------------------------------------------------------------------------------------
 
 
@@ -623,7 +655,7 @@ def test_a_poll_keeps_polling_while_a_derived_table_remains(
     until(lambda: not massive_session._core._polls)
 
 
-def test_a_failing_poll_leaves_a_late_close_alone(
+def test_a_poll_fails_once_and_publishes_nothing_after(
     *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers, clock: FakeClock
 ) -> None:
     # A poll the session fails (a close, a dying thread) fails once, and publishes nothing
@@ -639,6 +671,41 @@ def test_a_failing_poll_leaves_a_late_close_alone(
     assert poller._publish(rows) == 0
     until(lambda: bool(table.j_table.isFailed()))
     clock.advance(60)
+    poller.thread.join(TIMEOUT)
+
+
+def test_a_failure_after_the_close_fails_the_poll_with_the_close(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A cycle's fatal error that loses the race to the close: the close marked the row first,
+    # so the table names the close, as its row does, and the failure is not logged.
+    script.rows()
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    poller = poller_of(pollers)
+    clock.wait_for_sleepers(1)
+    core = massive_session._core
+    closed = f"{core.label} was closed; this table no longer updates"
+    monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
+    failures: list[str] = []
+    publisher = poller._publisher
+
+    class _Recording:
+        def publish_failure(self, error: Exception) -> None:
+            failures.append(str(error))
+            publisher.publish_failure(error)
+
+    poller._publisher = cast("Any", _Recording())
+    with caplog.at_level(logging.ERROR, LOGGER):
+        assert poller.fail(dm.AuthenticationError("HTTP 401"))
+    assert failures == [closed]
+    assert not caplog.records
+    until(lambda: bool(table.j_table.isFailed()))
     poller.thread.join(TIMEOUT)
 
 

@@ -298,13 +298,63 @@ def test_a_reactive_stream_starts_with_no_symbols(massive_session: dm.MassiveSes
 
 
 def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
-    massive_session: dm.MassiveSession, drain: Callable[[], None]
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The listener reports on an update-graph thread, so the failure is only queued there.
-    sink, _ = make_sink(massive_session._core, ALL)
+    core = massive_session._core
+    sink, _ = make_sink(core, ALL)
+    failures = _record_failures(sink, monkeypatch)
+    gate = threading.Event()
+
+    def hold() -> None:  # holds the reaper until the call has returned
+        assert gate.wait(TIMEOUT)
+
+    core.defer(hold)
     sink.fail_later(RuntimeError("the watchlist broke"))
+    assert not sink.failed  # nothing failed on the reporting thread
+    gate.set()
     drain()
-    assert sink.failed
+    assert failures == [
+        (
+            "test.trades stream 1: its symbol table failed, so the stream can no longer follow "
+            "it: the watchlist broke"
+        )
+    ]
+
+
+def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    # Records the error each `publish_failure` of the sink's publisher fails its table with.
+    failures: list[str] = []
+    publisher = sink.publisher
+
+    class _Recording:
+        def publish_failure(self, error: Exception) -> None:
+            failures.append(str(error))
+            publisher.publish_failure(error)
+
+    monkeypatch.setattr(sink, "publisher", _Recording())
+    return failures
+
+
+def test_a_failure_after_the_close_fails_the_table_with_the_close(
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The close marked the row first: the table names the close, as its row does, and the
+    # failure is not logged, since the close logs its count.
+    core = massive_session._core
+    sink, _ = make_sink(core, ALL)
+    failures = _record_failures(sink, monkeypatch)
+    closed = f"{core.label} was closed; this table no longer updates"
+    monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.stream"):
+        assert sink.fail(MassiveError("a failure that raced the close"))
+    assert failures == [closed]
+    assert not caplog.records
+    assert not sink.fail(MassiveError("again"))  # once only
 
 
 # --- Flusher -----------------------------------------------------------------------------------

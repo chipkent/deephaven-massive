@@ -361,7 +361,7 @@ def test_close_marks_streams_closed_and_warns_once(
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
         massive_session.close()
         massive_session.close()
-    assert caplog.messages == ["session closed; 1 live tables failed"]
+    assert caplog.messages == [f"{massive_session._core.label} closed; 1 live tables failed"]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
     closed = f"{label(massive_session)} was closed; this table no longer updates"
@@ -408,7 +408,7 @@ def test_close_with_no_live_tables_logs_info(
     with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.core"):
         massive_session.close()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, "session closed; 0 live tables failed")
+        (logging.INFO, f"{massive_session._core.label} closed; 0 live tables failed")
     ]
 
 

@@ -1,4 +1,4 @@
-"""The WebSocket transport: one connection per URL over `WsClient`, and the streams on them.
+"""The WebSocket transport: connections over `WsClient`, shared by sessions, and their streams.
 
 `WsTransport` is the session's `StreamTransport`, over the session's one `WsConnections`. A
 stream verb (`blink()`, `append_only()`, `ring()`, `last_by()`) that finds no live stream for
@@ -50,13 +50,20 @@ happens outside). The loop thread makes no Java call: every failure goes to a fl
 for a stream whose connection failed while it opened, to the opening caller. A stream's
 blink-table shutdown callback takes the locks only to update the registries and then posts the
 release of the stream's topics to its connection's loop; it never sends and never calls Java.
-The transport, the group, and the connections hold the session cores weakly, so a session
-dropped without `close()` is still freed and its closer runs.
+The transport and the group hold the session cores weakly. A connection reaches a session's
+core only through the sinks of that session's registered streams, and a registered stream keeps
+its session in the live set anyway; so a session with no stream left, dropped without `close()`,
+is still freed and its closer runs.
+
+The module is one subject, the connections sessions stream over, though it is long:
+a `Connection`, the `ConnectionGroup` that shares it, and each session's `WsConnections`
+call one another at run time, so splitting them would make an import cycle.
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import threading
 import time
@@ -92,7 +99,7 @@ from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Hashable, Sequence
+    from collections.abc import Callable, Collection, Hashable, Sequence
 
     from deephaven.execution_context import ExecutionContext
 
@@ -399,7 +406,8 @@ class Connection:
 
         Args:
             final_flush: True to have the flush thread apply what it has queued (failures
-                included) before it ends; False when the session closes and tables go static.
+                included) before it ends; False when the session closes, which has already
+                failed its tables.
         """
         with self._start_lock:
             self._closing = True
@@ -453,7 +461,7 @@ class Connection:
             stream: The stream.
         """
         self._register_stream(stream)
-        self._after_change(opened=stream.stream_id)
+        self._after_change(opened=(stream.stream_id,))
 
     def _register_stream(self, stream: _Stream) -> None:
         """Record a stream and add its topics, declaring its channel's required keys first.
@@ -565,18 +573,22 @@ class Connection:
         Also forgets the calls kept for streams it no longer awaits (a move whose hand-over
         never came).
         """
+        self._drop_unawaited()
+        self._after_change()
+
+    def _drop_unawaited(self) -> None:
+        """Forget the calls kept for streams this connection no longer awaits."""
         with self._lock:
             awaited = set(self.awaiting)
         for stream_id in [s for s in self._early if s not in awaited]:
             del self._early[stream_id]
-        self._after_change()
 
-    def _after_change(self, *, opened: int | None = None) -> None:
+    def _after_change(self, *, opened: Collection[int] = ()) -> None:
         """After a change of streams or topics: reconcile, publish the cap, maybe go idle.
 
         Args:
-            opened: The stream just added, whose topics now count against the options cap
-                through the admitted set instead of as pending.
+            opened: The streams just added (or adopted), whose topics now count against the
+                options cap through the admitted set instead of as pending.
         """
         self.subscriptions.reconcile()
         self._show_deferred(opened=opened)
@@ -602,6 +614,12 @@ class Connection:
         has queued and publishes the rows it has buffered (a stream's publish lock keeps the two
         flush threads from interleaving on one stream).
 
+        Only the streams that still hold a lease go there (the move pointed each lease at
+        `successor`). A stream whose lease is gone (its blink table shut down, or its session
+        closed, after or before the move) stays behind: it stops being routed, `successor`
+        stops awaiting it, and its topics are never subscribed there, so a closed session's
+        stream cannot keep the successor open.
+
         Args:
             successor: The connection that takes over.
         """
@@ -609,14 +627,22 @@ class Connection:
         self._streams.clear()
         self._successor = successor
         with self._lock:
+            leased = self._group.streams
+            moving = [s for s in streams if s.stream_id in leased]
+            gone = {s.stream_id for s in streams} - {s.stream_id for s in moving}
+            for stream_id in gone:
+                successor.awaiting.discard(stream_id)
+                successor.cap_pending.pop(stream_id, None)
             failure = successor.failure
             if failure is None:
-                for stream in streams:
+                for stream in moving:
                     successor.flusher.routes.add(stream.channel, stream.sink)
+        for stream_id in gone:
+            self.flusher.routes.remove(stream_id)
         if failure is not None:
-            self.flusher.fail([s.stream_id for s in streams], failure)
+            self.flusher.fail([s.stream_id for s in moving], failure)
         else:
-            successor.post(successor.adopt, streams)
+            successor.post(successor.adopt, moving)
         self.subscriptions.ended()
         self.close(final_flush=True)
 
@@ -635,7 +661,8 @@ class Connection:
         for stream in streams:
             for callback, args in self._early.pop(stream.stream_id, ()):
                 callback(stream.stream_id, *args)
-        self._after_change()
+        self._drop_unawaited()
+        self._after_change(opened=[s.stream_id for s in streams])
 
     # --- loop thread: client callbacks ---------------------------------------------------------
 
@@ -866,7 +893,7 @@ class Connection:
         self._show_deferred()
         self._write_row()
 
-    def _show_deferred(self, *, opened: int | None = None) -> None:
+    def _show_deferred(self, *, opened: Collection[int] = ()) -> None:
         """Publish the admitted options contracts and show each stream's deferred count.
 
         The admitted set is published, and an opening stream's pending topics dropped, in one
@@ -874,14 +901,14 @@ class Connection:
         neither.
 
         Args:
-            opened: A stream whose pending topics are now counted through the admitted set.
+            opened: The streams whose pending topics are now counted through the admitted set.
         """
         if self.asset_class is not AssetClass.OPTIONS:
             return
         with self._lock:
             self.cap_admitted = self.subscriptions.admitted
-            if opened is not None:
-                self.cap_pending.pop(opened, None)
+            for stream_id in opened:
+                self.cap_pending.pop(stream_id, None)
         deferred = self.subscriptions.deferred
         updates: dict[int, StreamUpdate] = {}
         for stream in self._streams.values():
@@ -1105,6 +1132,27 @@ _groups: dict[Hashable, ConnectionGroup] = {}
 # taken before a group's lock, never under it.
 
 
+def _sharing_value(name: str, value: object) -> Hashable:
+    """Return a connection setting as it appears in a group's sharing key.
+
+    The key is process-wide and public (`ConnectionGroup.key`), so the API key appears as its
+    SHA-256 digest, never itself: no repr or traceback of the key can show the secret. A mapping
+    (`ws_hosts`) becomes a frozenset of its items.
+
+    Args:
+        name: One of `CONNECTION_SETTINGS`.
+        value: The session's value of it.
+
+    Returns:
+        A hashable value, equal for equal settings.
+    """
+    if name == "api_key":
+        return hashlib.sha256(cast("str", value).encode()).digest()
+    if isinstance(value, Mapping):
+        return frozenset(value.items())
+    return value
+
+
 class ConnectionGroup:
     """The WebSocket connections shared by the sessions of one API key and equal settings.
 
@@ -1192,8 +1240,7 @@ class ConnectionGroup:
             The group.
         """
         settings = tuple(
-            frozenset(value.items()) if isinstance(value, Mapping) else value
-            for value in (getattr(config, name) for name in CONNECTION_SETTINGS)
+            _sharing_value(name, getattr(config, name)) for name in CONNECTION_SETTINGS
         )
         graph = str(exec_ctx.update_graph.j_update_graph.getName())
         key = (*settings, graph, client_factory)
@@ -1328,7 +1375,7 @@ class ConnectionGroup:
         """
         asset_class = connection.asset_class
         with self.lock:
-            users = list(connection.users)
+            users = [owner for owner in connection.users if not owner.closed]
         for owner in users:
             try:
                 owner.record_verdict(asset_class, ChannelFamily.TICK, decision)
@@ -1346,14 +1393,17 @@ class ConnectionGroup:
         successor: Connection | None = None
         moved: list[int] = []
         with self.lock:
-            # Not if the connection is closing (its sessions closed) or failed (its streams
-            # fail with it).
-            if not connection.closing and connection.failure is None:
+            # Not if the connection is closing or failed, or left the registry meanwhile: its
+            # last session closed, or it failed (its streams fail with it).
+            if (
+                not connection.closing
+                and connection.failure is None
+                and self.connections.get(connection.url) is connection
+            ):
                 # A stream of the class may already have opened the delayed host's connection.
                 successor = self.connections.setdefault(url, candidate)
                 successor.families.add(ChannelFamily.TICK)
-                if self.connections.get(connection.url) is connection:
-                    del self.connections[connection.url]
+                del self.connections[connection.url]
                 for owner in connection.users:
                     successor.users.setdefault(owner, 0)
                     owner.show_row(asset_class, ChannelFamily.TICK, successor)
@@ -1362,6 +1412,12 @@ class ConnectionGroup:
                         owner = self.owners[stream_id]
                         self.streams[stream_id] = successor
                         successor.awaiting.add(stream_id)
+                        if asset_class is AssetClass.OPTIONS:
+                            # Counted against the successor's cap until it adopts the stream:
+                            # the old connection's admitted topics include the stream's.
+                            successor.cap_pending[stream_id] = connection.cap_pending.pop(
+                                stream_id, connection.cap_admitted
+                            )
                         successor.take(owner)
                         connection.give(owner)
                         moved.append(stream_id)
@@ -1375,6 +1431,8 @@ class ConnectionGroup:
             # The old loop ended first: its streams were failed there and never arrive.
             with self.lock:
                 successor.awaiting.difference_update(moved)
+                for stream_id in moved:
+                    successor.cap_pending.pop(stream_id, None)
             successor.post(successor.check_idle)
 
 
@@ -1433,6 +1491,11 @@ class WsConnections:
         self._row_owners: dict[tuple[AssetClass, ChannelFamily], Connection] = {}
         self._plans: dict[tuple[DatasetSpec, str], ChannelPlan] = {}
         self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        """True once `close()` has run; read with the group's lock held."""
+        return self._closed
 
     def core(self) -> SessionCore | None:
         """Return the session's core, or None once it has been freed.
@@ -1669,31 +1732,36 @@ class WsConnections:
     def _abandon(self, connection: Connection, stream_id: int) -> None:
         """Return the lease of a stream whose open failed, and let its connection go idle.
 
-        Idempotent: the shutdown callback may already have returned the lease.
+        Idempotent: the shutdown callback may already have returned the lease. The lease is
+        returned wherever it is now: the verdict may have moved it to a successor while the
+        stream opened.
 
         Args:
-            connection: The stream's connection.
+            connection: The connection the stream leased.
             stream_id: The stream.
         """
         with self._lock:
-            connection.cap_pending.pop(stream_id, None)
-            self._forget(stream_id, connection)
-        connection.flusher.routes.remove(stream_id)
-        connection.post(connection.check_idle)
+            current = self._forget(stream_id)
+            touched = {connection} if current is None else {connection, current}
+            for each in touched:
+                each.cap_pending.pop(stream_id, None)
+                each.awaiting.discard(stream_id)
+        for each in touched:
+            each.flusher.routes.remove(stream_id)
+            each.post(each.check_idle)
 
-    def _forget(self, stream_id: int, connection: Connection | None = None) -> Connection | None:
-        """Drop a stream's lease from the group; the group's lock is held.
+    def _forget(self, stream_id: int) -> Connection | None:
+        """Drop a stream's lease from the group; the group's lock is held. Idempotent.
 
         Args:
-            stream_id: The stream.
-            connection: Drop the lease only if it is on this connection; None for any.
+            stream_id: The stream; stream ids are unique in the process.
 
         Returns:
-            The connection that held the lease, or None if none (of `connection`) did.
+            The connection that held the lease, or None if it was already returned.
         """
         group = self.group
         current = group.streams.get(stream_id)
-        if current is None or (connection is not None and current is not connection):
+        if current is None:
             return None
         del group.streams[stream_id]
         del group.owners[stream_id]

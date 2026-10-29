@@ -123,8 +123,10 @@ def _register(core: SessionCore) -> None:
     every connection setting (`CONNECTION_SETTINGS`) is equal: a connection carries one value
     of each. A new session whose settings differ from those of an open session with the same
     key gets connections of its own, which compete with the other session's for the slot, so
-    a WARNING names the first such session and the settings that differ. Sessions are held
-    weakly; closed and collected ones do not count.
+    a WARNING names the first such session and the settings that differ. Sessions on
+    different Deephaven update graphs never share either; that is not warned about, since a
+    worker normally has one graph. Sessions are held weakly; closed and collected ones do not
+    count.
 
     Args:
         core: The new session's core.
@@ -460,8 +462,8 @@ class MassiveSession:
         failed table". `m.streams()` shows every stream `CLOSED` (one that had already failed
         keeps `FAILED`), and a `connections()` or `streams()` table taken before the close
         keeps its final rows. The session's streams leave their WebSocket connections, and
-        every connection no other session of the same key uses is closed. "session closed; N
-        live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
+        every connection no other session of the same key uses is closed. "MassiveSession #1
+        closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
         `connections()`, and `streams()` raise `MassiveError("MassiveSession #1 is closed")`;
         building queries, reaching namespaces, and `release()` keep working. On an
         update-graph thread it raises `ValueError`, even when the session is already closed.

@@ -112,6 +112,9 @@ class StreamState(StrEnum):
     CLOSED = "CLOSED"
 
 
+_STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
+"""The states whose `Error` names why the stream stopped, which no later update replaces."""
+
 _S, _I, _L, _T = ColumnType.STRING, ColumnType.INT, ColumnType.LONG, ColumnType.INSTANT
 
 CONNECTIONS: Final = Schema(
@@ -301,6 +304,10 @@ class StreamUpdate:
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
 
+        The `Error` of a `FAILED` or `CLOSED` row names why the stream stopped, so `error` and
+        `clear_error` leave it alone: a flush or a poll cycle that races the stop never replaces
+        the cause.
+
         Args:
             row: The stream's current row.
 
@@ -320,8 +327,22 @@ class StreamUpdate:
             symbols=row.symbols if self.symbols is None else self.symbols,
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
-            error=None if self.clear_error else row.error if self.error is None else self.error,
+            error=self._error(row),
         )
+
+    def _error(self, row: StreamRow) -> str | None:
+        """Return the row's new `Error`.
+
+        Args:
+            row: The stream's current row.
+
+        Returns:
+            The current text for a stopped stream or an update that sets none, null for
+            `clear_error`, and the update's text otherwise.
+        """
+        if row.state in _STOPPED or (self.error is None and not self.clear_error):
+            return row.error
+        return None if self.clear_error else self.error
 
 
 def as_row(row: ConnectionRow | StreamRow) -> dict[str, object]:

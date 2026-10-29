@@ -539,9 +539,11 @@ Sessions in one process that use the same API key **share their WebSocket connec
 account, so two sessions with connections of their own would knock each other off and both
 stall in `WAITING_SLOT`. Sessions share only when the settings that shape a connection are
 equal: the API key, `ws_hosts`, `ack_timeout`, `reconnect_backoff`, `max_reconnect_backoff`,
-and `flush_interval`. A connection carries one value of each, so a session whose settings
-differ never joins another session's connection, and the library never silently applies one
-session's settings to another session's streams. Such a session opens connections of its own,
+and `flush_interval`; they must also run on the same Deephaven update graph, because a
+connection's flush thread enters one execution context for all its streams (a worker normally
+has one graph, so this rarely matters and is not warned about). A connection carries one value
+of each, so a session whose settings differ never joins another session's connection, and the
+library never silently applies one session's settings to another session's streams. Such a session opens connections of its own,
 and its construction logs a WARNING naming the other session and the settings that differ,
 because on an individual plan the two then compete for the slot. A second session with equal
 settings logs nothing. Sharing is per process: a session in another process that uses the key
@@ -671,9 +673,13 @@ return result
   every method that changes one of them updates the set in the same `registry_lock` section.
   The set is what keeps a session with a running stream or poll alive after the user dropped
   every reference to it: nothing else in the library holds a core strongly (connections,
-  flushers, pollers, and the clients hold it weakly). A core that leaves the set is handed to
-  the reaper as a job argument, so its last reference is dropped there, after the lock is
-  released, and not on an update-graph, gRPC, or liveness-cleanup thread.
+  flushers, pollers, and the clients hold it weakly; a registered stream's sink holds it, but
+  a registered stream keeps the core in the set anyway). A core that leaves the set is handed
+  to the reaper as a job argument, so its last reference is not dropped under the lock. The
+  thread that took it out still holds it while it returns, so the final release may also land
+  there, on whatever thread that is; that is safe because a core's finalizer only queues work
+  (its closers and the diagnostics writer's stop go to the reaper) and never blocks or calls
+  Java.
 - **Opening a stream.** The session mints the stream id (a process-wide counter) and
   registers the stream's record, `OPENING`, with one hold for the opener, before it calls
   `StreamTransport.open_stream(..., stream_id=)`; so a failure or a shutdown the transport
@@ -712,7 +718,8 @@ return result
   key and deletes its record if no hold is left, or marks it shut down so that the last hold
   deletes it (and queues the stop of a reactive stream's watchlist listener on the reaper), and
   `loop.call_soon_threadsafe(...)` to the connection's loop so the topic reference counts are
-  decremented there. Never a send, never a Deephaven call, never the final release of a core.
+  decremented there. Never a send, never a Deephaven call. It may drop the last reference to
+  a core, whose finalizer only queues work on the reaper.
   The JVM holds the callback until it collects the publisher, so the callback reaches the
   session's connections only through a weak reference, as a watchlist listener's callbacks
   reach the stream: a strong one would form a cycle across Python and Java that neither
@@ -748,8 +755,9 @@ return result
      connection no other session leases is closed and joined for a bounded time; the pollers
      stop.
   5. It writes the final rows, then releases the diagnostics scope.
-  6. It logs "session closed; N live tables failed", at WARNING when N > 0 and at INFO when N
-     is 0.
+  6. It logs "MassiveSession #1 closed; N live tables failed", at WARNING when N > 0 and at
+     INFO when N is 0. N counts the tables that are failed once the close is done, including
+     one a racing failure failed first; the tables are not logged one by one.
 
   The failures shut the blink tables down on the next update cycle, whose callbacks then
   release the records; a session whose failed tables are still held stays in the live set
@@ -759,8 +767,10 @@ return result
 - **Library thread death.** If the reaper, the diagnostics writer, or a connection's flush
   thread dies on an exception it does not handle (a `KeyboardInterrupt` or `SystemExit` raised
   inside it), it fails the live tables it served before it ends, naming the thread: otherwise
-  those tables would be frozen without an error, and the session would stay in the live set
-  for ever. The WebSocket client thread reports any internal failure as `FAILED`, which fails
+  those tables would be frozen without an error. A dead reaper can no longer release results,
+  so its session stays in the live set until the process ends; that leak is accepted, because
+  only an interrupt raised inside the reaper kills it, and its tables are failed, never left
+  looking live. The WebSocket client thread reports any internal failure as `FAILED`, which fails
   the connection's streams ([section 13.3](#133-connection-and-subscription-protocol)).
 
 Three documented behaviours that users will notice:
@@ -2496,7 +2506,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - `TablePublisher.add` is safe from the flush thread: the Java side snapshots the static batch
   and guarantees non-interleaved adds. `on_flush_callback` is not used (it blocks the update
   cycle).
-- After its `add` calls, each flush reports to the session once:
+- After its `add` calls, each flush reports once to each session whose streams it published:
   `SessionCore.update_streams({stream_id: StreamUpdate(rows_published=..., ...)})`, where
   `StreamUpdate` is a frozen keyword-only record whose fields left as None keep their values.
   One short critical section under `registry_lock`, about 20 times a second per connection at
@@ -2504,7 +2514,9 @@ How a request is built from a `DatasetSpec` and a `Request`:
   (writing a row only once the stream has opened), ignores ids that have left it, and never
   changes `State` (only `fail_stream` does). An `error` there is a warning, and
   `StreamUpdate(clear_error=True)` sets `Error` back to null, for example once the options
-  contract cap no longer defers anything. `poll()` rows take their `StreamId` from the same
+  contract cap no longer defers anything. Neither touches the `Error` of a `FAILED` or `CLOSED`
+  row: the cause of a stop is final, so a flush or a poll cycle that races `close()` or a
+  failure never replaces it. `poll()` rows take their `StreamId` from the same
   allocator, `SessionCore.next_stream_id()`, so the two kinds never collide.
 - A failure fails exactly the streams whose topics the server rejected. Nothing tears down a
   whole URL on an entitlement error. A failed stream's key is unregistered at once
@@ -2765,10 +2777,10 @@ without the GIL.
 | verdict move, one short-lived thread per move of a connection to the `delayed.` host (§ 13.3) | library | `RestTransport.record_verdict`; creating the new connection's client (TLS settings load from disk); moving the streams' leases under `registry_lock`; posting the hand-over to the old connection's loop | block a loop thread; call Deephaven |
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls; `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| reaper, one per session | library | `scope.release()`; stream held-result counts; the closers of a session freed unclosed; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; the final release of a core that left the live set | anything else |
+| reaper, one per session | library | `scope.release()`; stream held-result counts; the closers of a session freed unclosed; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
 | diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table | anything else |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a listener error queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
-| Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.poll_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking; the final release of a core |
+| Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.poll_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
 
 ### 18.2 Shared state and ownership
 
@@ -2867,6 +2879,17 @@ the standard-library codec is the default. `PythonDeephavenSession.setVariable` 
 comment "relying on the GIL being kind to us"; the library never mutates script globals, so this
 does not affect it, but it is why the Deephaven integration tests must run on the free-threaded
 builds rather than unit tests alone.
+
+**Deferred frees across threads.** A free-threaded build counts references with biased
+reference counting: a reference dropped on a thread other than the one that created the object
+is queued to the creating thread, which merges it only when it next runs Python code, or when a
+cyclic collection runs. So when the reaper drops the last reference to a core that the user's
+thread created, the core is freed, and its connections, clients, and threads close, only once
+that thread next runs Python code, or at the next cyclic collection, whichever comes first; in
+a console whose commands run on the thread that created the session, that is the next command.
+A thread blocked in a C call such as `Thread.join()` or `Event.wait()` merges nothing. This is a property of the runtime, not
+a race: nothing is lost, only delayed, and `m.close()` stays immediate. Tests that wait for a
+session to be freed therefore poll in Python, never inside one C-level wait.
 
 ## 19. Wire clients and the spec snapshot
 

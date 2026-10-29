@@ -480,9 +480,10 @@ class ResultRegistry:
     def retire(self) -> None:
         """Stop the reaper once no tracked result remains; called when the session is collected.
 
-        A tracked result whose owner callback does not hold the session core (a `poll()`
-        table's poller, for example) can outlive the session. Stopping the reaper with the
-        session would leave such a result unreleased when it is collected, so the reaper is
+        Owner callbacks hold the session core only weakly, so a tracked result can outlive the
+        session: one `release()`d while its wrapper is still alive, for example. Stopping the
+        reaper with the session would leave such a result unreleased when it is collected, so
+        the reaper is
         stopped only once the registry is empty: now if it already is, otherwise by the job
         that forgets the last collected result. Takes no lock and makes no Java call (it runs
         in a garbage-collection finalizer): it only queues a job on the reaper.

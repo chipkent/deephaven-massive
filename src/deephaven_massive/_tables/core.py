@@ -36,11 +36,16 @@ dependency never points from the tables up to the code that does the I/O.
 and by nothing else. The module's live set holds every core whose stream registry, `poll()`
 registry, or count of held diagnostics views is non-empty; every method that changes one of
 them updates the set in the same `registry_lock` section (`_sync_live`). Everything else in the
-library refers to a core weakly (connections, flushers, pollers, the clients, and the owner
-callbacks of result records), so an unused session is freed by reference counting, at once,
-and a session whose stream a derived table keeps running stays alive as long as that table.
+library refers to a core weakly (connections, pollers, the clients, and the owner callbacks of
+result records), or only through a registered stream (a stream's sink, which its flusher
+routes), which keeps the core in the set anyway; so an unused session is freed by reference
+counting, at once, and a session whose stream a derived table keeps running stays alive as
+long as that table.
 A core that leaves the set is handed to the reaper as a job argument, so its last reference
-is dropped there, outside every lock.
+is not dropped under a lock; the thread that took it out may still drop it last, which is safe
+because the core's finalizer only queues work on the reaper. On a free-threaded build, a
+reference dropped on another thread reaches the thread that created the core only when that
+thread next runs Python code (or a cyclic collection runs), so the core is freed then.
 
 The module also holds the process-wide stream-id allocator and three context checks.
 `on_update_graph` runs at every entry point: `MassiveSession()`, every verb (through
@@ -388,7 +393,7 @@ def _call(core_ref: weakref.ref[SessionCore], release: Callable[..., None], *arg
 
 
 def _let_go(core: SessionCore) -> None:
-    """Reaper job that holds a core leaving the live set, so its last reference drops there.
+    """Reaper job that holds a core leaving the live set, so its last reference usually drops there.
 
     Args:
         core: The core; the job's reference to it ends when the job returns.
@@ -399,7 +404,9 @@ def _thread_died(core_ref: weakref.ref[SessionCore], what: str, death: BaseExcep
     """The `on_death` of a session's reaper or diagnostics writer: fail its live tables.
 
     Runs on the dying thread. A thread that dies leaves the session's tables frozen (no
-    release, or no diagnostics), so they fail instead, naming the thread and its cause.
+    release, or no diagnostics), so they fail instead, naming the thread and its cause. A dead
+    reaper can no longer release results, so the session then stays in the live set until the
+    process ends; only an interrupt raised inside the reaper kills it.
 
     Args:
         core_ref: The session's core, weakly: the thread must not keep it alive.
@@ -608,8 +615,9 @@ class SessionCore:
 
         Called with `registry_lock` held, by every method that changes the stream registry, the
         `poll()` registry, or the count of diagnostics views. A core leaving the set is handed
-        to the reaper (`_let_go`), so its last reference is never dropped under a lock or on the
-        thread that made the change.
+        to the reaper (`_let_go`), so its last reference is never dropped under a lock; the
+        changing thread may still drop it last once it returns, which is safe because the
+        core's finalizer only queues work.
         """
         live = bool(self._streams or self._polls or self._views)
         if live is self._in_live:
@@ -984,7 +992,9 @@ class SessionCore:
         registry, nothing else knows the stream, so this method releases its scope itself. A
         failure or a shutdown the transport reported during the open has already been
         recorded on the record, and the stream is returned as is: `stream_result` then raises
-        the `MassiveError` naming the failure instead of building a result.
+        the `MassiveError` naming the failure instead of building a result. A reactive stream
+        that shut down during the open has its watchlist listener stopped on the reaper here,
+        since the shutdown had no handle to stop it through.
 
         Args:
             spec: The dataset.
@@ -1012,6 +1022,9 @@ class SessionCore:
                 self._streams[stream_id] = replace(state, handle=opened, row=row)
                 stored = True  # from here on, releasing the opener's hold releases the stream
                 self.diagnostics.write(row)
+                if state.shut_down and opened.stop_watch is not None:
+                    # The shutdown found no handle to stop the watchlist listener through.
+                    self._reaper.submit(opened.stop_watch)  # a Deephaven call: never here
                 closed = self._closed
         except BaseException:
             if opened is not None and not stored:  # the stream never reached the registry
@@ -1065,7 +1078,7 @@ class SessionCore:
             with entered(self.exec_ctx):
                 state.handle.scope.release()
 
-    def fail_stream(self, stream_id: int, error: str) -> None:
+    def fail_stream(self, stream_id: int, error: str) -> str | None:
         """Record that a stream failed and stop reusing it for new verbs.
 
         Called by the transport just before it fails the stream's table (`publish_failure`).
@@ -1087,13 +1100,18 @@ class SessionCore:
         Args:
             stream_id: The failed stream.
             error: The failure text for the `Error` column.
+
+        Returns:
+            The close's text when the close came first, so the caller fails the table with it
+            and the table and its row name the same cause; None when `error` was recorded (or
+            only logged).
         """
         with self.registry_lock:
             state = self._streams.get(stream_id)
             poll = self._polls.get(stream_id)
             current = state.row if state is not None else None if poll is None else poll.row
             if current is not None and current.state is StreamState.CLOSED:
-                return
+                return current.error
             polled = state is None and self._update_poll(
                 stream_id, functools.partial(replace, state=StreamState.FAILED, error=error)
             )
@@ -1108,6 +1126,7 @@ class SessionCore:
             logger.debug(
                 "%s: stream %d failed after it left the registry: %s", self.label, stream_id, error
             )
+        return None
 
     def next_stream_id(self) -> int:
         """Return a new process-unique stream id, the `StreamId` of an `m.streams()` row.
@@ -1287,7 +1306,9 @@ class SessionCore:
         held diagnostics view until it is released or collected, which keeps the session in the
         live set: a view a user holds stays current. After `close()` it keeps the diagnostics
         table, and so its final rows, alive. If building or tracking the view raises anything,
-        even `KeyboardInterrupt`, the scope and the count are released first.
+        even `KeyboardInterrupt`, the scope and the count are released first; a `DHError` from a
+        `close()` that released the diagnostics tables meanwhile becomes the closed session's
+        `MassiveError`.
 
         Args:
             table: `diagnostics.connections` or `diagnostics.streams`.
@@ -1296,7 +1317,8 @@ class SessionCore:
             The view: every column of `table`, the same rows.
 
         Raises:
-            MassiveError: If the session is closed (`"MassiveSession #1 is closed"`).
+            MassiveError: If the session is closed (`"MassiveSession #1 is closed"`), also when
+                the close ran while the view was built.
         """
         with self.registry_lock:
             if self._closed:
@@ -1311,13 +1333,15 @@ class SessionCore:
             self.results.track(
                 result, scope, functools.partial(_call, weakref.ref(self), SessionCore._drop_view)
             )
-        except BaseException:  # nothing was tracked: the scope and the count are ours
+        except BaseException as error:  # nothing was tracked: the scope and the count are ours
             try:
                 if scope is not None:
                     with entered(self.exec_ctx):
                         scope.release()
             finally:
                 self._drop_view()
+            if isinstance(error, DHError) and self.closed:
+                raise MassiveError(f"{self.label} is closed") from error
             raise
         return result
 
@@ -1409,14 +1433,17 @@ class SessionCore:
             error: The error they fail with.
 
         Returns:
-            How many tables this call failed.
+            How many of the tables are failed now: by this call, or by a failure that raced it
+            (which then fails the table with this call's error if this call recorded it first).
         """
         failed = 0
         for fail in fails:
             try:
-                failed += bool(fail(error))
+                fail(error)
             except Exception:
                 logger.exception("%s: could not fail a live table", self.label)
+            else:
+                failed += 1
         return failed
 
     def close(self) -> None:
@@ -1433,8 +1460,9 @@ class SessionCore:
         `snapshot()`, `to_pandas`, and `to_arrow`); the closers run (the session's streams leave
         their connections, connections no other session uses close, and the pollers stop); the
         final rows are written and the diagnostics scope released. Results stay tracked, so
-        garbage collection and `release()` still free them. Logs "session closed; N live tables
-        failed": a WARNING when N > 0, INFO otherwise.
+        garbage collection and `release()` still free them. Logs "MassiveSession #1 closed; N live
+        tables failed": a WARNING when N > 0, INFO otherwise; the tables themselves are not
+        logged one by one.
 
         Raises:
             ValueError: On an update-graph thread, even when the session is already closed.
@@ -1469,7 +1497,7 @@ class SessionCore:
                 logger.exception("%s: a transport failed to close", self.label)
         self.diagnostics.release()
         level = logging.WARNING if failed else logging.INFO
-        logger.log(level, "session closed; %d live tables failed", failed)
+        logger.log(level, "%s closed; %d live tables failed", self.label, failed)
 
 
 def _closed_row(row: StreamRow, error: str) -> StreamRow:

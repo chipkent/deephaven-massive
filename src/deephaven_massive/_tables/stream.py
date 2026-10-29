@@ -501,8 +501,12 @@ class StreamSink:
 
         The failure is recorded first (`SessionCore.fail_stream`) and the table failed after
         (`publish_failure`), so a verb that finds the table failed always finds the failure
-        recorded too, and names it. Logged at ERROR. Never call it on an update-graph thread
-        or under `registry_lock`; the thread needs an execution context.
+        recorded too, and names it. When the session's close came first, the table fails with
+        the close's error instead, so the table and its `CLOSED` row name the same cause, and
+        nothing is logged (the close logs its count). Any other failure is logged at ERROR.
+        The stream counts as failed only once `publish_failure` has returned, so a failure
+        that raises can be retried. Never call it on an update-graph thread or under
+        `registry_lock`; the thread needs an execution context.
 
         Args:
             error: The error the table fails with.
@@ -513,10 +517,13 @@ class StreamSink:
         with self._publish_lock:
             if self.failed:
                 return False
+            closed = self.core.fail_stream(self.stream_id, str(error))
+            if closed is None:
+                logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
+            self.publisher.publish_failure(
+                error if closed in (None, str(error)) else MassiveError(closed)
+            )
             self.failed = True
-            logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
-            self.core.fail_stream(self.stream_id, str(error))
-            self.publisher.publish_failure(error)
             return True
 
     def fail_later(self, error: Exception) -> None:
@@ -720,7 +727,7 @@ class Flusher:
             final: True to have the thread flush once more before it ends, so the failures
                 queued last (a connection's fatal failure fails every stream) are applied.
                 False when the session closes: what is still buffered is not published, and
-                no stream is failed, since a closed session's tables go static.
+                no stream is failed here, since the close has already failed its tables.
         """
         if final:
             self._final.set()

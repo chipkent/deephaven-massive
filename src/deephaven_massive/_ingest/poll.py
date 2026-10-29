@@ -134,7 +134,17 @@ class UnsupportedParameterError(MassiveError):
     """
 
 
-_FATAL: Final = (AuthenticationError, EntitlementError, RowDataError, UnsupportedParameterError)
+class _SymbolTableFailedError(MassiveError):
+    """A reactive symbol table failed, so a `poll()` table can no longer follow it."""
+
+
+_FATAL: Final = (
+    AuthenticationError,
+    EntitlementError,
+    RowDataError,
+    UnsupportedParameterError,
+    _SymbolTableFailedError,
+)
 """The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""
 
 
@@ -279,9 +289,9 @@ class Poller:
     context for its whole life, and leaves the session's `Pollers` when it ends. Every other
     method is safe from any thread: `stop` and `release` only set an event and update
     registries, and `fail` fails the table. The key state of `REPLACE` and `APPEND` belongs to
-    the thread alone, so it takes no lock; the publish lock, a leaf below which only
-    `registry_lock` is taken, keeps a failure and an `add` from interleaving and makes the
-    failure once-only.
+    the thread alone, so it takes no lock; the publish lock, below which only `registry_lock`
+    is taken (a cycle's rows are converted to a table before it), keeps a failure and an `add`
+    from interleaving and makes the failure once-only.
     """
 
     __slots__ = (
@@ -438,10 +448,19 @@ class Poller:
             The request's symbols, or for a reactive table the valid symbols it holds now,
             canonical and sorted (rows that are no valid symbol of the class are ignored and
             logged once at WARNING).
+
+        Raises:
+            _SymbolTableFailedError: If the reactive table has failed: its rows no longer
+                change, so the poll fails rather than poll a frozen list.
         """
         symbols = self._request.symbols
         if not isinstance(symbols, SymbolTable):
             return symbols
+        if symbols.table.j_table.isFailed():
+            raise _SymbolTableFailedError(
+                f"{self._spec.name} poll(): its symbol table failed, so the poll can no longer "
+                "follow it"
+            )
         canonical = symbol_canonicalizer(self._spec.asset_class)
         snapshot = symbols.table.snapshot()
         found = {canonical(row[0]) for row in snapshot.iter_tuple(cols="Symbol")}
@@ -543,11 +562,14 @@ class Poller:
         elif self._mode is PollMode.APPEND:
             table, identities = self._fresh(table)
             published = table.num_rows
+        # Converted before the publish lock, which is a leaf: the conversion may take the
+        # update-graph lock.
+        rows = dh_arrow.to_table(table) if table.num_rows else None
         with self._publish_lock:
             if self._failed:  # the session closed after the stop check: publish nothing
                 return 0
-            if table.num_rows:
-                self._publisher.add(dh_arrow.to_table(table))
+            if rows is not None:
+                self._publisher.add(rows)
         # The key state changes only once the cycle is published: if it failed, the next
         # cycle still tombstones the keys this one dropped, or appends the rows it skipped.
         if keys is not None:
@@ -644,7 +666,10 @@ class Poller:
         """Mark the row `FAILED`, then fail the table, once; log it at ERROR.
 
         The failure is recorded first, as `StreamSink.fail` does for a stream, so the row is on
-        its way to `m.streams()` before anyone can see the table failed.
+        its way to `m.streams()` before anyone can see the table failed. When the session's
+        close came first, the table fails with the close's error instead and nothing is logged,
+        so the table and its `CLOSED` row name the same cause. The table counts as failed only
+        once `publish_failure` has returned, so a failure that raises can be retried.
 
         Args:
             core: The session's core.
@@ -656,10 +681,13 @@ class Poller:
         with self._publish_lock:
             if self._failed:
                 return False
+            closed = core.fail_stream(self._stream_id, str(error))
+            if closed is None:
+                logger.error("%s poll() failed: %s", self._spec.name, error)
+            self._publisher.publish_failure(
+                error if closed in (None, str(error)) else MassiveError(closed)
+            )
             self._failed = True
-            logger.error("%s poll() failed: %s", self._spec.name, error)
-            core.fail_stream(self._stream_id, str(error))
-            self._publisher.publish_failure(error)
             return True
 
 

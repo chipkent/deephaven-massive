@@ -7,6 +7,7 @@ failures reported to the core, and the interrupt windows of a verb's bookkeeping
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import gc
 import importlib
 import inspect
@@ -1171,9 +1172,16 @@ def test_an_unused_session_is_freed_without_the_cyclic_collector() -> None:
         assert alive() is not None  # the running stream keeps its session
         del result  # the last use of the stream: its session leaves the live set
         assert fake.shutdown[1].wait(TIMEOUT)
-        reaper.join(TIMEOUT)  # the reaper drops the last reference, then ends
-        assert not reaper.is_alive()
+        # The reaper drops the last reference, then ends. Wait in Python, not in join(): a
+        # free-threaded build merges a reference dropped on another thread into its owner's
+        # count only while the owner runs Python code.
+        pause = threading.Event()  # never set; only paces the bounded wait
+        for _ in range(int(TIMEOUT / 0.02)):
+            if alive() is None and not reaper.is_alive():
+                break
+            pause.wait(0.02)
         assert alive() is None
+        assert not reaper.is_alive()
     finally:
         gc.enable()
 
@@ -1484,6 +1492,35 @@ def test_a_running_stream_keeps_its_session_in_the_live_set(
     assert id(core) not in _core._live
 
 
+def test_a_stream_that_shuts_down_while_opening_stops_its_watchlist_listener(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
+) -> None:
+    # The shutdown ran before the handle reached the registry, so it had nothing to stop the
+    # listener through; storing the handle stops it.
+    core = massive_session._core
+    stopped = threading.Event()
+    open_stream = fake_streams.open_stream
+
+    def shut_down_while_opening(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = open_stream(spec, request, channel, stream_id=stream_id)
+        core.stream_shut_down(stream_id)  # what an early shutdown callback does
+        return dataclasses.replace(handle, stop_watch=stopped.set)
+
+    monkeypatch.setattr(fake_streams, "open_stream", shut_down_while_opening)
+    result = stream_query(massive_session).append_only()  # a shutdown is not a failure
+    drain()
+    assert stopped.is_set()
+    massive_session.release(result)
+    drain()
+    assert core._streams == {}
+
+
 def test_a_verb_that_races_close_never_returns_its_table(
     massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
 ) -> None:
@@ -1521,6 +1558,24 @@ def test_a_diagnostics_view_that_cannot_be_built_leaves_no_hold(
     assert id(core) not in _core._live
 
 
+def test_a_diagnostics_view_that_races_close_raises_the_closed_error(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The close releases the diagnostics tables while the view is built.
+    core = massive_session._core
+    build = make_result
+
+    def close_first(factory: Callable[[], Table]) -> object:
+        massive_session.close()
+        return build(factory)
+
+    monkeypatch.setattr(_core, "make_result", close_first)
+    with pytest.raises(dm.MassiveError, match=f"^{label(massive_session)} is closed$") as caught:
+        massive_session.streams()
+    assert isinstance(caught.value.__cause__, DHError)
+    assert core._views == 0
+
+
 def test_a_table_that_cannot_be_failed_does_not_spare_the_others(
     *,
     massive_session: dm.MassiveSession,
@@ -1541,7 +1596,7 @@ def test_a_table_that_cannot_be_failed_does_not_spare_the_others(
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
         massive_session.close()
     assert f"{label(massive_session)}: could not fail a live table" in caplog.text
-    assert "session closed; 1 live tables failed" in caplog.text
+    assert f"{label(massive_session)} closed; 1 live tables failed" in caplog.text
     assert list(fake_streams.failed) == [2]
     massive_session.release(first)
     massive_session.release(second)
@@ -1574,9 +1629,13 @@ def test_a_dying_reaper_fails_the_sessions_live_tables(
     (row,) = dh_to_pylist(core.diagnostics.streams)  # no view: nothing could release it
     assert (row["State"], row["Error"]) == ("FAILED", text)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    # Nothing can release the hold any more; drop it here so the session can go.
+    # Nothing can release the hold any more: a dead reaper leaks its session. Drop the hold
+    # here, then the job it left in the dead reaper's queue, so the session can go.
     del result
     core._release_hold(1)
+    queued = core._reaper._worker._queue
+    while not queued.empty():
+        queued.get_nowait()
 
 
 def test_a_thread_of_a_freed_session_dies_quietly() -> None:
