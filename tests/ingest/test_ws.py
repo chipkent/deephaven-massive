@@ -2201,10 +2201,29 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
 
 
 def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
-    ws_session: WsSession,
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A connection out of the registry (a fatal failure retired it) still carries the session's
-    # stream until the stream shuts down; the session's close closes it too.
+    # stream until the stream shuts down; the session's close closes it too, reaching it through
+    # the stream's lease. The close fails the stream's table first, and the next update cycle
+    # shuts the blink table down, whose callback returns that lease: on a slow machine before
+    # the close takes the session's leases. The callback is held here until the close is done,
+    # so the close always finds the lease. (Had the callback come first, nothing would close the
+    # connection but its idle close; in the library only a fatal failure retires a connection
+    # this way, and the failure ends the connection by itself.)
+    shut_down = ws_session.connections._shut_down
+    lock = threading.Lock()
+    held: list[int] = []
+    holding = True
+
+    def hold(stream_id: int) -> None:
+        with lock:
+            if holding:
+                held.append(stream_id)
+                return
+        shut_down(stream_id)
+
+    monkeypatch.setattr(ws_session.connections, "_shut_down", hold)
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
@@ -2213,6 +2232,11 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
     )
     ws_session.close()
     assert connection.join(TIMEOUT)
+    with lock:  # a callback held so far is passed on now, and a later one goes straight through
+        holding = False
+        late = list(held)
+    for stream_id in late:
+        shut_down(stream_id)
     del result
 
 
