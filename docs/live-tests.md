@@ -242,7 +242,8 @@ For a long run on a tester's machine, `scripts/live_run.py` runs everything abov
 for days, and records what is needed to diagnose a problem afterwards without another live
 run. It probes what the key can do at each start and each trading morning, runs every group of
 checks at a fixed New York time, adapts by itself when the subscriptions change, and can be
-stopped and started at any time. Run it from the repository root, in the terminal that holds
+stopped and started at any time. A tester follows [the tester guide](tester-guide.md), which
+walks through it step by step. Run it from the repository root, in the terminal that holds
 the variables above:
 
 ```bash

@@ -4,7 +4,9 @@ import gc
 import logging
 import threading
 import time
+import weakref
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -20,6 +22,7 @@ from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import background_read
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
+from deephaven_massive._tables.diagnostics import StreamState
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
 
@@ -47,6 +50,15 @@ def until(condition: Callable[[], bool]) -> None:
             return
         event.wait(0.01)
     assert condition()
+
+
+def until_done(stream_rows: Rows) -> dict[str, Any]:
+    # Waits for the read's row in m.streams() to show DONE, and returns it. The row is
+    # recorded in the update cycle that adds the rows and shown on a later one, so once it
+    # shows, every snapshot of the result holds the rows.
+    until(lambda: stream_rows()[0]["State"] == "DONE")
+    (row,) = stream_rows()
+    return row
 
 
 def schema(m: dm.MassiveSession) -> Schema:
@@ -131,9 +143,8 @@ def test_a_read_fills_its_table_in_one_update(
     read = the_read(massive_session)
     gate.set()
     read.thread.join(TIMEOUT)
-    until(lambda: result.size == 2)
+    row = until_done(stream_rows)
     assert tickers(result, dh_to_pylist) == ["AAPL", "MSFT"]
-    (row,) = stream_rows()
     assert (row["State"], row["RowsPublished"], row["Error"]) == ("DONE", 2, None)
     massive_session.release(result)
     (row,) = stream_rows()
@@ -142,26 +153,32 @@ def test_a_read_fills_its_table_in_one_update(
 
 
 def test_a_read_without_a_note_says_only_that_it_reads_in_the_background(
-    massive_session: dm.MassiveSession,
+    massive_session: dm.MassiveSession, stream_rows: Rows
 ) -> None:
     result = open_test_read(massive_session, returning(static_rows(massive_session)))
     assert result.attributes()["TableDescription"] == (
         f"test.trades: A dataset for the tests. {BACKGROUND_NOTE}"
     )
     the_read(massive_session).thread.join(TIMEOUT)
+    # An empty result adds no rows, so the read itself records it DONE once published.
+    (row,) = stream_rows()
+    assert (row["State"], row["RowsPublished"]) == ("DONE", 0)
+    assert result.size == 0
     massive_session.release(result)
 
 
 @pytest.mark.jvm_held
 def test_the_result_is_published_in_the_dataset_s_column_order(
-    massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     # A transport's table with its columns in another order, and one more, still lands.
     rows = static_rows(massive_session, "AAPL")
     with entered(massive_session._core.exec_ctx):
         shuffled = rows.update_view("Extra = 1").move_columns_up(["TimestampInsert", "Price"])
     result = open_test_read(massive_session, returning(shuffled))
-    until(lambda: result.size == 1)
+    until_done(stream_rows)
     assert tickers(result, dh_to_pylist) == ["AAPL"]
     massive_session.release(result)
 
@@ -257,6 +274,39 @@ def test_releasing_a_loading_read_stops_it_and_publishes_nothing(
     until(lambda: not massive_session._core._workers)
 
 
+def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
+    massive_session: dm.MassiveSession, stream_rows: Rows, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Called here, as Deephaven calls it on an update-graph thread, which a coverage tracer
+    # before Python 3.14 does not follow.
+    gate = threading.Event()
+    rows = static_rows(massive_session, "AAPL")
+
+    def run(stop: threading.Event) -> Table:
+        assert gate.wait(TIMEOUT)
+        return rows
+
+    result = open_test_read(massive_session, run)
+    read = the_read(massive_session)
+    (call,) = massive_session._core._workers
+    landed = background_read._RowsLanded(weakref.ref(massive_session._core), call)
+    added = SimpleNamespace(size=lambda: 3)
+    update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
+    with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
+        landed.on_update(cast("Any", update), is_replay=False)
+        landed.on_error(RuntimeError("the table broke"))
+    (row,) = stream_rows()
+    assert (row["State"], row["RowsPublished"]) == ("DONE", 3)
+    assert [r.getMessage() for r in caplog.records] == [
+        f"call {call} done: its 3 rows landed in the result",
+        f"call {call}: its result failed: the table broke",
+    ]
+    gate.set()
+    read.thread.join(TIMEOUT)
+    massive_session.release(result)
+    until(lambda: not massive_session._core._workers)
+
+
 def test_a_derived_table_keeps_the_read_going_after_release(
     massive_session: dm.MassiveSession,
     stream_rows: Rows,
@@ -282,10 +332,9 @@ def test_a_derived_table_keeps_the_read_going_after_release(
     assert row["State"] == "RELEASED"
     gate.set()
     read.thread.join(TIMEOUT)
-    until(lambda: derived[0].size == 1)
+    row = until_done(stream_rows)  # the released result still records its rows landing
+    assert row["RowsPublished"] == 1
     assert tickers(derived[0], dh_to_pylist) == ["AAPL"]
-    (row,) = stream_rows()
-    assert (row["State"], row["RowsPublished"]) == ("DONE", 1)
     derived.clear()
     with entered(massive_session._core.exec_ctx):
         scope.release()
@@ -317,12 +366,14 @@ def test_closing_the_session_fails_a_loading_read(
 
 
 def test_a_close_after_the_rows_landed_changes_nothing(
-    massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     result = open_test_read(massive_session, returning(static_rows(massive_session, "AAPL")))
     read = the_read(massive_session)
     read.thread.join(TIMEOUT)
-    until(lambda: result.size == 1)
+    until_done(stream_rows)
     view = massive_session.streams()
     massive_session.close()
     assert not read.fail(dm.MassiveError("closed"))  # it has its rows
@@ -332,6 +383,42 @@ def test_a_close_after_the_rows_landed_changes_nothing(
     assert row["State"] == "DONE"
     del view
     massive_session.release(result)
+
+
+def test_a_console_close_between_the_publish_and_the_landing_shows_the_read_done(
+    *,
+    massive_session: dm.MassiveSession,
+    console_command: Callable[[Callable[[], None]], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The command holds the update graph's lock, so the rows land only after the close has
+    # released the diagnostics: the close records the published read DONE itself.
+    results: list[Table] = []
+    rows = static_rows(massive_session, "AAPL")
+    views = [massive_session.streams()]  # cleared at the end, which drops the view
+
+    def command() -> None:
+        results.append(open_test_read(massive_session, returning(rows)))
+        read = the_read(massive_session)
+        read.thread.join(TIMEOUT)  # it published; the rows wait for the next cycle
+        massive_session.close()
+        assert not read.fail(dm.MassiveError("closed"))  # it has its rows
+
+    console_command(command)
+
+    def read_rows() -> list[tuple[str, int, str | None]]:
+        # The view gets its rows once the command has released the lock.
+        return [
+            (r["State"], r["RowsPublished"], r["Error"])
+            for r in dh_to_pylist(views[0])
+            if r["Kind"] == "read"
+        ]
+
+    until(lambda: read_rows() == [("DONE", 1, None)])
+    assert not failed(results[0])
+    assert tickers(results[0], dh_to_pylist) == ["AAPL"]
+    views.clear()
+    massive_session.release(results[0])
 
 
 def test_a_read_racing_close_after_registering_never_starts(
@@ -379,21 +466,30 @@ def test_a_failed_registration_releases_everything(
 
 
 def test_a_read_opened_in_a_console_command_lands_after_it(
+    *,
     massive_session: dm.MassiveSession,
     console_command: Callable[[Callable[[], None]], None],
+    stream_rows: Rows,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     # The command holds the update graph's lock: the read returns at once, and its rows land
-    # in the first cycle after the command ends.
+    # in the first cycle after the command ends. Until then the read is not DONE, although
+    # its thread has published: DONE means the rows are in the table.
     results: list[Table] = []
     rows = static_rows(massive_session, "AAPL")
 
     def command() -> None:
         results.append(open_test_read(massive_session, returning(rows)))
-        the_read(massive_session).thread.join(TIMEOUT)  # it published without the lock
+        read = the_read(massive_session)
+        read.thread.join(TIMEOUT)  # it published without the lock
         assert results[0].size == 0
+        (state,) = massive_session._core._workers.values()
+        assert state.row.state == StreamState.LOADING
 
     console_command(command)
-    until(lambda: results[0].size == 1)
+    row = until_done(stream_rows)
+    assert row["RowsPublished"] == 1
+    assert tickers(results[0], dh_to_pylist) == ["AAPL"]
     massive_session.release(results[0])
 
 
