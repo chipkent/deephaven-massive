@@ -335,6 +335,15 @@ class DatasetSpec:
             (a ticker not yet updated). Empty by default.
         per_symbol: True when the endpoint takes one symbol per request, so a symbol list fans
             out to one request per symbol.
+        symbols_overlap: True when one row can answer several symbols' requests, such as a
+            news article that mentions two tickers of a watchlist, so a fan-out over several
+            symbols can return it more than once. It has two effects: a `fetch()` or `poll()`
+            cycle keeps the first copy of each row whose `poll_keys` (and only those columns)
+            are all set, and `limit` caps each request's rows rather than the total, so one
+            symbol's rows never crowd out another's. Such a dataset needs `poll_keys` of scalar
+            columns, since rows are grouped by their values, and no `nullable_poll_keys`.
+            `fetch()` keeps every row whose key is null; a `poll()` table fails on one. False
+            by default.
         fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
             one asset class, where it differs from `fetch_path`, such as
             `{AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"}`; the symbols of every
@@ -392,6 +401,7 @@ class DatasetSpec:
     nullable_poll_keys: Mapping[str, str] = field(default_factory=dict)
     revision_keys: tuple[str, ...] = ()
     per_symbol: bool = False
+    symbols_overlap: bool = False
     fetch_paths_by_class: Mapping[AssetClass, str] = field(default_factory=dict)
     symbols_per_request: int | None = None
     page_size: int | None = None
@@ -415,8 +425,9 @@ class DatasetSpec:
                 a REST path's rows, declares an `end` key outside a bars dataset or a `date` key on
                 a dataset without row times, or, for a daily summary, leaves a source without its
                 `date` key; `poll_keys` holds the `Symbol` of an optional symbol key, is empty on an
-                `APPEND` dataset, is empty together with `revision_keys`, or shares a column with
-                `revision_keys`;
+                `APPEND` dataset or one whose symbols overlap, is empty together with
+                `revision_keys`, or shares a column with `revision_keys`; a dataset whose symbols
+                overlap has `nullable_poll_keys`;
                 `nullable_poll_keys` names a column that is no poll key, or gives an empty
                 reason; a flat-file prefix does not declare its `symbol` and `time` keys from
                 its own columns (and, for futures, its `date` key, the session against which
@@ -648,9 +659,11 @@ class DatasetSpec:
 
         Raises:
             ValueError: If `poll_keys` holds the `Symbol` of an optional symbol key (a row
-                without one would have a null poll key); is empty on an `APPEND` dataset, or
-                together with `revision_keys`; shares a column with `revision_keys`; or if
-                `nullable_poll_keys` names a column that is no poll key, or gives no reason.
+                without one would have a null poll key); is empty on an `APPEND` dataset, on
+                one whose symbols overlap (its repeated rows are found by them), or together
+                with `revision_keys`; shares a column with `revision_keys`; or if
+                `nullable_poll_keys` names a column that is no poll key, gives no reason, or
+                is set on a dataset whose symbols overlap.
         """
         optional = any(
             declared.symbol is not None and not declared.symbol.required
@@ -664,6 +677,16 @@ class DatasetSpec:
             )
         if not self.poll_keys and self.poll_mode is PollMode.APPEND:
             raise ValueError(f"{self.name}: an APPEND dataset needs poll_keys")
+        if self.symbols_overlap and not self.poll_keys:
+            raise ValueError(
+                f"{self.name}: a dataset whose symbols overlap needs poll_keys, which find the "
+                "rows several symbols return"
+            )
+        if self.symbols_overlap and self.nullable_poll_keys:
+            raise ValueError(
+                f"{self.name}: a dataset whose symbols overlap cannot have nullable_poll_keys: "
+                "a null key cannot tell two rows apart"
+            )
         if not (*self.poll_keys, *self.revision_keys):
             raise ValueError(
                 f"{self.name}: an explicit APPEND poll() needs a row identity: declare "
@@ -948,7 +971,9 @@ def _sent_value(
     if kind is ParamKind.LIST:
         return _list_items(spec, key, value, rest_path=rest_path, name=name)
     if isinstance(value, str) and kind in _TIME_KINDS:
-        value = parse_date_like(value, key)
+        # An upper bound (`.lt`, `.lte`) rounds text finer than a microsecond up, so no row
+        # is lost; every other form rounds down.
+        value = parse_date_like(value, key, upper=name.rpartition(".")[2] in ("lt", "lte"))
     if (
         isinstance(value, date)
         and not isinstance(value, datetime)

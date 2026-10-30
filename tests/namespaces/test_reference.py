@@ -1,6 +1,7 @@
 """Tests for the `m.reference` namespace."""
 
 import json
+import logging
 import re
 import threading
 from collections.abc import Callable, Iterator
@@ -8,12 +9,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table
+from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
 
@@ -23,6 +24,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType, required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix
+from deephaven_massive._ingest import poll
 from deephaven_massive._ingest.poll import Pollers, open_poll
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import reference
@@ -226,9 +228,9 @@ def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
     # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    with pytest.raises(ValueError, match="as_of is a calendar date; pass a date"):
+    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
         ref.ticker_details("AAPL", as_of=early)
-    with pytest.raises(ValueError, match="as_of is a calendar date; pass a date"):
+    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
         ref.tickers(as_of=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)
@@ -280,15 +282,18 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
     assert ref.news(["AAPL"])._request == Request(symbols=("AAPL",))
 
 
-def test_news_takes_one_symbol(massive_session: dm.MassiveSession) -> None:
-    # The endpoint's `ticker` parameter is single-valued, and it has no `ticker.any_of`.
+def test_news_takes_a_watchlist(massive_session: dm.MassiveSession) -> None:
+    # The endpoint's `ticker` parameter is single-valued and it has no `ticker.any_of`, so a
+    # watchlist is one request per ticker.
     news = cast("RestPath", source(R, "/v2/reference/news"))
     assert "ticker.any_of" not in {p.name for p in news.params}
+    assert reference.NEWS.symbols_overlap
     ref: Any = massive_session.reference
-    with pytest.raises(ValueError, match=r"takes one symbol: .*not \['AAPL', 'MSFT'\]"):
-        ref.news(symbols=["MSFT", "AAPL"])
-    with pytest.raises(TypeError, match="takes one symbol, not a table"):
-        ref.news(symbols=new_table([string_col("Symbol", ["AAPL"])]))
+    assert ref.news(symbols=["MSFT", "AAPL"])._request == Request(symbols=("AAPL", "MSFT"))
+    table = new_table([string_col("Symbol", ["AAPL"])])
+    assert ref.news(symbols=table)._request == Request(symbols=SymbolTable(table))
+    with pytest.raises(ValueError, match="no symbols"):
+        ref.news(symbols=[])
 
 
 def test_lookup_queries(massive_session: dm.MassiveSession) -> None:
@@ -377,7 +382,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         ref.tickers(active=None)
     with pytest.raises(ValueError, match="needs a timezone"):
         ref.tickers(as_of="2025-01-02T09:30")
-    with pytest.raises(ValueError, match="is not an ISO-8601 date"):
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         ref.ticker_details("AAPL", as_of="soon")
     with pytest.raises(ValueError, match="types is empty"):
         ref.ticker_events("AAPL", types=[])
@@ -644,6 +649,94 @@ def test_news_fetch(
     assert "Symbol" not in out[0]
     assert out[0]["Tickers"] == ["UBS"]
     assert out[0]["PublishedUtc"] == datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
+
+
+def _article(article_id: str, published: str, *tickers: str) -> dict[str, object]:
+    return {
+        "id": article_id,
+        "published_utc": published,
+        "tickers": list(tickers),
+        "title": f"Article {article_id}",
+        "article_url": f"https://example.com/{article_id}",
+        "publisher": {"name": "Example"},
+        "keywords": ["markets"],
+    }
+
+
+_NEWS = "/v2/reference/news"
+
+
+def _news_target(ticker: str, **params: object) -> str:
+    # The path and query the client sends: its parameters sorted by name, percent-encoded.
+    query = {
+        "limit": 1000,
+        "ticker": ticker,
+        **{k.replace("_gte", ".gte"): v for k, v in params.items()},
+    }
+    return f"{_NEWS}?{urlencode(sorted(query.items()))}"
+
+
+def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToRows,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest")
+    shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
+    # An article without an id cannot be told from another, so neither copy is dropped.
+    unnamed = {
+        k: v for k, v in _article("", "2024-06-24T15:00:00Z", "AAPL", "MSFT").items() if k != "id"
+    }
+    fake_rest.reply(
+        _news_target("AAPL", limit=3),
+        Reply(envelope([shared, _article("a1", "2024-06-24T17:00:00Z", "AAPL"), unnamed])),
+    )
+    fake_rest.reply(
+        _news_target("MSFT", limit=3),
+        Reply(envelope([shared, _article("m1", "2024-06-24T16:00:00Z", "MSFT"), unnamed])),
+    )
+    out = dh_to_pylist(rest_session.reference.news(symbols=["MSFT", "AAPL"], limit=3).fetch())
+    assert sorted(r.target for r in fake_rest.requests) == [
+        _news_target("AAPL", limit=3),
+        _news_target("MSFT", limit=3),
+    ]
+    # Ticker by ticker, in ticker order; the shared article once, where AAPL's request had it,
+    # and `limit` caps each ticker's articles, not the table.
+    assert [row["Id"] for row in out] == ["both", "a1", None, "m1", None]
+    assert (
+        "reference.news: kept 5 of 6 rows from 2 requests, each row once by Id; limit=3 per "
+        "request" in caplog.messages
+    )
+
+
+def test_news_polls_follow_a_live_watchlist(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToRows,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock(manual=True)
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
+    since = "2024-06-24T04:00:00Z"
+    fake_rest.reply(_news_target("AAPL", published_utc_gte=since), Reply(envelope([shared])))
+    fake_rest.reply(
+        _news_target("MSFT", published_utc_gte=since),
+        Reply(envelope([shared, _article("m1", "2024-06-24T16:00:00Z", "MSFT")])),
+    )
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    table = rest_session.reference.news(symbols=watch, start="2024-06-24").poll(60)
+    _until(lambda: [r["Id"] for r in dh_to_pylist(table)] == ["both"])
+    clock.wait_for_sleepers(1)
+    watch.add(new_table([string_col("Symbol", ["MSFT"])]))
+    clock.advance(60)
+    # The next cycle reads the added ticker too; the article both tickers return stays one row.
+    _until(lambda: sorted(r["Id"] for r in dh_to_pylist(table)) == ["both", "m1"])
+    rest_session.release(table)
 
 
 def test_a_news_page_without_keywords_keeps_every_column(

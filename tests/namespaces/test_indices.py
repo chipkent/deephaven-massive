@@ -460,14 +460,14 @@ def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
 
 def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     for moment in (datetime(2025, 6, 2, 15, 30, tzinfo=UTC), "2025-06-03T02:00:00+00:00"):
-        with pytest.raises(ValueError, match=r"date is a calendar date; pass a date"):
+        with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
             m.indices.daily_open_close("I:SPX", moment)
     naive = datetime(2025, 6, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match="needs a timezone"):
         m.indices.daily_open_close("I:SPX", naive)
-    with pytest.raises(ValueError, match="is not an ISO-8601 date"):
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         m.indices.daily_open_close("I:SPX", "June 2")
-    with pytest.raises(TypeError, match="date must be a str, date, or datetime"):
+    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
         m.indices.daily_open_close("I:SPX", cast("str", 20250602))
 
 

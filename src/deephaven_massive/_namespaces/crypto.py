@@ -22,7 +22,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import (
     AssetClass,
@@ -34,7 +33,12 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import SNAPSHOT_SYMBOLS_PER_REQUEST, Namespace, build_query
+from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
+    Namespace,
+    build_query,
+    day_argument,
+)
 
 if TYPE_CHECKING:
     from deephaven_massive._query import (
@@ -721,7 +725,7 @@ class _Crypto(Namespace):
         side = _require_enum(direction, Direction, "direction")
         return cast("Query", build_query(self._core, MOVERS, params={"direction": side}))
 
-    @raises_through(build_query, calendar_day)
+    @raises_through(build_query, day_argument)
     def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
@@ -751,8 +755,9 @@ class _Crypto(Namespace):
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, or a Deephaven table with a `Symbol` column (read once per
                 `poll()` cycle).
-            date: The UTC day, as `"YYYY-MM-DD"` or a `date`. It is a calendar date, so a
-                `datetime` raises `ValueError`.
+            date: The UTC day, as `"YYYY-MM-DD"`, a `date`, Deephaven date text such as
+                `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`. It is a
+                calendar date, so a `datetime` or an instant raises `ValueError`.
 
         Returns:
             The query. No request is made until a verb is called.
@@ -782,6 +787,6 @@ class _Crypto(Namespace):
                     "use m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
                     "every ticker's bar of that day"
                 ),
-                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

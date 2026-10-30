@@ -145,15 +145,42 @@ def _raised_directly(function: Callable[..., object]) -> frozenset[str]:
     return frozenset(found)
 
 
-def _raises_problems(function: Callable[..., object]) -> list[str]:
+def _public_name(error: str, helper: Callable[..., object]) -> str:
+    """Name the exception a public function documents for one its helper lists.
+
+    A helper may list a private exception class, such as `TimeTextError`, a `ValueError` that
+    lets the library tell one bad input from another. A public docstring names the nearest
+    class a user can catch: a builtin, or one `dm` exports.
+
+    Returns:
+        The name of that class; `error` itself when it names no class the helper can see.
+    """
+    raised = inspect.unwrap(helper).__globals__.get(error, getattr(builtins, error, None))
+    if not isinstance(raised, type):
+        return error
+    # Every exception class derives from a builtin one, so the search always ends.
+    return next(
+        cls.__name__
+        for cls in raised.__mro__
+        if hasattr(builtins, cls.__name__) or cls.__name__ in dm.__all__
+    )
+
+
+def _raises_problems(function: Callable[..., object], *, public: bool = False) -> list[str]:
     """Say how a function's `Raises:` section differs from what it and its helpers raise.
+
+    Args:
+        function: The function to check.
+        public: True for a function of the public API, whose section names only exceptions a
+            user can catch (`_public_name`).
 
     Returns:
         One line per difference; empty when the section is exact.
     """
     expected = set(_raised_directly(function))
     for helper in getattr(function, RAISES_THROUGH, ()):
-        expected |= _documented(helper)
+        listed = _documented(helper)
+        expected |= {_public_name(e, helper) for e in listed} if public else listed
     documented = _documented(function)
     name = function.__qualname__
     return [
@@ -241,6 +268,7 @@ def _checked_functions() -> dict[str, Callable[..., object]]:
 
 _RAISE_NOTHING = frozenset(
     {
+        "deephaven_massive._dataset_list.datasets",
         "deephaven_massive._debug_log.disable_debug_logging",
         "deephaven_massive._namespaces.reference._Reference.market_holidays",
         "deephaven_massive._namespaces.reference._Reference.market_status",
@@ -257,7 +285,12 @@ def test_every_public_function_documents_its_errors() -> None:
 
 
 def test_every_raises_section_lists_exactly_what_its_function_and_helpers_raise() -> None:
-    problems = [p for f in _checked_functions().values() for p in _raises_problems(f)]
+    public = _public_api()
+    problems = [
+        p
+        for name, f in _checked_functions().items()
+        for p in _raises_problems(f, public=name in public)
+    ]
     assert not problems, "\n".join(problems)
 
 
@@ -350,3 +383,31 @@ def test_the_walk_never_enters_the_wire_package() -> None:
     names = list(_library_modules(dm.__path__, f"{dm.__name__}."))
     assert f"{dm.__name__}._namespaces.stocks" in names
     assert not [name for name in names if name.startswith(_WIRE_PACKAGE)]
+
+
+def test_a_public_function_names_the_public_base_of_a_private_helper_error() -> None:
+    def helper() -> None:
+        """Raise a private error.
+
+        Raises:
+            _PrivateValueError: Always.
+        """
+
+    def public() -> None:
+        """Pass a helper's private error through.
+
+        Raises:
+            ValueError: Always, from the helper.
+        """
+
+    helper.__globals__["_PrivateValueError"] = type("_PrivateValueError", (ValueError,), {})
+    raises_through(helper)(public)
+    try:
+        assert _raises_problems(public, public=True) == []
+        name = public.__qualname__
+        assert _raises_problems(public) == [
+            f"{name} does not list _PrivateValueError, which it or a helper raises",
+            f"{name} lists ValueError, which neither it nor a declared helper raises",
+        ]
+    finally:
+        del helper.__globals__["_PrivateValueError"]

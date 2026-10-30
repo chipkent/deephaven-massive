@@ -157,7 +157,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 40 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 41 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -174,6 +174,10 @@ dm.EntitlementError        # subclass of MassiveError: the plan lacks the datase
 
 # Sentinel
 dm.ALL                     # every symbol on the stream, in the flat file, or in the snapshot
+
+# The dataset list
+dm.datasets                # () -> Table: one static row per dataset (section 7.7); no session
+                           # or API key needed
 
 # Symbol converters: other spellings to Massive's exact REST ticker (section 10)
 dm.canonical_symbol              # (text, asset_class, *,
@@ -223,10 +227,11 @@ dm.disable_debug_logging   # disable_debug_logging(): turns off what either swit
 dm.__version__             # from importlib.metadata
 ```
 
-The four query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`) are
-importable from the private module `deephaven_massive._query` for type annotations only. Users never construct them. The type
-aliases `Symbols`, `DateLike`, and `FilterValue` are importable from `deephaven_massive._types`
-for the same purpose. Every query also has `columns()`
+The four query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`) and the
+type aliases `Symbols`, `DateLike`, and `FilterValue` are importable from the public module
+`deephaven_massive.queries`, for type annotations; users never construct a query. The package's
+`__init__.py` never imports it, so `import deephaven_massive` stays cheap, and it is not one of
+the names above: annotating a helper of one's own should not need a private import. Every query also has `columns()`
 ([section 7](#7-query-classes-and-verbs)), a method rather than an export, so the list above
 does not change.
 
@@ -247,8 +252,10 @@ contains a `Literal` of strings ([section 11](#11-enums-and-types)).
 
 ### 4.1 Source modules
 
-Every module below `deephaven_massive/` other than `__init__.py` is private. The rule: the
-first path component below the package has a leading underscore. A module inside a private
+Every module below `deephaven_massive/` other than `__init__.py` and `queries.py` is private.
+The rule: the first path component below the package has a leading underscore. `queries.py`,
+the query types for annotations ([section 3](#3-exports)), is the one public module beside the
+package itself; a new one needs owner approval. A module inside a private
 subpackage needs no underscore of its own.
 
 Inside the private modules, a name used by other modules is bare (`QueryBase`, `SessionCore`,
@@ -296,7 +303,10 @@ _session.py              MassiveSession: builds the catalog, the core, and the s
                          line; NAMESPACE_MODULES and CATALOG (section 4.3)
 _query.py                the four query classes and their verbs, through the core's ports
                          (section 7); query_class and bar_query_class, which choose a dataset's
-                         query class
+                         query class; verbs(), the verbs a dataset serves
+_dataset_list.py         dm.datasets(): the static table of every dataset in CATALOG (section 7.7)
+queries.py               public: the four query classes and Symbols, DateLike, FilterValue, for
+                         type annotations (section 3)
 _namespaces/
   __init__.py            docstring only
   query_building.py      Namespace, the shared dataset factory (build_query), list_query,
@@ -363,6 +373,8 @@ _tables/                 the Deephaven side: tables, liveness, library threads
   stream.py              streams, flush thread, fan-out, bound-failure routing (section 14)
   poll.py                poll(): Poller, Pollers, open_poll; REPLACE/UPSERT/APPEND, fan-out, data
                          failures -> publish_failure; SymbolRowError
+  time_text.py           deephaven_time_text(): Deephaven's own date and time text, read by
+                         Deephaven's parser for the date arguments (section 11)
   watchlist.py           read_symbols(), SymbolWatch: the check and watch of symbol tables
                          (section 10)
   symbols.py             canonicalize_symbols(), the table form of the symbol converters
@@ -539,7 +551,7 @@ under `if TYPE_CHECKING:` counts: moving an upward import under it does not make
 | 2 | datasets | `_datasets/` | Dataset semantics: no I/O, no threads, no Deephaven calls, and `deephaven` imported only for type checking. So any of it is safe to call under `registry_lock` and on any thread. |
 | 3 | tables | `_tables/` | The Deephaven side: tables, liveness, the session core, publishers, library threads. It never holds a wire client and imports no ingest code, so it is tested with no fake server. |
 | 4 | ingest | `_ingest/` | The only holder of wire clients: `SessionClients` owns them per session. |
-| 5 | API | the root `__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/` | What users touch. `_session.py` is the composition root. `_debug_log` imports no Deephaven. |
+| 5 | API | the root `__init__`, `_dataset_list`, `_debug_log`, `_session`, `_query`, the public `queries`, and `_namespaces/` | What users touch. `_session.py` is the composition root. `_debug_log` imports no Deephaven. |
 
 **Composition.** `_session.py` is the one module that sees every layer. It imports every
 namespace module statically and names each once, in `NAMESPACE_MODULES` (a test compares the
@@ -1652,12 +1664,33 @@ day's bar;
 `snapshots(...)`, and `history()` of a dataset with a time axis names its `start=` and `end=`
 arguments. Any other missing attribute raises Python's plain `AttributeError`.
 
+### 7.7 The dataset list
+
+`dm.datasets()` returns a static table with one row per dataset of `CATALOG`, in declaration
+order, so a user can browse and filter what exists from the console before any session or API
+key: it reads only the catalog and makes no network call. Its columns, each with a tooltip
+description:
+
+| Column | Type | Content |
+|---|---|---|
+| `Dataset` | String | The catalog name, such as `stocks.trades`. |
+| `Call` | String | How a session `m` reaches it (`m.stocks.trades`; `m.snapshots` for the unified snapshot). |
+| `Summary` | String | `DatasetSpec.summary`, the first sentence of the method's docstring. |
+| `Verbs` | String[] | The verbs its queries have, in the order `fetch`, `poll`, `blink`, `append_only`, `ring`, `last_by`, `history`; a `bars` dataset lists the stream verbs, which only its streaming timespans have. |
+| `Transports` | String[] | The transports that serve it, spelled as `columns()` spells them: `REST`, `flat files`, `WebSocket`. |
+| `Documentation` | String | The web address of its section of the column reference. |
+
+`Verbs` and `Transports` are arrays, so a filter tests membership:
+``dm.datasets().where("Arrays.asList(Verbs).contains(`blink`)")``. The function is a module-level
+name rather than a session method because the catalog needs no session.
+
 ## 8. Namespace tree
 
 Notation:
 
 - `Symbols = str | Sequence[str] | Table | _All` ([section 10](#10-symbols-and-all)).
-- `DateLike = str | date | datetime` ([section 11](#11-enums-and-types)).
+- `DateLike = str | date | datetime | numpy.datetime64`, plus Deephaven's Java `Instant`,
+  `ZonedDateTime`, and `LocalDate` ([section 11](#11-enums-and-types)).
 - `…F` is the trailing keyword-only block
   `sort: str | None = None, order: Order | None = None, limit: int | None = None, filters: Mapping[str, FilterValue] | None = None`.
   The block offers only the ordering the dataset's paths accept, so a signature never offers
@@ -1693,7 +1726,9 @@ Notation:
   `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
   class in each table below follows from the dataset's transports
   ([section 7](#7-query-classes-and-verbs)).
-- `limit` is a total-row cap. Page size is internal. Every docstring says so. The cap is
+- `limit` is a total-row cap, except on a dataset whose symbols overlap
+  (`DatasetSpec.symbols_overlap`, `reference.news`): there it caps each symbol's request, so
+  one ticker's rows never crowd out another's. Page size is internal. Every docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
   when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
@@ -1868,7 +1903,7 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` is one symbol: a list of several raises `ValueError` (build one query per symbol) and a `Table` raises `TypeError` |
+| `news(symbols=None, *, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`); in `fetch()` an article without an `Id` is kept, never merged, while a `poll()` table, keyed by `Id`, fails on one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
@@ -2437,13 +2472,47 @@ declares its one WebSocket channel and flat-file prefix (a bars dataset keys the
 `Transport {REST, WS, FLAT_FILES}` is defined once, in `_massive.spec.types`, and used on both
 sides of the boundary.
 
-**Dates.** Parameters accept an ISO-8601 `str`, a `date`, or a timezone-aware `datetime`. A
-naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
+**Dates.** Parameters accept an ISO-8601 `str`, any date or time text Deephaven's own parser
+reads (such as `"2025-03-03T09:30 America/New_York"` or `"2025-03-03T09:30:00 ET"`), a `date`,
+a timezone-aware `datetime` (a `pandas.Timestamp` among them, its nanoseconds kept), the Java
+time values Deephaven hands its users (`java.time.Instant` and `ZonedDateTime`, which are
+instants, and `LocalDate`, a date: what `dh_now()` and `to_j_local_date()` return, and what
+`Instant` and `LocalDate` cells give when read as Java values, through `iter_dict` for one;
+`dh_today()` returns ISO text), or a `numpy.datetime64` (a date at day precision; otherwise an
+instant in UTC, as Deephaven reads it and as `to_numpy` gives an `Instant` column, which logs
+at DEBUG). This is the set Deephaven's own `deephaven.time` converters take, less a bare
+integer, which Deephaven reads as epoch nanoseconds and which would silently misread a date
+written as `20250303`, and text Deephaven reads only as such a count. Internal code may still
+pass an integer it has already decoded, such as epoch nanoseconds, where an internal API takes
+one; the public arguments refuse it. ISO-8601 text is read by `_datasets/dates.py`
+(`parse_date_like`): first as a date in any ISO form (`"2025-03-03"`, `"20250303"`,
+`"2025-W10-1"`), then as a date and time. Other text is read by Deephaven's parser at the API
+layer (`_tables/time_text.py`, `deephaven_time_text`): first as a date (`"2025-3-3"`), so
+date-only text stays a calendar date, then as a date and time with a zone or offset, never as an
+epoch count; the Java value it gives then goes down like any other. Deephaven text that names a
+day and a zone but no time (`"2025-03-03 ET"`), which Deephaven reads as that midnight, is
+refused, since as an `end` it would drop the day. Text neither reads raises one `ValueError`
+naming both forms, with Deephaven's own reason (such as `No matching time zone: EST`) and the
+zones it reads. `parse_date_like` turns each value into a `date` or an aware `datetime`,
+outside the wire package; it recognizes a Java value by its jpy class name, so it imports
+neither Deephaven nor jpy. An instant with nanoseconds below the microsecond, from ISO or
+Deephaven text, Java, numpy, or pandas, is moved outward to a microsecond: Deephaven's instants
+carry nanoseconds the user never chose (`dh_now()` on Linux, a SIP `Timestamp`), and text
+follows the same rule. A lower bound (`start`) is rounded down, so it still includes the row an instant
+came from; an upper bound (`end`) is rounded up, so the half-open range may include up to
+999 ns more but never loses a row, and an `end` past the last microsecond of year 9999 becomes
+`datetime.max`. Each rounding logs at DEBUG with its result and the amount moved. A
+`numpy.datetime64` of a week, month, or year raises `ValueError` naming a day instead: as an
+`end` it would shrink the range to its first day, and a numpy week starts on a Thursday. A
+`NaT` (numpy or pandas) and a time outside years 1 to 9999 raise `ValueError`, with the value
+as the caller passed it. Type checkers see Deephaven's Java values as `Any`, so `DateLike` names
+only `numpy.datetime64` beside the Python types. A naive `datetime` or `pandas.Timestamp`, or an
+ISO string with a time but no offset, raises a `ValueError` that names
 the parameter, the value, and the fix, for example `start=datetime.datetime(2025, 1, 2, 9, 30)
 needs a timezone: pass an aware datetime or a date`. The same rule and message apply to a naive
-`datetime` passed as a `filters` value or a typed parameter. ISO text with more than six
-fractional digits of a second raises `ValueError` too: a `datetime` holds microseconds, and
-cutting the rest would move the time. A range (`history()` and the `start`/`end` of a `…T`
+`datetime` passed as a `filters` value or a typed parameter. A `filters` value given as ISO text
+finer than a microsecond is rounded the same way, up for an upper bound (`.lt`, `.lte`) and
+down otherwise. A range (`history()` and the `start`/`end` of a `…T`
 dataset) takes two bounds of one kind: two dates are whole days, two datetimes exact instants,
 and a date mixed with a datetime raises `ValueError`
 ([section 12](#12-timestamp-units-and-day-boundaries)).
@@ -6544,6 +6613,64 @@ document already reflects them.
     behaviour instead of moving from "loading" to "complete"; `m.streams()` shows the change
     ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released),
     [section 7](#7-query-classes-and-verbs), [section 17](#17-diagnostics)).
+69. **More inputs and a list of datasets** (2026-10-30; the owner approved each item in the
+    API review and decided the three questions it raised, marked *owner*; the coordinator
+    decided the other details after an adversarial review by a Deephaven quant user and a
+    library maintainer, and the owner may object to any).
+    - Date and time arguments (`history()`'s bounds and every `start=`, `end=`, `as_of=`, and
+      single day) take the natural native inputs, the set Deephaven's own `deephaven.time`
+      converters take (*owner*): Java `Instant`, `ZonedDateTime`, and `LocalDate`, a
+      `numpy.datetime64`, and a `pandas.Timestamp`, beside text, `date`, and `datetime`. A
+      Deephaven library takes the values Deephaven hands its users, rather than making them
+      format text in a second grammar. The conversion lives in `_datasets/dates.py`, outside
+      the wire package.
+    - Integers are refused in every public date argument (*owner*): Deephaven reads one as
+      epoch nanoseconds, which would silently misread a date written as `20250303`. Internal
+      APIs may pass integers, such as epoch nanoseconds, directly as an optimization; nothing
+      is added for that, and nothing blocks it.
+    - Deephaven's own date and time text is accepted (*owner*), read by Deephaven's parser
+      rather than a second hand-written grammar: any text `to_j_local_date` or `to_j_zdt`
+      reads, such as `"2025-03-03T09:30 America/New_York"`. ISO-8601 is read exactly as
+      before, and date-only text stays a calendar date. The API layer converts the text
+      (`_tables/time_text.py`), since the dataset layer imports Deephaven only for type
+      checking; it is called where the arguments arrive, which is simpler than passing a
+      parser object down through the dataset layer. Deephaven's instant parser is not used, so
+      bare digits are never read as an epoch count. Text neither form reads raises one error
+      naming both.
+    - A `numpy.datetime64` finer than a day is an instant in UTC, as Deephaven reads it
+      (*owner*); a day is a date. A week, month, or year is refused, naming a day: as an `end`
+      it would shrink the range to its first day, and a numpy week starts on a Thursday.
+    - A `pandas.Timestamp` without a timezone is refused like a naive `datetime`: read as UTC,
+      a New York user's 09:30 would silently become 04:30. A `numpy.datetime64` has no zone
+      slot at all, so it stays UTC.
+    - An instant with nanoseconds below the microsecond (Java, numpy, or pandas) is moved
+      outward to a microsecond, `start` down and `end` up, so no row is lost and `end` may
+      include up to 999 ns more (*owner*): Deephaven's instants carry nanoseconds the user
+      never chose. An `end` past the last microsecond of year 9999 becomes `datetime.max`.
+      ISO-8601 text finer than a microsecond, refused before, is rounded the same way, so text
+      and values follow one rule (coordinator, following the owner's wish for
+      Deephaven-like inputs).
+    - Every ISO-8601 date form is a date (`"20250303"`, `"2025-W10-1"`), as Python reads it,
+      and Deephaven's own date text (`"2025-3-3"`) too. Deephaven text that names a day and a
+      zone but no time (`"2025-03-03 ET"`) is refused: Deephaven reads it as that midnight,
+      so as an `end` it would drop the day. A refusal keeps Deephaven's own reason and names
+      the zones it reads (coordinator).
+      `filters=` values are left to the change that settles their type.
+    - `tests/test_layout.py` lists the public `queries` module and the API-layer
+      `_dataset_list` module (*owner*).
+    - `dm.datasets()`, a static table of every dataset with its summary, verbs, transports,
+      and documentation link, at module level, since the catalog needs no key or session
+      ([section 7.7](#77-the-dataset-list)).
+    - The query classes and the argument aliases are public, in `deephaven_massive.queries`,
+      which the package never imports: annotating a helper should not need a private import.
+      The module also exports `Symbols`, `DateLike`, and `FilterValue`, since a helper that
+      takes a query usually takes its arguments too.
+    - `m.reference.news` follows a watchlist: `symbols` stays plural (one ticker, a list, or a
+      live symbol table), the library sends one request per ticker and keeps an article
+      several tickers return once, by `Id`. `limit`, `sort`, and `order` apply per ticker, so
+      one ticker's articles never crowd out another's. A singular `symbol` would have removed
+      watchlist support, which must stay (decision 4).
+    ([section 3](#3-exports), [section 8.7](#87-mreference), [section 11](#11-enums-and-types)).
 
 ## 23. Open verification items
 

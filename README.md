@@ -55,7 +55,8 @@ verb picks the table you get:
 | `history(start, end)` | past rows, read once from REST or from Massive's flat files |
 
 A verb a dataset cannot serve does not exist on it, so tab completion in the console shows what
-each dataset can do. `help(dm)` lists the whole API.
+each dataset can do. `dm.datasets()` returns a table of every dataset, with what it holds and
+its verbs, and works before you set a key. `help(dm)` lists the whole API.
 
 ## Read next
 

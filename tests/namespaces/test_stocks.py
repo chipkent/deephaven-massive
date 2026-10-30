@@ -22,12 +22,14 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import numpy as np
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
+from deephaven.time import to_j_local_date
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
@@ -524,6 +526,10 @@ def test_movers_take_a_direction(massive_session: dm.MassiveSession) -> None:
     [
         ("2025-06-06", date(2025, 6, 6)),
         (date(2025, 6, 6), date(2025, 6, 6)),
+        # The day values a Deephaven console hands its user: a Java LocalDate, a numpy day.
+        (to_j_local_date("2025-06-06"), date(2025, 6, 6)),
+        (np.datetime64("2025-06-06"), date(2025, 6, 6)),
+        ("2025-6-6", date(2025, 6, 6)),  # Deephaven's own date text
     ],
 )
 def test_daily_open_close_names_a_new_york_day(
@@ -542,9 +548,17 @@ def test_daily_open_close_rejects_all_and_bad_days(massive_session: dm.MassiveSe
         open_close(dm.ALL, "2025-06-06")
     with pytest.raises(ValueError, match="needs a timezone"):
         open_close("AAPL", datetime(2025, 6, 6, 9, 30))  # noqa: DTZ001 - a naive time on purpose
-    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+    with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
         open_close("AAPL", datetime(2025, 6, 7, 1, tzinfo=UTC))
-    with pytest.raises(TypeError, match="date must be a str, date, or datetime"):
+    # Deephaven's own text reaches the day too, and a time there is no day either; the message
+    # shows the text as passed.
+    with pytest.raises(ValueError, match=r"date='2025-06-06T09:30 America/New_York' is a calendar"):
+        open_close("AAPL", "2025-06-06T09:30 America/New_York")
+    with pytest.raises(ValueError, match=r"names a day and a zone but no time"):
+        open_close("AAPL", "2025-06-06 ET")
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time"):
+        open_close("AAPL", "June 6")
+    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
         open_close("AAPL", cast("Any", 20250606))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         open_close("AAPL", "2025-06-06", adjusted=cast("Any", None))

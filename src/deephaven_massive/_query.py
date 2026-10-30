@@ -40,8 +40,8 @@ completes (`open_read` in `_tables/background_read.py`); that thread logs the ca
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
-The classes are importable from this private module for type annotations only; users never
-construct them.
+Users import the classes for type annotations from the public module
+`deephaven_massive.queries`, and never construct them.
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._tables.transports import FlatFileTransport, RestTransport, StreamTransport
 from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
 from deephaven_massive._types import override
@@ -104,6 +105,7 @@ __all__ = [
     "QueryBase",
     "StreamHistoryQuery",
     "StreamQuery",
+    "verbs",
 ]
 
 logger = logging.getLogger(__name__)
@@ -216,6 +218,23 @@ def _serves(spec: DatasetSpec, verb: str) -> bool:
     if verb == "history":
         return spec.has_history
     return spec.has_fetch
+
+
+def verbs(spec: DatasetSpec) -> tuple[str, ...]:
+    """Return the verbs a dataset's queries can have, in the order `_VERBS` lists them.
+
+    A `bars` dataset streams at some timespans only, and its stream verbs are listed all the
+    same; the verbs of one `bars()` call follow its timespan (`bar_query_class` in
+    `_namespaces/base.py`). `dm.datasets()` shows the result.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The verbs' names, such as `("fetch", "poll")` or `("blink", "append_only", "ring",
+        "last_by", "history")`.
+    """
+    return tuple(verb for verb in _VERBS if _serves(spec, verb))
 
 
 def _read_symbol_table(
@@ -1126,10 +1145,14 @@ class HistoryQuery(QueryBase):
 
         Bar windows by class, how rows are stamped, the source rules, and what each source
         fills: https://github.com/chipkent/deephaven-massive/blob/main/docs/guides/history.md.
+        A bound may also be one of Deephaven's own time values (`dh_today()`, `dh_now()`, a
+        Java `LocalDate`, `Instant`, or `ZonedDateTime`, a `numpy.datetime64`, or a
+        `pandas.Timestamp`); the Args below say which is a day and which an instant.
 
         Args:
             start: The first day, or the first instant included: an ISO-8601 string, a `date`,
-                or a timezone-aware `datetime`.
+                a timezone-aware `datetime`, a Java `LocalDate`, `Instant`, or
+                `ZonedDateTime`, a `numpy.datetime64`, or a `pandas.Timestamp` (`DateLike`).
             end: The last day included, or the first instant excluded, of the same kind as
                 `start`; None (the default) reads through now: the current instant for a
                 datetime `start`, today in the day zone (for futures, the current session)
@@ -1156,9 +1179,10 @@ class HistoryQuery(QueryBase):
             read fills once with that result.
 
         Raises:
-            TypeError: If `source` is not a `dm.HistorySource`, a bound is not a `str`,
-                `date`, or `datetime`, or `wait` is not a `bool`.
-            ValueError: Synchronously, before any request: a naive or unparseable bound; a date
+            TypeError: If `source` is not a `dm.HistorySource`, a bound is none of the
+                `DateLike` types, or `wait` is not a `bool`.
+            ValueError: Synchronously, before any request: a naive or unparseable bound, or a
+                `numpy.datetime64` that is `NaT`; a date
                 mixed with a datetime; `start` after `end` (or after now when `end` is None); a
                 symbol table without a symbol, with only rows that are not Massive's exact
                 tickers, or with any such row under `noncanonical_symbols=OnError.RAISE`;
@@ -1232,8 +1256,12 @@ class HistoryQuery(QueryBase):
             The static table, or the refreshing one a background read fills.
         """
         chosen = _require_enum(source, HistorySource, "source")
-        first = parse_date_like(start, "start")
-        last = None if end is None else parse_date_like(end, "end")
+        first = parse_date_like(deephaven_time_text(start, "start"), "start")
+        last = (
+            None
+            if end is None
+            else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
+        )
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols)

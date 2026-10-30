@@ -51,10 +51,23 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import Column
     from deephaven_massive._massive import Provenance
 
-__all__ = ["COMMAND", "SyncResult", "anchor", "call_path", "column_changes", "render", "sync"]
+__all__ = [
+    "COMMAND",
+    "PAGES_URL",
+    "SyncResult",
+    "anchor",
+    "call_path",
+    "column_changes",
+    "render",
+    "section_url",
+    "sync",
+]
 
 COMMAND: Final = "uv run python scripts/render_reference.py"
 """The command that regenerates the column reference, run from the repository root."""
+
+PAGES_URL: Final = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
+"""Where the committed pages are read on GitHub; a page's URL is this and its file name."""
 
 _TRANSPORT_ORDER: Final = (Transport.REST, Transport.FLAT_FILES, Transport.WS)
 """The order of the transports in a **Supplied by** cell and of the wire-field columns, the
@@ -146,6 +159,19 @@ def anchor(spec: DatasetSpec) -> str:
         serves itself, which has no namespace: `"snapshots"`.
     """
     return (spec.name.partition(".")[2] or spec.name).replace(".", "-")
+
+
+def section_url(spec: DatasetSpec) -> str:
+    """Return the web address of a dataset's section of the column reference.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        `PAGES_URL`, the namespace's page, and the section's `anchor`, such as
+        `"https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#trades"`.
+    """
+    return f"{PAGES_URL}{spec.name.partition('.')[0]}.md#{anchor(spec)}"
 
 
 def call_path(spec: DatasetSpec) -> str:

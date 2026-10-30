@@ -31,7 +31,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import check_symbol, symbol_class
 from deephaven_massive._enums import (
@@ -51,6 +50,7 @@ from deephaven_massive._namespaces.base import (
     Namespace,
     adjustment_notes,
     build_query,
+    day_argument,
     list_params,
     require_bool,
 )
@@ -887,7 +887,7 @@ class _Options(Namespace):
             ),
         )
 
-    @raises_through(build_query, list_params, calendar_day, _contract_type, _expired, _underlying)
+    @raises_through(build_query, list_params, day_argument, _contract_type, _expired, _underlying)
     def contracts(
         self,
         symbols: Symbols | None = None,
@@ -936,8 +936,10 @@ class _Options(Namespace):
             underlying: Only contracts linked to this exact Massive ticker, such as `"AAPL"`
                 or `"I:SPX"`; None for every underlying.
             contract_type: Only calls or only puts; None for both.
-            as_of: The day whose contracts to list, as an ISO-8601 date or a `date` (a
-                `datetime` raises `ValueError`: it is a calendar date); None for today.
+            as_of: The day whose contracts to list, as an ISO-8601 date, a `date`, Deephaven
+                date text such as `"2025-3-3"`, a Java `LocalDate`, or a day-precision
+                `numpy.datetime64` (a `datetime` or an instant raises `ValueError`: it is a
+                calendar date); None for today.
             expired: False, the default (Massive's), lists contracts still trading; True lists
                 expired ones only. False is not sent, since it is the endpoint's default.
             sort: The field to sort by: `"ticker"`, `"underlying_ticker"`,
@@ -973,7 +975,7 @@ class _Options(Namespace):
         params: dict[str, object] = {
             "underlying_ticker": None if underlying is None else _underlying(underlying),
             "contract_type": _contract_type(contract_type),
-            "as_of": None if as_of is None else calendar_day(CONTRACTS, as_of, "as_of"),
+            "as_of": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
             "expired": _expired(expired),
         }
         params.update(list_params(sort=sort, order=order))
@@ -991,7 +993,7 @@ class _Options(Namespace):
             ),
         )
 
-    @raises_through(build_query, calendar_day)
+    @raises_through(build_query, day_argument)
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, high, low, close, and volume of each options contract on one day.
 
@@ -1012,8 +1014,9 @@ class _Options(Namespace):
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column.
-            date: The trading day, as an ISO-8601 date or a `date`. It is a calendar date, so a
-                `datetime` raises `ValueError`.
+            date: The trading day, as an ISO-8601 date, a `date`, Deephaven date text such as
+                `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`. It is a
+                calendar date, so a `datetime` or an instant raises `ValueError`.
             adjusted: Whether the prices and volume are adjusted for splits of the underlying
                 (never for dividends); True by default. Massive does not echo the basis here,
                 so it cannot be checked.
@@ -1041,6 +1044,6 @@ class _Options(Namespace):
                 symbols=symbols,
                 all_alternative="use m.options.snapshots(dm.ALL)",
                 adjusted=require_bool("adjusted", adjusted),
-                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

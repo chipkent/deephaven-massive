@@ -32,7 +32,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._errors import raises_through
@@ -41,6 +40,7 @@ from deephaven_massive._namespaces.base import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     build_query,
+    day_argument,
     list_params,
 )
 
@@ -471,7 +471,7 @@ class _Indices(Namespace):
             ),
         )
 
-    @raises_through(build_query, calendar_day)
+    @raises_through(build_query, day_argument)
     def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
         """One day's opening, closing, high, and low levels of each index.
 
@@ -495,19 +495,20 @@ class _Indices(Namespace):
         Args:
             symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` is refused), or
                 a Deephaven table with a `Symbol` column, re-read on every `poll()` cycle.
-            date: The day, as an ISO-8601 date (`"2025-06-02"`) or a `date`. It is a calendar
-                date, so a `datetime` raises `ValueError`.
+            date: The day, as an ISO-8601 date (`"2025-06-02"`), a `date`, Deephaven date text
+                such as `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`.
+                It is a calendar date, so a `datetime` or an instant raises `ValueError`.
 
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
         Raises:
-            TypeError: For a `date` that is not a `str`, `date`, or `datetime`, or `symbols` of an
+            TypeError: For a `date` of none of the `DateLike` types, or `symbols` of an
                 unsupported type.
-            ValueError: For `dm.ALL`, a `datetime` or text that is not an ISO-8601 date as `date`, a
-                symbol that is not a valid index symbol, an empty symbol list, or a table without a
-                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
-                takes.
+            ValueError: For `dm.ALL`, a `datetime` or other time as `date`, text that is neither
+                an ISO-8601 date nor Deephaven date text, a symbol that is not a valid index
+                symbol, an empty symbol list, or a table without a `Symbol` column. Also for
+                `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -521,6 +522,6 @@ class _Indices(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="use m.indices.snapshots(dm.ALL)",
-                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )
