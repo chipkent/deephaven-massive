@@ -7,7 +7,8 @@ import logging
 import math
 import re
 import threading
-from collections.abc import Callable, Iterator, Sequence
+import weakref
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
@@ -2523,6 +2524,46 @@ def test_a_read_fans_out_on_the_callers_pool(
         )
         assert not pool._shutdown  # the caller's pool stays open
     assert (table.num_rows, requests) == (2, 2)
+
+
+class _RefusalError(ValueError):
+    """A path's refusal of a parameter, which a test can hold weakly to see it freed."""
+
+
+def test_a_parameter_one_path_refuses_leaves_no_cycle(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The crypto path refuses `adjusted` and the stock path takes it, so the check passes. The
+    # crypto path's error must be freed when the check returns, not left in a reference cycle
+    # with the check's frame: that cycle holds the reader, and through it the session, until
+    # the cyclic collector runs. The collector stays off, so only reference counting frees it.
+    refusals: list[weakref.ref[_RefusalError]] = []
+    real = rest._base
+
+    def base(
+        spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        try:
+            return real(spec, rest_path, request, fixed=fixed)
+        except ValueError as error:
+            refusal = _RefusalError(str(error))
+            refusals.append(weakref.ref(refusal))
+            try:
+                raise refusal from None
+            finally:
+                del refusal  # this frame must not hold its own error
+
+    monkeypatch.setattr(rest, "_base", base)
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("poll")
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        reader.check_parameters(SMA, Request(adjusted=False))
+        assert len(refusals) == 1
+        assert refusals[0]() is None
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def test_a_failed_history_is_logged_and_raised(

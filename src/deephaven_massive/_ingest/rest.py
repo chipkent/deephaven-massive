@@ -1893,20 +1893,26 @@ class RestReader:
         candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
         errors: list[ValueError] = []
         templates = [template for template in candidates if template is not None]
-        for template in templates:
-            rest_path = self.rest_path(template)
-            try:
-                _base(spec, rest_path, request, fixed={})
-                _axis_query(
-                    spec,
-                    rest_path,
-                    dates=(request.start, request.end),
-                    asset_class=spec.asset_class,
-                )
-            except ValueError as error:
-                errors.append(error)
-        if len(errors) == len(templates):
-            raise errors[0]
+        try:
+            for template in templates:
+                rest_path = self.rest_path(template)
+                try:
+                    _base(spec, rest_path, request, fixed={})
+                    _axis_query(
+                        spec,
+                        rest_path,
+                        dates=(request.start, request.end),
+                        asset_class=spec.asset_class,
+                    )
+                except ValueError as error:
+                    errors.append(error)
+            if len(errors) == len(templates):
+                raise errors[0]
+        finally:
+            # Each error's traceback holds this frame, and the frame's list holds the error: a
+            # cycle that keeps this reader, and so its session, alive after the session is
+            # dropped, until the cyclic garbage collector next runs. Emptying the list breaks it.
+            errors.clear()
 
     def plan_fetch(
         self, spec: DatasetSpec, request: Request, symbols: NormalizedSymbols | None
