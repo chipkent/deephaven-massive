@@ -1,0 +1,14 @@
+{
+  "listed": [
+    {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD", "active": true},
+    {"ticker": "X:ETHWBTC", "base_currency_symbol": "ETHW", "currency_symbol": "BTC", "active": true},
+    {"ticker": "X:DOTUSD", "base_currency_symbol": "DOT", "currency_symbol": "USD", "active": true},
+    {"ticker": "X:1INCHUSD", "base_currency_symbol": "1INCH", "currency_symbol": null, "active": true},
+    {"ticker": "X:BTCPYUSD", "base_currency_symbol": "BTCP", "currency_symbol": "USD", "active": true}
+  ],
+  "delisted": [
+    {"ticker": "X:FTTUSD", "base_currency_symbol": "FTT", "currency_symbol": "USD", "active": false},
+    {"ticker": "X:DOTUSD", "base_currency_symbol": "DOT", "currency_symbol": "USD", "active": false},
+    {"ticker": "BTC-EUR", "base_currency_symbol": "BTC", "currency_symbol": "EUR", "active": false}
+  ]
+}

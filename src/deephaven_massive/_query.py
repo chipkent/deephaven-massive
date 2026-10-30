@@ -90,7 +90,12 @@ from deephaven_massive._tables.execution_context import entered, refuse_update_g
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._tables.transports import FlatFileTransport, RestTransport, StreamTransport
-from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
+from deephaven_massive._tables.watchlist import (
+    SymbolRowRule,
+    read_symbols,
+    skipped_rows_text,
+    watched_rows,
+)
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -1093,13 +1098,13 @@ class StreamQuery(QueryBase):
         if "Symbol" in keys:
             # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
             return self._stream(
-                lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"),
+                lambda blink: watched_rows(blink.last_by(list(keys)), watch),
                 request,
                 verb="last_by",
             )
         # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
         return self._stream(
-            lambda blink: blink.where_in(watch, "Symbol").last_by(list(keys)),
+            lambda blink: watched_rows(blink, watch).last_by(list(keys)),
             request,
             verb="last_by",
         )

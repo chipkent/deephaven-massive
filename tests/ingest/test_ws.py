@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
-from deephaven import agg, dtypes, input_table, new_table
+from deephaven import agg, dtypes, input_table, new_table, update_graph
 from deephaven.column import string_col
 
 import deephaven_massive as dm
@@ -707,6 +707,86 @@ def test_a_failing_upstream_watchlist_fails_the_stream(
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
+
+
+def stream_blink(ws_session: WsSession) -> Table:
+    # The blink table of the session's only stream, which no result exposes.
+    (state,) = ws_session.session._core._streams.values()
+    assert state.handle is not None
+    return state.handle.blink
+
+
+def cycle_ended(ws_session: WsSession) -> None:
+    # Taking the update graph's shared lock waits for the running update cycle to end, so every
+    # notification of the cycle that delivered a failure has run, and survived, by now.
+    with update_graph.shared_lock(ws_session.session._core.exec_ctx.update_graph):
+        pass
+
+
+@pytest.mark.parametrize("keys", [(), ("Exchange",)], ids=["by symbol", "by exchange"])
+def test_a_failing_watchlist_fails_a_last_by_stream_once(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    keys: tuple[str, ...],
+) -> None:
+    # The watchlist fails the result first, and its stream's failure follows a few cycles
+    # later: a result that `where_in` filtered by the watchlist would get that second failure,
+    # and Deephaven ends the process on it.
+    source = input_table({"Symbol": dtypes.string})
+    source.add(new_table([string_col("Symbol", ["AAPL"])]))
+    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
+    result = ws_session.query(TRADES, watchlist).last_by(*keys)
+    ws_session.subscribed("T.AAPL")
+    blink = stream_blink(ws_session)
+    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+    wait_for(lambda: failed_after_flush(ws_session, blink))
+    cycle_ended(ws_session)
+    assert result.j_table.isFailed()
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
+
+
+def watching_streams(ws_session: WsSession, rows_when: RowsWhen) -> tuple[Table, Table]:
+    # Quotes of a watchlist, and trades of the symbols those quotes hold, both by symbol.
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    quotes = ws_session.query(QUOTES, watchlist).last_by()
+    trades = ws_session.query(TRADES, quotes.view("Symbol")).last_by()
+    ws_session.subscribed("Q.AAPL")
+    quote = {"ev": "Q", "sym": "AAPL", "bx": 4, "bp": 1.0, "bs": 100, "ax": 7, "ap": 1.1}
+    ws_session.publish(quote | {"as": 100, "t": 1_700_000_000_000, "z": 3})
+    rows_when(quotes, lambda rows: len(rows) == 1)
+    ws_session.subscribed("T.AAPL")  # the trades follow the quotes' symbols
+    return quotes, trades
+
+
+def test_closing_a_last_by_stream_that_watches_another_stream_fails_each_once(
+    ws_session: WsSession, rows_when: RowsWhen
+) -> None:
+    # The close fails both streams in one pass; the downstream result is filtered by the
+    # upstream result, so it hears of both failures, and must take only the first.
+    quotes, trades = watching_streams(ws_session, rows_when)
+    ws_session.session.close()
+    wait_for(lambda: bool(quotes.j_table.isFailed() and trades.j_table.isFailed()))
+    cycle_ended(ws_session)
+
+
+def test_releasing_a_stream_another_stream_watches_keeps_the_watcher_following(
+    ws_session: WsSession, rows_when: RowsWhen
+) -> None:
+    # Releasing or collecting the upstream result fails nothing: the downstream result's
+    # watchlist keeps the upstream stream running, and the close then fails both once.
+    quotes, trades = watching_streams(ws_session, rows_when)
+    ws_session.session.release(quotes)
+    del quotes
+    gc.collect()
+    ws_session.send(trade("AAPL"))
+    ws_session.flush()
+    rows_when(trades, lambda rows: [r["Symbol"] for r in rows] == ["AAPL"])
+    ws_session.session.close()
+    wait_for(lambda: bool(trades.j_table.isFailed()))
+    cycle_ended(ws_session)
 
 
 def test_a_frame_symbol_the_library_cannot_read_is_kept_by_default(

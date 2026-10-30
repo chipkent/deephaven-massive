@@ -30,10 +30,12 @@ from deephaven_massive._massive import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    from tests._live.ticker_lists import SpreadRead
 
 pytestmark = pytest.mark.integration
 
@@ -43,6 +45,12 @@ Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
+SpreadReads: TypeAlias = (
+    "Callable[[Sequence[Mapping[str, Any]]], tuple[list[SpreadRead], list[str]]]"
+)
+SpreadReport: TypeAlias = (
+    "Callable[[Sequence[Mapping[str, Any]], Mapping[str, Sequence[Mapping[str, Any]]]], list[str]]"
+)
 
 _PRODUCTS = ("ES", "NQ", "CL", "NG", "GC", "SI", "ZN", "ZC", "6E")
 """Products of all four venues whose schedules the weekday check reads."""
@@ -53,6 +61,7 @@ _SCHEDULE_LIMIT = 20_000
 _AGGS = "/futures/v1/aggs/{ticker}"
 _SNAPSHOT = "/futures/v1/snapshot"
 _CONTRACTS = "/futures/v1/contracts"
+_PRODUCTS_PATH = "/futures/v1/products"
 _SCHEDULES = "/futures/v1/schedules"
 
 _CONTRACT_SHAPE = re.compile(r"[A-Z0-9]+?[FGHJKMNQUVXZ]\d{1,2}")
@@ -343,7 +352,7 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("futures ticker shapes")
+@pytest.mark.settles("47")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_shapes_of_futures_contract_tickers(
@@ -353,23 +362,73 @@ def test_shapes_of_futures_contract_tickers(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Which shapes futures contract tickers take: one- or two-digit years, and spreads.
+    """Which shapes single futures contract tickers take: one- or two-digit years.
 
     Records one page of NG contracts with the tickers outside a product code, a month letter,
-    and a one- or two-digit year, and one page of combo (spread) tickers. Reading it: every
-    single contract inside that shape confirms the ticker grammar; anything else extends it,
-    or is left to the handling of unknown symbols.
+    and a one- or two-digit year, and the library's `contracts` of NG. Reading it: every
+    single contract inside that shape confirms the ticker grammar (a year is never rewritten,
+    so `ESZ25` is not `ESZ5`); anything else extends it, or is left to the handling of unknown
+    symbols. Spread tickers are the next test's.
     """
     singles = _page(live_rest, _CONTRACTS, query={"product_code": "NG", "limit": 1000})
-    combos = _page(live_rest, _CONTRACTS, query={"type": "combo", "limit": 50})
     tickers = sorted({str(row.get("ticker")) for row in singles})
     odd = [ticker for ticker in tickers if not _CONTRACT_SHAPE.fullmatch(ticker)]
     evidence(f"NG contracts: {len(tickers)} tickers, e.g. {tickers[:10]} ... {tickers[-10:]}")
     evidence(f"NG tickers outside letters, a month code, and a 1-2 digit year: {odd}")
-    evidence(f"combo (spread) tickers: {sorted({str(row.get('ticker')) for row in combos})}")
     library = table_rows(live_session.futures.contracts(product_code="NG", limit=20).fetch())
     evidence(f"library contracts(NG): Ticker {[r['Ticker'] for r in library]}")
     assert tickers
+
+
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("48")
+@pytest.mark.requests(5)
+@pytest.mark.timeout(100)
+def test_forms_of_futures_spread_tickers_on_every_venue(
+    live_rest: RestClient,
+    *,
+    futures_spread_reads: SpreadReads,
+    futures_spread_report: SpreadReport,
+    evidence: Evidence,
+) -> None:
+    """Which forms futures spread (combo) tickers take on each venue, and how they name their legs.
+
+    Massive documents no grammar for spreads; the library accepts exactly the forms its samples
+    show (`GCQ6-GCZ6`, `BOB 02-01 U6`, `CL:BF Q6-U6-V6`, `CL:BZ U6-V6`, `6A:XF:AUDUSD:Q6`) and
+    builds no spread from its legs. Reads every combo product (`/futures/v1/products?type=combo`,
+    one page of up to 50,000), then, for each of the four exchanges (CME, CBOT, NYMEX,
+    COMEX), one page of up to 1,000 combo contracts (`/futures/v1/contracts?type=combo`) of
+    two of its single products (whose calendar spreads may carry their legs' product code)
+    and up to 20 of its combo products, taken in turn from each strategy type. On a paid
+    plan it also reads the combo contracts of any other venue the products name; with
+    Futures on Basic, which allows 5 requests a minute, those are left out and named, so
+    the test sends 5 requests.
+
+    Records each venue's combo products by strategy type, and, per venue read, every ticker
+    form (each run of letters written `A`, each run of digits `9`) with its count, how many
+    of its tickers `canonical_symbol_future_spread` accepts, and examples with their contract
+    name, product code, and the legs written out whole in the ticker; then every ticker the
+    library refuses. Reading it: forms the library accepts in full confirm its spread
+    grammar; a refused form must join the grammar (or stay a ticker kept as written), and the
+    names and legs say whether a builder from legs could produce each form.
+    """
+    products = _page(live_rest, _PRODUCTS_PATH, query={"type": "combo", "limit": 50_000})
+    reads, left_out = futures_spread_reads(products)
+    contracts = {
+        read.venue: _page(
+            live_rest,
+            _CONTRACTS,
+            query={"type": "combo", "product_code.any_of": list(read.product_codes), "limit": 1000},
+        )
+        for read in reads
+    }
+    for read in reads:
+        evidence(f"{read.venue} combo contracts read for products {list(read.product_codes)}")
+    if left_out:
+        evidence(f"Futures on Basic: the combo contracts of {left_out} are not read")
+    for line in futures_spread_report(products, contracts):
+        evidence(line)
+    assert products, "Massive listed no combo product"
 
 
 _CHICAGO = ZoneInfo("America/Chicago")

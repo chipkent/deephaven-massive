@@ -1,15 +1,16 @@
 """Live checks of Massive's REST rate limit: the refusal's text and which requests it counts.
 
 Massive limits each class on its free Basic plan to 5 REST requests per minute and answers
-HTTP 429 beyond that. The test here deliberately draws refusals from a class the key holds on
-Basic (Indices is preferred, since a run needs it least), so it needs at least one class left
-on Basic, and the run puts it first. It runs with no other client of the key.
+HTTP 429 beyond that. The tests here deliberately draw refusals from a class the key holds on
+Basic (Indices is preferred, since a run needs it least), so each needs at least one class left
+on Basic, and the run puts them first. They run with no other client of the key.
 
-The test first lets a minute pass, so earlier requests no longer count, then sends single raw
-requests (one attempt each, no retry) and records each answer's status, its rate-limit
-headers, and its message. Which requests count against which limit is recorded, never
-asserted: the library's own rules for data outside every subscription may change while the
-evidence stays the same. How to run these tests is in `docs/live-tests.md`.
+Each test first lets a minute pass, so earlier requests no longer count, then sends single raw
+requests (one attempt each, no retry, outside the run's rate governor) and records each
+answer's status, its rate-limit headers, and its message. Which requests count against which
+limit is recorded, never asserted: the library's own rules for data outside every
+subscription may change while the evidence stays the same. How to run these tests is in
+`docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven_massive import MassiveConfig
+    from tests._live.classes import MarketLookup
 
 pytestmark = pytest.mark.integration
 
@@ -48,8 +50,13 @@ _UNASSIGNED: tuple[Request, ...] = (
     ("/v1/marketstatus/now", {}, {}),
     ("/v3/reference/tickers/types", {}, {}),
     ("/fed/v1/treasury-yields", {}, {"limit": 1}),
+    ("/v3/reference/tickers", {}, {"limit": 1}),
+    ("/benzinga/v1/firms", {}, {"limit": 1}),
+    ("/v3/snapshot", {}, {"ticker.any_of": ["AAPL", "C:EURUSD"]}),
 )
-"""Requests of data that belongs to no subscription: market status, reference, economy."""
+"""Requests of data that belongs to no subscription: market status, reference (ticker types,
+and a ticker lookup across markets), economy, a partner's data, and a unified snapshot of two
+classes (a stock and a forex pair)."""
 
 _PROBE_EVERY = 5.0
 """Seconds between the probes that look for the end of a refusal."""
@@ -112,9 +119,12 @@ def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
        records each answer's status, rate-limit headers, and time since the first request,
        and the refusal's full text: the message the rate governor's match must contain, and
        whether its headers say when to retry.
-    2. Sends ten requests of data outside every subscription (market status, ticker types,
-       treasury yields), and records each answer: answered ones say that data is not charged
-       to the spent class, and a refusal after five that it has a Basic limit of its own.
+    2. Sends ten requests of data outside every subscription, in turn: market status, ticker
+       types, treasury yields, a ticker lookup across markets, a partner's page (Benzinga
+       firms), and a unified snapshot of a stock and a forex pair. Records each answer:
+       answered ones say that data is not charged to the spent class, and a refusal after five
+       that it has a Basic limit of its own. A 403 (a partner or a snapshot the key's plans
+       lack) says only that; whether Massive counted it shows in the answers after it.
     3. Sends the class's request every 5 s until one is answered, for at most 150 s from the
        first request, and records when: about 60 s after the first request means a window
        that slides from each request, one at a minute boundary a fixed window, and one later
@@ -154,13 +164,71 @@ def test_a_spent_basic_minute_its_refusal_and_when_it_frees(
         evidence(f"still refused {_PROBE_FOR:.0f} s after the first request")
 
 
+@pytest.mark.needs("some:basic")
+@pytest.mark.settles("66")
+@pytest.mark.requests(8)
+@pytest.mark.timeout(150)
+def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
+    send: Callable[[Request], tuple[int, str]],
+    *,
+    market_lookup: MarketLookup,
+    by_class: Mapping[str, Request],
+    evidence: Evidence,
+) -> None:
+    """Whether Massive charges a ticker lookup filtered by a class's market to that class.
+
+    The library charges every reference read to the `other` bucket, a lookup filtered by
+    market (`/v3/reference/tickers?market=fx`) and the session's crypto ticker list included,
+    as Massive's knowledge base says reference endpoints are counted on their own. One
+    sequence after a single pause of 61 s, so earlier requests have left Massive's window,
+    on a class on Basic whose tickers a market lists (Indices, else Currencies, else Stocks):
+
+    1. Sends the class's own request five times, which spends its minute; Basic answers each.
+    2. Looks up one ticker in each of the class's markets (`indices`; `fx` and `crypto`;
+       `stocks`), then in a market of another class, the control, which a spent class never
+       refuses.
+    3. Sends the class's request once more, which Basic refuses.
+
+    Records each answer's status, rate-limit headers, and time. Reading it: a lookup of the
+    class's own market refused with HTTP 429 while the control is answered means Massive
+    charges it to the class, so the library must charge market-filtered lookups, and the
+    crypto ticker list, to the class rather than to `other`; answered means Massive counts it
+    elsewhere, as the library assumes. The test asserts only that the first five requests
+    were answered and the last refused: otherwise another client of the key used the class,
+    or it is not on Basic, and the lookups' answers say nothing.
+    """
+    name, request = market_lookup.name, by_class[market_lookup.name]
+    threading.Event().wait(_MINUTE)
+    start = time.monotonic()
+    spent = []
+    for number in range(1, _LIMIT + 1):
+        status, described = send(request)
+        spent.append(status)
+        evidence(f"{name} request {number} at {time.monotonic() - start:.1f} s: HTTP {status}")
+        evidence(f"    {described}")
+    for market in (*market_lookup.markets, market_lookup.other_market):
+        status, described = send(("/v3/reference/tickers", {}, {"market": market, "limit": 1}))
+        whose = "another class's, the control" if market == market_lookup.other_market else name
+        evidence(
+            f"ticker lookup market={market} ({whose}) at {time.monotonic() - start:.1f} s: "
+            f"HTTP {status}; {described}"
+        )
+    status, described = send(request)
+    evidence(
+        f"{name} request after the lookups at {time.monotonic() - start:.1f} s: HTTP {status}; "
+        f"{described}"
+    )
+    assert 429 not in spent, f"{name} refused one of its first five requests: another client?"
+    assert status == 429, f"{name} answered a sixth request within a minute: is it on Basic?"
+
+
 @pytest.fixture
-def by_class(index_symbol: str) -> dict[str, Request]:
+def by_class() -> dict[str, Request]:
     """Return a cheap request of each subscription's own data.
 
-    Args:
-        index_symbol: `I:SPX`, or `I:NDX` when Indices is on Basic, which excludes SPX: a
-            refused index would answer 403, never the 429 the test waits for.
+    The index request reads `I:NDX`, which Indices Basic includes: it excludes SPX, DJI, RUT,
+    and VIX, and a refused index would answer 403, never the 429 the tests wait for. These
+    requests are sent only to a class on Basic.
 
     Returns:
         The request, by class.
@@ -172,7 +240,7 @@ def by_class(index_symbol: str) -> dict[str, Request]:
             {},
             {"underlying_ticker": "AAPL", "limit": 1},
         ),
-        "indices": ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": index_symbol}, {}),
+        "indices": ("/v2/aggs/ticker/{indicesTicker}/prev", {"indicesTicker": "I:NDX"}, {}),
         "currencies": ("/v2/aggs/ticker/{forexTicker}/prev", {"forexTicker": "C:EURUSD"}, {}),
         "futures": ("/futures/v1/products", {}, {"limit": 1}),
     }
