@@ -1171,7 +1171,7 @@ def test_a_long_verb_in_a_console_command_is_reported_once(
         console_command(command)
     (message,) = caplog.messages
     assert message.startswith(f"{label(massive_session)}: test.trades append_only() ran for ")
-    assert "live tables do not update until the command ends; run long downloads" in message
+    assert "until the command ends; pass wait=False to fetch() or history() to read in" in message
     for result in made:
         massive_session.release(result)
     made.clear()
@@ -1519,6 +1519,10 @@ class _Ports:
         self.asked.append("flat_files")
         return _FLAT_FILES
 
+    def read_stop(self) -> threading.Event:
+        self.asked.append("read_stop")
+        return threading.Event()
+
 
 def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContext) -> None:
     catalog = _catalog.Catalog((SPEC,))
@@ -1535,11 +1539,12 @@ def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContex
         assert core.rest_transport() is _REST
         assert core.stream_transport() is _STREAMS
         assert core.flat_file_transport() is _FLAT_FILES
-        assert ports.asked == ["rest", "streams", "flat_files"]
+        assert not core.read_stop().is_set()
+        assert ports.asked == ["rest", "streams", "flat_files", "read_stop"]
         with pytest.raises(RuntimeError, match=r"^core already has its transports attached$"):
             core.attach(_Ports())
         assert core.rest_transport() is _REST
-        assert ports.asked == ["rest", "streams", "flat_files", "rest"]
+        assert ports.asked == ["rest", "streams", "flat_files", "read_stop", "rest"]
     finally:
         core.close()
 

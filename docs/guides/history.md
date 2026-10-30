@@ -122,6 +122,10 @@ details and a recipe for adjusting as-traded bars yourself.
 
 `history()` blocks until the whole range is read. Requests run on the calling thread, and
 flat files are read by up to `max_concurrency` threads that finish before the call returns.
+A long read in the Deephaven console holds up every live table until it ends, so pass
+`wait=False` for one: the call returns at once with an empty table, and the whole result
+appears in it in one update when the download has finished. Its row in `m.streams()` shows
+`LOADING`, then `DONE`, or `FAILED` with the reason.
 There is no `limit`: the library pages through everything in the range. On the free Basic tier,
 requests are paced at five a minute, and a read that needs a minute or more of them logs its
 request count first, at INFO.
