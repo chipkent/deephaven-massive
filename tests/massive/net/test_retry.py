@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -67,12 +68,41 @@ def test_an_absent_retry_after_is_none_and_silent(caplog: pytest.LogCaptureFixtu
 def test_an_unusable_retry_after_is_none_and_logged(
     header: str, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger=retry.__name__)
     assert retry.retry_after_seconds(header, now=0.0) is None
     [record] = caplog.records
-    assert (record.name, record.levelname) == (retry.__name__, "WARNING")
+    # The caller's fallback wait is the outcome; nothing for a user to act on.
+    assert (record.name, record.levelname) == (retry.__name__, "DEBUG")
     assert record.getMessage() == (
         f"ignoring a Retry-After that is neither seconds nor an HTTP date: {header!r}"
     )
+
+
+def test_a_long_retry_after_is_returned_as_asked_since_each_caller_caps_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert retry.retry_after_seconds("9" * 20, now=0.0) == 1e20
+    assert retry.retry_after_seconds("9" * 400, now=0.0) == math.inf
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Fri, 15 Jan 2027 08:00:00 GMT",
+        "Fri, 15 Jan 2027 08:00:00 -0000",
+    ],
+)
+def test_an_http_date_is_seconds_since_the_epoch_in_gmt(header: str) -> None:
+    assert retry.http_date_seconds(header) == 1_800_000_000.0
+
+
+@pytest.mark.parametrize("header", [None, "", "soon", "30"])
+def test_what_is_not_an_http_date_is_none_and_silent(
+    header: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert retry.http_date_seconds(header) is None
+    assert caplog.records == []
 
 
 def test_a_retry_after_date_without_a_zone_is_gmt() -> None:

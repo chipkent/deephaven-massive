@@ -1,9 +1,10 @@
 """Check one decoded JSON value against its field's `WireType` and convert it, exactly.
 
 Every decoder that reads JSON (the REST client's `to_batch`, the WebSocket client's frame
-decoder) converts each field value through `convert_field`, so one value means the same thing
-on every transport. The result is a plain Python scalar, independent of Arrow; each decoder
-builds its own columns from it.
+decoder) converts each field value through the same converter, so one value means the same
+thing on every transport. `convert_field` converts one value; a decoder of many values looks up
+each field's converter once (`field_converter`) and calls it per value. The result is a plain
+Python scalar, independent of Arrow; each decoder builds its own columns from it.
 
 | `WireType` | Accepts | Returns |
 |---|---|---|
@@ -55,7 +56,8 @@ the WebSocket channel, symbol, and host):
 
 - `convert_field` raises `UnconvertibleError` whose message names the field, the expected type
   and any named conversion, and quotes the value: `Price (wire key 'p') expects double, got
-  "1.5"`.
+  "1.5"`. A decoder that called `field_converter`'s function builds the same text with
+  `unconvertible_message`.
 - `missing_key_message` gives the clause for a row that lacks a key the dataset needs:
   `no SipTimestamp (wire key 't'), which the dataset needs`.
 - `excerpt` quotes a value as every message does: its JSON text, cut to 200 characters, and
@@ -86,8 +88,10 @@ __all__ = [
     "convert",
     "convert_field",
     "excerpt",
+    "field_converter",
     "missing_key_message",
     "row_excerpt",
+    "unconvertible_message",
 ]
 
 _T = TypeVar("_T")
@@ -124,12 +128,13 @@ class UnconvertibleError(ValueError):
     """
 
 
-def _integer(value: object, bounds: tuple[int, int]) -> int:
-    """Return `value` as an integer within `bounds`.
+def _long(value: object) -> int:
+    """Return a `long` or `epoch` value: an integer in the signed 64-bit range.
+
+    A plain `int`, what a JSON decoder gives for every such value, skips the type checks.
 
     Args:
         value: A decoded JSON value.
-        bounds: The inclusive range.
 
     Returns:
         `value`.
@@ -137,23 +142,11 @@ def _integer(value: object, bounds: tuple[int, int]) -> int:
     Raises:
         UnconvertibleError: If `value` is not an `int` (a `bool` is not), or is out of range.
     """
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int and (isinstance(value, bool) or not isinstance(value, int)):
         raise UnconvertibleError
-    if not bounds[0] <= value <= bounds[1]:
+    if not _INT64[0] <= value <= _INT64[1]:
         raise UnconvertibleError
     return value
-
-
-def _long(value: object) -> int:
-    """Return a `long` or `epoch` value: an integer in the signed 64-bit range.
-
-    Args:
-        value: A decoded JSON value.
-
-    Returns:
-        `value`.
-    """
-    return _integer(value, _INT64)
 
 
 def _double(value: object) -> float:
@@ -169,6 +162,8 @@ def _double(value: object) -> float:
         UnconvertibleError: If `value` is not a number, is a `bool`, or is an integer too large
             for a double.
     """
+    if type(value) is float:  # what a JSON decoder gives for nearly every such value
+        return value
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise UnconvertibleError
     try:
@@ -454,13 +449,66 @@ _NAMED: Mapping[Conversion, Callable[[object], object]] = MappingProxyType(
 )
 
 
+def field_converter(field: Field) -> Callable[[object], object]:
+    """Return the function that checks and converts one field's values.
+
+    A decoder looks it up once per field and calls it once per non-null value, which saves
+    `convert_field`'s lookup of the converter on every value of a large page or frame. It is
+    the plain converter of `field.wire_type`, or the field's named conversion; a value that does
+    not fit raises `UnconvertibleError` with no message, and the decoder then builds the shared
+    message with `unconvertible_message`.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.spec.convert import field_converter
+            from deephaven_massive._massive.spec.types import Field, WireType
+
+            price = Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE)
+            to_price = field_converter(price)
+            assert to_price(1) == 1.0
+
+    Args:
+        field: The field.
+
+    Returns:
+        A function from a decoded JSON value (not `None`) to the value in the form `convert`
+        gives for `field.wire_type`.
+    """
+    if field.conversion is None:
+        return _CONVERTERS[field.wire_type]
+    return _NAMED[field.conversion]
+
+
+def unconvertible_message(field: Field, value: object) -> str:
+    """Return the clause for a value that does not fit its field.
+
+    Every decoder that fails a row for it (REST raises, WebSocket rejects the row) puts this
+    clause after its own context, so the failure reads the same on every transport.
+
+    Args:
+        field: The field.
+        value: The decoded JSON value that `field_converter(field)` refused.
+
+    Returns:
+        The clause, naming the field, the expected type and any named conversion, and quoting
+        the value, such as `Exchange (wire key 'x') expects long (by the conversion
+        quoted-integer), got "4.8"`.
+    """
+    expected = str(field.wire_type)
+    if field.conversion is not None:
+        expected += f" (by the conversion {field.conversion})"
+    return f"{field.column} (wire key {field.wire_key!r}) expects {expected}, got {excerpt(value)}"
+
+
 def convert_field(field: Field, value: object) -> object:
     """Check a decoded JSON value against its field and return its converted form.
 
     For a field with no `conversion` this is `convert(field.wire_type, value)`. For a field
     with one, the value arrives in the vendor's documented form and that named conversion
     (see the module's table) turns it into the form `convert` gives for `field.wire_type`.
-    Call it once per non-null value.
+    Call it once per non-null value; a decoder of many values takes `field_converter` once
+    instead.
 
     Args:
         field: The field the value belongs to.
@@ -470,21 +518,13 @@ def convert_field(field: Field, value: object) -> object:
         The value in the form `convert` gives for `field.wire_type`.
 
     Raises:
-        UnconvertibleError: If the value does not fit, with the message every decoder shows
-            after its own context, such as `Exchange (wire key 'x') expects long (by the
-            conversion quoted-integer), got "4.8"`.
+        UnconvertibleError: If the value does not fit, with the clause of
+            `unconvertible_message`, which every decoder shows after its own context.
     """
     try:
-        if field.conversion is None:
-            return convert(field.wire_type, value)
-        return _NAMED[field.conversion](value)
+        return field_converter(field)(value)
     except UnconvertibleError:
-        expected = str(field.wire_type)
-        if field.conversion is not None:
-            expected += f" (by the conversion {field.conversion})"
-        raise UnconvertibleError(
-            f"{field.column} (wire key {field.wire_key!r}) expects {expected}, got {excerpt(value)}"
-        ) from None
+        raise UnconvertibleError(unconvertible_message(field, value)) from None
 
 
 def excerpt(value: object) -> str:

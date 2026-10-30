@@ -50,6 +50,9 @@ _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})
 _TIME_KINDS: Final = frozenset({ParamKind.DATE, ParamKind.TIMESTAMP})
 """The parameter kinds whose text value must be an ISO-8601 date or an instant with an offset."""
 
+_NUMBER_KINDS: Final = frozenset({ParamKind.INTEGER, ParamKind.NUMBER})
+"""The parameter kinds whose `.any_of` list takes `int` or `float` items."""
+
 _FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of", "all_of")
 """The suffixes the specification adds to a parameter's base name (`timestamp.gte`)."""
 
@@ -131,39 +134,58 @@ def takes_instants(rest_path: RestPath, name: str, kind: ParamKind) -> bool:
     return any(f.wire_key == base and f.wire_type in _INSTANT_TYPES for f in rest_path.fields)
 
 
-def _list_items(spec: DatasetSpec, key: str, value: ParamValue, *, dates: bool) -> ParamValue:
+def _list_items(
+    spec: DatasetSpec, key: str, value: ParamValue, *, rest_path: RestPath, name: str
+) -> ParamValue:
     """Return a list filter's values one text item each, so every spelling gives one key.
 
     The wire joins a list with commas, so a comma can never be part of one value: `"a,b"`,
     `("a,b",)`, and `("a", "b")` all send `a,b`. Splitting every item on commas, and
     stripping the spaces around each part, makes them one value, so equal filters give equal
-    queries. On a list of dates (`date.any_of`), a `date` item is its ISO-8601 day.
+    queries. On a list of dates (`date.any_of`), a `date` item is its ISO-8601 day; on a list
+    of numbers (`strike_price.any_of`), an `int` or `float` item is written as the base
+    parameter writes one number (`encode_value`), so `(150, 152.5)` sends `150,152.5`. A
+    `bool` is never a number.
 
     Args:
         spec: The dataset, for messages.
         key: The filter's key, for messages.
-        value: A `str`, or a tuple of `str` and, when `dates`, `date` items; anything else is
-            returned unchanged for the encoder to refuse.
-        dates: True when the list's base parameter is a date parameter.
+        value: A `str`, or a tuple of `str` and the items the base parameter takes; anything
+            else is returned unchanged for the encoder to refuse.
+        rest_path: The path the list parameter belongs to.
+        name: The list parameter's wire name, such as `strike_price.any_of`. Its base
+            parameter on the same path (`strike_price`) decides by its kind which items
+            besides text the list takes; a list without a base parameter takes text only.
 
     Returns:
         The tuple of text items.
 
     Raises:
         ValueError: If an item is empty (`"a,,b"`, `""`, or `" "`), which Massive would read
-            as a value of its own, or a `date` item is given to a list that does not take
-            dates.
+            as a value of its own, or an item is of a kind the base parameter does not take:
+            a `date` for a list that is not of dates, a number for a list that is not of
+            numbers, or a `float` for a list of integers.
     """
     if isinstance(value, str):
         value = (value,)
     if not isinstance(value, tuple):
         return value
+    stem = name.rpartition(".")[0]
+    base = next((p for p in rest_path.params if p.name == stem), None)
+    kind = None if base is None else base.kind
     texts: list[str] = []
     for item in value:
         if isinstance(item, date) and not isinstance(item, datetime):
-            if not dates:
-                raise ValueError(f"{spec.name} filter {key!r} takes text items, not {item!r}")
+            if kind is not ParamKind.DATE:
+                raise ValueError(f"{spec.name} filter {key!r} takes no dates, not {item!r}")
             texts.append(item.isoformat())
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            if base is None or kind not in _NUMBER_KINDS:
+                raise ValueError(f"{spec.name} filter {key!r} takes no numbers, not {item!r}")
+            try:
+                texts.append(encode_value(base, item, label=f"{spec.name} filter {key!r}"))
+            except TypeError as error:
+                raise ValueError(str(error)) from None
         elif isinstance(item, str):
             texts.extend(part.strip() for part in item.split(","))
         else:
@@ -246,11 +268,11 @@ def _sent_value(
     `_check_day_filter`.
     """
     if kind is ParamKind.LIST:
-        base = name.rpartition(".")[0]
-        dates = any(p.name == base and p.kind is ParamKind.DATE for p in rest_path.params)
-        return _list_items(spec, key, value, dates=dates)
+        return _list_items(spec, key, value, rest_path=rest_path, name=name)
     if isinstance(value, str) and kind in _TIME_KINDS:
-        value = parse_date_like(value, key)
+        # An upper bound (`.lt`, `.lte`) rounds text finer than a microsecond up, so no row
+        # is lost; every other form rounds down.
+        value = parse_date_like(value, key, upper=name.rpartition(".")[2] in ("lt", "lte"))
     if (
         isinstance(value, date)
         and not isinstance(value, datetime)

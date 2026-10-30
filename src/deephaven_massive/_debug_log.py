@@ -45,11 +45,22 @@ the issue text, must be enough for an agent to reproduce and fix the bug:
 
 - A decision is a branch on configuration, server data, or input that changes what is
   requested, routed, or returned. Each decision logs at DEBUG with its inputs and outcome.
-- A failure logs at ERROR, and a degradation at WARNING. Each names what an agent needs to
-  reproduce it: the offending field and value, the dataset, the endpoint or channel, the
-  symbol, and the call or stream id. Every layer logs what it knows; repeats are fine. Log too
-  much rather than too little.
-- Nothing is logged per row or per frame except a failure.
+- A level says what the user must do, since users see WARNING and above. ERROR is only for a
+  defect that broke a result, and its text says whose it is: a defect of the library ends with
+  `_errors.LIBRARY_BUG` (how to report it), and a defect in the user's code or input names what
+  to fix (`_errors.user_defect`). A defect logs at ERROR even when it is also raised. WARNING
+  is for live data that is stale or wrong, or something the user must act on, once per
+  episode, with the recovery at INFO. INFO is for decisions and progress. Everything else is
+  DEBUG, including an expected error that is also raised to the caller. Expected conditions
+  (refusals, plan and rate limits, network failures, the user's own `close()`) never log at
+  ERROR. A `MassiveError` carries its `cause`; `_log_limits.log_failure` logs a failure that
+  fails live tables once, at the level its cause gives.
+- Each record names what an agent needs to reproduce it: the offending field and value, the
+  dataset, the endpoint or channel, the symbol, and the call or stream id. Every layer logs
+  what it knows at DEBUG; repeats there are fine. Log too much rather than too little.
+- The common path of each WebSocket frame, row decode, and flush makes no log call at any
+  level; its exceptional branches log through the bounded helpers of `_log_limits`, never on
+  every event.
 - No log call is passed the API key, the S3 secret, a header, or the authentication frame. A
   wire client cleans what it receives of its own secret (`_massive/net/redaction.py`) before
   anything reads it, so text built from a server's answer is safe to log.

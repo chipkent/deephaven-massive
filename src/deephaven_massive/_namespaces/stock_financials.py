@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, Order, Timeframe, _require_enum
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import (
     EVERY_TICKER,
@@ -105,310 +106,7 @@ RATIOS: Final = DatasetSpec(
 )
 
 
-DATASETS: Final[tuple[DatasetSpec, ...]] = (
-    BALANCE_SHEETS,
-    INCOME_STATEMENTS,
-    CASH_FLOW_STATEMENTS,
-    RATIOS,
-)
-"""Every dataset of `m.stocks.financials`, one `DatasetSpec` each."""
-
-
-class _StockFinancials(Namespace):
-    """`m.stocks.financials`: company financial statements and daily valuation ratios.
-
-    Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
-    any thread. Each method builds a query and never blocks.
-
-    Example:
-        ::
-
-            import deephaven_massive as dm
-
-            m = dm.MassiveSession()
-            sheets = m.stocks.financials.balance_sheets("AAPL", timeframe=dm.Timeframe.ANNUAL)
-            t = sheets.fetch()
-    """
-
-    __slots__ = ()
-    _path: ClassVar[str] = "stocks.financials"
-
-    def balance_sheets(
-        self,
-        symbols: Symbols | None = None,
-        *,
-        timeframe: Timeframe | None = None,
-        start: DateLike | None = None,
-        end: DateLike | None = None,
-        sort: str | None = None,
-        order: Order | None = None,
-        limit: int | None = None,
-        filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
-        """Balance sheets of US public companies, one row per filer and reporting period.
-
-        Each row is a company's assets, liabilities, and equity at the end of a quarter or
-        fiscal year, as filed with the SEC. A filing can name several share classes, so a row
-        has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
-        only selects the filings that list any of them. Served by REST
-        (`/stocks/financials/v1/balance-sheets`) through `fetch()` and `poll()`; `poll()`
-        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-balance_sheets,
-        the web UI's column tooltips, or `columns()`.
-
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
-        Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            timeframe: `dm.Timeframe.ANNUAL` or `dm.Timeframe.QUARTERLY`; None for both.
-                A balance sheet is a position at the period's end, so it has no trailing
-                twelve months.
-            start: The first period end date to include (`period_end`), inclusive; None for
-                no lower bound.
-            end: The last period end date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
-
-        Returns:
-            The query; nothing is requested until a verb runs.
-
-        Raises:
-            ValueError: If `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`, which the
-                balance sheets do not offer.
-
-        Example:
-            ::
-
-                q = m.stocks.financials.balance_sheets(
-                    ["AAPL", "MSFT"], timeframe=dm.Timeframe.QUARTERLY, start="2023-01-01"
-                )
-                t = q.fetch()
-        """
-        if timeframe is Timeframe.TRAILING_TWELVE_MONTHS:
-            raise ValueError(
-                "balance sheets have no trailing twelve months; "
-                "use dm.Timeframe.ANNUAL or dm.Timeframe.QUARTERLY"
-            )
-        return _statement_query(
-            self._core,
-            BALANCE_SHEETS,
-            symbols=symbols,
-            timeframe=timeframe,
-            start=start,
-            end=end,
-            sort=sort,
-            order=order,
-            limit=limit,
-            filters=filters,
-        )
-
-    def income_statements(
-        self,
-        symbols: Symbols | None = None,
-        *,
-        timeframe: Timeframe | None = None,
-        start: DateLike | None = None,
-        end: DateLike | None = None,
-        sort: str | None = None,
-        order: Order | None = None,
-        limit: int | None = None,
-        filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
-        """Income statements of US public companies, one row per filer and reporting period.
-
-        Each row is a company's revenue, expenses, earnings, and per-share figures for a
-        quarter or fiscal year, as filed with the SEC. A filing can name several share
-        classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of
-        tickers, and `symbols` only selects the filings that list any of them. Served by REST
-        (`/stocks/financials/v1/income-statements`) through `fetch()` and `poll()`; `poll()`
-        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-income_statements,
-        the web UI's column tooltips, or `columns()`.
-
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
-        Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
-                None for every timeframe the endpoint holds.
-            start: The first period end date to include (`period_end`), inclusive; None for
-                no lower bound.
-            end: The last period end date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
-
-        Returns:
-            The query; nothing is requested until a verb runs.
-
-        Example:
-            ::
-
-                t = m.stocks.financials.income_statements(
-                    "NVDA", timeframe=dm.Timeframe.ANNUAL
-                ).fetch()
-        """
-        return _statement_query(
-            self._core,
-            INCOME_STATEMENTS,
-            symbols=symbols,
-            timeframe=timeframe,
-            start=start,
-            end=end,
-            sort=sort,
-            order=order,
-            limit=limit,
-            filters=filters,
-        )
-
-    def cash_flow_statements(
-        self,
-        symbols: Symbols | None = None,
-        *,
-        timeframe: Timeframe | None = None,
-        start: DateLike | None = None,
-        end: DateLike | None = None,
-        sort: str | None = None,
-        order: Order | None = None,
-        limit: int | None = None,
-        filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
-        """Cash flow statements of US public companies, one row per filer and reporting period.
-
-        Each row is a company's operating, investing, and financing cash flows for a quarter
-        or fiscal year, as filed with the SEC. A filing can name several share classes, so a
-        row has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
-        only selects the filings that list any of them. Served by REST
-        (`/stocks/financials/v1/cash-flow-statements`) through `fetch()` and `poll()`;
-        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-cash_flow_statements,
-        the web UI's column tooltips, or `columns()`.
-
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as a `str` timeframe; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
-        Args:
-            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
-                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
-                None for every timeframe the endpoint holds.
-            start: The first period end date to include (`period_end`), inclusive; None for
-                no lower bound.
-            end: The last period end date to include, inclusive. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The field to sort by, such as `"period_end"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
-
-        Returns:
-            The query; nothing is requested until a verb runs.
-
-        Example:
-            ::
-
-                t = m.stocks.financials.cash_flow_statements("AAPL", start="2024-01-01").fetch()
-        """
-        return _statement_query(
-            self._core,
-            CASH_FLOW_STATEMENTS,
-            symbols=symbols,
-            timeframe=timeframe,
-            start=start,
-            end=end,
-            sort=sort,
-            order=order,
-            limit=limit,
-            filters=filters,
-        )
-
-    def ratios(
-        self,
-        symbols: Symbols | None = None,
-        *,
-        sort: str | None = None,
-        order: Order | None = None,
-        limit: int | None = None,
-        filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
-        """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
-
-        Each row is one ticker's ratios (price to earnings, return on equity, debt to equity,
-        and so on) as of the row's `Date`, computed by Massive from the trailing twelve months
-        of filings and the daily close. The endpoint has no date filter, so the dataset has no
-        `start` or `end`. Served by REST (`/stocks/financials/v1/ratios`) through `fetch()` and
-        `poll()`; `symbols` is sent as one `ticker.any_of` list, and `poll()` replaces the
-        table each cycle, keyed by `Symbol` and `Date`.
-
-        `limit` caps the total number of rows across pages; the page size is internal.
-        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-ratios,
-        the web UI's column tooltips, or `columns()`.
-
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a filter
-        is unknown, reserved, or of the wrong kind.
-
-        Args:
-            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
-                re-read each `poll()` cycle); None for every ticker.
-            sort: The field to sort by, such as `"market_cap"`; None for the server default.
-            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
-                the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
-            filters: Further query parameters of the endpoint by wire name with dots written
-                as underscores, such as `{"price_to_earnings_lt": 15}`; checked now.
-
-        Returns:
-            The query; nothing is requested until a verb runs.
-
-        Example:
-            ::
-
-                cheap = m.stocks.financials.ratios(filters={"price_to_earnings_lt": 10}).fetch()
-        """
-        return list_query(
-            self._core,
-            RATIOS,
-            all_alternative=EVERY_TICKER,
-            symbols=symbols,
-            sort=sort,
-            order=order,
-            limit=limit,
-            filters=filters,
-        )
-
-
+@raises_through(list_query, _require_enum)
 def _statement_query(
     core: SessionCore,
     spec: DatasetSpec,
@@ -439,8 +137,10 @@ def _statement_query(
     Returns:
         The `Query`.
 
-    A `timeframe` that is not a `dm.Timeframe` raises the `TypeError` of `_require_enum`; the
-    errors of `list_query` propagate.
+    Raises:
+        TypeError: If `timeframe` is not a `dm.Timeframe`, or another argument has the wrong
+            type (`list_query`).
+        ValueError: If an argument has a value the dataset refuses (`list_query`).
     """
     frame = None if timeframe is None else _require_enum(timeframe, Timeframe, "timeframe")
     return list_query(
@@ -456,3 +156,310 @@ def _statement_query(
         limit=limit,
         filters=filters,
     )
+
+
+DATASETS: Final[tuple[DatasetSpec, ...]] = (
+    BALANCE_SHEETS,
+    INCOME_STATEMENTS,
+    CASH_FLOW_STATEMENTS,
+    RATIOS,
+)
+"""Every dataset of `m.stocks.financials`, one `DatasetSpec` each."""
+
+
+class _StockFinancials(Namespace):
+    """`m.stocks.financials`: company financial statements and daily valuation ratios.
+
+    Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
+    any thread. Each method builds a query and never blocks.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            m = dm.MassiveSession()
+            sheets = m.stocks.financials.balance_sheets("AAPL", timeframe=dm.Timeframe.ANNUAL)
+            t = sheets.fetch()
+    """
+
+    __slots__ = ()
+    _path: ClassVar[str] = "stocks.financials"
+
+    @raises_through(_statement_query)
+    def balance_sheets(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        timeframe: Timeframe | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Balance sheets of US public companies, one row per filer and reporting period.
+
+        Each row is a company's assets, liabilities, and equity at the end of a quarter or
+        fiscal year, as filed with the SEC. A filing can name several share classes, so a row
+        has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
+        only selects the filings that list any of them. Served by REST
+        (`/stocks/financials/v1/balance-sheets`) through `fetch()` and `poll()`; `poll()`
+        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-balance_sheets,
+        the web UI's column tooltips, or `columns()`.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            timeframe: `dm.Timeframe.ANNUAL` or `dm.Timeframe.QUARTERLY`; None for both.
+                A balance sheet is a position at the period's end, so it has no trailing
+                twelve months.
+            start: The first period end date to include (`period_end`), inclusive; None for
+                no lower bound.
+            end: The last period end date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
+            sort: The field to sort by, such as `"period_end"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type, such as a `str` timeframe.
+            ValueError: If `timeframe` is `dm.Timeframe.TRAILING_TWELVE_MONTHS`, which the
+                balance sheets do not offer; or if `symbols` is `dm.ALL` or empty, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or
+                of the wrong kind.
+
+        Example:
+            ::
+
+                q = m.stocks.financials.balance_sheets(
+                    ["AAPL", "MSFT"], timeframe=dm.Timeframe.QUARTERLY, start="2023-01-01"
+                )
+                t = q.fetch()
+        """
+        if timeframe is Timeframe.TRAILING_TWELVE_MONTHS:
+            raise ValueError(
+                "balance sheets have no trailing twelve months; "
+                "use dm.Timeframe.ANNUAL or dm.Timeframe.QUARTERLY"
+            )
+        return _statement_query(
+            self._core,
+            BALANCE_SHEETS,
+            symbols=symbols,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    @raises_through(_statement_query)
+    def income_statements(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        timeframe: Timeframe | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Income statements of US public companies, one row per filer and reporting period.
+
+        Each row is a company's revenue, expenses, earnings, and per-share figures for a
+        quarter or fiscal year, as filed with the SEC. A filing can name several share
+        classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of
+        tickers, and `symbols` only selects the filings that list any of them. Served by REST
+        (`/stocks/financials/v1/income-statements`) through `fetch()` and `poll()`; `poll()`
+        replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-income_statements,
+        the web UI's column tooltips, or `columns()`.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
+                None for every timeframe the endpoint holds.
+            start: The first period end date to include (`period_end`), inclusive; None for
+                no lower bound.
+            end: The last period end date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
+            sort: The field to sort by, such as `"period_end"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type, such as a `str` timeframe.
+            ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
+                is before `start`, or a filter is unknown, reserved, or of the wrong kind.
+
+        Example:
+            ::
+
+                t = m.stocks.financials.income_statements(
+                    "NVDA", timeframe=dm.Timeframe.ANNUAL
+                ).fetch()
+        """
+        return _statement_query(
+            self._core,
+            INCOME_STATEMENTS,
+            symbols=symbols,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    @raises_through(_statement_query)
+    def cash_flow_statements(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        timeframe: Timeframe | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Cash flow statements of US public companies, one row per filer and reporting period.
+
+        Each row is a company's operating, investing, and financing cash flows for a quarter
+        or fiscal year, as filed with the SEC. A filing can name several share classes, so a
+        row has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
+        only selects the filings that list any of them. Served by REST
+        (`/stocks/financials/v1/cash-flow-statements`) through `fetch()` and `poll()`;
+        `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every company. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-cash_flow_statements,
+        the web UI's column tooltips, or `columns()`.
+
+        Args:
+            symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
+                with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
+            timeframe: `dm.Timeframe.ANNUAL`, `QUARTERLY`, or `TRAILING_TWELVE_MONTHS`;
+                None for every timeframe the endpoint holds.
+            start: The first period end date to include (`period_end`), inclusive; None for
+                no lower bound.
+            end: The last period end date to include, inclusive. None (the default) sends no upper
+                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
+            sort: The field to sort by, such as `"period_end"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"fiscal_year_gte": 2020}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type, such as a `str` timeframe.
+            ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
+                is before `start`, or a filter is unknown, reserved, or of the wrong kind.
+
+        Example:
+            ::
+
+                t = m.stocks.financials.cash_flow_statements("AAPL", start="2024-01-01").fetch()
+        """
+        return _statement_query(
+            self._core,
+            CASH_FLOW_STATEMENTS,
+            symbols=symbols,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )
+
+    @raises_through(list_query)
+    def ratios(
+        self,
+        symbols: Symbols | None = None,
+        *,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+    ) -> Query:
+        """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
+
+        Each row is one ticker's ratios (price to earnings, return on equity, debt to equity,
+        and so on) as of the row's `Date`, computed by Massive from the trailing twelve months
+        of filings and the daily close. The endpoint has no date filter, so the dataset has no
+        `start` or `end`. Served by REST (`/stocks/financials/v1/ratios`) through `fetch()` and
+        `poll()`; `symbols` is sent as one `ticker.any_of` list, and `poll()` replaces the
+        table each cycle, keyed by `Symbol` and `Date`.
+
+        `limit` caps the total number of rows across pages; the page size is internal.
+        `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#financials-ratios,
+        the web UI's column tooltips, or `columns()`.
+
+        Args:
+            symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
+                re-read each `poll()` cycle); None for every ticker.
+            sort: The field to sort by, such as `"market_cap"`; None for the server default.
+            order: The direction of `sort`; without `sort` it raises `ValueError`. None for
+                the server default.
+            limit: The most rows to return in total, a positive `int`; None for every row.
+            filters: Further query parameters of the endpoint by wire name with dots written
+                as underscores, such as `{"price_to_earnings_lt": 15}`; checked now.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a filter is
+                unknown, reserved, or of the wrong kind.
+
+        Example:
+            ::
+
+                cheap = m.stocks.financials.ratios(filters={"price_to_earnings_lt": 10}).fetch()
+        """
+        return list_query(
+            self._core,
+            RATIOS,
+            all_alternative=EVERY_TICKER,
+            symbols=symbols,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+        )

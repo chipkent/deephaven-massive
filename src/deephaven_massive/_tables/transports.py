@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Callable, Sequence
     from datetime import date, timedelta
 
@@ -124,6 +125,15 @@ class RestTransport(Protocol):
         Args:
             asset_class: The asset class of the stream.
             family: The channel family, `TICK` or `FMV`.
+
+        Returns:
+            The pair's decision: its host, its recency, and the evidence it rests on.
+
+        Raises:
+            EntitlementError: The plan has no WebSocket access for the asset class.
+            AuthenticationError: Massive rejected the API key.
+            MassiveError: The request failed, or Massive answered with a timeframe the
+                library does not know.
         """
         ...
 
@@ -165,7 +175,14 @@ class RestTransport(Protocol):
         """
         ...
 
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+    def fetch(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 
         Args:
@@ -173,6 +190,38 @@ class RestTransport(Protocol):
             request: The normalized arguments.
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+            stop: A background read's stop token (`IngestPorts.read_stop`): once set, the
+                read's requests stop waiting for the rate governor and no new one starts, so
+                the call ends soon with an error the caller ignores. None for a call only the
+                session's close stops.
+
+        Returns:
+            A static table with the dataset's columns, in its schema's order.
+
+        Raises:
+            ValueError: Before any request, if a path the call reads does not take a parameter
+                or filter the request sets.
+            AuthenticationError: If Massive rejects the API key (HTTP 401).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
+                schema, a symbol's later page answers HTTP 404, or a request fails in any other
+                way.
+        """
+        ...
+
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+        """Check, with no request, that `fetch` can plan its requests for the request.
+
+        A background `fetch(wait=False)` calls it on the caller thread, so a parameter a path
+        does not take raises there, at the call, as `fetch` raises it before its first request.
+        The plan splits no crypto pair (that may read Massive's ticker list): the read does.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments, with static symbols.
+
+        Raises:
+            ValueError: The request sets a parameter a path of the call does not take.
         """
         ...
 
@@ -193,11 +242,26 @@ class RestTransport(Protocol):
             interval: The time between cycles.
             mode: How cycles combine.
             query: The `repr` of the query, for the `Query` column of `m.streams()`.
+
+        Returns:
+            The live table, with the dataset's columns, tracked by the session. A failure
+            after it exists fails the table rather than raising.
+
+        Raises:
+            ValueError: Before the table exists, if a path the call can read does not take a
+                parameter or filter the request sets. A cycle's failure later fails the table
+                instead of raising.
         """
         ...
 
     def history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, static.
 
@@ -207,6 +271,34 @@ class RestTransport(Protocol):
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
+            stop: A background read's stop token, as `fetch` takes it.
+
+        Returns:
+            A static table with the dataset's columns, holding the rows inside `window`.
+
+        Raises:
+            AuthenticationError: If Massive rejects the API key (HTTP 401).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
+                schema, a page of adjusted bars echoes another basis than the request, a
+                symbol's later page answers HTTP 404, a bar of a day or longer is stamped at a
+                time Massive is not known to use, or a request fails in any other way.
+        """
+        ...
+
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+        """Check, with no request, that `history` can plan its requests over `window`.
+
+        The `check_fetch` of a background `history(..., source=REST or AUTO, wait=False)` that
+        chose REST.
+
+        Args:
+            spec: The dataset; `history()` has checked that REST can serve the request.
+            request: The normalized arguments, with static symbols and the parsed bounds.
+            window: The call's window.
+
+        Raises:
+            ValueError: The request sets a parameter a path of the call does not take.
         """
         ...
 
@@ -235,6 +327,19 @@ class StreamTransport(Protocol):
             request: The normalized arguments.
             channel: The WebSocket channel.
             stream_id: The id the session minted for the stream.
+
+        Returns:
+            The stream's handle, carrying `stream_id`, its blink table, and its scope.
+
+        Raises:
+            ValueError: If explicit options contracts would put more than 1,000 topics on the
+                session's `/options` connection.
+            AuthenticationError: If Massive rejects the API key on the request that decides the
+                WebSocket host.
+            EntitlementError: If the plan has no WebSocket access for the class (the request
+                that decides the host is refused).
+            MassiveError: If the session is closed, the host cannot be decided, or Massive's
+                crypto ticker list cannot be read or does not hold a crypto pair.
         """
         ...
 
@@ -254,6 +359,7 @@ class FlatFileTransport(Protocol):
         *,
         dates: Sequence[date],
         call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the rows of `window` from the dataset's flat files, static.
 
@@ -266,6 +372,22 @@ class FlatFileTransport(Protocol):
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+            stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
+                file read stops at its next block and no new one starts. None for a call only
+                the session's close stops.
+
+        Returns:
+            A static table with the dataset's columns: the files' rows in date order. A
+            range without rows or files gives an empty table with every column.
+
+        Raises:
+            AuthenticationError: If S3 rejects the flat-file credentials.
+            EntitlementError: If the plan does not include the files (S3 answers 403); for
+                futures files the message names the venue and the `venue=` parameter.
+            MassiveError: If the bucket or endpoint is wrong, the last requested day's file is
+                missing within a day of its publication time, a bar of a day or longer is
+                stamped at a time Massive is not known to use, or a read fails in any other
+                way.
         """
         ...
 
@@ -306,5 +428,15 @@ class IngestPorts(Protocol):
 
         Raises:
             ValueError: If the configuration has no S3 credentials.
+        """
+        ...
+
+    def read_stop(self) -> threading.Event:
+        """Return a new stop token for one background read, unset.
+
+        The token is the wire layer's cancellation token, which the transports' `fetch` and
+        `history` accept as `stop`: setting it ends the read's waits for the rate governor at
+        once and stops its file reads at their next block. The tables layer only sets it and
+        reads it, as the `threading.Event` it is.
         """
         ...

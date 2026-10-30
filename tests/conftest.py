@@ -9,11 +9,18 @@ Test modules never import from this file; they request its fixtures by name. Fak
 `tests/_fakes/` are handed to tests through thin fixtures defined here.
 
 The live integration tests (`tests/**/test_*_integration.py`) get their own fixtures here too:
-the marker checks, the key skip, live sessions and wire clients, raw flat-file and REST
-readers, the run's plans, dates, and corporate actions, and the `evidence` recorder, which
-writes `live-evidence.log` as it goes and closes the terminal summary. The logic behind the
-plans, dates, contracts, and corporate actions lives in `tests/_live/`, where it is unit-tested
-against the fakes; the fixtures here only call it.
+the marker checks, the key skip, the Basic plan's pacing (the skip of a test that would wait
+more than a minute, and a terminal line for each wait), live sessions and wire clients, raw
+flat-file and REST readers, the run's plans, dates, and corporate actions, and the `evidence`
+recorder, which writes `live-evidence.log` as it goes and closes the terminal summary. The
+logic behind the plans, pacing, dates, contracts, and corporate actions lives in
+`tests/_live/`, where it is unit-tested against the fakes; the fixtures here only call it.
+
+The soak tests (marker `soak`) run the library against the fakes for `MASSIVE_SOAK_SECONDS`
+each, under load: a fast fake feed, many streams, and churn. Here they get a time limit scaled
+to that run instead of the suite's 60 s and faulthandler's 120 s, and the `soak` fixture, which
+paces their rounds and fails one whose memory or threads keep growing. `docs/dev/soak-tests.md`
+says how to run them, overnight included.
 """
 
 from __future__ import annotations
@@ -59,6 +66,7 @@ from tests._live import (
     classes,
     contracts,
     events,
+    pacing,
     parallel,
     plans,
     probe,
@@ -80,7 +88,7 @@ if TYPE_CHECKING:
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
-    from tests._fakes.ws import FakeMassiveServer
+    from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
 
 _DATA_DIR = Path(__file__).parent / "data"
@@ -1043,6 +1051,212 @@ def _client_threads() -> list[str]:
     return [t.name for t in threading.enumerate() if _CLIENT_THREAD.match(t.name) and t.is_alive()]
 
 
+# --- Soak tests ------------------------------------------------------------------------------
+
+SOAK_SECONDS_VARIABLE: Final = "MASSIVE_SOAK_SECONDS"
+"""The environment variable that sets how long each soak test runs, in seconds."""
+
+_SOAK_DEFAULT_SECONDS: Final = 20.0
+"""How long each soak test runs when `MASSIVE_SOAK_SECONDS` is not set: long enough for a few
+rounds, short enough that `-m soak` finishes in a few minutes."""
+
+_SOAK = "soak"
+"""The marker of the soak tests."""
+
+_SOAK_MARGIN: Final = 300.0
+"""Seconds a soak test may take beyond its run before its timeout ends it: its setup, the
+drain of its last rows, and its checks. A test that hangs (a deadlock) is ended there, with
+every thread's stack in the report."""
+
+_SOAK_ROUND_SECONDS: Final = 2.0
+"""How long one round of a soak test lasts, at least: the resources are sampled between
+rounds."""
+
+_SOAK_JVM_GROWTH: Final = 256 * 2**20
+"""How far, in bytes, the JVM's used heap after a full collection may rise from the end of a
+soak test's first round to the end of its run. The first round warms up the code paths and
+the update graph; after it, a run that frees what it makes stays within tens of megabytes,
+while a stream or table kept per churn step grows by megabytes a second."""
+
+_SOAK_PYTHON_GROWTH: Final = 50_000
+"""How many more Python objects the garbage collector may track at the end of a soak test's
+run than at the end of its first round. A run that frees what it makes stays within a few
+thousand; a result or row kept per churn step grows by tens of thousands a minute."""
+
+_SOAK_THREAD_GROWTH: Final = 64
+"""How many more threads than at the end of its first round a soak test may have running at
+any round's end. Every library thread belongs to a session or a connection, so a run whose
+streams come and go has a steady count; a thread left per stream, call, or session grows it
+without limit."""
+
+
+def soak_seconds() -> float:
+    """Return how long each soak test runs: `MASSIVE_SOAK_SECONDS`, or 20 s when it is not set.
+
+    Returns:
+        The seconds, a positive number.
+
+    Raises:
+        pytest.UsageError: If the variable is set to anything but a positive number.
+    """
+    text = os.environ.get(SOAK_SECONDS_VARIABLE, "")
+    if not text:
+        return _SOAK_DEFAULT_SECONDS
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = 0.0
+    if not seconds > 0:
+        raise pytest.UsageError(
+            f"{SOAK_SECONDS_VARIABLE} must be a positive number of seconds, not {text!r}"
+        )
+    return seconds
+
+
+class Soak:
+    """One soak test's run: its rounds, and the bounds on what may grow across them.
+
+    The `soak` fixture creates one per soak test. The test runs its load (a feed, churning
+    worker threads) and iterates `rounds()` on its own thread; each round lasts at least
+    `_SOAK_ROUND_SECONDS`, and after each one the run samples the JVM's used heap after a full
+    collection, the objects Python's collector tracks, and the threads running. Once the run's
+    time is up the iteration ends, after checking that none of the three grew past its bound
+    (`_SOAK_JVM_GROWTH`, `_SOAK_PYTHON_GROWTH`, `_SOAK_THREAD_GROWTH`) from the end of the first
+    round, and writes a one-line summary to stderr with the test's own figures (`note`). A
+    test that ends early stops iterating, and nothing is checked. Used by the test's thread
+    only.
+
+    Attributes:
+        seconds: How long the run lasts (`soak_seconds`).
+        running: Set while the run lasts; worker threads loop while it is set, and it is
+            cleared when the time is up, before the checks.
+    """
+
+    def __init__(self, seconds: float, name: str, report: Callable[[str], None]) -> None:
+        """Prepare the run; its clock starts at the first round.
+
+        Args:
+            seconds: How long the run lasts.
+            name: The test's node id, for the summary.
+            report: Writes the summary line where the person running the tests sees it.
+        """
+        self.seconds = seconds
+        self.running = threading.Event()
+        self.running.set()
+        self._name = name
+        self._report = report
+        self._notes: dict[str, object] = {}
+        self._pause = threading.Event()  # never set; only paces the rounds
+        runtime = importlib.import_module("jpy").get_type("java.lang.Runtime")
+        self._runtime = runtime.getRuntime()
+
+    def note(self, **figures: object) -> None:
+        """Add figures to the run's summary line, such as the rows sent and their rate.
+
+        Args:
+            **figures: Each name and its value, shown as `name=value`.
+        """
+        self._notes.update(figures)
+
+    def rounds(self) -> Iterator[int]:
+        """Yield each round's number until the run's time is up, then check the growth bounds.
+
+        The run fails the test once its time is up if the JVM's heap, Python's objects, or the
+        threads grew past their bounds; the message gives the first round's figures and the
+        run's.
+
+        Yields:
+            0, 1, 2, ...: the round about to run. The test does or checks one round's work,
+            and the next round starts at least `_SOAK_ROUND_SECONDS` after this one did.
+        """
+        started = time.monotonic()
+        samples: list[tuple[int, int, int]] = []
+        round_ = 0
+        while True:
+            began = time.monotonic()
+            yield round_
+            self._pause.wait(max(0.0, began + _SOAK_ROUND_SECONDS - time.monotonic()))
+            samples.append(self._sample())
+            round_ += 1
+            if time.monotonic() - started >= self.seconds:
+                break
+        self.running.clear()
+        # The least of the last three samples of each measure, so one sample taken mid-burst
+        # does not count as growth.
+        first = samples[0]
+        last = tuple(min(sample[i] for sample in samples[-3:]) for i in range(3))
+        most_threads = max(sample[2] for sample in samples)
+        figures = " ".join(f"{name}={value}" for name, value in self._notes.items())
+        self._report(
+            f"soak {self._name}: {round_} rounds in {time.monotonic() - started:.0f} s; "
+            f"JVM heap {first[0] / 2**20:.0f} -> {last[0] / 2**20:.0f} MiB; Python objects "
+            f"{first[1]} -> {last[1]}; threads {first[2]} -> at most {most_threads}; {figures}"
+        )
+        assert last[0] - first[0] < _SOAK_JVM_GROWTH, (
+            f"the JVM's heap grew from {first[0]} to {last[0]} bytes over the run"
+        )
+        assert last[1] - first[1] < _SOAK_PYTHON_GROWTH, (
+            f"Python's tracked objects grew from {first[1]} to {last[1]} over the run"
+        )
+        assert most_threads - first[2] < _SOAK_THREAD_GROWTH, (
+            f"the threads grew from {first[2]} to {most_threads} over the run"
+        )
+
+    def _sample(self) -> tuple[int, int, int]:
+        """Collect both heaps, then measure them and count the threads.
+
+        Returns:
+            The JVM's used heap in bytes, the objects Python's collector tracks, and the
+            threads running.
+        """
+        gc.collect()
+        importlib.import_module("jpy").get_type("java.lang.System").gc()
+        used = self._runtime.totalMemory() - self._runtime.freeMemory()
+        return used, len(gc.get_objects()), threading.active_count()
+
+
+@pytest.fixture
+def make_trade_feed(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., TradeFeed]]:
+    """Return a factory of `TradeFeed`s (`tests/_fakes/ws.py`) on the fake WebSocket server.
+
+    The factory takes the feed's symbols and its keyword options (`rows_per_frame`); a feed it
+    made that is still running at teardown is stopped then.
+
+    Yields:
+        The factory; call `start()` on the feed it returns.
+    """
+    module = importlib.import_module("tests._fakes.ws")
+    feeds: list[TradeFeed] = []
+
+    def make(symbols: list[str], **options: object) -> TradeFeed:
+        feed: TradeFeed = module.TradeFeed(fake_ws_server, symbols, **options)
+        feeds.append(feed)
+        return feed
+
+    yield make
+    for feed in feeds:
+        feed.stop()
+
+
+@pytest.fixture
+def soak(request: pytest.FixtureRequest, capsys: pytest.CaptureFixture[str]) -> Soak:
+    """Return the run of a soak test, which lasts `MASSIVE_SOAK_SECONDS` (20 s by default).
+
+    Args:
+        request: The test, named in the summary.
+        capsys: Lets the summary line through to the terminal.
+
+    Returns:
+        The run; iterate its `rounds()`.
+    """
+
+    def report(line: str) -> None:
+        with capsys.disabled():
+            sys.stderr.write(f"\n{line}\n")
+
+    return Soak(soak_seconds(), request.node.nodeid, report)
+
+
 @pytest.fixture
 def ws_session(make_ws_session: Callable[..., WsSession]) -> WsSession:
     """Return a `WsSession` with the default options: a fixed real-time host, manual flushes.
@@ -1177,9 +1391,6 @@ _EVIDENCE_LOCK = threading.Lock()
 _REQUEST_SECONDS = 13.0
 """Seconds of timeout a live test gets for each REST request it makes to a Basic class."""
 
-_DEFAULT_REQUESTS = 10
-"""The REST requests a live test is assumed to make when it declares none (`requests`)."""
-
 _SETTLED: Final = pytest.StashKey[
     dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]
 ]()
@@ -1312,25 +1523,6 @@ def _requirements(item: pytest.Item) -> tuple[str, ...]:
     return tuple(str(arg) for marker in item.iter_markers("needs") for arg in marker.args)
 
 
-def _may_read_basic(item: pytest.Item) -> bool:
-    """Return whether a test may read a class on Basic, whose requests are paced.
-
-    A test that runs on a class's Basic plan (`needs("<class>:basic")`) reads that class
-    whatever the key's plan, so its requests may wait for a place in the class's five a minute.
-    This needs no plan, so collection never probes.
-
-    Args:
-        item: The test.
-
-    Returns:
-        True when one of its `needs` requirements is a class's Basic plan.
-    """
-    return any(
-        r.endswith(":basic") and r != plans.SOME_BASIC and r.partition(":")[0] in plans.TIERS
-        for r in _requirements(item)
-    )
-
-
 _LIVE_GOVERNORS: list[GovernorRegistry] = []
 """The run's one registry of live rate governors, on the real clock, created by the first live
 test: Massive counts a minute's requests across tests, so the governors must outlive each."""
@@ -1382,7 +1574,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     connection limits) and `integration_smoke` (the unattended check that every dataset and
     verb works). A test of either must also be a live test, and it is deselected unless the
     `-m` expression names its tier: `-m integration` runs every live test but those, and
-    `-m integration_limits` or `-m integration_smoke` runs only that tier.
+    `-m integration_limits` or `-m integration_smoke` runs only that tier. Last, every soak test
+    gets a time limit of its run (`soak_seconds`) plus `_SOAK_MARGIN`, in place of the suite's
+    60 s.
 
     Args:
         config: The pytest configuration, for the `-m` expression and the deselection hook.
@@ -1424,16 +1618,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             config.hook.pytest_deselected(items=tiered)
             items[:] = [item for item in items if item.get_closest_marker(tier) is None]
     _arrange_live_tests(config, items)
+    limit = soak_seconds() + _SOAK_MARGIN
+    for item in items:
+        if item.get_closest_marker(_SOAK) is not None:
+            item.add_marker(pytest.mark.timeout(limit))
 
 
 def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Order, time, and register the live tests for the run's summary.
 
     The tests that need a class left on Basic (the rate-limit checks) run first, while their
-    class's minute is unspent. A test that may read a class on Basic (`_may_read_basic`) gets
-    a timeout scaled to its REST requests (its `requests` marker, else 10), since each may wait
-    for a place in the class's 5 a minute; on a paid plan the longer limit is only unused. Each
-    test's `settles` and `verifies` items and its `needs` are kept for the summary.
+    class's minute is unspent. A test that may read a class on Basic (`pacing.basic_reads`)
+    gets a timeout scaled to its REST requests (`pacing.declared_requests`), since each may
+    wait for a place in the class's 5 a minute; on a paid plan the longer limit is only unused.
+    A test that would send a class on Basic more than 5 requests is skipped once the run knows
+    its plans (`_live_tests_need_a_key`), since the plans are probed only when the first live
+    test runs. Each test's `settles` and `verifies` items and its `needs` are kept for the
+    summary.
 
     Args:
         config: The pytest configuration, whose stash keeps the items.
@@ -1448,10 +1649,9 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
         settles = tuple(str(a) for m in item.iter_markers("settles") for a in m.args)
         verifies = tuple(str(a) for m in item.iter_markers("verifies") for a in m.args)
         settled[item.nodeid] = (settles, verifies, _requirements(item))
-        if not _may_read_basic(item):
+        if not pacing.basic_reads(_requirements(item)):
             continue
-        marker = item.get_closest_marker("requests")
-        count = int(marker.args[0]) if marker is not None else _DEFAULT_REQUESTS
+        count = pacing.declared_requests(item.get_closest_marker("requests"))
         current = item.get_closest_marker("timeout")
         base = float(current.args[0]) if current is not None and current.args else 100.0
         item.add_marker(pytest.mark.timeout(base + _REQUEST_SECONDS * count), append=False)
@@ -1459,12 +1659,16 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
 
 @pytest.fixture(autouse=True)
 def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
-    """Skip a live test under CI, without `MASSIVE_API_KEY`, or when the plans fall short.
+    """Skip a live test under CI, without a key, short of its plans, or too slow on Basic.
 
     It runs before the test's own function-scoped fixtures. The session-scoped `live_plans`
     fixture, which probes the key's plans for the first live test of a run, is set up before
     it, and so makes the same check (`_live_key`) first. A test's `needs` markers name the plans
-    it needs; one the run's plans do not meet skips, naming the plan and its monthly price.
+    it needs; one the run's plans do not meet skips, naming the plan and its monthly price. A
+    test that reads a class the key holds on Basic and declares more than 5 requests skips too
+    (`pacing.skip_reason`), since every request after the fifth would wait for a later minute.
+    That check needs the plans, which the run learns only when its first live test starts, so
+    it sits here rather than in the collection hook.
 
     Args:
         request: The requesting test, for its markers and the `live_plans` fixture.
@@ -1473,9 +1677,79 @@ def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
         return
     _live_key()
     run_plans: plans.LivePlans = request.getfixturevalue("live_plans")
-    unmet = plans.unmet(_requirements(request.node), run_plans)
+    requirements = _requirements(request.node)
+    unmet = plans.unmet(requirements, run_plans)
     if unmet:
         pytest.skip("needs " + "; ".join(plans.plan_text(r) for r in unmet))
+    on_basic = pacing.classes_on_basic(run_plans.tiers)
+    reason = pacing.skip_reason(
+        [name for name in pacing.basic_reads(requirements) if name in on_basic],
+        pacing.declared_requests(request.node.get_closest_marker("requests")),
+    )
+    if reason is not None:
+        pytest.skip(reason)
+
+
+@pytest.fixture(autouse=True)
+def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -> Iterator[None]:
+    """Print a terminal line each time a request of a live test waits for its pace.
+
+    A live test gets a `pacing.WaitProgress` on the key's rate governor for its duration, which
+    prints one line per wait (`_write_progress`), so a paced run never looks hung. It holds a
+    lease of the governor meanwhile. It is named to sort after `_live_tests_need_a_key`, so a
+    skipped test takes no lease, and it depends on `rest_clock`, which counts the leases a test
+    holds when it begins, so that count includes none of this fixture's and the leak check
+    sees it released.
+
+    Args:
+        request: The requesting test, for its markers, the `live_plans` fixture, and the
+            terminal.
+        rest_clock: Installs the run's live governors for a live test; its clock is unused.
+
+    Yields:
+        Nothing; the test runs in between.
+    """
+    del rest_clock  # requested only for its order: it is set up before this fixture
+    if request.node.get_closest_marker(_INTEGRATION) is None:
+        yield
+        return
+    config = _live_massive_config(request.getfixturevalue("live_plans"))
+    lease = _live_governors().lease(
+        api_key=config.api_key,
+        base_url=config.rest_base_url,
+        basic=config.rest_basic_subscriptions,
+        label="live test progress",
+        listener=_ignore,
+    )
+    requests = pacing.declared_requests(request.node.get_closest_marker("requests"))
+    write = functools.partial(_write_progress, request.config)
+    progress = pacing.WaitProgress(lease.governor, requests=requests, write=write)
+    lease.governor.subscribe(progress)
+    try:
+        yield
+    finally:
+        lease.governor.unsubscribe(progress)
+        lease.release()
+
+
+_PROGRESS_LOCK = threading.Lock()
+"""Serializes the progress lines, each of which suspends the output capture while it prints."""
+
+
+def _write_progress(config: pytest.Config, line: str) -> None:
+    """Print one pacing line to the terminal while a live test runs, past the output capture.
+
+    pytest captures a test's output and shows it only for a failure, so the line is written
+    with the capture suspended for that one write, as `capsys.disabled()` does.
+
+    Args:
+        config: The pytest configuration, for the capture manager and the terminal reporter.
+        line: The line, without its newline.
+    """
+    capture = config.pluginmanager.getplugin("capturemanager")
+    reporter = config.pluginmanager.getplugin("terminalreporter")
+    with _PROGRESS_LOCK, capture.global_and_fixture_disabled():
+        reporter.write_line(f"live pacing: {line}")
 
 
 def _live_key() -> str:
@@ -1513,12 +1787,13 @@ _PLANS: Final = {
     "test_forex_integration.py": "a Currencies plan that includes this data",
     "test_timestamps_integration.py": "a Currencies plan that includes this data",
     "test_stocks_integration.py": "a Stocks plan that includes this data",
+    "test_stock_filings_integration.py": "a Stocks plan that includes this data",
     "test_options_integration.py": "an Options plan that includes this data",
     "test_indices_integration.py": "an Indices plan that includes this data",
     "test_futures_integration.py": "a Futures plan that includes this data",
     "test_reference_integration.py": "a plan that includes this reference data",
     "test_flatfiles_integration.py": "flat-file access to this dataset",
-    "test_hosts_integration.py": "the plan this check names in its docstring",
+    "test_host_decision_integration.py": "the plan this check names in its docstring",
     "test_ws_integration.py": "the plan this check names in its docstring",
 }
 """The plan a live test module's data needs, named in a skip when the key lacks it."""
@@ -1586,10 +1861,11 @@ def pytest_runtest_makereport(
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
-    """Lift the faulthandler limit from a live test, and decide what a refusal means.
+    """Lift the faulthandler limit from a live or soak test, and decide what a refusal means.
 
     The 120 s faulthandler limit is cancelled for the call of a live test, whose own timeout,
-    scaled to its paced requests, bounds it instead.
+    scaled to its paced requests, bounds it instead; and for a soak test's, whose timeout is
+    scaled to its run (`pytest_collection_modifyitems`).
 
     A refusal is an `EntitlementError`, or the wire's `WireEntitlementError` (an HTTP 403 or a
     `NOT_AUTHORIZED` envelope). One that names the timeframe ("Your plan doesn't include this
@@ -1616,9 +1892,10 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
             declared plans should have covered the request.
         WireEntitlementError: In the same cases.
     """
-    if item.get_closest_marker(_INTEGRATION) is not None:
-        # A live test waits on Massive's rate limits and streams, longer than the 120 s after
-        # which faulthandler would end the process; its own (scaled) timeout bounds it.
+    if item.get_closest_marker(_INTEGRATION) is not None or item.get_closest_marker(_SOAK):
+        # A live test waits on Massive's rate limits and streams, and a soak test runs for
+        # `MASSIVE_SOAK_SECONDS`, either longer than the 120 s after which faulthandler would
+        # end the process; each one's own (scaled) timeout bounds it.
         faulthandler.cancel_dump_traceback_later()
     try:
         return (yield)
@@ -1915,12 +2192,41 @@ def live_config(live_plans: plans.LivePlans) -> MassiveConfig:
     Returns:
         The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
     """
+    return _live_massive_config(live_plans)
+
+
+def _live_massive_config(run_plans: plans.LivePlans) -> MassiveConfig:
+    """Build the live configuration: `MASSIVE_API_KEY`, the S3 credentials, the Basic classes.
+
+    Args:
+        run_plans: The run's plans; its classes on Basic are paced from the first request.
+
+    Returns:
+        The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
+    """
     dm = importlib.import_module("deephaven_massive")
     config: MassiveConfig = dm.MassiveConfig(
         api_key=_required_env("MASSIVE_API_KEY"),
-        rest_basic_subscriptions=_basic_subscriptions(live_plans),
+        rest_basic_subscriptions=_basic_subscriptions(run_plans),
     )
     return config
+
+
+@pytest.fixture
+def classes_on_basic(live_plans: plans.LivePlans) -> frozenset[str]:
+    """Return the classes the key holds on Basic, so a live test can read less of them.
+
+    A test that may read a class on Basic sends that class at most 5 requests when it is on
+    Basic, and reads more (more underlyings, symbols, or pages) only on a paid plan, which is
+    not paced.
+
+    Args:
+        live_plans: The run's plans.
+
+    Returns:
+        The name of each class on Basic, such as `"options"`.
+    """
+    return pacing.classes_on_basic(live_plans.tiers)
 
 
 @pytest.fixture
@@ -2528,14 +2834,17 @@ def week_bar_report(
 ) -> Callable[[str, str, str], WeekReport]:
     """Return a function that shows where Massive starts a week bar, from raw REST bars.
 
-    It reads the week bars and the hour bars of one ticker over four calendar weeks, the
+    It reads the week bars and the shorter bars of one ticker over four calendar weeks, the
     recent week without a holiday and the three before it, from the aggregates range endpoint,
-    unfiltered. For each week bar it reports its stamp, its volume, the first and last hour bar
-    of the seven days from its stamp, and the three candidate seven-day windows whose hour-bar
-    volume comes closest to the bar's (`week_windows.score`); a candidate within a relative
-    error of 1e-9 is marked `MATCH`: that is the bucket Massive uses, wherever the bar is
-    stamped. A bar of the four weeks (`week_windows.is_checked`) is checked by comparison: the
-    library's week must be the closest window, ties allowed (`week_windows.library_is_closest`).
+    unfiltered: hour bars for crypto and forex, and day bars for stocks, whose hour bars do not
+    add up to the week bar's volume (about a fifth off in the live check) while the day bars of
+    its Monday to Friday do exactly. For each week bar it reports its stamp, its volume, the
+    first and last shorter bar of the seven days from its stamp, and the three candidate
+    seven-day windows whose volume comes closest to the bar's (`week_windows.score`); a
+    candidate within a relative error of 1e-9 is marked `MATCH`: that is the bucket Massive
+    uses, wherever the bar is stamped. A bar of the four weeks (`week_windows.is_checked`) is
+    checked by comparison: the library's week must be the closest window, ties allowed
+    (`week_windows.library_is_closest`).
 
     Args:
         rest_rows: Reads raw REST rows.
@@ -2544,8 +2853,9 @@ def week_bar_report(
     Returns:
         A function `(ticker_param, ticker, zone)`: the path placeholder of the class (such as
         `"stocksTicker"`), the ticker, and the class's day zone, `"UTC"` (crypto, forex) or
-        `"New York"` (stocks). It returns the evidence lines, how many bars it checked, and the
-        stamps of the checked bars whose closest window is not the library's week.
+        `"New York"` (stocks), which also selects day bars instead of hour bars. It returns the
+        evidence lines, how many bars it checked, and the stamps of the checked bars whose
+        closest window is not the library's week.
     """
     span_of_weeks = (recent_week[0] - timedelta(days=21), recent_week[1])
     first, last = span_of_weeks
@@ -2561,14 +2871,16 @@ def week_bar_report(
             params |= {"from": first - timedelta(days=7), "to": last + timedelta(days=7)}
             return rest_rows(path, params, {"sort": "asc", "limit": 50_000})
 
-        week_rows, hours = bars("week"), bars("hour")
-        lines = [f"{ticker} {first} to {last}: {len(week_rows)} week bars, {len(hours)} hour bars"]
+        unit = "hour" if day_zone is UTC else "day"
+        week_rows, shorter = bars("week"), bars(unit)
+        counts = f"{len(week_rows)} week bars, {len(shorter)} {unit} bars"
+        lines = [f"{ticker} {first} to {last}: {counts}"]
         checked, misses = 0, []
         for week in week_rows:
             stamp = int(week["t"])
             target = float(week["v"])
-            inside = [h for h in hours if stamp <= h["t"] < stamp + week_windows.WEEK_MS]
-            scored = week_windows.score(stamp, target, hours, zone=day_zone)
+            inside = [h for h in shorter if stamp <= h["t"] < stamp + week_windows.WEEK_MS]
+            scored = week_windows.score(stamp, target, shorter, zone=day_zone)
             best = ", ".join(
                 f"{label} err={error:.2e}{' MATCH' if error <= week_windows.MATCH else ''}"
                 for error, label, _ in scored[:3]
@@ -2579,7 +2891,8 @@ def week_bar_report(
                 else "none"
             )
             lines.append(
-                f"week t={_instant_text(stamp * _MS)} v={target} hours from the stamp: {span}; "
+                f"week t={_instant_text(stamp * _MS)} v={target} {unit} bars from the stamp: "
+                f"{span}; "
                 f"closest windows: {best}"
             )
             if week_windows.is_checked(stamp, span_of_weeks):
@@ -3048,8 +3361,7 @@ def period_bar_report(
     stamped outside the span is recorded as such and left out. A read the plan refuses is recorded
     and the other units are still read; the first refusal is then raised, for the run to judge (a
     day outside the plan's history skips the test). Reading it: a bar stamped 00:00 New York time
-    (01:00 for an index) on its period's first day, or on the Saturday or Sunday before a week's
-    Monday, is one the library accepts.
+    (01:00 for an index) on its period's first day, a week's Sunday, is one the library accepts.
 
     Args:
         rest_rows: Reads raw REST rows.
@@ -3189,17 +3501,21 @@ _EVENTS: dict[str, list[Any]] = {}
 
 @pytest.fixture
 def recent_splits(
-    table_rows: Callable[[Table], list[dict[str, Any]]], evidence: Callable[[str], None]
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+    live_plans: plans.LivePlans,
+    evidence: Callable[[str], None],
 ) -> Callable[[MassiveSession], list[events.Split]]:
     """Return a function that finds the year's most recent forward splits of common stocks.
 
     The first call of a run reads every split of the year and after it (one REST request,
     `_all_splits`), chooses the candidates (`events.forward_splits`), then checks the newest
     ones against the reference tickers until five common stocks are found (a request each,
-    `events.first_common`); later calls reuse them. Each call records them as evidence.
+    `events.first_common`), or, with stocks on Basic, until one is found among the first two
+    (`_common_events`); later calls reuse them. Each call records them as evidence.
 
     Args:
         table_rows: Snapshots a table into rows.
+        live_plans: The run's plans, whose Stocks plan sets how many splits are checked.
         evidence: Records the splits found.
 
     Returns:
@@ -3212,7 +3528,9 @@ def recent_splits(
             window = events.event_window(calendar.today())
             found = events.forward_splits(_all_splits(session, table_rows), window)
             common = _is_common_stock(session, table_rows)
-            _EVENTS["splits"] = events.first_common(found, lambda s: s.symbol, common)
+            _EVENTS["splits"] = _common_events(
+                found, lambda s: s.symbol, common, run_plans=live_plans
+            )
         evidence(f"recent forward splits: {_EVENTS['splits']}")
         return list(_EVENTS["splits"])
 
@@ -3221,18 +3539,22 @@ def recent_splits(
 
 @pytest.fixture
 def special_dividends(
-    table_rows: Callable[[Table], list[dict[str, Any]]], evidence: Callable[[str], None]
+    table_rows: Callable[[Table], list[dict[str, Any]]],
+    live_plans: plans.LivePlans,
+    evidence: Callable[[str], None],
 ) -> Callable[[MassiveSession], list[events.Dividend]]:
     """Return a function that finds the year's most recent special cash dividends.
 
     The first call of a run reads up to 50 dividends of the last year classed `special`, newest
     first, through the session's `stocks.dividends` (one REST request), chooses the candidates
     without a later split (`events.special_dividends`, with `_all_splits`), then checks them
-    against the reference tickers until five common stocks are found (`events.first_common`);
-    later calls reuse them. Each call records them as evidence.
+    against the reference tickers until five common stocks are found (`events.first_common`),
+    or, with stocks on Basic, until one is found among the first two (`_common_events`); later
+    calls reuse them. Each call records them as evidence.
 
     Args:
         table_rows: Snapshots a table into rows.
+        live_plans: The run's plans, whose Stocks plan sets how many dividends are checked.
         evidence: Records the dividends found.
 
     Returns:
@@ -3255,11 +3577,46 @@ def special_dividends(
             rows = table_rows(query.fetch())
             found = events.special_dividends(rows, _all_splits(session, table_rows))
             common = _is_common_stock(session, table_rows)
-            _EVENTS["dividends"] = events.first_common(found, lambda d: d.symbol, common)
+            _EVENTS["dividends"] = _common_events(
+                found, lambda d: d.symbol, common, run_plans=live_plans
+            )
         evidence(f"recent special cash dividends: {_EVENTS['dividends']}")
         return list(_EVENTS["dividends"])
 
     return find
+
+
+def _common_events(
+    found: Sequence[Any],
+    symbol: Callable[[Any], str],
+    is_common: Callable[[str], bool],
+    *,
+    run_plans: plans.LivePlans,
+) -> list[Any]:
+    """Keep the candidate events of common stocks, fewer with stocks on Basic.
+
+    A test sends a class on Basic at most 5 requests, and each candidate it tries costs two bar
+    requests, so with stocks on Basic only the first `events.BASIC_EVENT_CHECKS` candidates are
+    checked and `events.BASIC_EVENT_CANDIDATES` kept; on a paid plan, the first
+    `events.EVENT_CANDIDATES` common stocks.
+
+    Args:
+        found: The candidate events, newest first.
+        symbol: Returns an event's ticker.
+        is_common: Tells whether a ticker is a common stock (a request each).
+        run_plans: The run's plans.
+
+    Returns:
+        The events kept, newest first.
+    """
+    if run_plans.tiers["stocks"] == "basic":
+        return events.first_common(
+            found[: events.BASIC_EVENT_CHECKS],
+            symbol,
+            is_common,
+            keep=events.BASIC_EVENT_CANDIDATES,
+        )
+    return events.first_common(found, symbol, is_common)
 
 
 def _all_splits(
@@ -3302,7 +3659,7 @@ def _is_common_stock(
     dm = importlib.import_module("deephaven_massive")
 
     def check(symbol: str) -> bool:
-        query = session.reference.tickers(symbols=symbol, ticker_type=dm.TickerType.CS)
+        query = session.reference.tickers(symbol, ticker_type=dm.TickerType.CS)
         return bool(table_rows(query.fetch()))
 
     return check

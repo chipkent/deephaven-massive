@@ -32,11 +32,17 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import Namespace, build_query, list_params
+from deephaven_massive._namespaces.query_building import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
+    Namespace,
+    build_query,
+    day_argument,
+    list_params,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -64,7 +70,7 @@ _MINUTE_FILES: Final = "us_indices/minute_aggs_v1"
 _DAY_FILES: Final = "us_indices/day_aggs_v1"
 
 _SNAPSHOT_PAGE: Final = 250
-"""The indices snapshot's largest `limit`, and the most tickers one request names."""
+"""The indices snapshot's largest `limit`."""
 
 _AGGREGATES_PAGE: Final = 50_000
 """The range endpoint's largest `limit`, which counts the base aggregates behind a page."""
@@ -136,7 +142,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
-    symbols_per_request=_SNAPSHOT_PAGE,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     page_size=_SNAPSHOT_PAGE,
     revision_keys=("LastUpdated",),
 )
@@ -182,6 +188,7 @@ class _Indices(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "indices"
 
+    @raises_through(build_query)
     def values(self, symbols: Symbols) -> StreamHistoryQuery:
         """Index levels, tick by tick, as computed by the index providers.
 
@@ -214,10 +221,12 @@ class _Indices(Namespace):
             A query with the stream verbs and `history()`. Nothing is requested until a verb
             is called.
 
-        A symbol that is not a valid index symbol (one with another asset class's prefix, for
-        example), an empty symbol list, or a table without a `Symbol` column raises
-        `ValueError`; `symbols` of any other type than a `str`, a sequence of `str`, a table,
-        or `dm.ALL` raises `TypeError`.
+        Raises:
+            TypeError: For `symbols` of any other type than a `str`, a sequence of `str`, a table,
+                or `dm.ALL`.
+            ValueError: For a symbol that is not a valid index symbol (one with another asset
+                class's prefix, for example), an empty symbol list, or a table without a `Symbol`
+                column. Also for `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -240,6 +249,7 @@ class _Indices(Namespace):
     def bars(
         self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
     ) -> HistoryQuery: ...
+    @raises_through(build_query)
     def bars(
         self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
     ) -> HistoryQuery:
@@ -266,7 +276,7 @@ class _Indices(Namespace):
         flat files. There is no `limit`; the library pages internally. `history()` returns
         only the bars whose whole window lies inside the range and has ended, judged by
         `TimestampEnd`: the current day's bar never appears, a day bar only from 01:00 New York
-        time the next day, and a week bar only from a range that reaches its Sunday.
+        time the next day, and a week bar only from a range that reaches its Saturday.
 
         `TimestampEnd` is the first instant at which the bar is complete, so join on it (`aj(t,
         bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed bars. An intraday
@@ -276,15 +286,14 @@ class _Indices(Namespace):
         an hour after the midnight that follows its window's last day, at 01:00 New York time, since
         whether an index day bar covers the New York or the Chicago day is not verified. Since an
         index can update around the clock (`I:AAVE100`), a week or a longer period covers its whole
-        calendar period, weekends included: it starts at 00:00 of its first calendar day (a week
-        stamped on the Saturday or Sunday before its Monday, on that day) and ends an hour after the
-        midnight that follows its last. A bar of several days counts trading days, ending as late as
-        holidays could push it (one weekday more, and one more for every five further days), since
-        there is no holiday calendar. A longer bar must be stamped at 00:00 or 01:00 on the day its
-        period starts: a week on its Monday or the Saturday or Sunday before, a month, quarter, or
-        year on its 1st. Any other stamp fails the call with `MassiveError` naming the source, since
-        the bar may cover other days than its label. `Date` is null for a bar that spans more than
-        one date.
+        calendar period, weekends included: it starts at 00:00 of its first calendar day (a week's
+        Sunday) and ends an hour after the midnight that follows its last. A bar of several days
+        counts trading days, ending as late as holidays could push it (one weekday more, and one
+        more for every five further days), since there is no holiday calendar. A longer bar must be
+        stamped at 00:00 or 01:00 on the day its period starts: a week on its Sunday, where Massive
+        starts it, a month, quarter, or year on its 1st. Any other stamp fails the call with
+        `MassiveError` naming the source, since the bar may cover other days than its label.
+        `Date` is null for a bar that spans more than one date.
 
         `dm.ALL` is accepted by the stream verbs and by `history()` from flat files (1-minute
         and 1-day bars). `history()` over REST takes one index per request, so `dm.ALL`
@@ -307,11 +316,13 @@ class _Indices(Namespace):
             A `StreamHistoryQuery` or `HistoryQuery`, as above. Nothing is requested until a
             verb is called.
 
-        A `timespan` that is not a `dm.Timespan` (`dm.Timespan("minute")` converts text), a
-        `multiplier` that is not an `int`, or `symbols` of an unsupported type raises
-        `TypeError`. `Timespan.SESSION`, a `multiplier` that is not positive, a symbol that is
-        not a valid index symbol, an empty symbol list, or a table without a `Symbol` column
-        raises `ValueError`.
+        Raises:
+            TypeError: For a `timespan` that is not a `dm.Timespan` (`dm.Timespan("minute")`
+                converts text), a `multiplier` that is not an `int`, or `symbols` of an unsupported
+                type.
+            ValueError: For `Timespan.SESSION`, a `multiplier` that is not positive, a symbol that
+                is not a valid index symbol, an empty symbol list, or a table without a `Symbol`
+                column. Also for `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -328,6 +339,7 @@ class _Indices(Namespace):
             ),
         )
 
+    @raises_through(build_query)
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous trading day's open, high, low, and close of each index.
 
@@ -361,9 +373,12 @@ class _Indices(Namespace):
         Returns:
             A query with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
-        `dm.ALL`, a symbol that is not a valid index symbol, an empty symbol list, or a table
-        without a `Symbol` column raises `ValueError`; `symbols` of any other type than a
-        `str`, a sequence of `str`, or a table raises `TypeError`.
+        Raises:
+            TypeError: For `symbols` of any other type than a `str`, a sequence of `str`, or a
+                table.
+            ValueError: For `dm.ALL`, a symbol that is not a valid index symbol, an empty symbol
+                list, or a table without a `Symbol` column. Also for `symbols` of None, with a
+                message that names the forms it takes.
 
         Example:
             ::
@@ -374,11 +389,15 @@ class _Indices(Namespace):
             self._core,
             PREVIOUS_DAY_BAR,
             symbols=symbols,
-            all_alternative="m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            all_alternative=(
+                "use m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             timespan=Timespan.DAY,
         )
         return cast("Query", query)
 
+    @raises_through(build_query, list_params)
     def snapshots(
         self,
         symbols: Symbols,
@@ -423,12 +442,15 @@ class _Indices(Namespace):
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
-        A `sort` that is not a `str`, an `order` that is not a `dm.Order`, a `limit` that is
-        not an `int`, a `filters` that is not a mapping, or `symbols` of an unsupported type
-        raises `TypeError`. A `limit` that is not positive, a filter key that is not a
-        parameter of the snapshot or a value of the wrong kind (the message lists the valid
-        keys), a symbol that is not a valid index symbol, an empty symbol list, or a table
-        without a `Symbol` column raises `ValueError`.
+        Raises:
+            TypeError: For a `sort` that is not a `str`, an `order` that is not a `dm.Order`, a
+                `limit` that is not an `int`, a `filters` that is not a mapping, or `symbols` of an
+                unsupported type.
+            ValueError: For a `limit` that is not positive, a filter key that is not a parameter of
+                the snapshot or a value of the wrong kind (the message lists the valid keys), a
+                symbol that is not a valid index symbol, an empty symbol list, or a table without a
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -448,6 +470,7 @@ class _Indices(Namespace):
             ),
         )
 
+    @raises_through(build_query, day_argument)
     def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
         """One day's opening, closing, high, and low levels of each index.
 
@@ -471,16 +494,20 @@ class _Indices(Namespace):
         Args:
             symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` is refused), or
                 a Deephaven table with a `Symbol` column, re-read on every `poll()` cycle.
-            date: The day, as an ISO-8601 date (`"2025-06-02"`) or a `date`. It is a calendar
-                date, so a `datetime` raises `ValueError`.
+            date: The day, as an ISO-8601 date (`"2025-06-02"`), a `date`, Deephaven date text
+                such as `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`.
+                It is a calendar date, so a `datetime` or an instant raises `ValueError`.
 
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
-        A `date` that is not a `str`, `date`, or `datetime`, or `symbols` of an unsupported
-        type, raises `TypeError`. `dm.ALL`, a `datetime` or text that is not an ISO-8601 date as
-        `date`, a symbol that is not a valid index symbol, an empty symbol list, or a table
-        without a `Symbol` column raises `ValueError`.
+        Raises:
+            TypeError: For a `date` of none of the `DateLike` types, or `symbols` of an
+                unsupported type.
+            ValueError: For `dm.ALL`, a `datetime` or other time as `date`, text that is neither
+                an ISO-8601 date nor Deephaven date text, a symbol that is not a valid index
+                symbol, an empty symbol list, or a table without a `Symbol` column. Also for
+                `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -493,7 +520,7 @@ class _Indices(Namespace):
                 self._core,
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
-                all_alternative="m.indices.snapshots(dm.ALL)",
-                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+                all_alternative="use m.indices.snapshots(dm.ALL)",
+                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

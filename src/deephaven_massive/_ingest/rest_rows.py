@@ -34,8 +34,8 @@ from deephaven_massive._datasets.row_times import DATE, StampRule, time_column, 
 from deephaven_massive._datasets.source_columns import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
-from deephaven_massive._datasets.wire_symbols import WireSymbols, unknown_symbol_message
-from deephaven_massive._enums import UnknownSymbols
+from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
+from deephaven_massive._enums import OnError
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._massive import DriftReport, WireError, to_batch
 
@@ -99,7 +99,7 @@ class RowConverter:
         spec: DatasetSpec,
         rest_path: RestPath,
         *,
-        unknown_symbols: UnknownSymbols,
+        unreadable_symbols: OnError,
     ) -> RowConverter:
         """Prepare the conversion from the path's generated fields and the dataset's schema.
 
@@ -107,13 +107,13 @@ class RowConverter:
             catalog: The catalog, for the dataset's merged schema.
             spec: The dataset.
             rest_path: The path.
-            unknown_symbols: The session's rule for a symbol spelling the library cannot
-                read; `WARN` also adds the `RawSymbol` column to the schema.
+            unreadable_symbols: The session's setting for a symbol spelling the library
+                cannot read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
 
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.
@@ -126,7 +126,7 @@ class RowConverter:
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
             required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
             symbols=WireSymbols(
-                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
             ),
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
             time_name=time_column(spec.times),
@@ -186,8 +186,8 @@ class RowConverter:
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
-                session's `unknown_symbols` is `FAIL`; under `WARN` such a row keeps a null
-                `Symbol` and the text in `RawSymbol`.
+                session's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a
+                row keeps a null `Symbol` and the text in `RawSymbol`.
 
         A timestamp out of range raises the `UnitMismatchError` of `timestamps.instants`.
         """
@@ -208,8 +208,8 @@ class RowConverter:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
                     read = self.symbols.read(values, {})
-                    if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
-                        raise RowDataError(unknown_symbol_message(self.dataset, read.unknown))
+                    if read.unreadable and not self.symbols.keeps:
+                        raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
                     values, raw = read.symbols, read.raw
                 if source.unit is not None:
                     label = f"{self.dataset}.{name}"

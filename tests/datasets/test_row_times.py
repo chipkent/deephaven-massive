@@ -287,7 +287,7 @@ def test_a_futures_second_bar_ends_at_the_later_of_its_length_and_massive_s_end(
         ["2025-03-07T15:00:00", "2025-03-07T15:00:01", "2025-03-07T15:00:02"],
         ends=["2025-03-07T15:01:00", None, "2025-03-07T15:00:03"],
     )
-    with caplog.at_level(logging.WARNING, logger=row_times.__name__):
+    with caplog.at_level(logging.INFO, logger=row_times.__name__):
         assert fill(rule, sent)[END] == [
             "2025-03-07T15:01:00+00:00",
             "2025-03-07T15:00:02+00:00",
@@ -295,7 +295,7 @@ def test_a_futures_second_bar_ends_at_the_later_of_its_length_and_massive_s_end(
         ]
         fill(rule, sent)
     warned = [r for r in caplog.records if "is not its start plus one second" in r.message]
-    assert len(warned) == 1  # once per process
+    assert [r.levelno for r in warned] == [logging.INFO]  # once per process; nothing to act on
     agreeing = bars(["2025-03-07T15:00:00"], ends=["2025-03-07T15:00:01"])
     caplog.clear()
     assert fill(rule, agreeing)[END] == ["2025-03-07T15:00:01+00:00"]
@@ -364,9 +364,13 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     }
     assert fill(month, bars(["2024-06-01T04:00:00"]))[START] == ["2024-06-03T04:00:00+00:00"]
     assert fill(month, bars(["2024-06-01T04:00:00"]))[END] == ["2024-06-29T04:00:00+00:00"]
-    # Crypto weeks are calendar weeks, in UTC.
+    # Crypto weeks are calendar weeks from Sunday 00:00 UTC, where Massive stamps them.
     crypto = TimeRule("crypto.bars", RowTimes.BAR, A.CRYPTO, T.WEEK, 1)
-    assert fill(crypto, bars(["2025-03-03T00:00:00"]))[END] == ["2025-03-10T00:00:00+00:00"]
+    assert fill(crypto, bars(["2025-03-02T00:00:00"])) == {
+        DATE: [None],
+        START: ["2025-03-02T00:00:00+00:00"],
+        END: ["2025-03-09T00:00:00+00:00"],
+    }
     # Several days.
     days = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 3)
     assert fill(days, bars(["2025-03-03T05:00:00"])) == {
@@ -374,12 +378,15 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
         START: ["2025-03-03T05:00:00+00:00"],
         END: ["2025-03-07T05:00:00+00:00"],
     }
-    # An index can update around the clock, so its week may hold its weekend: it ends an hour
-    # after the next Monday begins.
+    # An index can update around the clock, so its week holds its weekend: it runs from its
+    # Sunday to an hour after the next Sunday begins.
     indices = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.WEEK, 1)
-    assert fill(indices, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-10T05:00:00+00:00"]
-    # Stamped on the Sunday before, an index week may hold that Sunday: it starts there.
-    assert fill(indices, bars(["2025-03-02T05:00:00"]))[START] == ["2025-03-02T05:00:00+00:00"]
+    assert fill(indices, bars(["2025-03-02T05:00:00"])) == {
+        DATE: [None],
+        START: ["2025-03-02T05:00:00+00:00"],
+        END: ["2025-03-09T06:00:00+00:00"],  # 01:00 New York time, still standard time
+    }
+
     index_days = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.DAY, 2)
     assert fill(index_days, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-06T06:00:00+00:00"]
 
@@ -399,7 +406,7 @@ def test_stock_bars_of_several_days_count_trading_days_with_a_holiday_allowance(
 def test_an_indicator_value_ends_where_a_bar_of_its_period_ends() -> None:
     # Indicator stamps are checked like the bars', so a value covers its bar's window.
     week = TimeRule("indicators.sma", RowTimes.BAR, A.CRYPTO, T.WEEK, 1)
-    assert fill(week, bars(["2025-03-03T00:00:00"]))[END] == ["2025-03-10T00:00:00+00:00"]
+    assert fill(week, bars(["2025-03-02T00:00:00"]))[END] == ["2025-03-09T00:00:00+00:00"]
     day = TimeRule("indicators.sma", RowTimes.BAR, A.STOCKS, T.DAY, 1)
     assert fill(day, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-04T05:00:00+00:00"]
 
@@ -572,19 +579,19 @@ def test_stamp_rule() -> None:
     assert stamp_rule(options.BARS, two_days) == StampRule(NEW_YORK, frozenset(), "bar")
     assert stamp_rule(indices.BARS, two_days) == StampRule(NEW_YORK, frozenset({chicago}), "bar")
     assert stamp_rule(forex.BARS, two_days) == StampRule(UTC, frozenset(), "bar")
-    # A week on its Monday, or for the classes closed at weekends the Saturday or Sunday before.
+    # A week on its Sunday, in every class, where Massive starts its weeks.
     for multiplier in (1, 2):
         week = Request(timespan=Timespan.WEEK, multiplier=multiplier)
-        weekend = frozenset({5, 6, 0})
+        sunday = frozenset({6})
         assert stamp_rule(stocks.BARS, week) == StampRule(
-            NEW_YORK, frozenset(), "bar", weekdays=weekend
+            NEW_YORK, frozenset(), "bar", weekdays=sunday
         )
         assert stamp_rule(indices.BARS, week) == StampRule(
-            NEW_YORK, frozenset({chicago}), "bar", weekdays=weekend
+            NEW_YORK, frozenset({chicago}), "bar", weekdays=sunday
         )
-        monday = frozenset({0})
-        assert stamp_rule(forex.BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
-        assert stamp_rule(crypto.BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
+        assert stamp_rule(forex.BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=sunday)
+        assert stamp_rule(crypto.BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=sunday)
+
     # A month, quarter, or year on its 1st.
     for timespan, months in (
         (Timespan.MONTH, frozenset(range(1, 13))),
@@ -708,6 +715,7 @@ def test_an_unknown_stamp_fails_loudly(zone: tzinfo, known: tuple[time, ...], of
             remedy="read the flat files",
         )
     message = str(caught.value)
+    assert caught.value.cause is dm.ErrorCause.LIBRARY_DEFECT  # a stamp the library cannot place
     assert ", which is not a stamp Massive is known to use for such a bar (00:00:00.000" in message
     assert message.endswith(
         f"; read the flat files, and report the stamp at {ISSUES_URL} so the day cut can be settled"
@@ -766,19 +774,22 @@ def week_starts(values: pa.Array, zone: tzinfo, weekdays: tuple[int, ...]) -> li
 
 
 def test_a_week_bar_must_be_stamped_on_a_day_its_week_starts() -> None:
-    # 2025-03-01 is a Saturday, 03-02 a Sunday, 03-03 a Monday.
+    # 2025-03-01 is a Saturday, 03-02 a Sunday, 03-03 a Monday. Massive starts its weeks on
+    # Sunday: 00:00 UTC for crypto and forex, 00:00 New York time for stocks.
     saturday, sunday = MARCH_3 - 2 * DAY_NS, MARCH_3 - DAY_NS
-    assert week_starts(stamps(MARCH_3, None), UTC, (0,)) == [MARCH_3, None]
-    new_york = [instant_ns(datetime.combine(date(2025, 3, d), time(), NEW_YORK)) for d in (1, 2, 3)]
-    assert week_starts(stamps(*new_york), NEW_YORK, (5, 6, 0)) == new_york
+    assert week_starts(stamps(sunday, None), UTC, (6,)) == [sunday, None]
+    new_york = instant_ns(datetime.combine(date(2025, 3, 2), time(), NEW_YORK))
+    assert week_starts(stamps(new_york), NEW_YORK, (6,)) == [new_york]
     with pytest.raises(
         MassiveError,
-        match=r"is stamped 2025-03-02T00:00:00\+00:00, which is not a stamp Massive is known to "
-        r"use for such a bar \(00:00:00\.000 in UTC, on a Monday\)",
+        match=r"is stamped 2025-03-03T00:00:00\+00:00, which is not a stamp Massive is known to "
+        r"use for such a bar \(00:00:00\.000 in UTC, on a Sunday\)",
     ):
-        week_starts(stamps(MARCH_3, sunday), UTC, (0,))
-    with pytest.raises(MassiveError, match=r"on a Monday or Saturday or Sunday\)"):
-        week_starts(stamps(saturday + DAY_NS * 4 + 5 * HOUR_NS), NEW_YORK, (5, 6, 0))
+        week_starts(stamps(sunday, MARCH_3), UTC, (6,))
+    with pytest.raises(MassiveError, match=r"on a Sunday\)"):
+        week_starts(stamps(saturday + 5 * HOUR_NS), NEW_YORK, (6,))
+    with pytest.raises(MassiveError, match=r"on a Monday or Sunday\)"):
+        week_starts(stamps(saturday + 5 * HOUR_NS), NEW_YORK, (6, 0))
 
 
 @pytest.mark.parametrize(

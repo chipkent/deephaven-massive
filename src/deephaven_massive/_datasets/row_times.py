@@ -41,11 +41,12 @@ become `Date`.
   session as for ticks, null when the bar crosses 17:00 Chicago time.
 - **1-day bar.** 00:00 of the day to 00:00 of the next day (01:00 New York time for indices);
   `Date` is the day.
-- **n-day, week, month, quarter, or year bar.** 00:00 of the window's first day (a week's
-  Monday; for stocks, options, and indices a period's first weekday) to 00:00 after its last
-  day (last weekday for stocks and options; for indices, which can update around the clock,
-  the period's last calendar day and one hour more); stock, option, and index days count as
-  trading days with a holiday allowance (`bar_periods.last_trading_day`); `Date` is null.
+- **n-day, week, month, quarter, or year bar.** 00:00 of the window's first day (for stocks
+  and options a period's first weekday, a week's Monday; for every other class its first
+  calendar day, a week's Sunday) to 00:00 after its last day (last weekday for stocks and
+  options; for indices, which can update around the clock, the period's last calendar day and
+  one hour more); stock, option, and index days count as trading days with a holiday
+  allowance (`bar_periods.last_trading_day`); `Date` is null.
 - **Futures session bar.** Massive's `window_start` to 17:00 Chicago time on its session date;
   `Date` is that date.
 - **Futures bar of several sessions.** `window_start` to 17:00 Chicago time on the latest day
@@ -107,7 +108,6 @@ from deephaven_massive._datasets.dates import (
     DAY_ZONES,
     day_end,
     day_zone,
-    trades_at_weekends,
 )
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
@@ -117,7 +117,7 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_sessions,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import ErrorCause, MassiveError
 from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
@@ -644,7 +644,8 @@ class TimeRule:
                 raise MassiveError(
                     f"{self.dataset}: Massive sent a day summary with isUTC false, so its day "
                     "is not the UTC day whose window the library gives it; report it at "
-                    f"{ISSUES_URL}"
+                    f"{ISSUES_URL}",
+                    cause=ErrorCause.LIBRARY_DEFECT,
                 )
         zone = self._zone()
         labels = _column(rows, DATE)
@@ -714,7 +715,8 @@ class TimeRule:
 
         Massive's documented futures one-second sample spans 60 seconds from `s` to `e`;
         whichever is right, the later end never attaches a bar before its window closed. A
-        disagreement is logged once per process.
+        disagreement is logged once per process, at INFO: the later end is already the safe
+        choice, so there is nothing for the user to do.
 
         Args:
             rows: The batch, whose `TimestampEnd` holds Massive's `e` where the source sends it.
@@ -734,7 +736,6 @@ class TimeRule:
                 "second; the later of the two is kept as TimestampEnd",
                 self.dataset,
                 first,
-                level=logging.WARNING,
             )
         later = pc.if_else(pc.greater(sent, computed), sent, computed)
         return pc.coalesce(later, computed)
@@ -770,10 +771,6 @@ class TimeRule:
             first, after = bar_days(
                 self.asset_class, day, timespan=timespan, multiplier=self.multiplier
             )
-            if self.asset_class is AssetClass.INDICES:
-                # An index can update at weekends: a week stamped on its Saturday or Sunday may
-                # hold that day, so it starts there, the earlier reading.
-                first = min(first, day)
             starts.append(_ns(_midnight(first, zone)))
             ends.append(_ns(day_end(self.asset_class, after - timedelta(days=1))))
             dates.append(day.isoformat() if single else None)
@@ -985,12 +982,9 @@ serves, and for an indicator value of a day or longer, which is computed over th
 bars. The indices range's midnight in Chicago is that of its 1-day bars and of the index
 indicator samples' underlying aggregates."""
 
-_WEEK_STAMP_DAYS: Final = frozenset({5, 6, 0})
-"""The days a week bar of a class that does not trade at weekends may be stamped on: the
-Saturday or Sunday before its Monday-to-Friday week, which belong to it, or that Monday."""
-
-_MONDAY: Final = frozenset({0})
-"""The day a forex or crypto week bar must be stamped on: the Monday its calendar week starts."""
+_SUNDAY: Final = frozenset({6})
+"""The day a week bar must be stamped on, in every class: the Sunday Massive starts its week on
+(00:00 UTC for forex and crypto, 00:00 New York time for stocks, options, and indices)."""
 
 _PERIOD_MONTHS: Final[Mapping[Timespan, frozenset[int]]] = {
     Timespan.MONTH: frozenset(range(1, 13)),
@@ -1021,8 +1015,8 @@ def stamp_rule(
     midnight in Chicago; those stamps move to the day's start, and any other stamp fails,
     since such a bar may cover other days than its label (the documented crypto REST samples
     sit at midnight New York time, another day cut). A week, month, quarter, or year bar must
-    also be stamped on the day its period starts, or the whole-window rule would place it in
-    another period.
+    also be stamped on the day its period starts (a week's Sunday, a longer period's 1st), or
+    the whole-window rule would place it in another period.
 
     The indicators' values are computed over the aggregates range's bars and carry those
     bars' stamps (Massive's samples show the underlying aggregates at 00:00 New York time for
@@ -1059,8 +1053,7 @@ def stamp_rule(
     known = _LONGER_STAMPS[cls]
     what = "indicator value" if indicator else "bar"
     if timespan is Timespan.WEEK:
-        weekdays = _MONDAY if trades_at_weekends(cls) else _WEEK_STAMP_DAYS
-        return StampRule(zone, known, what, weekdays=weekdays)
+        return StampRule(zone, known, what, weekdays=_SUNDAY)
     return StampRule(zone, known, what, months=_PERIOD_MONTHS.get(timespan, frozenset()))
 
 
@@ -1194,7 +1187,8 @@ def _expected(
 
     Returns:
         Such as `"00:00:00.000, 16:00:00.000 in America/New_York"` or
-        `"00:00:00.000 in UTC, on a Monday"`.
+        `"00:00:00.000 in UTC, on a Sunday"`.
+
     """
     times = ", ".join(t.isoformat("milliseconds") for t in sorted({time(0), *known}))
     text = f"{times} in {zone}"
@@ -1242,5 +1236,6 @@ def _refuse(
         f"{label}: {article} {what} from {source} is stamped {bad.isoformat()}{local}, which is "
         f"not a stamp Massive is known to use for such a bar ({expected}), so it may cover "
         f"other days than the one it would be labelled with; {remedy}, and report the stamp at "
-        f"{ISSUES_URL} so the day cut can be settled"
+        f"{ISSUES_URL} so the day cut can be settled",
+        cause=ErrorCause.LIBRARY_DEFECT,
     )

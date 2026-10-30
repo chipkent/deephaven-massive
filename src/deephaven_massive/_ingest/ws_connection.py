@@ -11,9 +11,13 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   `delayed.` host (`ConnectionGroup.reroute`, `Connection.hand_over`). A fatal failure (a
   rejected key, a handshake error retrying cannot fix) fails every stream on it.
 - **Rows, rejects, drift, and its row.** Rows go to the flush thread; a rejected row fails the
-  streams that would have received it; drift is recorded on the connection's `SchemaDrift`.
-  The connection's `m.connections()` row is rewritten as its state changes, throttled while
-  messages flow (`SUMMARY_INTERVAL`), and its traffic is logged as a periodic summary.
+  streams that would have received it; drift is recorded on the connection's `SchemaDrift`. A
+  row with no symbol fails only the channel's `dm.ALL` streams and is logged at ERROR as a
+  defect of the library, once per spelling. The connection logs one WARNING per outage, and one
+  when it goes silent during its market's trading hours (`NO_FRAMES_WARNING`), each with its
+  recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
+  most once a second while messages flow, and its traffic is logged as a summary every
+  `SUMMARY_INTERVAL` seconds.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
 - **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself.
 
@@ -45,12 +49,21 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
+from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
+from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, subscription_of
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    EntitlementError,
+    ErrorCause,
+    MassiveError,
+    from_wire,
+    wire_cause,
+)
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
 from deephaven_massive._ingest.subscriptions import (
     Sender,
@@ -59,6 +72,7 @@ from deephaven_massive._ingest.subscriptions import (
     channel_of,
     stream_topics,
 )
+from deephaven_massive._log_limits import BoundedLog, log_failure
 from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
@@ -72,7 +86,7 @@ from deephaven_massive._tables.transports import HostDecision
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Collection, Hashable, Sequence
+    from collections.abc import Callable, Collection, Hashable, Iterable, Sequence
 
     from deephaven.execution_context import ExecutionContext
 
@@ -85,6 +99,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CONNECTION_SETTINGS",
     "IDLE_GRACE",
+    "NO_FRAMES_WARNING",
     "OPTIONS_CAP",
     "SUMMARY_INTERVAL",
     "ClientFactory",
@@ -109,6 +124,17 @@ _MESSAGE_ROW_NS: Final = 1_000_000_000
 
 SUMMARY_INTERVAL: Final = 60.0
 """Seconds between a connection's DEBUG summaries of its traffic, so a stall shows in the log."""
+
+NO_FRAMES_WARNING: Final = 300.0
+"""Seconds a connection with acknowledged subscriptions may go without a frame during its asset
+class's regular trading hours before it logs a WARNING that its live tables may be stale. Five
+minutes, since a connection carrying only a few quiet symbols can go a minute or two without a
+trade; the check runs with each `SUMMARY_INTERVAL` summary."""
+
+_UNREADABLE_ROW_LIMIT: Final = 100
+"""The most distinct rows with no valid symbol logged at ERROR per process."""
+
+_unreadable_rows: Final = BoundedLog(logger, limit=_UNREADABLE_ROW_LIMIT, level=logging.ERROR)
 
 CONNECTION_SETTINGS: Final = (
     "api_key",
@@ -250,6 +276,26 @@ class ConnectionStream:
     static: bool
 
 
+@dataclass(slots=True)
+class _Episodes:
+    """A connection's two silence episodes, each logged once as a WARNING. Loop-confined.
+
+    Attributes:
+        lost_at: When the socket was lost (seconds since the epoch), or None while connected.
+        lost_warned: Whether the outage's WARNING was logged (only when the connection had
+            live tables), so its reconnect logs the recovery.
+        last_frame_at: When the last frame of any kind arrived or the socket opened
+            (nanoseconds since the epoch); data has the connection's own `_last_message_at`.
+        quiet_at: When the no-frames WARNING was logged (nanoseconds since the epoch), or
+            None outside that episode.
+    """
+
+    lost_at: float | None = None
+    lost_warned: bool = False
+    last_frame_at: int = 0
+    quiet_at: int | None = None
+
+
 class Connection:
     """A connection to one `wss://<host>/<cluster>`, its flush thread, and its streams.
 
@@ -367,9 +413,8 @@ class Connection:
         self._summary: Timer | None = None
         self._traffic = _Traffic()
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
-        self._stalled = False
-        self._ended = False
-        self._moving = False
+        self._stalled = self._ended = self._moving = False
+        self._episodes = _Episodes()
         self._backlog_timer: Timer | None = None
         self._change_scheduled = False
 
@@ -632,8 +677,9 @@ class Connection:
         """Handle a call for a stream this connection does not hold.
 
         A stream that moved away is forwarded to the connection that took it; one that is
-        moving here but not adopted yet keeps the call until `adopt` applies it; any other
-        (a stream whose open failed before it was attached) is ignored.
+        moving here but not adopted yet keeps the call until `adopt` applies it. Any other (a
+        stream whose open failed before it was attached, or one that was moving here when it
+        shut down) is dropped, with the calls kept for it, and the connection may go idle.
 
         Args:
             stream_id: The stream.
@@ -649,7 +695,29 @@ class Connection:
         if awaited:
             self._early.setdefault(stream_id, []).append((callback, args))
         else:
-            self._after_change()  # a stream that never arrived may have been the last lease
+            # A stream that never arrived may have been the last lease, and calls kept for it
+            # while it was still awaited are no longer needed.
+            logger.debug(
+                "%s: stream %d is neither held nor awaited here; %s is dropped",
+                self.url,
+                stream_id,
+                getattr(callback, "__name__", callback),
+            )
+            self.check_idle()
+
+    def stop_awaiting(self, stream_ids: Iterable[int]) -> None:
+        """Stop awaiting streams and stop counting them against the options cap; lock held.
+
+        Called with the group's lock held, for streams that will never be adopted here: their
+        lease was returned, or the old connection's loop ended before it could hand them over.
+        The caller posts `check_idle` (or a release follows) so the calls kept for them go too.
+
+        Args:
+            stream_ids: The streams.
+        """
+        for stream_id in stream_ids:
+            self.awaiting.discard(stream_id)
+            self.cap_pending.pop(stream_id, None)
 
     def check_idle(self) -> None:
         """Arm the idle close if the connection has no stream left.
@@ -703,10 +771,12 @@ class Connection:
 
         Only the streams that still hold a lease go there (the move pointed each lease at
         `successor`). A stream whose lease is gone (its blink table shut down, or its session
-        closed, after or before the move) stays behind: it stops being routed, `successor`
-        stops awaiting it, and its topics are never subscribed there, so a closed session's
-        stream cannot keep the successor open. The connection closes even if the hand-over
-        raises, since a connection out of the registry has no other close.
+        closed, after or before the move) stays behind: it stops being routed here, and its
+        topics are never subscribed on `successor`, which stopped awaiting it when the lease
+        was returned (`WsConnections._forget`), so a closed session's stream cannot keep the
+        successor open. A lease returned after this choice is caught by `adopt`. The
+        connection closes even if the hand-over raises, since a connection out of the registry
+        has no other close.
 
         Args:
             successor: The connection that takes over.
@@ -719,9 +789,6 @@ class Connection:
                 leased = self._group.streams
                 moving = [s for s in streams if s.stream_id in leased]
                 gone = {s.stream_id for s in streams} - {s.stream_id for s in moving}
-                for stream_id in gone:
-                    successor.awaiting.discard(stream_id)
-                    successor.cap_pending.pop(stream_id, None)
                 failure = successor.failure
                 if failure is None:
                     for stream in moving:
@@ -739,11 +806,28 @@ class Connection:
     def adopt(self, streams: list[ConnectionStream]) -> None:
         """Take over the streams of a connection the verdict moved, and the calls they missed.
 
+        Only the streams whose lease this connection still holds are taken. A stream whose
+        lease was returned after the hand-over chose it (its blink table shut down) is left
+        out and its route removed: its release may have reached this loop first and been
+        dropped, so registering it would keep its topics subscribed with nothing to release
+        them.
+
         Args:
             streams: The streams, with their topics.
         """
         with self._lock:
             self.awaiting.difference_update(s.stream_id for s in streams)
+            leased = self._group.streams
+            gone = [s.stream_id for s in streams if leased.get(s.stream_id) is not self]
+        if gone:
+            logger.debug(
+                "%s: streams %s shut down during their hand-over; they are not adopted",
+                self.url,
+                gone,
+            )
+            for stream_id in gone:
+                self.flusher.routes.remove(stream_id)
+            streams = [s for s in streams if s.stream_id not in gone]
         if self._ended:  # it failed or closed first; its failure already failed the routes
             return
         for stream in streams:
@@ -766,6 +850,17 @@ class Connection:
         """
         if generation > 1:
             self._reconnects += 1
+        episodes = self._episodes
+        if episodes.lost_at is not None:
+            if episodes.lost_warned:
+                logger.info(
+                    "%s: reconnected after %.0f s; its live tables receive data again",
+                    self.url,
+                    time.time() - episodes.lost_at,
+                )
+            episodes.lost_at = None
+            episodes.lost_warned = False
+        episodes.last_frame_at = time.time_ns()
         if self._summary is None:
             self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
         self._state = ConnectionState.CONNECTED
@@ -782,6 +877,7 @@ class Connection:
             generation: The generation it arrived in.
             status: The decoded status.
         """
+        self._episodes.last_frame_at = time.time_ns()
         if generation == self.subscriptions.generation:
             self.subscriptions.status(status)
 
@@ -821,9 +917,10 @@ class Connection:
         whether or not DEBUG is on (the line is built only when it is): the data batches and
         rows per channel received, the rejected rows, the acknowledged topics, and how long
         ago each channel last had data, so a stream that went quiet shows in the log even
-        though nothing failed.
+        though nothing failed. It also checks for a silent connection (`_check_frames`).
         """
         self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
+        self._check_frames(time.time_ns())
         if logger.isEnabledFor(logging.DEBUG):
             now = time.time_ns()
             topics, acked, pending, no_ack = self.subscriptions.counts()
@@ -852,8 +949,51 @@ class Connection:
             )
         self._traffic.next_window()
 
+    def _check_frames(self, now: int) -> None:
+        """Warn once per episode when the connection goes silent while its market trades.
+
+        A connection that holds acknowledged subscriptions and has received no frame of any
+        kind for `NO_FRAMES_WARNING` seconds, during its asset class's regular trading hours
+        (`in_trading_hours`), logs one WARNING that its live tables may be stale; the first
+        frame after it logs the recovery at INFO. A connection that is not connected is the
+        outage WARNING's (`_on_state`), not this one's.
+
+        Args:
+            now: The current time, in nanoseconds since the epoch.
+        """
+        episodes = self._episodes
+        last = max(episodes.last_frame_at, self._last_message_at or 0)
+        if episodes.quiet_at is not None:
+            if last > episodes.quiet_at:
+                logger.info("%s: frames arrive again", self.url)
+                episodes.quiet_at = None
+            return
+        silent = (now - last) / 1e9
+        if (
+            self._state is not ConnectionState.CONNECTED
+            or not self.subscriptions.acknowledged
+            or silent < NO_FRAMES_WARNING
+            or not in_trading_hours(self.asset_class, datetime.fromtimestamp(now / 1e9, UTC))
+        ):
+            return
+        episodes.quiet_at = now
+        logger.warning(
+            "%s: no frame for %.0f s during %s trading hours, though %d topics are "
+            "acknowledged, so its live tables may be stale; a market holiday or symbols that "
+            "are not trading explain it, and m.connections() shows the connection's state",
+            self.url,
+            silent,
+            self.asset_class.value,
+            len(self.subscriptions.acknowledged),
+        )
+
     def _on_state(self, state: WsState, detail: float | WireError | None) -> None:
         """Show the client's state; on a fatal failure, fail every stream.
+
+        The first `RECONNECTING` or `WAITING_SLOT` of an outage logs one WARNING when the
+        connection carries live tables, since they get no data until it reconnects; each
+        later attempt of the same outage logs nothing here, and the reconnect logs the
+        recovery at INFO (`_on_open`).
 
         Args:
             state: The client's new state.
@@ -864,6 +1004,21 @@ class Connection:
         if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
             self.subscriptions.ended()
             self._next_reconnect_at = int(cast("float", detail) * 1e9)
+            episodes = self._episodes
+            if episodes.lost_at is None:
+                episodes.lost_at = time.time()
+                episodes.lost_warned = bool(self._streams)
+                if episodes.lost_warned:
+                    logger.warning(
+                        "%s: the connection is down (%s); its %d live tables get no data until "
+                        "it reconnects, next attempt in %.0f s; m.connections() shows its state",
+                        self.url,
+                        "the account has no free connection, max_connections"
+                        if state is WsState.WAITING_SLOT
+                        else "reconnecting",
+                        len(self._streams),
+                        cast("float", detail) - episodes.lost_at,
+                    )
             if state is WsState.WAITING_SLOT and not self._stalled:
                 self._stalled = True
                 text = self._stall_text()
@@ -900,9 +1055,10 @@ class Connection:
                 f"the WebSocket connection to {self.decision.host}{self.path} failed: "
                 f"{error.message}",
                 status=error.status,
+                cause=wire_cause(error),  # an internal error of the client is a defect
             )
         self._last_error = str(public)
-        logger.error("%s", public)
+        log_failure(logger, public, "%s")
         with self._lock:  # one section: no verb leases the connection once it has failed
             self.failure = public
             routed = [sink.stream_id for sink in self.flusher.routes.sinks()]
@@ -925,13 +1081,16 @@ class Connection:
             symbol = canonical_from_wire(self.asset_class, reject.symbol)
             why = f"{reject.symbol!r} is not a spelling the library reads"
         if symbol is None:
-            logger.error(
-                "%s%s: a %s row has no valid symbol (%s); failing the channel's ALL streams: %s",
+            _unreadable_rows.log(
+                f"{self.path}\0{channel}\0{reject.symbol}",
+                "%s%s: a %s row has no valid symbol (%s); failing the channel's ALL streams: "
+                "%s. %s",
                 self.decision.host,
                 self.path,
                 channel,
                 why,
                 reject.error.message,
+                LIBRARY_BUG,
             )
         ids = [
             s.stream_id
@@ -947,8 +1106,8 @@ class Connection:
             reject.error.message,
             reject.raw,
         )
-        if ids:
-            self.flusher.fail(ids, from_wire(reject.error))
+        if ids:  # a row the library cannot read is its own defect, never the user's
+            self.flusher.fail(ids, from_wire(reject.error, cause=ErrorCause.LIBRARY_DEFECT))
 
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
         """Fail the streams of refused topics with `EntitlementError`.
@@ -962,8 +1121,10 @@ class Connection:
         if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
             hint += " (index values may need business.massive.com)"
         error = EntitlementError(
-            f"{self.decision.host}{self.path} refused {', '.join(sorted(refused))}: {message}; "
-            f"the plan may not include this data on this host; {hint}"
+            f"the WebSocket server {self.decision.host}{self.path} refused the subscription to "
+            f"{', '.join(sorted(refused))}; Massive said: {message}; the "
+            f"{subscription_of(self.asset_class)} subscription's plan may not include this data "
+            f"on this host; {hint}"
         )
         self._last_error = str(error)
         ids = [s.stream_id for s in self._streams.values() if s.topics & refused]
@@ -1093,7 +1254,7 @@ class Connection:
                 logger.warning("%s stream %d: %s", stream.plan.dataset, stream.stream_id, text)
                 update = StreamUpdate(deferred=count, error=text)
             else:
-                logger.warning(
+                logger.info(
                     "%s stream %d: no contract is deferred any more",
                     stream.plan.dataset,
                     stream.stream_id,
@@ -1645,9 +1806,7 @@ class ConnectionGroup:
         if not connection.post(connection.hand_over, successor):
             # The old loop ended first: its streams were failed there and never arrive.
             with self.lock:
-                successor.awaiting.difference_update(moved)
-                for stream_id in moved:
-                    successor.cap_pending.pop(stream_id, None)
+                successor.stop_awaiting(moved)
             successor.post(successor.check_idle)
 
     @staticmethod
@@ -1682,7 +1841,9 @@ class ConnectionGroup:
             try:
                 owner.record_verdict(*key, decision)
             except Exception:  # the session's next stream of the class records it again
-                logger.exception("could not record the real-time verdict for %s", connection.url)
+                logger.exception(
+                    "could not record the real-time verdict for %s. %s", connection.url, LIBRARY_BUG
+                )
                 continue
             with owner.group.lock:
                 owner.verdicts_recorded.add(key)

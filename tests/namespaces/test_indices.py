@@ -115,7 +115,11 @@ def test_values_history_is_flat_files_only() -> None:
 def _schema(spec: DatasetSpec) -> list[tuple[str, str]]:
     # The columns the dataset's own sources fill. A kind's schema also holds the columns only
     # its other members supply, which this dataset always leaves null.
-    return [(c.name, c.type.value) for c in CATALOG.dataset_schema(spec).columns if c.supplied_by]
+    return [
+        (c.name, c.type.value)
+        for c in CATALOG.dataset_schema(spec, raw_symbol=False).columns
+        if c.supplied_by
+    ]
 
 
 def test_values_schema() -> None:
@@ -376,7 +380,8 @@ def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     with pytest.raises(
         ValueError,
         match=r"^indices\.previous_day_bar does not accept dm\.ALL; use "
-        r"m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)$",
+        r"m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\), "
+        r"every ticker's bar of that day$",
     ):
         m.indices.previous_day_bar(dm.ALL)
 
@@ -451,14 +456,14 @@ def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
 
 def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     for moment in (datetime(2025, 6, 2, 15, 30, tzinfo=UTC), "2025-06-03T02:00:00+00:00"):
-        with pytest.raises(ValueError, match=r"date is a calendar date; pass a date"):
+        with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
             m.indices.daily_open_close("I:SPX", moment)
     naive = datetime(2025, 6, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match="needs a timezone"):
         m.indices.daily_open_close("I:SPX", naive)
-    with pytest.raises(ValueError, match="is not an ISO-8601 date"):
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         m.indices.daily_open_close("I:SPX", "June 2")
-    with pytest.raises(TypeError, match="date must be a str, date, or datetime"):
+    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
         m.indices.daily_open_close("I:SPX", cast("str", 20250602))
 
 
@@ -585,6 +590,7 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
     ]
     assert out[0] == {
         "Symbol": "I:SPX",
+        "RawSymbol": None,
         "Error": None,
         "LastUpdated": 1748894400 * NS,
         "MarketStatus": "closed",
@@ -688,24 +694,24 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
     prev = rest_session.indices.previous_day_bar("I:SPX")
     assert [r["TimestampStart"] for r in rows(prev.fetch())] == [MIDNIGHT_MS * MS]
-    # A week bar stamped 01:00 on the Sunday before its week covers that week, and since an
-    # index can update around the clock, it may hold that Sunday too: it starts at Sunday's
-    # midnight and ends an hour after the next Monday's. A range must reach both Sundays.
-    saturday, sunday = MIDNIGHT_MS - 2 * DAY_MS, MIDNIGHT_MS - DAY_MS
-    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{saturday}/{MIDNIGHT_MS + 7 * DAY_MS - 1}"
+    # Massive starts a week on its Sunday, so a week bar is stamped 01:00 (midnight in
+    # Chicago) on its Sunday; since an index can update around the clock, the week holds its
+    # weekend: it starts at Sunday's midnight and ends an hour after the next Sunday's. A
+    # range must reach the Saturday.
+    sunday = MIDNIGHT_MS - DAY_MS
+    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{sunday}/{MIDNIGHT_MS + 6 * DAY_MS - 1}"
     fake_rest.reply(
         quote(week_path),
-        bars_reply(sunday + HOUR_MS),
         bars_reply(sunday + HOUR_MS),
         bars_reply(sunday + 16 * HOUR_MS),
     )
     week = rest_session.indices.bars("I:SPX", dm.Timespan.WEEK)
-    first, last = date(2025, 6, 1), date(2025, 6, 8)
+    first, last = date(2025, 6, 1), date(2025, 6, 7)
     weeks = rows(week.history(first, last, source=dm.HistorySource.REST))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in weeks] == [
-        (None, sunday * MS, (MIDNIGHT_MS + 7 * DAY_MS + HOUR_MS) * MS)
+        (None, sunday * MS, (MIDNIGHT_MS + 6 * DAY_MS + HOUR_MS) * MS)
     ]
-    # A range from the Monday leaves it out: the bar may hold the Sunday before.
+    # A range from the Monday holds no whole week, so it asks for none.
     assert rows(week.history(day, last, source=dm.HistorySource.REST)) == []
     # A week bar at the close, or a day bar at 02:00, is another cut: each fails loudly.
     with pytest.raises(
@@ -767,6 +773,7 @@ def test_daily_open_close_fetches_each_index_for_the_day(
         "Date": "2025-06-02",
         "TimestampStart": MIDNIGHT_MS * MS,
         "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
+        "RawSymbol": None,
         "High": 5940.35,
         "Low": 5876.0,
         "Open": 5896.68,
@@ -800,6 +807,7 @@ def wait_for(condition: Callable[[], bool]) -> None:
                 "Symbol": "I:SPX",
                 "Date": "2025-06-02",
                 "Timestamp": 1748894399000 * MS,
+                "RawSymbol": None,
                 "Value": 5935.94,
             },
         ),
@@ -888,7 +896,9 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
     wait_for(lambda: error() is not None)
     message = str(error())
-    assert "socket.test/indices refused V.I:SPX: not authorized" in message
+    assert (
+        "socket.test/indices refused the subscription to V.I:SPX; Massive said: not authorized"
+    ) in message
     assert "MassiveConfig.ws_hosts[AssetClass.INDICES]" in message
     assert "business.massive.com" in message
     assert [type(error) for error in failures] == [dm.EntitlementError]

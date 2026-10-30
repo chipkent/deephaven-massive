@@ -16,13 +16,14 @@ from deephaven_massive._enums import Subscription
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.rate_limits import (
     BUCKETS,
+    CONSOLE_ADVICE,
     CONSOLE_PATIENCE,
     LEARN_ONLY,
     OTHER,
     READ_PATIENCE,
     GovernorRegistry,
     PaceCheck,
-    RateLimitWarnings,
+    RateLimitNotices,
     ReadShape,
     announce,
     bucket_of,
@@ -218,7 +219,7 @@ def test_the_registry_counts_the_leases_not_yet_released() -> None:
     assert registry.leases() == 0
 
 
-# --- Warnings ------------------------------------------------------------------------------------
+# --- Refusal notices -----------------------------------------------------------------------------
 
 
 def _error(message: str) -> _massive.WireError:
@@ -228,10 +229,12 @@ def _error(message: str) -> _massive.WireError:
 def test_a_learned_basic_subscription_is_explained_once_per_session(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitWarnings("MassiveSession #1", frozenset())
-    with caplog.at_level(logging.WARNING, LOGGER):
+    warnings = RateLimitNotices("MassiveSession #1", frozenset())
+    with caplog.at_level(logging.INFO, LOGGER):
         warnings.refused("currencies", _error(BASIC), basic=True)
         warnings.refused("currencies", _error(BASIC), basic=True)
+    # Requests pause and resume by themselves: an INFO notice, not a WARNING.
+    assert [r.levelno for r in caplog.records] == [logging.INFO]
     assert caplog.messages == [
         (
             "MassiveSession #1: Massive refused a currencies request with HTTP 429 (HTTP 429 "
@@ -246,8 +249,8 @@ def test_a_learned_basic_subscription_is_explained_once_per_session(
 def test_a_declared_subscription_refused_points_at_other_users_of_the_account(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitWarnings("MassiveSession #2", frozenset({Subscription.STOCKS}))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    warnings = RateLimitNotices("MassiveSession #2", frozenset({Subscription.STOCKS}))
+    with caplog.at_level(logging.INFO, LOGGER):
         warnings.refused("stocks", _error(BASIC), basic=True)
         warnings.refused("options", _error("busy"), basic=False)  # another bucket: its own
     assert caplog.messages[0].endswith(
@@ -265,8 +268,8 @@ def test_a_declared_subscription_refused_points_at_other_users_of_the_account(
 def test_a_refusal_outside_the_subscriptions_names_no_subscription(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitWarnings("MassiveSession #1", frozenset())
-    with caplog.at_level(logging.WARNING, LOGGER):
+    warnings = RateLimitNotices("MassiveSession #1", frozenset())
+    with caplog.at_level(logging.INFO, LOGGER):
         warnings.refused(OTHER, _error(BASIC), basic=True)
     assert caplog.messages[0].startswith(
         "MassiveSession #1: Massive refused a request outside Massive's subscriptions with "
@@ -321,6 +324,20 @@ def test_rows_show_each_buckets_state() -> None:
     assert not waiting.is_alive()
 
 
+@pytest.mark.parametrize("asked", [1e10, 1e12, float("inf")])
+def test_a_huge_retry_after_leaves_paused_until_a_valid_timestamp(asked: float) -> None:
+    # A Retry-After of 31,700 years, or of more digits than a float holds, would put the pause
+    # end past what a nanosecond timestamp can hold; the ten-minute cap keeps it a real time.
+    clock = FakeClock(manual=True, wall=1_800_000_000.0)
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=clock)
+    _refuse(governor, "options", "HTTP 429: slow down", retry_after=asked)
+    rows = {row.bucket: row for row in rate_limit_rows(governor)}
+    assert rows["options"].state is RateLimitState.PAUSED
+    assert rows["options"].paused_until == (1_800_000_000 + 600) * 10**9
+    assert rows["options"].paused_until < 2**63
+    assert governor.next_change() == 600.0
+
+
 # --- Notices -------------------------------------------------------------------------------------
 
 
@@ -355,8 +372,8 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
             logging.WARNING,
             (
                 "stocks.bars history: 250 requests; paced at 5 requests a minute (stocks); this "
-                "command will pause every live table in the worker for at least 49 min: run "
-                "long downloads from a thread of your own, outside a console command"
+                "command will pause every live table in the worker for at least 49 min: pass "
+                "wait=False to read in the background"
             ),
         )
     ]
@@ -463,10 +480,23 @@ def test_the_default_registry_names_the_other_buckets_requests() -> None:
 def test_a_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
-    assert read_patience(dh_exec_ctx).seconds == READ_PATIENCE == 600.0
-    # A console command holds the update graph's exclusive lock: the read gives up sooner.
+    patience = read_patience(dh_exec_ctx)
+    assert (patience.seconds, patience.advice) == (READ_PATIENCE, "")
+    assert READ_PATIENCE == 600.0
+    # A console command holds the update graph's exclusive lock: the read gives up sooner, and
+    # its give-up error says how to read without the lock.
     with exclusive_lock(dh_exec_ctx.update_graph):
-        assert read_patience(dh_exec_ctx).seconds == CONSOLE_PATIENCE == 90.0
+        console = read_patience(dh_exec_ctx)
+    assert console.seconds == CONSOLE_PATIENCE == 90.0
+    assert (
+        console.advice
+        == CONSOLE_ADVICE
+        == (
+            "this read ran inside a Deephaven console command, which waits out only 90 s of "
+            "pauses; pass wait=False to fetch() or history() to read in the background, which "
+            "waits out 10 min"
+        )
+    )
     assert read_patience(dh_exec_ctx) is not read_patience(dh_exec_ctx)  # one per read
 
 

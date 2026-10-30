@@ -30,7 +30,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import (
     AssetClass,
@@ -42,12 +41,15 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import (
     EVERY_TICKER,
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     adjustment_notes,
     build_query,
+    day_argument,
     list_query,
     require_bool,
     ticker_key,
@@ -225,9 +227,6 @@ _OPEN_CLOSE: Final = "/v1/open-close/{stocksTicker}/{date}"
 
 # The snapshots declare no time key: a ticker that has not traded can carry `updated` 0,
 # which as the declared time column would fail the whole response instead of reading as null.
-# The tickers travel comma-separated in the URL, so a long watchlist is split into requests of
-# 250 symbols, the size Massive's unified snapshot documents as its limit, to keep each URL
-# well under the lengths servers refuse.
 SNAPSHOTS: Final = DatasetSpec(
     name="stocks.snapshots",
     summary="Current market snapshots of US-listed stocks, one row per ticker.",
@@ -235,7 +234,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): ticker_key()},
     symbol_param="tickers",
-    symbols_per_request=250,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=("Updated",),
 )
 MOVERS: Final = DatasetSpec(
@@ -408,6 +407,7 @@ class _Stocks(Namespace):
         """The SEC filings and taxonomy datasets (`m.stocks.filings`)."""
         return self._filings
 
+    @raises_through(build_query)
     def trades(self, symbols: Symbols) -> StreamHistoryQuery:
         """Trades of US-listed stocks, tick by tick.
 
@@ -425,16 +425,18 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#trades,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
-        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
-        has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (streams follow its rows), or `dm.ALL`.
 
         Returns:
             The query; nothing is requested or subscribed until a verb runs.
+
+        Raises:
+            TypeError: If `symbols` is not one of the accepted forms.
+            ValueError: If `symbols` is empty or holds an invalid ticker, or a `Table` has no
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -445,6 +447,7 @@ class _Stocks(Namespace):
         """
         return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
 
+    @raises_through(build_query)
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed stock.
 
@@ -465,16 +468,18 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#last_trade,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
-        accepted forms; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker,
-        or a `Table` has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle).
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If `symbols` is not one of the accepted forms.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a `Table`
+                has no `Symbol` column. Also for `symbols` of None, with a message that names the
+                forms it takes.
 
         Example:
             ::
@@ -485,10 +490,11 @@ class _Stocks(Namespace):
             self._core,
             LAST_TRADE,
             symbols=symbols,
-            all_alternative="m.stocks.snapshots(dm.ALL).fetch()",
+            all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """National best bid and offer quotes of US-listed stocks, tick by tick.
 
@@ -506,16 +512,18 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#quotes,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
-        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
-        has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (streams follow its rows), or `dm.ALL`.
 
         Returns:
             The query; nothing is requested or subscribed until a verb runs.
+
+        Raises:
+            TypeError: If `symbols` is not one of the accepted forms.
+            ValueError: If `symbols` is empty or holds an invalid ticker, or a `Table` has no
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -524,6 +532,7 @@ class _Stocks(Namespace):
         """
         return cast("StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols))
 
+    @raises_through(build_query)
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest national best bid and offer of each US-listed stock.
 
@@ -544,16 +553,18 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#last_quote,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
-        accepted forms; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker,
-        or a `Table` has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle).
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If `symbols` is not one of the accepted forms.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a `Table`
+                has no `Symbol` column. Also for `symbols` of None, with a message that names the
+                forms it takes.
 
         Example:
             ::
@@ -564,7 +575,7 @@ class _Stocks(Namespace):
             self._core,
             LAST_QUOTE,
             symbols=symbols,
-            all_alternative="m.stocks.snapshots(dm.ALL).fetch()",
+            all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
         )
         return cast("Query", query)
 
@@ -586,6 +597,7 @@ class _Stocks(Namespace):
         multiplier: int = 1,
         adjusted: bool = True,
     ) -> HistoryQuery: ...
+    @raises_through(build_query, require_bool)
     def bars(
         self,
         symbols: Symbols,
@@ -619,8 +631,8 @@ class _Stocks(Namespace):
         from its first to its last weekday. A bar of several days counts trading days,
         ending as late as holidays could push it (one weekday more, and one more for every
         five further days), since there is no holiday calendar. A longer bar must be stamped
-        at 00:00 on the day its period starts: a week on its Monday or the Saturday or
-        Sunday before, a month, quarter, or year on its 1st. Any other stamp fails the call
+        at 00:00 on the day its period starts: a week on its Sunday, where Massive starts
+        it, a month, quarter, or year on its 1st. Any other stamp fails the call
         with `MassiveError` naming the source, since the bar may cover other days than its
         label. `Date` is null for a bar that spans more than one date: several days, a week
         or longer, or an intraday bar across midnight. Joining an intraday row to the same
@@ -649,11 +661,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#bars,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `timespan` is not a
-        `dm.Timespan`, `multiplier` is not an `int`, `adjusted` is not a `bool`, or `symbols` is not
-        an accepted form; `ValueError` if `timespan` is `SESSION`, `multiplier` is below 1, or
-        `symbols` is empty or holds an invalid ticker.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (streams follow its rows), or `dm.ALL`.
@@ -668,6 +675,13 @@ class _Stocks(Namespace):
         Returns:
             The query, of the class the timespan and multiplier give; nothing is requested
             or subscribed until a verb runs.
+
+        Raises:
+            TypeError: If `timespan` is not a `dm.Timespan`, `multiplier` is not an `int`,
+                `adjusted` is not a `bool`, or `symbols` is not an accepted form.
+            ValueError: If `timespan` is `SESSION`, `multiplier` is below 1, or `symbols` is empty
+                or holds an invalid ticker. Also for `symbols` of None, with a message that names
+                the forms it takes.
 
         Example:
             ::
@@ -688,6 +702,7 @@ class _Stocks(Namespace):
         )
         return cast("HistoryQuery", query)
 
+    @raises_through(build_query, require_bool)
     def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> Query:
         """The previous trading day's bar (open, high, low, close, volume) of US stocks.
 
@@ -714,10 +729,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#previous_day_bar,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `adjusted` is not a
-        `bool`, or `symbols` is not an accepted form; `ValueError` if `symbols` is `dm.ALL`,
-        empty, or holds an invalid ticker, or a `Table` has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle).
@@ -726,6 +737,12 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If `adjusted` is not a `bool`, or `symbols` is not an accepted form.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a `Table`
+                has no `Symbol` column. Also for `symbols` of None, with a message that names the
+                forms it takes.
 
         Example:
             ::
@@ -736,12 +753,16 @@ class _Stocks(Namespace):
             self._core,
             PREVIOUS_DAY_BAR,
             symbols=symbols,
-            all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            all_alternative=(
+                "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def luld(self, symbols: Symbols) -> StreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.
 
@@ -756,16 +777,18 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#luld,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
-        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
-        has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (the stream follows its rows), or `dm.ALL`.
 
         Returns:
             The query; nothing is subscribed until a verb runs.
+
+        Raises:
+            TypeError: If `symbols` is not one of the accepted forms.
+            ValueError: If `symbols` is empty or holds an invalid ticker, or a `Table` has no
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -774,6 +797,7 @@ class _Stocks(Namespace):
         """
         return cast("StreamQuery", build_query(self._core, LULD, symbols=symbols))
 
+    @raises_through(build_query)
     def imbalances(self, symbols: Symbols) -> StreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
@@ -788,16 +812,18 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#imbalances,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
-        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
-        has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (the stream follows its rows), or `dm.ALL`.
 
         Returns:
             The query; nothing is subscribed until a verb runs.
+
+        Raises:
+            TypeError: If `symbols` is not one of the accepted forms.
+            ValueError: If `symbols` is empty or holds an invalid ticker, or a `Table` has no
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -806,6 +832,7 @@ class _Stocks(Namespace):
         """
         return cast("StreamQuery", build_query(self._core, IMBALANCES, symbols=symbols))
 
+    @raises_through(build_query)
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
@@ -820,16 +847,18 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#fmv,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
-        accepted forms; `ValueError` if `symbols` is empty or holds an invalid ticker, or a `Table`
-        has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (the stream follows its rows), or `dm.ALL`.
 
         Returns:
             The query; nothing is subscribed until a verb runs.
+
+        Raises:
+            TypeError: If `symbols` is not one of the accepted forms.
+            ValueError: If `symbols` is empty or holds an invalid ticker, or a `Table` has no
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -838,6 +867,7 @@ class _Stocks(Namespace):
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
+    @raises_through(build_query, require_bool)
     def snapshots(self, symbols: Symbols, *, include_otc: bool = False) -> Query:
         """Current market snapshots of US-listed stocks, one row per ticker.
 
@@ -853,10 +883,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#snapshots,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `include_otc` is not a `bool`,
-        or `symbols` is not an accepted form; `ValueError` if `symbols` is empty or holds an invalid
-        ticker, or a `Table` has no `Symbol` column.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle), or `dm.ALL` for the full market.
@@ -864,6 +890,12 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If `include_otc` is not a `bool`, or `symbols` is not an accepted form.
+            ValueError: If `symbols` is empty or holds an invalid ticker, or a `Table` has no
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -878,6 +910,7 @@ class _Stocks(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(require_bool, _require_enum)
     def movers(self, direction: Direction, *, include_otc: bool = False) -> Query:
         """The twenty US stocks with the largest percentage move today, up or down.
 
@@ -892,15 +925,15 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#movers,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `direction` is not a
-        `dm.Direction` or `include_otc` is not a `bool`.
-
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
             include_otc: True to include OTC securities; False (the default) leaves them out.
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If `direction` is not a `dm.Direction` or `include_otc` is not a `bool`.
 
         Example:
             ::
@@ -917,6 +950,7 @@ class _Stocks(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, require_bool, day_argument)
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, close, and pre- and after-market prices of US stocks on one day.
 
@@ -932,22 +966,25 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#daily_open_close,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if `date` is not a `str`, `date`,
-        or `datetime`, `adjusted` is not a `bool`, or `symbols` is not an accepted form;
-        `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or `date` is a
-        `datetime` or not an ISO-8601 date.
-
         Args:
             symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle).
-            date: The trading day: an ISO-8601 date or a `date`. It is a calendar date, so a
-                `datetime` raises `ValueError`.
+            date: The trading day: an ISO-8601 date, a `date`, Deephaven date text such as
+                `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`. It is a
+                calendar date, so a `datetime` or an instant raises `ValueError`.
             adjusted: True (the default) for prices and volume adjusted for splits (never for
                 dividends); False for the prices as traded. Massive does not echo the basis
                 here, so it cannot be checked.
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If `date` is not a `str`, `date`, or `datetime`, `adjusted` is not a `bool`,
+                or `symbols` is not an accepted form.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or `date` is a
+                `datetime` or not an ISO-8601 date. Also for `symbols` of None, with a message that
+                names the forms it takes.
 
         Example:
             ::
@@ -958,12 +995,16 @@ class _Stocks(Namespace):
             self._core,
             DAILY_OPEN_CLOSE,
             symbols=symbols,
-            all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)",
+            all_alternative=(
+                "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             adjusted=require_bool("adjusted", adjusted),
-            params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+            params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
         )
         return cast("Query", query)
 
+    @raises_through(list_query)
     def dividends(
         self,
         symbols: Symbols | None = None,
@@ -987,11 +1028,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#dividends,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
@@ -1009,6 +1045,12 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -1028,6 +1070,7 @@ class _Stocks(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def splits(
         self,
         symbols: Symbols | None = None,
@@ -1061,11 +1104,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#splits,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
@@ -1082,6 +1120,12 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -1114,6 +1158,7 @@ class _Stocks(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def ipos(
         self,
         symbols: Symbols | None = None,
@@ -1145,11 +1190,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#ipos,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every offering.
@@ -1165,6 +1205,12 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -1184,6 +1230,7 @@ class _Stocks(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def short_interest(
         self,
         symbols: Symbols | None = None,
@@ -1208,11 +1255,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#short_interest,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
@@ -1229,6 +1271,12 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -1248,6 +1296,7 @@ class _Stocks(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def short_volume(
         self,
         symbols: Symbols | None = None,
@@ -1272,11 +1321,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#short_volume,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
@@ -1292,6 +1336,12 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -1311,6 +1361,7 @@ class _Stocks(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def share_float(
         self,
         symbols: Symbols | None = None,
@@ -1333,10 +1384,6 @@ class _Stocks(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#share_float,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a filter
-        is unknown, reserved, or of the wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every ticker.
@@ -1350,6 +1397,11 @@ class _Stocks(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or a filter is
+                unknown, reserved, or of the wrong kind.
 
         Example:
             ::

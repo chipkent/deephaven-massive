@@ -18,6 +18,7 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._errors import raises_through
 from deephaven_massive._namespaces.query_building import Namespace, build_query, list_params
 
 if TYPE_CHECKING:
@@ -111,6 +112,7 @@ class _Economy(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "economy"
 
+    @raises_through(build_query, list_params)
     def _query(
         self,
         spec: DatasetSpec,
@@ -136,8 +138,9 @@ class _Economy(Namespace):
         Returns:
             The dataset's `Query`.
 
-        Invalid arguments raise the `TypeError` or `ValueError` of `list_params` and
-        `build_query`.
+        Raises:
+            TypeError: If an argument has the wrong type (`list_params`, `build_query`).
+            ValueError: If an argument has a value the dataset refuses (`build_query`).
         """
         params = list_params(sort=sort, order=order)
         query = build_query(
@@ -145,6 +148,7 @@ class _Economy(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(_query)
     def treasury_yields(
         self,
         *,
@@ -179,9 +183,10 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
-        an unknown filter raises `ValueError`; an argument of the wrong type raises
-        `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
+                `sort`, or an unknown filter.
         """
         return self._query(
             TREASURY_YIELDS,
@@ -193,6 +198,7 @@ class _Economy(Namespace):
             filters=filters,
         )
 
+    @raises_through(_query)
     def inflation(
         self,
         *,
@@ -227,9 +233,10 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
-        an unknown filter raises `ValueError`; an argument of the wrong type raises
-        `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
+                `sort`, or an unknown filter.
         """
         return self._query(
             INFLATION,
@@ -241,6 +248,7 @@ class _Economy(Namespace):
             filters=filters,
         )
 
+    @raises_through(_query)
     def inflation_expectations(
         self,
         *,
@@ -275,9 +283,10 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
-        an unknown filter raises `ValueError`; an argument of the wrong type raises
-        `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
+                `sort`, or an unknown filter.
         """
         return self._query(
             INFLATION_EXPECTATIONS,
@@ -289,6 +298,7 @@ class _Economy(Namespace):
             filters=filters,
         )
 
+    @raises_through(_query)
     def labor_market(
         self,
         *,
@@ -323,9 +333,10 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
-        an unknown filter raises `ValueError`; an argument of the wrong type raises
-        `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
+                `sort`, or an unknown filter.
         """
         return self._query(
             LABOR_MARKET,
@@ -337,6 +348,7 @@ class _Economy(Namespace):
             filters=filters,
         )
 
+    @raises_through(_query)
     def funding_conditions(
         self,
         *,
@@ -371,9 +383,10 @@ class _Economy(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        A `datetime` bound, a range that ends before it starts, `order` without `sort`, or
-        an unknown filter raises `ValueError`; an argument of the wrong type raises
-        `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
+                `sort`, or an unknown filter.
         """
         return self._query(
             FUNDING_CONDITIONS,

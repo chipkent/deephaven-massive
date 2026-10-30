@@ -38,7 +38,9 @@ request of each other lane, not behind every page of a long history with eight w
 the head works out when it may start; it is woken when that may change (a request finished or
 was released, the head before it started or gave up its place, a refusal, a new limit).
 
-After a 429 the bucket pauses: for the `Retry-After` the response asked for; without one, or
+After a 429 the bucket pauses: for the `Retry-After` the response asked for, up to
+`MAX_RETRY_AFTER` (10 minutes, so a broken server's header cannot stop a subscription's
+requests for days, and every pause ends at a time a timestamp can hold); without one, or
 with one of zero or in the past, a paced bucket for a whole window and an unpaced one for 15,
 30, then 60 s by the number of refusals in the run (`net.retry.rate_limit_wait`). A pause only
 ever grows. When it ends, the bucket sends one *probe*: the first request to start, alone,
@@ -102,7 +104,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Self, cast
 
-from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK, rate_limit_wait
 
 if TYPE_CHECKING:
@@ -114,6 +116,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BASIC_REQUESTS_PER_MINUTE",
+    "MAX_RETRY_AFTER",
     "RATE_WINDOW",
     "UNLIMITED",
     "Admission",
@@ -131,6 +134,10 @@ BASIC_REQUESTS_PER_MINUTE: Final = 5
 
 RATE_WINDOW: Final = 61.0
 """Seconds a finished request holds its slot of a paced bucket: Massive's minute plus 1 s."""
+
+MAX_RETRY_AFTER: Final = 600.0
+"""The longest pause a 429's `Retry-After` sets, in seconds: 10 minutes. A longer one is clamped
+to it and logged at WARNING; the bucket probes again when it ends."""
 
 _BASIC_REFUSAL: Final = "exceeded the maximum requests per minute"
 """The words of Massive's 429 message that mark a subscription on the Basic tier."""
@@ -187,8 +194,8 @@ class Patience:
     The governor reads and charges it only under its own lock, so a read's patience must be
     used with one governor.
 
-    Its `seconds` and `spent` are read-only; only `charge` changes it, and never a patience
-    without limit, so the one `UNLIMITED` serves every governor and thread.
+    Its `seconds`, `advice`, and `spent` are read-only; only `charge` changes it, and never a
+    patience without limit, so the one `UNLIMITED` serves every governor and thread.
 
     Example:
         ::
@@ -198,15 +205,18 @@ class Patience:
                 permit = admission.acquire(read)
     """
 
-    __slots__ = ("_counted_until", "_seconds", "_spent")
+    __slots__ = ("_advice", "_counted_until", "_seconds", "_spent")
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, *, advice: str = "") -> None:
         """Start with nothing charged.
 
         Args:
             seconds: The most pause time the read waits out, in seconds; `math.inf` for none.
+            advice: One more remedy the caller knows, which ends the message of a request that
+                gives up (`RequestGovernor` adds it after its own remedies); empty for none.
         """
         self._seconds = seconds
+        self._advice = advice
         self._spent = 0.0
         # The end of the pause time already charged (monotonic): a pause several requests of
         # the read wait out together is charged once.
@@ -216,6 +226,11 @@ class Patience:
     def seconds(self) -> float:
         """The most pause time the read waits out, in seconds; `math.inf` for no limit."""
         return self._seconds
+
+    @property
+    def advice(self) -> str:
+        """The caller's remedy that ends a give-up message; empty for none."""
+        return self._advice
 
     @property
     def spent(self) -> float:
@@ -935,15 +950,16 @@ class RequestGovernor:
         bucket learned Basic, so it is paced from now on, for the governor's life. A refusal
         to an attempt that started after the latest pause counts toward the run and sets a
         new pause; one to an attempt that started before it only lengthens the pause to its
-        own `Retry-After`. A `Retry-After` of zero counts as none. A run that time has ended
-        (see the module) ends first, so this refusal starts a new one. The caller then asks
-        for a new permit, which waits out the pause, or fails if the pause ends past its own
-        read's patience. Does nothing for a permit already reported.
+        own `Retry-After`. A `Retry-After` of zero counts as none, and one longer than
+        `MAX_RETRY_AFTER` pauses that long, logged at INFO with the value asked. A run that
+        time has ended (see the module) ends first, so this refusal starts a new one. The
+        caller then asks for a new permit, which waits out the pause, or fails if the pause
+        ends past its own read's patience. Does nothing for a permit already reported.
 
         Args:
             permit: The attempt's permit.
-            retry_after: The wait the response's `Retry-After` asked for, in seconds, or None
-                when it gave none.
+            retry_after: The wait the response's `Retry-After` asked for, in seconds (any
+                length, `math.inf` included), or None when it gave none.
             message: The refusal's text, with its request id, quoted in diagnostics and in the
                 error of a request that stops waiting.
 
@@ -953,6 +969,16 @@ class RequestGovernor:
         state = self._buckets[permit.bucket]
         basic = is_basic_refusal(message)
         asked = retry_after if retry_after is not None and retry_after > 0 else None
+        if asked is not None and asked > MAX_RETRY_AFTER:
+            # A decision, not something to act on: the paused-poll WARNING and the read's own
+            # error tell the user when a pause matters.
+            logger.info(
+                "%s: a refusal's Retry-After asks for %s s; pausing %s s, the most honoured",
+                permit.bucket,
+                asked,
+                MAX_RETRY_AFTER,
+            )
+            asked = MAX_RETRY_AFTER
         with self._lock:
             now = self._clock.monotonic()
             state.settle(now)  # before `finish`, so a slow probe still holds its run open
@@ -1213,7 +1239,7 @@ class RequestGovernor:
             The message: the bucket's requests and the latest refusal; when the next request
             goes, in UTC and in local time; the read's patience and what it has spent; the
             usual cause; and the remedies, the declaration only for a bucket that can be
-            declared.
+            declared, then the patience's `advice`, when it has one.
         """
         goes = datetime.fromtimestamp(self._clock.time() + state.pause_until - now, UTC)
         remedies = "retry after that time, or stop the other program"
@@ -1223,6 +1249,8 @@ class RequestGovernor:
                 "on the Basic tier, declare it Basic (rest_basic_subscriptions) so its "
                 "requests are paced, or upgrade it"
             )
+        if patience.advice:
+            remedies = f"{remedies}; {patience.advice}"
         return (
             f"Massive is refusing {state.label} with HTTP 429 (latest refusal: "
             f"{state.last_refusal}). Its next request, a probe, goes at "
@@ -1248,4 +1276,4 @@ class RequestGovernor:
             try:
                 listener()
             except Exception:
-                logger.exception("a rate-limit listener failed")
+                logger.exception("a rate-limit listener failed. %s", LIBRARY_BUG_REPORT)

@@ -22,12 +22,14 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import numpy as np
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
+from deephaven.time import to_j_local_date
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
@@ -520,6 +522,10 @@ def test_movers_take_a_direction(massive_session: dm.MassiveSession) -> None:
     [
         ("2025-06-06", date(2025, 6, 6)),
         (date(2025, 6, 6), date(2025, 6, 6)),
+        # The day values a Deephaven console hands its user: a Java LocalDate, a numpy day.
+        (to_j_local_date("2025-06-06"), date(2025, 6, 6)),
+        (np.datetime64("2025-06-06"), date(2025, 6, 6)),
+        ("2025-6-6", date(2025, 6, 6)),  # Deephaven's own date text
     ],
 )
 def test_daily_open_close_names_a_new_york_day(
@@ -538,9 +544,17 @@ def test_daily_open_close_rejects_all_and_bad_days(massive_session: dm.MassiveSe
         open_close(dm.ALL, "2025-06-06")
     with pytest.raises(ValueError, match="needs a timezone"):
         open_close("AAPL", datetime(2025, 6, 6, 9, 30))  # noqa: DTZ001 - a naive time on purpose
-    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+    with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
         open_close("AAPL", datetime(2025, 6, 7, 1, tzinfo=UTC))
-    with pytest.raises(TypeError, match="date must be a str, date, or datetime"):
+    # Deephaven's own text reaches the day too, and a time there is no day either; the message
+    # shows the text as passed.
+    with pytest.raises(ValueError, match=r"date='2025-06-06T09:30 America/New_York' is a calendar"):
+        open_close("AAPL", "2025-06-06T09:30 America/New_York")
+    with pytest.raises(ValueError, match=r"names a day and a zone but no time"):
+        open_close("AAPL", "2025-06-06 ET")
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time"):
+        open_close("AAPL", "June 6")
+    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
         open_close("AAPL", cast("Any", 20250606))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         open_close("AAPL", "2025-06-06", adjusted=cast("Any", None))
@@ -557,15 +571,27 @@ def test_list_datasets_filter_by_optional_symbols(
     assert type(make()) is Query
     assert make()._request.symbols is None
     assert make("AAPL")._request.symbols == ("AAPL",)
-    with pytest.raises(ValueError, match="use symbols=None, which returns every ticker"):
+    with pytest.raises(ValueError, match="leave symbols out, which returns every ticker"):
         make(dm.ALL)
+
+
+def a_sort_field(spec: DatasetSpec) -> str:
+    # A `sort` every REST path of the dataset takes: one of the listed fields where the spec
+    # lists them, else a field of the rows of the first path.
+    paths = [cast("RestPath", CATALOG.source(Transport.REST, p)) for p in spec.rest_paths]
+    sorts = [p for path in paths for p in path.params if p.name == "sort"]
+    listed = [p.values for p in sorts if p.values]
+    if listed:
+        return listed[0][0]
+    return paths[0].fields[0].wire_key
 
 
 @pytest.mark.parametrize("name", [*LIST_WITH_SYMBOLS, *LIST_WITHOUT_SYMBOLS])
 def test_list_datasets_take_the_list_block(massive_session: dm.MassiveSession, name: str) -> None:
-    query = factory(massive_session, name)(sort="x", order=dm.Order.DESC, limit=25)
+    sort = a_sort_field(spec_of(name))
+    query = factory(massive_session, name)(sort=sort, order=dm.Order.DESC, limit=25)
     assert type(query) is query_class(spec_of(name))
-    assert dict(query._request.params) == {"order": dm.Order.DESC, "sort": "x"}
+    assert dict(query._request.params) == {"order": dm.Order.DESC, "sort": sort}
     assert query._request.limit == 25
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         factory(massive_session, name)(order="asc")
@@ -1548,13 +1574,13 @@ def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
 def test_longer_bars_cover_their_whole_window_and_have_no_date(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # A week bar stamped on the Sunday before its week covers that Monday-to-Friday week; a
-    # month bar of June 2024 (whose 1st is a Saturday) its weekdays, Monday 3rd to Friday 28th.
+    # A week bar stamped on its Sunday (00:00 New York time, where Massive starts a week)
+    # covers its Monday-to-Friday week; a month bar of June 2024 (whose 1st is a Saturday) its
+    # weekdays, Monday 3rd to Friday 28th.
     sunday = new_york_midnight_ns(date(2025, 3, 2)) // 10**6
-    saturday = new_york_midnight_ns(date(2025, 3, 1)) // 10**6
     week_end = new_york_midnight_ns(date(2025, 3, 8)) // 10**6 - 1
     fake_rest.reply(
-        f"/v2/aggs/ticker/AAPL/range/1/week/{saturday}/{week_end}",
+        f"/v2/aggs/ticker/AAPL/range/1/week/{sunday}/{week_end}",
         Reply({"status": "OK", "adjusted": True, "results": [{"t": sunday, "c": 1.0}]}),
     )
     week = rest_session.stocks.bars("AAPL", dm.Timespan.WEEK)

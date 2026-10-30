@@ -128,10 +128,10 @@ src = ["src", "."]
 namespace-packages = ["tests", "scripts"]
 
 [tool.ruff.lint]
-# Besides ALL: the preview rules selected by name. DOC201, DOC501, and DOC502 check that
-# docstring Returns and Raises sections match the code; PLR0904, PLR0914, and PLR0916 are the
+# Besides ALL: the preview rules selected by name. DOC201 and DOC501 check that docstring
+# Returns and Raises sections cover the code; PLR0904, PLR0914, and PLR0916 are the
 # pylint limits on public methods, local variables, and boolean expressions.
-select = ["ALL", "DOC201", "DOC501", "DOC502", "PLR0904", "PLR0914", "PLR0916"]
+select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916"]
 # Preview is on so the preview rules above can be selected by name; explicit-preview-rules keeps
 # every other preview rule off. Preview also switches some stable rules (F401, UP007, the S3xx
 # family, ...) to their preview behavior.
@@ -145,6 +145,9 @@ ignore = [
     "EM102",  # raising with an f-string message is clearer than binding it to a variable first
     "PLR0913",  # keyword-only parameters are the API style; PLR0917 caps positional ones at 3
     "CPY001",  # the license is declared once in LICENSE and pyproject.toml, not per file
+    # Many functions raise through helpers, and tests/test_errors.py checks the public API's
+    # Raises sections in both directions; DOC501 still catches an undocumented raise.
+    "DOC502",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -240,10 +243,17 @@ filterwarnings = ["error"]
 # The options every pytest run starts with, CI's included. `-ra` lists each skipped or failed
 # test at the end of the run. `--import-mode=importlib` imports test files without adding their
 # directories to sys.path. `-m` picks which tests run: it leaves out the live tests, which call
-# Massive's real servers, and the benchmark sweep, which only prints timings. Pass your own `-m`
-# to replace it: `uv run pytest -m integration` runs only the live tests (each skips itself
-# unless MASSIVE_API_KEY is set), and `uv run pytest -m benchmark` runs only the sweep.
-addopts = ["-ra", "--import-mode=importlib", "-m", "not integration and not benchmark"]
+# Massive's real servers, the benchmark sweep, which only prints timings, and the soak tests,
+# which run for minutes or hours. Pass your own `-m` to replace it: `uv run pytest -m
+# integration` runs only the live tests (each skips itself unless MASSIVE_API_KEY is set),
+# `uv run pytest -m benchmark` runs only the sweep, and `uv run pytest -m soak` runs only the
+# soak tests (docs/dev/soak-tests.md).
+addopts = [
+    "-ra",
+    "--import-mode=importlib",
+    "-m",
+    "not integration and not benchmark and not soak",
+]
 # Each entry is `name(arguments): what the marker means`, shown by `uv run pytest --markers`.
 markers = [
     "integration: a live test, one that calls Massive's real servers. Every test in a file named test_*_integration.py has this marker, and no other test does. A plain run leaves these tests out; run them with -m integration and MASSIVE_API_KEY set.",
@@ -252,9 +262,10 @@ markers = [
     "needs(*plans): the Massive plans a live test requires. Write each plan as <asset class>:<plan>, such as stocks:starter; as s3, for the flat-file credentials; or as some:basic, for at least one asset class left on the free Basic plan. The test is skipped unless the key holds them: the first live test of a run asks Massive which plans the key holds, unless MASSIVE_LIVE_PLANS declares them.",
     "settles(*items): the open questions a live test records evidence for, which a person reads. The summary at the end of the run lists them as ran once every test of them passed.",
     "verifies(*items): the open questions whose answer a live test asserts: it fails unless Massive still behaves as the library assumes. The summary at the end of the run lists them as verified once every test of them passed.",
-    "requests(count): how many REST requests a live test makes. When the test's asset class is on the free Basic plan, which allows 5 requests a minute, its time limit grows with this count.",
+    "requests(count): the most REST requests a live test sends to one asset class when that class is on the free Basic plan, which allows 5 requests a minute. A test that may read a class on Basic declares at most 5, reading fewer symbols or pages there than on a paid plan, so it never waits more than about a minute; a unit test enforces this, and a live run skips a test that declares more while its class is on Basic. Its time limit grows with this count. A test without the marker counts as 10.",
     "jvm_held: a test whose own Deephaven formula passes the test's local variables to the JVM. Before the leak check fails the test, it asks the JVM to free unused memory once.",
     "benchmark: one point of a benchmark sweep, a test that prints timings and never fails on them. A plain run leaves these tests out; run them with -m benchmark.",
+    "soak: a long stress test that drives the library against the fake servers under heavy load (a fast feed, many streams, and constant churn) for MASSIVE_SOAK_SECONDS seconds, 20 by default. It fails on a lost or repeated row, a hang, or memory or threads that keep growing. A plain run leaves these tests out; run them with -m soak, as docs/dev/soak-tests.md describes.",
 ]
 testpaths = ["tests"]
 # Puts the repository root on sys.path, which --import-mode=importlib does not do itself, so

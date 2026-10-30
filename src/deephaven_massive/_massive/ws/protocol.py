@@ -12,10 +12,11 @@ tested without a socket; `ws.client` owns the socket and calls in here:
 - **Received frames.** `FrameDecoder` decodes each frame once, with the `net.codec` JSON codec,
   into `Status` events and per-channel `Data`: rows keyed by long-form column, `Reject`s for the
   rows that fail validation, and the `DriftReport` of the channel's objects in the frame. Each
-  value goes through `spec.convert.convert_field`, the converter the REST client uses too (a
-  field with a named `conversion` through that conversion), so a value means the same on both
-  transports. Drift is reported as REST reports it: `extra` holds the keys a channel does not
-  declare, which are dropped, and `missing` only the fields the vendor marks required
+  value goes through its field's converter (`spec.convert.field_converter`, looked up once per
+  channel), the converter the REST client uses too (a field with a named `conversion` through
+  that conversion), so a value means the same on both transports. Drift is reported as REST
+  reports it: `extra` holds the keys a channel does not declare, which are dropped, and
+  `missing` only the fields the vendor marks required
   (`Field.required`) that some object lacked or held as null. Each drifted key carries a
   sample (`DriftReport.samples`): the symbol of the first object that showed it and, for an
   extra key, its value. A rejected row carries its whole raw text (`Reject.raw`) and is logged
@@ -40,25 +41,26 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal, NamedTuple
 
 from websockets.client import process_exception
 from websockets.exceptions import InvalidStatus
 
 from deephaven_massive._massive.net import codec
-from deephaven_massive._massive.net.errors import WireError, is_tls_failure
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError, is_tls_failure
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
-    convert_field,
     excerpt,
+    field_converter,
     missing_key_message,
     row_excerpt,
+    unconvertible_message,
 )
 from deephaven_massive._massive.spec.types import DriftReport, DriftSample, Source, Transport
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from deephaven_massive._massive.spec.types import Field
 
@@ -76,6 +78,9 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+DROPPED_ERROR_LIMIT: Final = 20
+"""How many dropped frames or elements one connection logs at ERROR; later ones log at DEBUG."""
 
 MAX_TOPICS_PER_FRAME = 1000
 """The most topics one subscribe or unsubscribe frame names.
@@ -304,19 +309,26 @@ def _quote(value: object) -> str:
 _WORD = re.compile(r"""[^\s,;'"()\[\]]+""")
 
 
-@dataclass(frozen=True, kw_only=True)
-class _Step:
+class _Step(NamedTuple):
     """How one field of a channel is read from each object: computed once, used per row.
 
+    A tuple, so the decoder unpacks each step's parts at once for every value it reads.
+
     Attributes:
-        field: The generated field, which `spec.convert.convert_field` checks each value
-            against.
+        wire_key: The key of the field's value in an object.
+        column: The long-form column the value is stored under in a row.
         required: Whether a missing value (or null) rejects the row: the library's choice
             through `FrameDecoder.set_required`, not the vendor's `Field.required`.
+        convert: The field's converter (`spec.convert.field_converter`), which checks and
+            converts each non-null value.
+        field: The generated field, named in the message of a value that does not fit.
     """
 
+    wire_key: str
+    column: str
+    required: bool
+    convert: Callable[[object], object]
     field: Field
-    required: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -354,7 +366,10 @@ class _Channel:
         Returns:
             The plan.
         """
-        steps = tuple(_Step(field=f, required=f.wire_key in required) for f in source.fields)
+        steps = tuple(
+            _Step(f.wire_key, f.column, f.wire_key in required, field_converter(f), f)
+            for f in source.fields
+        )
         return cls(
             source=source,
             shape=frozenset(f.wire_key for f in source.fields) | {"ev"},
@@ -421,6 +436,7 @@ class FrameDecoder:
         self._path = path
         self._channels: dict[str, _Channel] = {}
         self._unknown: set[str] = set()
+        self._dropped = 0  # frames and elements dropped, for `_drop_level`
         for source in sources:
             channel = source.key.partition("/")[2]
             if source.transport is not Transport.WS or not channel:
@@ -470,8 +486,9 @@ class FrameDecoder:
         Each status object becomes a `Status` where it appears. A channel's data objects become
         one `Data`, placed where the channel's first object appears. A frame that is not JSON,
         an element that is not an object with a text `ev`, and the objects of a channel with no
-        source are dropped and logged (ERROR, ERROR, and WARNING once per channel); none of
-        them stops the other events.
+        source are dropped and logged (the first two at ERROR, as data the library cannot read,
+        up to `DROPPED_ERROR_LIMIT` times per connection and at DEBUG after that; the third at
+        WARNING once per channel); none of them stops the other events.
 
         Args:
             data: The frame's payload.
@@ -482,22 +499,27 @@ class FrameDecoder:
         try:
             value = codec.loads(data)
         except ValueError:
-            logger.exception(
-                "dropped a frame from %s%s that is not JSON: %s",
+            logger.log(
+                self._drop_level(),
+                "dropped a frame from %s%s that is not JSON: %s. %s",
                 self._host,
                 self._path,
                 _quote(data),
+                LIBRARY_BUG_REPORT,
+                exc_info=True,
             )
             return []
         order: list[Status | str] = []
         frame: dict[str, _Accumulator] = {}
         for item in value if isinstance(value, list) else [value]:
             if not isinstance(item, dict) or not isinstance(ev := item.get("ev"), str):
-                logger.error(
-                    "dropped an element of a frame from %s%s with no text 'ev': %s",
+                logger.log(
+                    self._drop_level(),
+                    "dropped an element of a frame from %s%s with no text 'ev': %s. %s",
                     self._host,
                     self._path,
                     _quote(item),
+                    LIBRARY_BUG_REPORT,
                 )
             elif ev == "status":
                 order.append(self._status(item))
@@ -516,6 +538,25 @@ class FrameDecoder:
                     order.append(ev)
                 self._row(ev, item, frame[ev])
         return [event if isinstance(event, Status) else self._data(event, frame) for event in order]
+
+    def _drop_level(self) -> int:
+        """Count one dropped frame or element, and return the level to log it at.
+
+        Returns:
+            ERROR for the first `DROPPED_ERROR_LIMIT` of the connection, so a vendor change
+            that breaks every frame logs a bounded number of ERRORs, and DEBUG after that.
+        """
+        self._dropped += 1
+        if self._dropped <= DROPPED_ERROR_LIMIT:
+            return logging.ERROR
+        if self._dropped == DROPPED_ERROR_LIMIT + 1:
+            logger.error(
+                "%s%s: %d dropped frames or elements were logged; further ones are logged at DEBUG",
+                self._host,
+                self._path,
+                DROPPED_ERROR_LIMIT,
+            )
+        return logging.DEBUG
 
     def _status(self, item: dict[str, object]) -> Status:
         """Decode one status object.
@@ -584,19 +625,18 @@ class FrameDecoder:
                     into.missing.add(key)
                     into.samples[key] = DriftSample(self._symbol(channel, item), None)
         row: dict[str, object] = {}
-        for step in spec.steps:
-            f = step.field
-            value = item.get(f.wire_key)
+        for key, column, required, convert, f in spec.steps:
+            value = item.get(key)
             if value is None:
-                if step.required:
+                if required:
                     into.rejects.append(self._reject(channel, item, missing_key_message(f)))
                     return
-                row[f.column] = None
+                row[column] = None
                 continue
             try:
-                row[f.column] = convert_field(f, value)
-            except UnconvertibleError as error:
-                into.rejects.append(self._reject(channel, item, str(error)))
+                row[column] = convert(value)
+            except UnconvertibleError:
+                into.rejects.append(self._reject(channel, item, unconvertible_message(f, value)))
                 return
         into.rows.append(row)
 

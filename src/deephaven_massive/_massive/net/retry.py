@@ -47,6 +47,7 @@ __all__ = [
     "UNTIMED_CHUNK",
     "Clock",
     "SystemClock",
+    "http_date_seconds",
     "rate_limit_wait",
     "retry_after_seconds",
     "transient_wait",
@@ -162,6 +163,32 @@ def transient_wait(retry: int, jitter: float) -> float:
     return TRANSIENT_WAITS[retry] * (1.0 + JITTER * jitter)
 
 
+def http_date_seconds(value: str | None) -> float | None:
+    """Return the time an HTTP date names, such as the value of a `Date` header.
+
+    The REST client measures a `Retry-After` date against the response's own `Date` with it,
+    and `retry_after_seconds` reads a `Retry-After` date with it, so both read dates alike.
+
+    Args:
+        value: The header's text, such as `"Wed, 21 Oct 2026 07:28:00 GMT"`, or `None` when
+            the response had none.
+
+    Returns:
+        Seconds since the Unix epoch, or `None` when `value` is `None` or not an HTTP date. A
+        date without a zone (`-0000`) is read as GMT, as HTTP dates always are. Nothing is
+        logged: the caller decides what an unusable date means.
+    """
+    if value is None:
+        return None
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.timestamp()
+
+
 def retry_after_seconds(value: str | None, now: float) -> float | None:
     """Return the wait a `Retry-After` header asks for, or `None` when it is absent or unusable.
 
@@ -173,23 +200,22 @@ def retry_after_seconds(value: str | None, now: float) -> float | None:
 
     Returns:
         The wait in seconds, never negative (a date in the past asks for no wait), or `None`
-        when `value` is `None` or is neither form. An unusable value is logged at WARNING,
-        quoted, on this module's logger, so the caller's fallback wait is never silent. A date
-        without a zone (`-0000`) is read as GMT, as HTTP dates always are.
+        when `value` is `None` or is neither form. The wait is as asked, however long, so a
+        caller caps what it honours: the REST governor at `MAX_RETRY_AFTER`, the WebSocket
+        client at its longest backoff. An unusable value is logged at DEBUG, quoted, on this
+        module's logger, so the caller's fallback wait is never silent. A date is read as
+        `http_date_seconds` reads it.
     """
     if value is None:
         return None
     text = value.strip()
     if text.isascii() and text.isdigit():
         return float(text)
-    try:
-        when = parsedate_to_datetime(text)
-    except (TypeError, ValueError):
-        _log.warning("ignoring a Retry-After that is neither seconds nor an HTTP date: %r", value)
+    when = http_date_seconds(text)
+    if when is None:
+        _log.debug("ignoring a Retry-After that is neither seconds nor an HTTP date: %r", value)
         return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return max(0.0, when.timestamp() - now)
+    return max(0.0, when - now)
 
 
 def rate_limit_wait(refusal: int, retry_after: float | None) -> float:

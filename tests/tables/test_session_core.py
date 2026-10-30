@@ -13,6 +13,7 @@ import importlib
 import inspect
 import itertools
 import logging
+import re
 import sys
 import threading
 import weakref
@@ -35,6 +36,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import StreamQuery
@@ -929,18 +931,19 @@ def test_a_session_collected_unclosed_runs_its_closers(
     m._core.on_close(broken)
     m._core.on_close(lambda: ran.append("closed"))
     reaper = m._core._reaper.thread
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.session_core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)
     assert not reaper.is_alive()
     assert ran == ["closed"]
+    # Collection is how a script ends its session: INFO. A closer that raises is a defect.
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
-            logging.WARNING,
+            logging.INFO,
             f"{name} was garbage-collected without close(); closing its connections and pollers",
         ),
-        (logging.ERROR, f"{name}: a transport failed to close"),
+        (logging.ERROR, f"{name}: a transport failed to close. {LIBRARY_BUG}"),
     ]
 
 
@@ -1171,7 +1174,7 @@ def test_a_long_verb_in_a_console_command_is_reported_once(
         console_command(command)
     (message,) = caplog.messages
     assert message.startswith(f"{label(massive_session)}: test.trades append_only() ran for ")
-    assert "live tables do not update until the command ends; run long downloads" in message
+    assert "until the command ends; pass wait=False to fetch() or history() to read in" in message
     for result in made:
         massive_session.release(result)
     made.clear()
@@ -1454,6 +1457,50 @@ def test_a_failure_while_the_shape_is_derived_is_named(
     assert core.results.held() == 0
 
 
+def test_a_close_while_the_shape_is_derived_raises_the_closed_session(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    # The close fails the stream: the verb names the close, not a failure of the stream.
+    core = massive_session._core
+    q = stream_query(massive_session)
+
+    def closing_then_shaping(blink: Table) -> Table:
+        core.close()
+        assert fake_streams.shutdown[1].wait(TIMEOUT)
+        return blink_to_append_only(blink)
+
+    with pytest.raises(dm.MassiveError, match=rf"^{re.escape(core.label)} is closed$") as raised:
+        core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=closing_then_shaping
+        )
+    assert isinstance(raised.value.__cause__, DHError)
+
+
+def test_a_close_the_streams_row_does_not_show_yet_raises_the_closed_session(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The close failed the table, and Deephaven refuses the described copy, before the
+    # stream's row reads CLOSED: the verb still names the close, never Deephaven's error.
+    core = massive_session._core
+    q = stream_query(massive_session)
+    monkeypatch.setattr(core, "_failure", lambda _: None)
+
+    def closing_then_describing(blink: Table) -> Table:
+        core.close()
+        raise RuntimeError(
+            "java.lang.UnsupportedOperationException: Cannot mutate attributes after they have "
+            "been published"
+        )
+
+    with pytest.raises(dm.MassiveError, match=rf"^{re.escape(core.label)} is closed$") as raised:
+        core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=closing_then_describing
+        )
+    assert type(raised.value.__cause__) is RuntimeError
+
+
 def test_a_failure_while_the_blink_copy_is_described_is_named(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
@@ -1519,6 +1566,10 @@ class _Ports:
         self.asked.append("flat_files")
         return _FLAT_FILES
 
+    def read_stop(self) -> threading.Event:
+        self.asked.append("read_stop")
+        return threading.Event()
+
 
 def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContext) -> None:
     catalog = _catalog.Catalog((SPEC,))
@@ -1535,11 +1586,12 @@ def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContex
         assert core.rest_transport() is _REST
         assert core.stream_transport() is _STREAMS
         assert core.flat_file_transport() is _FLAT_FILES
-        assert ports.asked == ["rest", "streams", "flat_files"]
+        assert not core.read_stop().is_set()
+        assert ports.asked == ["rest", "streams", "flat_files", "read_stop"]
         with pytest.raises(RuntimeError, match=r"^core already has its transports attached$"):
             core.attach(_Ports())
         assert core.rest_transport() is _REST
-        assert ports.asked == ["rest", "streams", "flat_files", "rest"]
+        assert ports.asked == ["rest", "streams", "flat_files", "read_stop", "rest"]
     finally:
         core.close()
 

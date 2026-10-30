@@ -16,14 +16,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
-from deephaven.table import Table
-
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
-from deephaven_massive._datasets.symbols import normalize
 from deephaven_massive._enums import (
     AssetClass,
-    ClassFromPrefix,
     ConditionDataType,
     Locale,
     Market,
@@ -33,20 +28,21 @@ from deephaven_massive._enums import (
     TickerType,
     _require_enum,
 )
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import (
     Namespace,
+    accepted_values,
     build_query,
+    day_argument,
     list_params,
     optional_text,
 )
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._massive import RestPath
     from deephaven_massive._query import Query
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
@@ -112,7 +108,10 @@ NEWS: Final = DatasetSpec(
     summary="News articles about tickers, with their publishers and sentiment insights.",
     fetch_path="/v2/reference/news",
     time_axis=("published_utc.gte", "published_utc.lt"),
+    # `ticker` takes one value, so a watchlist fans out one request per ticker, and an
+    # article that mentions two of its tickers comes back twice.
     symbol_param="ticker",
+    symbols_overlap=True,
     poll_mode=PollMode.APPEND,
     poll_keys=("Id",),
     page_size=_LIST_PAGE,
@@ -168,6 +167,7 @@ _REST_ASSET_CLASS: Final = {
 """The `asset_class` value of each class on the reference endpoints, which spell forex `fx`."""
 
 
+@raises_through(_require_enum)
 def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | None:
     """Translate an `asset_class` argument to the wire value of the dataset's endpoint.
 
@@ -184,15 +184,13 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
         The wire value, or None when `value` is None.
 
     Raises:
+        TypeError: If `value` is neither None nor a `dm.AssetClass` (`_require_enum`).
         ValueError: If the endpoint does not accept the class; the message lists those it does.
-
-    A `value` that is not a `dm.AssetClass` raises the `TypeError` of `_require_enum`.
     """
     if value is None:
         return None
     member = _require_enum(value, AssetClass, "asset_class")
-    path = cast("RestPath", core.catalog.source(_REST, cast("str", spec.fetch_path)))
-    accepted = next(param.values for param in path.params if param.name == "asset_class")
+    accepted = accepted_values(core, spec, "asset_class")
     if _REST_ASSET_CLASS[member] not in accepted:
         names = [m.name for m in AssetClass if _REST_ASSET_CLASS[m] in accepted]
         raise ValueError(
@@ -240,22 +238,23 @@ class _Reference(Namespace):
 
             m = dm.MassiveSession()
             details = m.reference.ticker_details(["AAPL", "MSFT"]).fetch()
-            news = m.reference.news(symbols="AAPL", start="2025-06-01").poll(60)
+            news = m.reference.news("AAPL", start="2025-06-01").poll(60)
     """
 
     __slots__ = ()
     _path: ClassVar[str] = "reference"
 
+    @raises_through(build_query, list_params, day_argument, _require_enum, optional_text)
     def tickers(
         self,
-        *,
         symbols: Symbols | None = None,
+        *,
         market: Market | None = None,
         ticker_type: TickerType | None = None,
         exchange: str | None = None,
         cusip: str | None = None,
         cik: str | None = None,
-        date: DateLike | None = None,
+        as_of: DateLike | None = None,
         active: bool = True,
         search: str | None = None,
         sort: str | None = None,
@@ -283,9 +282,11 @@ class _Reference(Namespace):
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            date: The day the listing is as of: a `date` or ISO-8601 date text (a `datetime`
+            as_of: The day the listing is as of, sent as the wire parameter `date`: a `date`,
+                ISO-8601 date text, Deephaven date text such as `"2025-3-3"`, a Java
+                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
                 raises `ValueError`: it is a calendar date); None for today.
-            active: True lists tickers traded on `date`; False lists delisted ones.
+            active: True lists tickers traded on `as_of`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
             order: The sort direction; None for the endpoint's default.
@@ -298,10 +299,9 @@ class _Reference(Namespace):
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
         Raises:
-            TypeError: If `active` is not a `bool`.
-
-        `dm.ALL`, an invalid symbol, a `datetime` as `date`, or an unknown filter raises
-        `ValueError`; another argument of the wrong type raises `TypeError`.
+            TypeError: If `active` is not a `bool`, or another argument has the wrong type.
+            ValueError: For `dm.ALL`, an invalid symbol, a `datetime` as `as_of`, or an unknown
+                filter.
         """
         if not isinstance(active, bool):
             raise TypeError(f"active must be a bool, not {type(active).__name__}")
@@ -313,7 +313,7 @@ class _Reference(Namespace):
             "exchange": optional_text("exchange", exchange),
             "cusip": optional_text("cusip", cusip),
             "cik": optional_text("cik", cik),
-            "date": None if date is None else calendar_day(TICKERS, date, "date"),
+            "date": None if as_of is None else day_argument(TICKERS, as_of, "as_of"),
             "active": active,
             "search": optional_text("search", search),
             **list_params(sort=sort, order=order),
@@ -322,15 +322,17 @@ class _Reference(Namespace):
             self._core,
             TICKERS,
             symbols=symbols,
-            all_alternative="symbols=None for every ticker",
+            symbols_optional=True,
+            all_alternative="leave symbols out for every ticker",
             params=params,
-            arguments={"type": "ticker_type"},
+            arguments={"type": "ticker_type", "date": "as_of"},
             filters=filters,
             limit=limit,
         )
         return cast("Query", query)
 
-    def ticker_details(self, symbols: Symbols, *, date: DateLike | None = None) -> Query:
+    @raises_through(build_query, day_argument)
+    def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> Query:
         """One ticker's company and listing details: address, branding, shares, and more.
 
         Served over REST (`/v3/reference/tickers/{ticker}`), one request per symbol; a symbol
@@ -343,24 +345,32 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
                 column.
-            date: The day the details are as of: a `date` or ISO-8601 date text (a
-                `datetime` raises `ValueError`: it is a calendar date); None for the latest.
+            as_of: The day the details are as of, sent as the wire parameter `date`: a `date`,
+                ISO-8601 date text, Deephaven date text such as `"2025-3-3"`, a Java
+                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
+                raises `ValueError`: it is a calendar date); None for the latest.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or a `datetime` as `date` raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, an invalid symbol, or a `datetime` as `as_of`. Also for
+                `symbols` of None, with a message that names the forms it takes.
         """
         query = build_query(
             self._core,
             TICKER_DETAILS,
             symbols=symbols,
-            all_alternative="m.reference.tickers() for every ticker",
-            params={"date": None if date is None else calendar_day(TICKER_DETAILS, date, "date")},
+            all_alternative="use m.reference.tickers() for every ticker",
+            params={
+                "date": None if as_of is None else day_argument(TICKER_DETAILS, as_of, "as_of")
+            },
+            arguments={"date": "as_of"},
         )
         return cast("Query", query)
 
+    @raises_through(build_query, _require_enum, _asset_class)
     def ticker_types(
         self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
     ) -> Query:
@@ -380,8 +390,9 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        An `asset_class` the endpoint does not accept (`FUTURES`) raises `ValueError`; an
-        argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For an `asset_class` the endpoint does not accept (`FUTURES`).
         """
         params = {
             "asset_class": _asset_class(self._core, TICKER_TYPES, asset_class),
@@ -389,6 +400,7 @@ class _Reference(Namespace):
         }
         return cast("Query", build_query(self._core, TICKER_TYPES, params=params))
 
+    @raises_through(build_query, _event_types)
     def ticker_events(self, symbols: Symbols, *, types: Sequence[str] | None = None) -> Query:
         """The timeline of a ticker's events, such as ticker changes, one row per event.
 
@@ -409,18 +421,21 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or an empty `types` raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, an invalid symbol, or an empty `types`. Also for `symbols` of
+                None, with a message that names the forms it takes.
         """
         query = build_query(
             self._core,
             TICKER_EVENTS,
             symbols=symbols,
-            all_alternative="a list of symbols",
+            all_alternative="pass a list of symbols",
             params={"types": _event_types(types)},
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def related_companies(self, symbols: Symbols) -> Query:
         """The companies Massive relates to a ticker, from news and returns data, one row each.
 
@@ -438,18 +453,21 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL` or an invalid symbol raises `ValueError`; an argument of the wrong type
-        raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL` or an invalid symbol. Also for `symbols` of None, with a
+                message that names the forms it takes.
         """
         query = build_query(
-            self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="a list of symbols"
+            self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="pass a list of symbols"
         )
         return cast("Query", query)
 
+    @raises_through(build_query, list_params)
     def news(
         self,
-        *,
         symbols: Symbols | None = None,
+        *,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -460,35 +478,52 @@ class _Reference(Namespace):
         """News articles about tickers, with their publishers and sentiment insights.
 
         Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
-        `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range,
-        so `poll()` needs `start` or `limit` and raises `ValueError` without either; a fixed
-        `start` keeps widening the window of a poll that runs for days. Massive documents no
-        default order for this endpoint, so a poll of the latest headlines asks for one:
-        `m.reference.news(symbols="AAPL", sort="published_utc", order=dm.Order.DESC,
+        `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range
+        for every ticker, so `poll()` needs `start` or `limit` and raises `ValueError` without
+        either; give it a recent `start`, a `limit`, or both, since a fixed `start` keeps
+        widening the window of a poll that runs for days. Massive documents no default order
+        for this endpoint, so a poll of the latest headlines asks for one:
+        `m.reference.news(["AAPL", "MSFT"], sort="published_utc", order=dm.Order.DESC,
         limit=50).poll(60)`. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
         (a `String[]`: `table.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps the
         articles that name one, and `table.ungroup("Tickers")` gives a row per article and
-        ticker), and `symbols` only selects the articles that mention one ticker. The
-        endpoint's `ticker` parameter takes a single ticker, so `symbols` is one symbol; for
-        several, build one query per symbol. `symbols=None` reads every article; `dm.ALL` is not
-        accepted (use `symbols=None`). Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#news,
+        ticker), and `symbols` selects the articles that mention any of its tickers.
+
+        The endpoint takes one ticker per request, so the library sends one request per
+        ticker and keeps an article that mentions several of them once, by its `Id`. In
+        `fetch()`, an article without an `Id` is kept, never merged with another; a `poll()`
+        table fails on one, since `Id` is its key. Rows come ticker by ticker, the tickers in
+        alphabetical order. `limit`, `sort`, and `order` apply to each
+        ticker's request, not to the whole table: `limit=10` reads up to ten articles per
+        ticker, and `order` sorts within each ticker's articles. For one order across tickers,
+        sort the result, such as `table.sort_descending("PublishedUtc")`. A watchlist table is
+        followed: `fetch()` reads its rows once, and `poll()` re-reads them every cycle, so a
+        ticker added to the table is read from the next cycle; the articles of a ticker removed
+        from it stay, since a `poll()` table only appends.
+        Each ticker costs one request a cycle or more: on a plan limited to 5 requests a
+        minute, `poll(60)` of a 50-ticker watchlist cannot keep up, and the table logs the
+        slow-poll WARNING. `symbols=None` reads every article in one request series;
+        `dm.ALL` is not accepted (use `symbols=None`). Its columns, and what each means, are
+        in https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#news,
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
-            symbols: The one ticker whose articles to read, as a `str` or a one-element
-                sequence; None for every article.
-            start: The earliest publication: a date is its 00:00 in New York, a `datetime`
-                is used as is; None for no lower bound, which reads the whole archive and
-                which `poll()` refuses unless `limit` is set.
+            symbols: The tickers whose articles to read: one symbol, a list, or a Deephaven
+                table with a `Symbol` column (a watchlist); None for every article.
+            start: The earliest publication (`DateLike`): a date is its 00:00 in New York, an
+                instant (an aware `datetime`, a Java `Instant`) is used as is; None for no
+                lower bound, which reads the whole archive and which `poll()` refuses unless
+                `limit` is set.
             end: The end of the range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, a
                 `datetime` is exclusive; None for no upper bound.
-            sort: The field to sort by (`"published_utc"`); None for the endpoint's default.
-            order: The sort direction; None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
+            sort: The field each ticker's request sorts by (`"published_utc"`); None for the
+                endpoint's default.
+            order: The sort direction of each ticker's request; None for the endpoint's
+                default.
+            limit: The maximum number of articles per ticker, or in total without `symbols`;
+                None for every article. The page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written
                 as underscores; the publication axis is set only through `start` and `end`.
 
@@ -496,32 +531,15 @@ class _Reference(Namespace):
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
         Raises:
-            TypeError: If `symbols` is a Deephaven table.
-            ValueError: If `symbols` names more than one symbol.
-
-        `dm.ALL`, an invalid symbol, a naive `datetime`, a range that ends before it starts,
-        or an unknown filter raises `ValueError`; an argument of the wrong type raises
-        `TypeError`.
+            TypeError: If an argument has the wrong type.
+            ValueError: For `dm.ALL`, an empty list, an invalid symbol, a naive `datetime`, a
+                range that ends before it starts, or an unknown filter.
         """
-        if isinstance(symbols, Table):
-            raise TypeError(
-                "reference.news takes one symbol, not a table; build one query per symbol"
-            )
-        if symbols is not None and not isinstance(symbols, _All):
-            one = cast(
-                "tuple[str, ...]", normalize(ClassFromPrefix.ANY, symbols)
-            )  # not ALL: checked above
-            if len(one) > 1:
-                raise ValueError(
-                    "reference.news takes one symbol: the endpoint's ticker parameter is "
-                    f"single-valued; build one query per symbol, not {list(one)}"
-                )
-            symbols = one
         query = build_query(
             self._core,
             NEWS,
             symbols=symbols,
-            all_alternative="symbols=None for every article",
+            all_alternative="leave symbols out for every article",
             start=start,
             end=end,
             params=list_params(sort=sort, order=order),
@@ -530,6 +548,7 @@ class _Reference(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, _require_enum, _asset_class)
     def exchanges(
         self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
     ) -> Query:
@@ -549,8 +568,9 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        An `asset_class` the endpoint does not accept (`INDICES`) raises `ValueError`; an
-        argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For an `asset_class` the endpoint does not accept (`INDICES`).
         """
         params = {
             "asset_class": _asset_class(self._core, EXCHANGES, asset_class),
@@ -558,6 +578,7 @@ class _Reference(Namespace):
         }
         return cast("Query", build_query(self._core, EXCHANGES, params=params))
 
+    @raises_through(build_query, list_params, _require_enum, _asset_class)
     def conditions(
         self,
         *,
@@ -596,10 +617,9 @@ class _Reference(Namespace):
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
         Raises:
-            TypeError: If `condition_id` is neither None nor an `int`.
-
-        An `asset_class` the endpoint does not accept or an unknown filter raises
-        `ValueError`; another argument of the wrong type raises `TypeError`.
+            TypeError: If `condition_id` is neither None nor an `int`, or another argument has
+                the wrong type.
+            ValueError: For an `asset_class` the endpoint does not accept, or an unknown filter.
         """
         if condition_id is not None and (
             isinstance(condition_id, bool) or not isinstance(condition_id, int)

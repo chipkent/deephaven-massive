@@ -85,7 +85,8 @@ OPTION_ROOT: Final = "OptionRoot"
 
 RAW_SYMBOL: Final = "RawSymbol"
 """The derived column of a dataset that reads its symbol from rows, in a session whose
-`unknown_symbols` is `WARN`: the text of a symbol the library could not read."""
+`unreadable_symbols` is `LOG` (the default) or `IGNORE`: the text of a symbol the library could
+not read."""
 
 DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     OPTION_ROOT: (
@@ -97,7 +98,8 @@ DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     RAW_SYMBOL: (
         "The symbol exactly as Massive sent it, on a row whose spelling the library cannot "
         "read as the dataset's class (its `Symbol` is then null); null on every other row. "
-        "Present only in a session whose `unknown_symbols` is `WARN`."
+        "Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails "
+        "on such a row instead."
     ),
 }
 """The library's description of each derived column."""
@@ -241,10 +243,11 @@ def _start_sentence(spec: DatasetSpec) -> str:
             "class (UTC for forex and crypto, New York otherwise)."
         )
     first = (
-        "a week's Monday"
-        if spec.asset_class in (AssetClass.FOREX, AssetClass.CRYPTO)
-        else "a week's Monday, a month's, quarter's, or year's first weekday"
+        "a week's Monday, a month's, quarter's, or year's first weekday"
+        if spec.asset_class in (AssetClass.STOCKS, AssetClass.OPTIONS)
+        else "a week's Sunday, a month's, quarter's, or year's 1st"
     )
+
     return (
         "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
         f"00:00 {_ZONE_CLOCKS[zone]} of its window's first day ({first}), whichever source "

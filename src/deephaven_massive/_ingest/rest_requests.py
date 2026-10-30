@@ -411,7 +411,9 @@ def shared_params(
 
     Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
     in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
-    segment, the indicators' query parameter); `Request.adjusted` when it is set; and the
+    segment, the indicators' query parameter); `Request.adjusted` when it is set and the path
+    takes it (a path without it, the crypto indicators', serves prices no split changes, so
+    `True` is left out there); and the
     futures `resolution` and the page size when the path takes them. The page size is
     `DatasetSpec.page_size`, or `Request.limit` when that is smaller.
 
@@ -426,8 +428,8 @@ def shared_params(
         `(path parameters, query parameters)`.
 
     Raises:
-        ValueError: If `Request.adjusted` is set and the path has no `adjusted` parameter
-            (the crypto indicators); an explicit value is never dropped.
+        ValueError: If `Request.adjusted` is False and the path has no `adjusted` parameter
+            (the crypto indicators): unadjusted prices are never dropped silently.
 
     Any other parameter the caller set that the path does not take raises the `ValueError` of
     `_caller_params`.
@@ -438,10 +440,10 @@ def shared_params(
         path["multiplier"] = request.multiplier
     if request.timespan is not None and "timespan" in params:
         (path if params["timespan"].in_path else query)["timespan"] = request.timespan
-    if request.adjusted is not None:
-        if "adjusted" not in params:
-            raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
+    if "adjusted" in params and request.adjusted is not None:
         query["adjusted"] = request.adjusted
+    elif request.adjusted is False:
+        raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if spec.page_size is not None and "limit" in params:

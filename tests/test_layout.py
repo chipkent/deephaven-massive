@@ -52,8 +52,8 @@ wire package.
 Then the file enforces the library's layers. Every module under `src/` is in one of six
 layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`, `_enums`, `_errors`,
 `_log_limits`, `_types`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`), and API
-(the root `__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/`); a module in no known
-layer is itself a violation. Then:
+(the root `__init__`, `_dataset_list`, `_debug_log`, `_session`, `_query`, the public `queries`,
+and `_namespaces/`); a module in no known layer is itself a violation. Then:
 
 - every import, relative import, resolvable literal dynamic import, and module-name string,
   inside `if TYPE_CHECKING:` or not, targets the module's own layer or a lower one;
@@ -193,6 +193,11 @@ def is_helper(test_file: PurePosixPath) -> bool:
     )
 
 
+PUBLIC_MODULES = frozenset({PurePosixPath("__init__.py"), PurePosixPath("queries.py")})
+"""The public modules: the package itself and the query types users import for annotations. A
+new entry needs owner approval."""
+
+
 def public_modules(modules: Iterable[PurePosixPath]) -> list[str]:
     """Return the modules that break the privacy rule.
 
@@ -200,13 +205,13 @@ def public_modules(modules: Iterable[PurePosixPath]) -> list[str]:
         modules: Module paths relative to `src/deephaven_massive/`.
 
     Returns:
-        Every module other than the package `__init__.py` whose first path component has no
-        leading underscore.
+        Every module outside `PUBLIC_MODULES` whose first path component has no leading
+        underscore.
     """
     return [
         str(module)
         for module in modules
-        if module != PurePosixPath("__init__.py") and not module.parts[0].startswith("_")
+        if module not in PUBLIC_MODULES and not module.parts[0].startswith("_")
     ]
 
 
@@ -372,12 +377,14 @@ def test_a_live_test_without_a_module_is_an_orphan() -> None:
 
 def test_every_module_below_the_package_is_private() -> None:
     # The first path component below `deephaven_massive/` carries a leading underscore, so the
-    # public surface is `__init__.py` alone.
+    # public surface is `__init__.py` and `queries.py` alone.
     assert public_modules(_source_modules()) == []
 
 
 def test_a_public_module_is_reported() -> None:
-    found = public_modules(_paths("__init__.py", "_config.py", "config.py", "namespaces/stocks.py"))
+    found = public_modules(
+        _paths("__init__.py", "queries.py", "_config.py", "config.py", "namespaces/stocks.py")
+    )
     assert found == ["config.py", "namespaces/stocks.py"]
 
 
@@ -1388,7 +1395,9 @@ def test_only_this_file_may_name_the_snapshot_files() -> None:
 _RANKS = {"wire": 0, "vocabulary": 1, "datasets": 2, "tables": 3, "ingest": 4, "api": 5}
 # The root modules of the vocabulary and of the API; every other root module is in no layer.
 _VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_log_limits", "_types"})
-_API_MODULES = frozenset({"__init__", "_debug_log", "_session", "_query"})
+_API_MODULES = frozenset(
+    {"__init__", "_dataset_list", "_debug_log", "_session", "_query", "queries"}
+)
 # The packages that are each one layer.
 _LAYER_PACKAGES = {
     "_massive": "wire",
@@ -1453,6 +1462,8 @@ _WIRE_VOCABULARY = frozenset(
 _WIRE_CLIENTS = frozenset(
     {
         "Cancel",
+        "CapturedReply",
+        "set_reply_capture",
         "RequestGovernor",
         "BucketState",
         "BASIC_REQUESTS_PER_MINUTE",

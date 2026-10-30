@@ -29,10 +29,10 @@ import logging
 import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeVar
 
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._errors import EntitlementError, MassiveError
+from deephaven_massive._errors import EntitlementError, ErrorCause, MassiveError
 from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._log_limits import log_once
 from deephaven_massive._tables.transports import HostDecision
@@ -49,6 +49,7 @@ __all__ = [
     "HostDecisionCache",
     "SnapshotProbe",
     "decide",
+    "succeeded_result",
 ]
 
 logger = logging.getLogger(__name__)
@@ -172,7 +173,8 @@ def _classify(asset_class: AssetClass, rows: Sequence[Mapping[str, object]]) -> 
                 raise MassiveError(
                     f"{asset_class.value} snapshot: {field} is {value!r}, neither DELAYED nor "
                     f"REAL-TIME, so the WebSocket host cannot be decided; pin it with "
-                    f"{_ws_hosts_hint(asset_class)}"
+                    f"{_ws_hosts_hint(asset_class)}",
+                    cause=ErrorCause.LIBRARY_DEFECT,  # a value the library cannot interpret
                 )
     if delayed is not None:
         logger.info("%s WebSocket host: %s=DELAYED", asset_class.value, delayed)
@@ -272,8 +274,9 @@ def decide(
 
     Raises:
         EntitlementError: If the snapshot is refused (HTTP 403 or `NOT_AUTHORIZED`): the plan
-            has no WebSocket access for the class ("stocks plan has no WebSocket access"),
-            with the refusal's status and request id.
+            has no WebSocket access for the class ("stocks plan has no WebSocket access"). The
+            message says the refused request was the library's own host check, names its
+            path, and quotes Massive's text; it keeps the refusal's status and request id.
 
     A timeframe that holds an undocumented value raises the `MassiveError` of `_classify`, and
     any error `fetch` raises other than a refusal propagates unchanged.
@@ -289,11 +292,15 @@ def decide(
         return HostDecision(
             REALTIME_HOST, Recency.REALTIME, "single documented host; Starter is real-time"
         )
+    probe = SNAPSHOT_PROBES[asset_class]
     try:
-        rows = fetch(SNAPSHOT_PROBES[asset_class])
+        rows = fetch(probe)
     except EntitlementError as error:
         raise EntitlementError(
-            f"{asset_class.value} plan has no WebSocket access: {error}",
+            f"{asset_class.value} plan has no WebSocket access: the {asset_class.value} "
+            f"subscription refused the library's own host check, a REST snapshot request "
+            f"({probe.path}) it sends before the first {asset_class.value} stream; Massive "
+            f"said: {error}",
             status=error.status,
             request_id=error.request_id,
         ) from error
@@ -341,18 +348,22 @@ class HostDecisionCache:
     def known_host(self, key: tuple[AssetClass, ChannelFamily]) -> HostDecision | None:
         """Return the decision of a (class, family) if one is made, without claiming it.
 
-        A failed decision is removed before its future completes, so a completed future under
-        the key always holds a decision.
+        A failed decision is removed before its future fails, but this check reads the future
+        under the lock and looks at it after: its maker may forget and fail it in between. So
+        only a decision counts; a failed future gives None, and the caller then claims or
+        waits as usual (`RestEndpoints.resolve_host`), where a failure reaches it as a copy
+        and an abandoned decision as a retry.
 
         Args:
             key: The asset class and channel family.
 
         Returns:
-            The decision, or None while none is made or one is being made.
+            The decision, or None while none is made, one is being made, or the one being made
+            has just failed.
         """
         with self._lock:
             future = self._hosts.get(key)
-        return future.result() if future is not None and future.done() else None
+        return succeeded_result(future)
 
     def replace_host(self, key: tuple[AssetClass, ChannelFamily], decision: HostDecision) -> None:
         """Cache a decision for a (class, family) in place of any earlier one.
@@ -381,3 +392,22 @@ class HostDecisionCache:
         with self._lock:
             if self._hosts.get(key) is future:
                 del self._hosts[key]
+
+
+T = TypeVar("T")
+"""The result type of a shared lookup's future."""
+
+
+def succeeded_result(future: Future[T] | None) -> T | None:
+    """Return a shared lookup's result once it has succeeded, and None in every other state.
+
+    Args:
+        future: The lookup's future, or None when no lookup is claimed.
+
+    Returns:
+        The result; None when the lookup is not claimed, still running, or failed (its
+        future then holds the error, which only the claim-or-wait path may act on).
+    """
+    if future is None or not future.done() or future.exception() is not None:
+        return None
+    return future.result()

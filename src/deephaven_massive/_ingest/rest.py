@@ -18,7 +18,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, the page
   size (`DatasetSpec.page_size`, or `Request.limit` when that is smaller, so a small cap
   fetches no more than it keeps), and for `history()` the ascending direction (`_ascending`).
-  `Request.limit` caps the total rows, and the client stops paging there.
+  `Request.limit` caps the total rows, and the client stops paging there; for a dataset whose
+  symbols overlap (`DatasetSpec.symbols_overlap`, the news of a watchlist) it caps each
+  request's rows instead, and a row several requests return is kept once (`_first_copies`).
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -63,9 +65,10 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses, or 90 s while the
   thread holds the update graph's lock), which becomes `MassiveError("rate limited: ...")`
-  with status 429 (the first 429 of each subscription has already logged its WARNING). A row that
-  breaks the schema (a missing required key, a value that does not convert, a timestamp out of
-  bounds) raises `RowDataError`. Static verbs log each error at ERROR and raise it.
+  with status 429 (the first 429 of each subscription has already logged its INFO notice). A row
+  that breaks the schema (a missing required key, a value that does not convert, a timestamp out
+  of bounds) raises `RowDataError`, a defect of the library. Static verbs raise each error, and
+  log it at DEBUG, or at ERROR for a defect.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/host_decision.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
@@ -103,20 +106,26 @@ from typing import TYPE_CHECKING, Final, TypeAlias, TypeVar, cast
 from urllib.parse import urlsplit
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from deephaven_massive._datasets.dates import day_class, is_trading_day
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import RowTimes, stamp_rule, time_rule
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
-from deephaven_massive._enums import AssetClass, Timespan, UnknownSymbols, subscription_of
+from deephaven_massive._enums import AssetClass, OnError, Timespan, subscription_of
 from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    ErrorCause,
     MassiveError,
     PermanentError,
     UnsupportedParameterError,
+    cause_of,
+    failure_text,
     from_wire,
+    library_bug,
 )
 from deephaven_massive._ingest import host_decision
-from deephaven_massive._ingest.host_decision import HostDecisionCache
+from deephaven_massive._ingest.host_decision import HostDecisionCache, succeeded_result
 from deephaven_massive._ingest.rate_limits import (
     OTHER,
     PaceCheck,
@@ -127,6 +136,7 @@ from deephaven_massive._ingest.rate_limits import (
 )
 from deephaven_massive._ingest.rest_requests import (
     Call,
+    CryptoSplit,
     axis_query,
     fetch_paths,
     history_calls,
@@ -175,6 +185,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+_ROW_NUMBER: Final = "__row_number"
+"""The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
+
+
 _TICKERS_PATH: Final = "/v3/reference/tickers"
 """The reference path that lists crypto tickers with their base and quote currencies."""
 _TICKERS_PAGE: Final = 1000
@@ -209,8 +223,9 @@ def _shared_failure(error: BaseException, context: str) -> BaseException:
         `_AbandonedError` when the maker stopped for its own reason: a `MassiveError` with
         status 429 (its patience ran out; the client never gives up on a 429 otherwise) or an
         interruption that is not an `Exception` (`KeyboardInterrupt`). Otherwise the
-        `MassiveError` itself, or for any other error a `MassiveError` naming it, which every
-        waiter raises a copy of (`_outcome`).
+        `MassiveError` itself, or for any other error a `MassiveError` naming it, a defect of
+        the library (`ErrorCause.LIBRARY_DEFECT`, with how to report it), which every waiter
+        raises a copy of (`_outcome`).
     """
     if isinstance(error, MassiveError):
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -218,7 +233,7 @@ def _shared_failure(error: BaseException, context: str) -> BaseException:
         return error
     if not isinstance(error, Exception):
         return _AbandonedError(repr(error))
-    return MassiveError(f"{context}: {error!r}")
+    return MassiveError(library_bug(f"{context}: {error!r}"), cause=ErrorCause.LIBRARY_DEFECT)
 
 
 def _outcome(future: Future[T]) -> T:
@@ -230,13 +245,15 @@ def _outcome(future: Future[T]) -> T:
     Returns:
         The result.
 
-    A failed lookup raises a copy of the maker's `MassiveError` (its type, text, status, and
-    request id), so that no exception object is raised on two threads at once.
+    A failed lookup raises a copy of the maker's `MassiveError` (its type, text, status,
+    request id, and cause), so that no exception object is raised on two threads at once.
     """
     try:
         return future.result()
     except MassiveError as error:
-        raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
+        raise type(error)(
+            str(error), status=error.status, request_id=error.request_id, cause=error.cause
+        ) from None
 
 
 def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
@@ -267,6 +284,28 @@ class UnlistedPairError(PermanentError):
     currencies that do not join to it (`RestReader.crypto_pair`). A `poll()` table fails with
     it, since every later cycle would read the same list.
     """
+
+
+def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
+    """Drop the repeats of a row that several symbols' requests returned, keeping its first.
+
+    A row is identified by `keys` alone. A row with a null key is never merged with another:
+    a null cannot tell two rows apart, so every such row is kept, in place.
+
+    Args:
+        rows: The rows of every request, in request order.
+        keys: The columns that identify a row (`DatasetSpec.poll_keys`).
+
+    Returns:
+        The rows, each identity once, in the order of their first copies.
+    """
+    numbered = rows.append_column(_ROW_NUMBER, pa.array(range(rows.num_rows), pa.int64()))
+    keyed = functools.reduce(pc.and_, (pc.is_valid(rows[key]) for key in keys))
+    identified = numbered.filter(keyed)
+    firsts = identified.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
+    unkeyed = numbered.filter(pc.invert(keyed))[_ROW_NUMBER]
+    kept = pa.chunked_array([*firsts[f"{_ROW_NUMBER}_min"].chunks, *unkeyed.chunks], pa.int64())
+    return rows.take(kept.sort())
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,15 +387,18 @@ class RestState:
     def known_crypto(self) -> CryptoTickers | None:
         """Return the session's crypto ticker list if it is read, without claiming it.
 
-        A failed read is removed before its future completes, so a completed future always
-        holds the list.
+        A failed read is removed before its future fails, but this check reads the future
+        under the lock and looks at it after: its reader may forget and fail it in between. So
+        only a list counts; a failed future gives None, and the caller then claims or waits
+        as usual (`RestReader._crypto_tickers`), where a failure reaches it as a copy and an
+        abandoned read as a retry.
 
         Returns:
-            The list, or None while it is not read or being read.
+            The list, or None while it is not read, is being read, or has just failed.
         """
         with self._lock:
             future = self._crypto
-        return future.result() if future is not None and future.done() else None
+        return succeeded_result(future)
 
     def forget_crypto(self) -> None:
         """Remove a failed read of the crypto ticker list, so that the next caller tries again.
@@ -396,8 +438,8 @@ class RestReader:
         catalog: The dataset catalog.
         drift: The session's drift registry.
         max_concurrency: The most requests of one fan-out at a time.
-        unknown_symbols: The session's rule for a symbol spelling the library cannot read
-            (`MassiveConfig.unknown_symbols`).
+        unreadable_symbols: The session's setting for a symbol spelling the library cannot
+            read (`MassiveConfig.unreadable_symbols`).
         threads: The name prefix of the threads of a fan-out pool this reader makes, such as
             `"massive #1 call-7 rest"`: the session, the call, and the transport.
         exec_ctx: The session's execution context, which tells whether a read's thread holds
@@ -408,7 +450,7 @@ class RestReader:
     catalog: Catalog
     drift: DriftRegistry
     max_concurrency: int
-    unknown_symbols: UnknownSymbols
+    unreadable_symbols: OnError
     threads: str
     exec_ctx: ExecutionContext
 
@@ -432,7 +474,7 @@ class RestReader:
         Returns:
             The path.
         """
-        return cast("RestPath", self.catalog.source(Transport.REST, template))
+        return self.catalog.rest_path(template)
 
     def crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Return a crypto ticker's base and quote currencies, with no guess.
@@ -472,6 +514,7 @@ class RestReader:
                 f"{where}: reading Massive's crypto tickers failed: {public}",
                 status=public.status,
                 request_id=public.request_id,
+                cause=public.cause,
             ) from public
         entry = tickers.get(symbol)
         if entry is None:
@@ -494,7 +537,8 @@ class RestReader:
 
         A failed read raises its public `MassiveError` (`AuthenticationError`,
         `EntitlementError`), and every caller that waited on it a copy of it; an unexpected
-        error of the reader propagates to it, and its waiters get a `MassiveError` naming it.
+        error of the reader, a defect, is logged at ERROR with how to report it and propagates
+        to it, and its waiters get a `MassiveError` naming it.
         A waiting caller that gives up raises the error `wait_for_shared` describes.
         """
         known = self.state.known_crypto()
@@ -523,6 +567,10 @@ class RestReader:
             # The reader's own unexpected error propagates; its waiters get a MassiveError.
             self.state.forget_crypto()
             future.set_exception(_shared_failure(error, "the read failed"))
+            if cause_of(error) is ErrorCause.LIBRARY_DEFECT:
+                logger.exception(
+                    "%s: reading Massive's crypto tickers failed. %s", self.state.label, LIBRARY_BUG
+                )
             raise
         future.set_result(tickers)
         return tickers
@@ -577,8 +625,11 @@ class RestReader:
         caller it joined; the lookup goes on for that caller and every other one still waiting.
 
         Blocks the calling thread until the lookup ends or this caller gives up; holds no lock
-        meanwhile, and leaves no listener behind. Logs the wait at DEBUG, a lookup abandoned by
-        its maker at INFO, and giving up at ERROR.
+        meanwhile. It leaves the governor's bucket listener behind on no path; the callback it
+        adds to the future cannot be removed, so it stays there, setting an event nobody waits
+        on once this call returns (a future cached for the session keeps one per caller that
+        waited on it). Logs the wait at DEBUG, a lookup abandoned by its maker at INFO, and
+        giving up at DEBUG: the caller raises the error.
 
         Args:
             future: The lookup's future, which the caller making it completes.
@@ -622,7 +673,7 @@ class RestReader:
                 failure = governor.charge_pause(bucket, patience)
                 if failure is not None:
                     public = self._public(failure)
-                    logger.error(
+                    logger.debug(
                         "%s: stops waiting for %s, which goes on for the caller making it: %s",
                         self.state.label,
                         what,
@@ -690,7 +741,7 @@ class RestReader:
         session raises `MassiveError("... is closed")`.
         """
         converter = RowConverter.build(
-            self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
+            self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
         )
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
@@ -803,9 +854,9 @@ class RestReader:
         A failed request otherwise raises the public error of its `WireError` (`_public`), and
         once the session is closed every failed request does, a 404 included: the call raises
         `MassiveError("... is closed")` rather than dropping its symbol. A row that breaks the
-        schema raises the `RowDataError` of `_Converter.convert`; a page on another adjustment
-        basis the `MassiveError` of `_check_adjusted`; and a bar stamped at a time Massive is
-        not known to use the `MassiveError` of `stamped`.
+        schema raises the `RowDataError` of `rest_rows.RowConverter.convert`; a page on another
+        adjustment basis the `MassiveError` of `_check_adjusted`; and a bar stamped at a time
+        Massive is not known to use the `MassiveError` of `stamped`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
@@ -1062,7 +1113,7 @@ class RestReader:
         """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
 
         A reactive symbol table can route a new symbol to a path that lacks a parameter the
-        caller set (an explicit `adjusted` on the crypto indicators). Retrying cannot fix that,
+        caller set (`adjusted=False` on the crypto indicators). Retrying cannot fix that,
         so its `ValueError` becomes `UnsupportedParameterError`, which fails the table. Before
         reading, the cycle's requests per bucket go to `pace`, which warns once when the paced
         ones outlast the interval.
@@ -1133,17 +1184,24 @@ class RestReader:
             errors.clear()
 
     def plan_fetch(
-        self, spec: DatasetSpec, request: Request, symbols: NormalizedSymbols | None
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        symbols: NormalizedSymbols | None,
+        *,
+        split: CryptoSplit | None = None,
     ) -> list[tuple[RestPath, list[Call]]]:
         """Plan the requests of a `fetch()` or `poll()` cycle, path by path.
 
         Makes no request, except that the first crypto pair a path takes as two currencies
-        reads the session's crypto ticker list (`crypto_pair`).
+        reads the session's crypto ticker list (`crypto_pair`), unless `split` is given.
 
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments.
             symbols: The static symbols.
+            split: Splits a crypto pair into its currencies; None for `crypto_pair`. A check
+                that must make no request passes `_unsplit`.
 
         Returns:
             Each path the cycle reads (`fetch_paths`) with its calls; none for an empty symbol
@@ -1163,7 +1221,7 @@ class RestReader:
                 request,
                 symbols=own,
                 dates=(request.start, request.end),
-                split=self.crypto_pair,
+                split=self.crypto_pair if split is None else split,
             )
             planned.append((rest_path, calls))
         return planned
@@ -1176,6 +1234,7 @@ class RestReader:
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
+        cancel: Cancel | None = None,
         pauses_live_tables: bool = False,
     ) -> tuple[pa.Table, int]:
         """Read a dataset's fetch paths for the symbols: `fetch()`.
@@ -1190,12 +1249,15 @@ class RestReader:
             symbols: The static symbols.
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
+            cancel: A background read's stop token, which ends the read's waits when set; None
+                when only the session's close should.
             pauses_live_tables: True when the calling thread holds the update graph's lock (a
                 console command), so the read pauses every live table of the worker while it
                 runs.
 
         Returns:
-            The rows of every path, in path order, capped at `Request.limit`, and the request
+            The rows of every path, in path order, capped at `Request.limit` (each request's
+            rows, for a dataset whose symbols overlap; `_read_planned`), and the request
             count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
@@ -1209,7 +1271,7 @@ class RestReader:
             pauses_live_tables=pauses_live_tables,
         )
         return self._read_planned(
-            spec, request, planned, record=record, executor=executor, cancel=None
+            spec, request, planned, record=record, executor=executor, cancel=cancel
         )
 
     def _read_planned(
@@ -1223,6 +1285,10 @@ class RestReader:
         cancel: Cancel | None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the total rows at `Request.limit`.
+
+        For a dataset whose symbols overlap (`DatasetSpec.symbols_overlap`), such as the news
+        of a watchlist, each request is capped instead, and a row several requests returned
+        is kept once, at its first copy (`_first_copies`).
 
         Args:
             spec: The dataset.
@@ -1257,10 +1323,24 @@ class RestReader:
             requests += made
         if not tables:
             schema = self.catalog.dataset_schema(
-                spec, raw_symbol=self.unknown_symbols is UnknownSymbols.WARN
+                spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
+        if spec.symbols_overlap:
+            # Each request was capped on its own, so one symbol's rows never crowd out another's.
+            kept = _first_copies(rows, spec.poll_keys)
+            logger.debug(
+                "%s: kept %d of %d rows from %d requests, each row once by %s; limit=%s per "
+                "request",
+                spec.name,
+                kept.num_rows,
+                rows.num_rows,
+                requests,
+                ", ".join(spec.poll_keys),
+                request.limit,
+            )
+            return kept, requests
         if request.limit is not None:
             rows = rows.slice(0, request.limit)
         return rows, requests
@@ -1303,7 +1383,7 @@ class RestEndpoints:
             core.catalog,
             core.drift,
             core.config.max_concurrency,
-            core.config.unknown_symbols,
+            core.config.unreadable_symbols,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
         )
@@ -1346,7 +1426,8 @@ class RestEndpoints:
 
         Errors: `EntitlementError` when the plan has no WebSocket access for the class,
         `AuthenticationError` for a rejected key, and `MassiveError` for an undocumented
-        timeframe or a failed request; each is logged at ERROR by the deciding caller. A
+        timeframe or a failed request; each is logged by the deciding caller, at DEBUG, or at
+        ERROR for a defect of the library. A
         waiting caller that gives up raises the error `RestReader.wait_for_shared` describes.
         """
         key = (asset_class, family)
@@ -1378,7 +1459,10 @@ class RestEndpoints:
                 error
                 if isinstance(error, MassiveError)
                 else MassiveError(
-                    f"deciding the {asset_class.value} WebSocket host failed: {error!r}"
+                    library_bug(
+                        f"deciding the {asset_class.value} WebSocket host failed: {error!r}"
+                    ),
+                    cause=ErrorCause.LIBRARY_DEFECT,
                 )
             )
             future.set_exception(
@@ -1458,7 +1542,7 @@ class RestEndpoints:
                 evidence `"server verdict: <message>"`.
         """
         self._state.hosts.replace_host((asset_class, family), decision)
-        logger.warning(
+        logger.info(
             "%s %s WebSocket host is now %s (%s)",
             asset_class.value,
             family.value,
@@ -1491,12 +1575,15 @@ class RestEndpoints:
             )
         )
 
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+    def fetch(
+        self, spec: DatasetSpec, request: Request, *, call: int, stop: threading.Event | None = None
+    ) -> Table:
         """Return every row the dataset's fetch path returns for the request, as a static table.
 
         Requests run on this thread, or for a per-symbol path on a pool of up to
-        `max_concurrency` threads; `Request.limit` caps the total rows. Drift is logged, once
-        per field.
+        `max_concurrency` threads; `Request.limit` caps the total rows, or each request's rows
+        for a dataset whose symbols overlap, which keeps a row several requests return once
+        (`RestReader._read_planned`). Drift is logged, once per field.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1504,11 +1591,15 @@ class RestEndpoints:
                 table before this call).
             call: The call's id (`SessionCore.next_stream_id`), which names its fan-out
                 threads (`"massive #1 call-7 rest_0"`).
+            stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`),
+                which ends the read's waits when set; None when only the session's close
+                should.
 
         Returns:
             A static table in the dataset's schema.
 
-        Errors, which the verb's call logs at ERROR: `AuthenticationError` (HTTP 401),
+        Errors, which the verb's call logs at the level their cause gives (DEBUG for an
+        expected one, ERROR for a defect such as `RowDataError`): `AuthenticationError` (HTTP 401),
         `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row that breaks
         the schema, and `MassiveError` itself for any other failure (a rate limit as `"rate
         limited: ..."`, a closed session as `"... is closed"`).
@@ -1521,12 +1612,34 @@ class RestEndpoints:
             spec,
             request,
             symbols=request.symbols,
+            cancel=_token(stop),
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
         return self._static(spec, table)
 
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+        """Plan `fetch`'s requests with none made, so a parameter error raises now.
+
+        A background `fetch(wait=False)` calls it on the caller thread before its table
+        exists. Crypto pairs are not split (`_unsplit`): the read splits them, and a pair
+        Massive does not list fails the read's table instead.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with static symbols.
+
+        A parameter a path does not take raises the `ValueError` of `shared_params`.
+        """
+        self._reader("check").plan_fetch(spec, request, request.symbols, split=_unsplit)
+
     def history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
@@ -1551,6 +1664,7 @@ class RestEndpoints:
             request: The normalized arguments, with static symbols.
             window: The call's window (`history_window` in `_datasets/history_source.py`).
             call: The call's id, which names its fan-out threads, as in `fetch`.
+            stop: A background read's stop token, as `fetch` takes it.
 
         Returns:
             A static table in the dataset's schema.
@@ -1561,21 +1675,9 @@ class RestEndpoints:
         HTTP 404, its data cut short.
         """
         reader = self._reader(f"call-{call}")
-        if isinstance(request.symbols, _All):
-            rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
-            path, query = shared_params(spec, rest_path, request, fixed={})
-            # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
-            days = [
-                day
-                for day in partition_dates(spec, window)
-                if is_trading_day(spec.asset_class, day)
-            ]
-            calls = [Call({**path, "date": day}, query) for day in days]
-            shape = ReadShape.PER_DAY
-        else:
-            rest_path = reader.rest_path(cast("str", spec.history_path))
-            calls = history_calls(spec, rest_path, request, window=window, split=reader.crypto_pair)
-            shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
+        rest_path, calls, shape = _history_plan(
+            reader, spec, request, window=window, split=reader.crypto_pair
+        )
         announce(
             self._state.client.governor,
             f"{spec.name} history",
@@ -1591,10 +1693,25 @@ class RestEndpoints:
             limit=None,
             window=window,
             remedy=_history_remedy(request),
+            cancel=_token(stop),
             patience=reader.patience(),
         )
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
         return self._static(spec, table)
+
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+        """Plan `history`'s requests with none made, so a parameter error raises now.
+
+        The `check_fetch` of a background `history(..., wait=False)` served by REST.
+
+        Args:
+            spec: The dataset; `history()` has checked that REST can serve the request.
+            request: The normalized arguments, with static symbols and the parsed bounds.
+            window: The call's window.
+
+        A parameter the path does not take raises the `ValueError` of `shared_params`.
+        """
+        _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
 
     def poll(
         self,
@@ -1745,15 +1862,90 @@ def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) 
 
 
 def _report_host_failure(error: MassiveError) -> None:
-    """Log a failed host decision at ERROR with exactly the text its exception carries.
+    """Log a failed host decision with exactly the text its exception carries.
 
     No verb call owns a host decision (every caller waiting for it shares the failure), so the
     record holds the message alone, which names the asset class, the request, and its status.
+    The deciding caller raises the error, so an expected failure (a refusal, a network
+    failure) logs at DEBUG; a defect logs at ERROR, a defect of the library with how to report
+    it.
 
     Args:
         error: The failure.
     """
-    logger.error("%s", error)
+    level = logging.DEBUG if error.cause is ErrorCause.EXPECTED else logging.ERROR
+    logger.log(level, "%s", failure_text(error))
+
+
+def _history_plan(
+    reader: RestReader,
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    window: HistoryWindow,
+    split: CryptoSplit,
+) -> tuple[RestPath, list[Call], ReadShape]:
+    """Plan a REST `history()`'s requests: the path, its calls, and how they are counted.
+
+    `dm.ALL` reads the grouped-daily path, one request per trading day of the window; any other
+    request reads the history path (`history_calls`). Makes no request unless `split` does.
+
+    Args:
+        reader: The reader whose paths the plan names.
+        spec: The dataset.
+        request: The normalized arguments, with static symbols.
+        window: The call's window.
+        split: Splits a crypto pair into its currencies (`RestReader.crypto_pair`, or
+            `_unsplit` for a check).
+
+    Returns:
+        The path, the planned calls in result order, and the read's `ReadShape`.
+
+    A parameter the path does not take raises the `ValueError` of `shared_params`.
+    """
+    if isinstance(request.symbols, _All):
+        rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
+        path, query = shared_params(spec, rest_path, request, fixed={})
+        # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
+        days = [
+            day for day in partition_dates(spec, window) if is_trading_day(spec.asset_class, day)
+        ]
+        return rest_path, [Call({**path, "date": day}, query) for day in days], ReadShape.PER_DAY
+    rest_path = reader.rest_path(cast("str", spec.history_path))
+    calls = history_calls(spec, rest_path, request, window=window, split=split)
+    shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
+    return rest_path, calls, shape
+
+
+def _unsplit(symbol: str) -> tuple[str, str]:
+    """Stand in for a crypto pair's split in a plan that must make no request.
+
+    `check_fetch` and `check_history` plan requests only to raise their parameter errors at
+    the call; the read itself splits each pair by Massive's ticker list.
+
+    Args:
+        symbol: A canonical crypto ticker, unused.
+
+    Returns:
+        Two empty currencies.
+    """
+    del symbol
+    return "", ""
+
+
+def _token(stop: threading.Event | None) -> Cancel | None:
+    """Return a background read's stop token as the wire layer's `Cancel` it is.
+
+    The ports type the token as the `threading.Event` the tables layer may name;
+    `SessionClients.read_stop` makes every one a `Cancel`.
+
+    Args:
+        stop: The token, or None.
+
+    Returns:
+        The same object, typed as a `Cancel`.
+    """
+    return cast("Cancel | None", stop)
 
 
 _FLAT_FILES_REMEDY: Final = (

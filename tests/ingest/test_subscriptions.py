@@ -314,9 +314,10 @@ def test_a_second_no_ack_of_a_topic_does_not_reconnect(caplog: pytest.LogCapture
         loop.subs.ended()
     calls = loop.sender.take()
     assert [c for c in calls if c[0] == "reconnect"] == [("reconnect", 0, ())]
+    # A topic Massive never acknowledges leaves its data missing: a WARNING, never an ERROR.
     assert [r.levelno for r in caplog.records if "no acknowledgement" in r.message] == [
-        logging.ERROR,
-        logging.ERROR,
+        logging.WARNING,
+        logging.WARNING,
     ]
 
 
@@ -398,10 +399,12 @@ def test_a_refusal_with_nothing_in_flight_is_only_logged(caplog: pytest.LogCaptu
     loop.subs.add(["T.AAPL"])
     loop.subs.opened(1)
     loop.subs.status(ack("T.AAPL"))
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.subscriptions"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.subscriptions"):
         loop.subs.status(refusal(message="huh"))
     assert loop.refused == []
-    assert "no subscription was in flight: huh" in caplog.text
+    [record] = caplog.records
+    assert record.levelno == logging.INFO  # nothing failed, so nothing to act on
+    assert "no subscription was in flight: huh" in record.getMessage()
 
 
 def test_other_statuses_change_nothing() -> None:
@@ -577,3 +580,37 @@ def test_a_change_with_no_generation_open_is_reported() -> None:
     loop.subs.add(["T.AAPL"])
     loop.subs.reconcile()
     assert loop.changes == [(1, 0, 0, 0)]
+
+
+def test_acknowledgements_do_not_recompute_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An acknowledgement changes no stream's demand, so the admitted set it reads is the same.
+    # Recomputing it per acknowledgement sorted every topic once per topic of the step, which
+    # stalled the connection's loop for seconds on a large options subscription.
+    computed: list[int] = []
+    recompute = Subscriptions._defer
+
+    def counted(self: Subscriptions) -> None:
+        computed.append(1)
+        recompute(self)
+
+    monkeypatch.setattr(Subscriptions, "_defer", counted)
+    loop = make_loop(cap=50)
+    topics = [f"T.O:{n:03d}" for n in range(100)]
+    loop.subs.add(topics, static=True)
+    loop.subs.opened(1)
+    admitted, deferred = loop.subs.admitted, loop.subs.deferred
+    for topic in sorted(admitted):
+        loop.subs.status(ack(topic))
+    assert len(computed) == 1
+    assert (loop.subs.admitted, loop.subs.deferred) == (admitted, deferred)
+    assert loop.subs.counts() == (50, 50, 0, 0)
+
+
+def test_a_refused_contract_frees_its_place_under_the_cap() -> None:
+    loop = make_loop(cap=1)
+    loop.subs.add(["T.O:A", "T.O:B"])
+    loop.subs.opened(1)
+    assert loop.sender.take() == [("subscribe", 1, ("T.O:A",))]
+    loop.subs.status(refusal("T.O:A"))
+    assert loop.subs.admitted == {"T.O:B"}
+    assert loop.sender.take() == [("subscribe", 1, ("T.O:B",))]

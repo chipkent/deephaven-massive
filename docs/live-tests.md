@@ -78,11 +78,27 @@ consequences:
   The library paces these itself: the classes on Basic become the live sessions'
   `MassiveConfig.rest_basic_subscriptions`, and every live test shares one rate governor per
   key for the whole run, on the real clock, so a REST request to a Basic class (the library's
-  own and the tests' raw ones) waits for its class's place within 5 a minute. A test that may
-  read a class on Basic gets a timeout that grows with its declared request count
-  (`@pytest.mark.requests(n)`), so a run on a free key is slow but never refused for its own
-  pace. A live run also lifts the 120 s limit after which faulthandler would end the process;
-  each test's own timeout bounds it.
+  own and the tests' raw ones) waits for its class's place within 5 a minute. No test waits
+  more than about a minute: a test that may read a class on Basic sends that class at most 5
+  requests when it is on Basic, and declares that count with `@pytest.mark.requests(n)`. To
+  stay within it, a test reads less on Basic than on a paid plan: fewer underlyings,
+  symbols, or pages, or none of a part that repeats what another request shows (the
+  underlying spellings read only the contracts of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`; the
+  split and dividend checks try only the newest event). Each such test's docstring says what
+  it leaves out, and its evidence has a line saying so. A unit test fails when a live test
+  that may read a class on Basic declares more than 5, and a live run skips such a test while
+  its class is on Basic, with the reason "needs a paid <class> plan: N requests would take
+  about M minutes on Basic". Each time a request waits, the run prints one line, such as
+  `live pacing: options: waiting 47 s for a request slot (paced at 5 requests a minute); 3 of
+  this test's 5 requests left`, so a paced run never looks hung. A test's timeout also grows
+  with its count. A live run lifts the 120 s limit after which faulthandler would end the
+  process; each test's own timeout bounds it.
+- **How long a free key takes.** With every class on Basic, `-m integration` runs the tests of
+  the "Every class on Basic" row below. Together they declare about 66 requests to stocks
+  (reference data included), 27 to currencies, 21 to futures, 8 to options, and 7 to indices,
+  so the stock requests alone take at least 13 minutes at 5 a minute, and the run takes
+  roughly a quarter of an hour. On paid plans nothing waits, and the tests read their full
+  sets.
 - **Indices.** Indices Basic excludes SPX, DJI, RUT, and VIX ([S6]): with Indices on Basic,
   the index tests use `I:NDX` instead of `I:SPX`.
 
@@ -213,6 +229,57 @@ refusing the newer, the two sessions can drop each other until the test ends:
 uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py 2>&1 | tee -a live-checks.log
 uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
 ```
+
+## The live-run program
+
+For a long run on a tester's machine, `scripts/live_run.py` runs everything above unattended,
+for days, and records what is needed to diagnose a problem afterwards without another live
+run. It probes what the key can do at each start and each trading morning, runs every group of
+checks at a fixed New York time, adapts by itself when the subscriptions change, and can be
+stopped and started at any time. Run it from the repository root, in the terminal that holds
+the variables above:
+
+```bash
+uv run python scripts/live_run.py check                       # the machine and the key; writes nothing
+uv run python scripts/live_run.py run --out ~/massive-live    # add --any-time for a first run now
+uv run python scripts/live_run.py status --out ~/massive-live
+uv run python scripts/live_run.py pack --out ~/massive-live   # writes live-results-<date>.zip
+```
+
+| Group | What it runs | When (New York time) |
+|---|---|---|
+| `evidence` | `-m integration -k "not luld"` | from 11:30, after the previous day's flat files |
+| `luld` | `-m integration -k luld` | 09:28, for the opening bands |
+| `smoke` | `-m integration_smoke` | from 11:30 |
+| `responses` | the documentation's examples, each in its own session, every raw reply recorded | from 11:30 |
+| `limits-ws`, `limits-second-connection` | the two limit-test commands above, the second last and alone | from 16:15 |
+| `stream-day` | a full trading day of streams for every class the key can stream | 03:45 to 20:30 on a planned day |
+| `throughput` | every symbol's busiest streams, measured over an hour | 09:15 to 11:00 the next day |
+| `stream-day-reconcile` | the streamed minute bars against REST history | from 11:30 the next day |
+| `half-day` | the bar-stamp tests | on the trading day after a half day |
+
+Each group runs in a child process, with the probed plans in `MASSIVE_LIVE_PLANS`, the
+library's debug log in the attempt's folder (`<group>/<date>-<n>/debug.log`), and a pytest
+plugin (`tests/_live/live_run/outcomes.py`) that records each test's outcome as it runs, so a crash
+loses nothing. The raw replies come from the wire package's reply-capture hook, which hands
+over every REST body and WebSocket frame already cleaned of the key. A check that passed is not
+run again until a subscription's tier rises; a check that failed runs once more; a check
+skipped for a missing subscription waits for the subscriptions to change.
+
+Control-C, a closed terminal, and a `kill` all stop the program the same way: the running
+child is stopped, the state saved, and the same `run` command resumes. A resume first stops any
+child an earlier run left behind and keeps every result that child recorded. `--any-time`
+takes effect once per results folder; a resume finishes its groups without it.
+
+The program reads the secrets only from the environment and never writes them: every line it
+prints or writes passes through a filter that replaces each secret's value (plain or
+URL-encoded), a proxy URL's password, and any `apiKey=`, `Authorization`, or `X-Amz-` value
+with `***`. `pack` scans every file of the results folder for each secret, plain,
+URL-encoded, and base64, and refuses to zip a folder in which it finds one. It also refuses
+unless the terminal holds exactly the secrets the run used: `run` records a salted fingerprint
+of each one, never its value, so a scan for other values cannot pass by mistake. The
+program's logic lives in `tests/_live/live_run/` (`cli.py` and the modules it names),
+unit-tested against the fakes; the script is its entry point.
 
 ## Reading the results
 

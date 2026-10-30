@@ -29,6 +29,7 @@ from deephaven_massive import _massive, _session
 from deephaven_massive._datasets import history_source, wire_symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.futures_sessions import CHICAGO
+from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -43,10 +44,10 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
-from deephaven_massive._errors import RowDataError
+from deephaven_massive._errors import LIBRARY_BUG, RowDataError
 from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_requests
 from deephaven_massive._ingest.host_decision import HostDecisionCache
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._namespaces import options as options_ns
 from deephaven_massive._namespaces import reference
@@ -353,6 +354,8 @@ def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBas
     # An indicator is computed over bars of a timespan, which its factory always sets.
     if spec is SMA:
         kwargs.setdefault("timespan", Timespan.MINUTE)
+    # A list dataset's symbols only filter it, as its factory says.
+    kwargs.setdefault("symbols_optional", spec.symbol_param is not None)
     return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
 
 
@@ -636,7 +639,7 @@ def test_a_list_of_dates_takes_date_items(
     fetch(session, RATINGS, filters={"date_any_of": [date(2025, 6, 2), "2025-06-03"]})
     ((_, sent_query),) = sent(fake_rest)
     assert sent_query["date.any_of"] == ["2025-06-02,2025-06-03"]
-    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes text items"):
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes no dates"):
         query(session, RATINGS, filters={"ticker_any_of": [date(2025, 6, 2)]})
 
 
@@ -878,7 +881,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
 
 
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     reader = cast("Any", session._core.rest_transport())._reader("call-1")
     claimed: list[Future[Any]] = []
@@ -890,12 +893,40 @@ def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_wait
         raise RuntimeError("the reader broke")
 
     monkeypatch.setattr(reader.state.client, "pages", pages)
-    with pytest.raises(RuntimeError, match="the reader broke"):  # the reader's own error
+    with (
+        caplog.at_level(logging.WARNING, LOGGER),
+        pytest.raises(RuntimeError, match="the reader broke"),  # the reader's own error
+    ):
         reader.crypto_pair("X:DOTUSD")
+    # A defect of the library: one ERROR, with its trace and how to report it.
+    [record] = caplog.records
+    assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
+    assert record.getMessage().endswith(f"reading Massive's crypto tickers failed. {LIBRARY_BUG}")
     (future,) = claimed
-    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError"):
+    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError") as waited:
         future.result()  # the waiters get a MassiveError
+    assert waited.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert str(waited.value).endswith(LIBRARY_BUG)
     assert reader.state.crypto_future()[1]  # and the failure is forgotten
+
+
+def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken(*_: object, **__: object) -> NoReturn:
+        raise RuntimeError("the rule broke")
+
+    monkeypatch.setattr(host_decision, "decide", broken)
+    with (
+        caplog.at_level(logging.WARNING, LOGGER),
+        pytest.raises(RuntimeError, match="the rule broke"),
+    ):
+        session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    [record] = caplog.records
+    assert (record.levelno, record.getMessage()) == (
+        logging.ERROR,
+        f"deciding the stocks WebSocket host failed: RuntimeError('the rule broke'). {LIBRARY_BUG}",
+    )
 
 
 class _WatchedFuture(Future[rest.CryptoTickers]):
@@ -1102,7 +1133,8 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
         f"at most {patience} s of its pauses"
     ) in caplog.messages
     stopped = [r for r in caplog.records if "stops waiting for the crypto" in r.getMessage()]
-    assert [r.levelno for r in stopped] == ([logging.ERROR] if console == "joiner" else [])
+    # The caller raises the error, so giving up on the shared wait is only DEBUG detail.
+    assert [r.levelno for r in stopped] == ([logging.DEBUG] if console == "joiner" else [])
     retried = [r for r in caplog.records if "this caller tries again" in r.getMessage()]
     assert [r.levelno for r in retried] == ([logging.INFO] if console == "maker" else [])
 
@@ -1151,6 +1183,7 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     monkeypatch: pytest.MonkeyPatch,
     load_fixture: Callable[[str, str], bytes],
     console: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     m, clock = _manual_session(fake_rest, monkeypatch)
     listeners = _Listeners(monkeypatch)
@@ -1176,6 +1209,8 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     assert decision.host == "delayed.massive.com"
     assert len(sent(fake_rest)) == 3
     assert (listeners.buckets, listeners.live) == (["stocks"], [])
+    # The caller that gave up raises; its expected failure logs nothing above DEBUG.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER]
 
 
 def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:
@@ -1193,6 +1228,32 @@ def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
     if kind == "crypto":
         return state.crypto_future()
     return state.hosts.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        rest._AbandonedError("rate limited: the maker gave up"),
+        dm.MassiveError("the read failed: boom", status=500),
+    ],
+    ids=["abandoned", "failed"],
+)
+def test_a_failed_lookup_is_never_returned_as_known(
+    *, session: dm.MassiveSession, kind: str, failure: Exception
+) -> None:
+    # A caller can read a lookup's future just before its maker forgets it and fails it. The
+    # quick check must then say "not known", so the caller claims or waits as usual: it must
+    # neither raise the maker's abandonment, which is never raised, nor the maker's own error
+    # object, which every other caller gets a copy of.
+    future, created = _claim(session, kind)
+    assert created
+    future.set_exception(failure)  # failed, and not yet forgotten: what the late reader sees
+    state = cast("rest.RestEndpoints", session._core.rest_transport())._state
+    if kind == "crypto":
+        assert state.known_crypto() is None
+    else:
+        assert state.hosts.known_host((AssetClass.STOCKS, ChannelFamily.TICK)) is None
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
@@ -1523,37 +1584,40 @@ def test_row_symbols_are_canonical(
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
-    assert "RawSymbol" not in out[0]
+    assert out[0]["RawSymbol"] is None  # the default session keeps the column, null when read
     assert sent(fake_rest)[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
-    # A spelling the library cannot read fails the request by default, naming it.
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the library "
-        r"cannot read as Massive's ticker\. Set MASSIVE_UNKNOWN_SYMBOLS=warn",
-    ):
-        fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
+    # Under RAISE, a spelling the library cannot read fails the request, naming it.
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unreadable_symbols=dm.OnError.RAISE
+    )
+    with dm.MassiveSession(config) as strict:
+        assert "RawSymbol" not in fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]
+        with pytest.raises(
+            dm.MassiveError,
+            match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the "
+            r"library cannot read as Massive's ticker\. To keep such rows .* This is a bug in "
+            r"deephaven-massive\.",
+        ):
+            fetch(strict, CONVERSION, params={"from": "AUD", "to": "XXX"})
 
 
-def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_under_warn(
+def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_by_default(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    monkeypatch.setattr(
-        wire_symbols,
-        "_unknown_spellings",
-        BoundedWarnings(logging.getLogger(wire_symbols.__name__), limit=5),
-    )
+    fresh = BoundedLog(logging.getLogger(wire_symbols.__name__), limit=5, level=logging.ERROR)
+    monkeypatch.setattr(wire_symbols, "_logged_spellings", fresh)
     body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
-    )
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, wire_symbols.__name__):
         (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
     assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
-    assert "forex.conversion: Massive sent the symbol '?'" in caplog.text
+    (record,) = [r for r in caplog.records if r.name == wire_symbols.__name__]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage().startswith("forex.conversion: Massive sent the symbol '?'")
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
@@ -1563,8 +1627,27 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
     assert sent(fake_rest)[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
-    with pytest.raises(ValueError, match=r"^a symbol table holds 'SPX' .*use 'I:SPX'"):
+    # A row that is not Massive's ticker is skipped, so the request names only the others.
+    fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX", "I:VIX"])]))
+    assert sent(fake_rest)[1][1]["ticker.any_of"] == ["I:VIX"]
+    # A table whose rows are all bad raises rather than read nothing.
+    with pytest.raises(
+        ValueError,
+        match=r"^indices\.snapshots: no row of the symbol table is Massive's ticker, so the "
+        r"result would follow nothing: skipping 1 symbol-table value that is not Massive's "
+        r"ticker: 'SPX'; fix or delete that row$",
+    ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
+    # Under RAISE, a bad row raises at once, naming the fix.
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, noncanonical_symbols=dm.OnError.RAISE
+    )
+    with dm.MassiveSession(config) as strict:
+        bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
+        with pytest.raises(
+            ValueError, match=r"^indices\.snapshots: a symbol table holds 'SPX' .*use 'I:SPX'"
+        ):
+            fetch(strict, INDEX_SNAPSHOTS, symbols=bad)
 
 
 # --- Rows ----------------------------------------------------------------------------------------
@@ -1702,39 +1785,52 @@ def test_refusals_raise_their_public_errors(
         DIVIDENDS_PATH,
         Reply({"status": "ERROR", "request_id": "r9", "message": "no"}, status=status),
     )
-    with caplog.at_level(logging.ERROR, LOGGER), pytest.raises(error) as info:
+    with caplog.at_level(logging.DEBUG), pytest.raises(error) as info:
         fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert (info.value.status, info.value.request_id) == (status, "r9")
+    assert info.value.cause is dm.ErrorCause.EXPECTED
+    # A refusal the caller receives is expected: the call logs it at DEBUG, never higher.
+    failed = [r for r in caplog.records if r.getMessage().startswith("call ")]
+    assert [r.levelno for r in failed if "failed" in r.getMessage()] == [logging.DEBUG]
     assert f"HTTP {status}" in caplog.text
     assert "test-key" not in caplog.text
 
 
 def test_a_lasting_rate_limit_names_itself_and_warns_once(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Massive asks for a pause beyond the ten minutes a read waits: the read gives up at once.
+    # Massive asks for a pause beyond what a read waits: the read gives up at once. A pause
+    # lasts at most ten minutes, which a read's full patience always covers, so this read has
+    # five minutes of it.
+    monkeypatch.setattr(rate_limits, "READ_PATIENCE", 300.0)
     refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
     given_up = (
         r"^rate limited: Massive is refusing stocks requests with HTTP 429 \(latest refusal: "
-        r".*r7.*\)\. Its next request, a probe, goes at 2027-01-15T08:11:40\+00:00 "
-        r"\(.* local time\), but this read waits out at most 600 s of pauses and has spent "
+        r".*r7.*\)\. Its next request, a probe, goes at 2027-01-15T08:10:00\+00:00 "
+        r"\(.* local time\), but this read waits out at most 300 s of pauses and has spent "
         r"0 s of its patience\. The usual cause is another program or process using the same "
         r"Massive account, whose limit they share\. "
         r"To go on: retry after that time; stop the other program; or, if this subscription is "
         r"on the Basic tier, declare it Basic \(rest_basic_subscriptions\) so its requests are "
         r"paced, or upgrade it\. m\.rate_limits\(\) shows each subscription's state$"
     )
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         for _ in range(2):
             with pytest.raises(dm.MassiveError, match=given_up):
                 fetch(session, DIVIDENDS, symbols=["AAPL"])
     # The second call failed without a request: the bucket's pause still stands.
     assert len(sent(fake_rest)) == 1
+    # The first 429 is a notice at INFO, once; the calls raise, and log nothing above it.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     warnings = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "with HTTP 429 (" in r.getMessage()
+        if r.levelno == logging.INFO and "with HTTP 429 (" in r.getMessage()
     ]
     assert len(warnings) == 1
     assert warnings[0].startswith(
@@ -2242,9 +2338,10 @@ def test_a_failed_history_is_logged_and_raised(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"{}", status=403))
-    with caplog.at_level(logging.ERROR, LOGGER), pytest.raises(dm.EntitlementError):
+    with caplog.at_level(logging.DEBUG), pytest.raises(dm.EntitlementError):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
     assert "HTTP 403" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_a_404_without_a_symbol_fails_the_call(
@@ -2485,11 +2582,11 @@ def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # Wednesday 03-05 to Friday 03-21 holds the weeks of 03-10 and 03-17 whole. The request
-    # starts on the Saturday before the first of them, so a bar stamped on its Sunday is
-    # returned whether Massive selects bars by stamp or builds them from `{from}`.
-    start, end = ny_ms(date(2025, 3, 8)), ny_ms(date(2025, 3, 22)) - 1
+    # starts on the Sunday Massive starts the first of them on, so its bar is returned
+    # whether Massive selects bars by stamp or builds them from `{from}`.
+    start, end = ny_ms(date(2025, 3, 9)), ny_ms(date(2025, 3, 22)) - 1
     path = f"/v2/aggs/ticker/AAPL/range/1/week/{start}/{end}"
-    stamps = [ny_ms(date(2025, 3, d)) for d in (2, 9, 16, 23)]  # Sundays, as a week may be
+    stamps = [ny_ms(date(2025, 3, d)) for d in (2, 9, 16, 23)]  # Sundays, where Massive stamps
     fake_rest.reply(path, Reply(envelope([{"t": t, "c": 1.0} for t in stamps])))
     out = history(
         session,
@@ -2501,8 +2598,9 @@ def test_week_bars_request_the_first_whole_week_and_keep_whole_weeks(
         adjusted=False,
     )
     assert [p for p, _ in sent(fake_rest)] == [path]
-    # Each week runs from its Monday's midnight to the Saturday's after its Friday, whatever
-    # day it was stamped on, and spans several dates, so it has no `Date`.
+    # Each week, stamped on its Sunday, runs from its Monday's midnight to the Saturday's
+    # after its Friday, and spans several dates, so it has no `Date`.
+
     assert [(r["TimestampStart"], r["TimestampEnd"], r["Date"]) for r in out] == [
         (ny_ms(date(2025, 3, 10)) * 10**6, ny_ms(date(2025, 3, 15)) * 10**6, None),
         (ny_ms(date(2025, 3, 17)) * 10**6, ny_ms(date(2025, 3, 22)) * 10**6, None),
@@ -2678,26 +2776,28 @@ def test_longer_crypto_bars_must_start_at_utc_midnight(
         r"and report",
     ):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
-    # A week bar at 00:00 UTC Monday is kept as stamped.
-    monday, after = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 10))
-    week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{monday}/{after - 1}".replace(":", "%3A")
-    sunday = monday - 86_400_000
+    # Massive stamps a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check),
+    # and the week runs to the next Sunday: it is kept as stamped.
+    sunday, after = utc_ms(date(2026, 10, 11)), utc_ms(date(2026, 10, 18))
+    week = f"/v2/aggs/ticker/X:BTCUSD/range/1/week/{sunday}/{after - 1}".replace(":", "%3A")
+    monday = sunday + 86_400_000
     fake_rest.reply(
         week,
-        Reply(envelope([{"t": monday, "c": 2.0}])),
         Reply(envelope([{"t": sunday, "c": 2.0}])),
+        Reply(envelope([{"t": monday, "c": 2.0}])),
     )
-    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     assert [(r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (monday * 10**6, after * 10**6, 2.0)
+        (sunday * 10**6, after * 10**6, 2.0)
     ]
-    # A week bar stamped on the Sunday before would be placed in the week before: it fails.
+    # A week bar stamped on another day may cover another week: it fails.
     with pytest.raises(
         dm.MassiveError,
-        match=r"is stamped 2025-03-02T00:00:00\+00:00, which is not a stamp Massive is known to "
-        r"use for such a bar \(00:00:00\.000 in UTC, on a Monday\)",
+        match=r"is stamped 2026-10-12T00:00:00\+00:00, which is not a stamp Massive is known to "
+        r"use for such a bar \(00:00:00\.000 in UTC, on a Sunday\)",
     ):
-        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2025-03-03", end="2025-03-09")
+        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
+
     # A month bar must be stamped on its 1st.
     first, april = utc_ms(date(2025, 3, 1)), utc_ms(date(2025, 4, 1))
     month = f"/v2/aggs/ticker/X:BTCUSD/range/1/month/{first}/{april - 1}".replace(":", "%3A")
@@ -2835,7 +2935,7 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
     basic = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
     fake_rest.reply(DIVIDENDS_PATH, basic, Reply(envelope([AAPL_DIVIDEND])))
     try:
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
         assert rest_clock.waits == [61.0]
         assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text
@@ -3354,3 +3454,75 @@ def test_fetch_rows_reads_every_page_raw(
     with pytest.raises(dm.MassiveError, match="cancelled"):
         transport.fetch_rows("/futures/v1/schedules", query, bucket="futures", cancel=stopped)
     assert len(fake_rest.requests) == 3
+
+
+# --- Background reads ------------------------------------------------------------------------
+
+
+def _join_reads(m: dm.MassiveSession) -> None:
+    # Waits for every background read of the session to end.
+    for state in list(m._core._workers.values()):
+        cast("Any", state.fail).__self__.thread.join(30.0)
+
+
+def test_a_background_fetch_checks_its_parameters_with_no_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    rest = session._core.rest_transport()
+    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
+    assert isinstance(q, Query)
+    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+        q.fetch(wait=False)
+    # A crypto pair is not split by the check, which would read Massive's ticker list.
+    pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
+    rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request)
+    assert fake_rest.requests == []
+    assert session._core._workers == {}
+
+
+def test_a_background_fetch_lands_the_rows_the_read_requested(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.fetch(wait=False)
+    _join_reads(session)
+    # The read's own row says how it ended; a failure shows its error here.
+    assert session._core.diagnostics.barrier().wait(30.0)
+    (row,) = dh_arrow.to_arrow(session.streams()).to_pylist()
+    assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 1)
+    pause = threading.Event()
+    for _ in range(3000):  # the rows land on the next update cycle
+        if table.size:
+            break
+        pause.wait(0.01)
+    assert [(r["Symbol"], r["CashAmount"]) for r in rows(table)] == [("AAPL", 0.25)]
+    session.release(table)
+
+
+def test_a_background_history_checks_its_plan_with_no_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Grouped daily bars of every symbol, a symbol's bars, and a crypto pair, which the check
+    # does not split: none of them makes a request.
+    rest = session._core.rest_transport()
+    first, last = date(2025, 3, 3), date(2025, 3, 4)
+    for spec, tickers in ((BARS, dm.ALL), (BARS, ["AAPL"]), (CRYPTO_BARS, ["X:BTCUSD"])):
+        q = query(session, spec, symbols=tickers, timespan=Timespan.DAY)
+        request = dataclasses.replace(q._request, start=first, end=last)
+        window = history_window(spec, request, start=first, end=last, classes=())
+        rest.check_history(spec, request, window)
+    assert fake_rest.requests == []
+
+
+def test_a_set_stop_token_ends_a_read_before_its_first_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    rest = session._core.rest_transport()
+    stop = Cancel()
+    stop.set()
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    with pytest.raises(dm.MassiveError):
+        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop)
+    assert fake_rest.requests == []

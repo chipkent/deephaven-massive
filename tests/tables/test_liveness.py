@@ -7,9 +7,11 @@ without a network, so they observe exactly when Deephaven runs a stream's `on_sh
 import gc
 import logging
 import threading
+import time
 import weakref
-from collections.abc import Callable
-from typing import Any, Protocol, cast
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
 from deephaven import empty_table, time_table
@@ -22,6 +24,7 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import StreamQuery
@@ -36,6 +39,11 @@ from deephaven_massive._tables.liveness import (
     release_scope,
 )
 from deephaven_massive._types import override
+
+if TYPE_CHECKING:
+    from deephaven_massive._tables.session_core import SessionCore
+    from tests._fakes.ws import FakeMassiveServer, TradeFeed
+    from tests._fakes.ws_session import WsSession
 
 
 class FakeStreams(Protocol):
@@ -548,13 +556,13 @@ def test_queue_worker_logs_a_fatal_exit_before_dying(
     def fatal(_batch: list[int]) -> None:
         raise _Fatal
 
-    with caplog.at_level(logging.CRITICAL, logger="deephaven_massive._tables.liveness"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.liveness"):
         worker: QueueWorker[int] = QueueWorker(dh_exec_ctx, "fatal-worker", handle=fatal)
         worker.put(1)
         worker.thread.join(TIMEOUT)
     assert not worker.thread.is_alive()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.CRITICAL, "fatal-worker died; its queue is no longer handled")
+        (logging.ERROR, f"fatal-worker died; its queue is no longer handled. {LIBRARY_BUG}")
     ]
     assert [args.exc_type for args in escaped] == [_Fatal]
 
@@ -730,3 +738,103 @@ def test_an_interrupt_right_after_the_finalizer_is_created_never_releases_twice(
     assert core._streams[1].row.held_results == 1  # `first` still holds the stream
     massive_session.release(first)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
+
+
+# --- Soak test: a long run under load (marker `soak`, left out of a plain run) ---------------
+
+
+class Soak(Protocol):
+    # What the soak test uses of the `soak` fixture (tests/conftest.py).
+    seconds: float
+    running: threading.Event
+
+    def rounds(self) -> Iterator[int]: ...
+
+    def note(self, **figures: object) -> None: ...
+
+
+SOAK_SYMBOLS = [f"S{i:02d}" for i in range(40)]
+"""The symbols the soak feed trades."""
+
+SOAK_HELD = 64
+"""How many results and streams the session may hold at the end of a soak round: the eight
+threads hold one each, and the rest are on their way out (a release waits for the reaper, and a
+stream's record goes when its blink table shuts down, on the next update cycle). A result or
+stream left behind per step grows past it within seconds."""
+
+
+def soak_settle(core: "SessionCore", condition: Callable[[], bool], what: str) -> None:
+    # Wait for the reaper's queued releases, then until `condition` holds; fail after a while.
+    done = threading.Event()
+    core._reaper.submit(done.set)
+    assert done.wait(TIMEOUT), "the reaper did not catch up"
+    pause = threading.Event()  # never set; only paces the polling
+    deadline = time.monotonic() + 6 * TIMEOUT
+    while not condition():
+        assert time.monotonic() < deadline, f"waited for {what}"
+        pause.wait(0.1)
+
+
+def open_and_let_go(harness: "WsSession", worker: int, step: int) -> None:
+    # One step of the release soak: open a result of one of the four shapes for one symbol, hold
+    # it for a moment, then let it go, by `m.release` or, every other step, by dropping it for
+    # the garbage collector and the reaper.
+    q = query(harness.session, [SOAK_SYMBOLS[(worker * 5 + step * 3) % 40]])
+    shape = step % 4
+    result = (q.blink, q.append_only, q.last_by, lambda: q.ring(10))[shape]()
+    threading.Event().wait((0.02, 0.1, 0.05)[step % 3])  # never set; only paces the step
+    if (worker + step) % 2:
+        harness.session.release(result)
+
+
+@pytest.mark.soak
+def test_soak_released_and_collected_results_free_their_streams(
+    make_ws_session: "Callable[..., WsSession]",
+    *,
+    make_trade_feed: "Callable[..., TradeFeed]",
+    fake_ws_server: "FakeMassiveServer",
+    soak: Soak,
+) -> None:
+    # Eight threads keep opening results of every shape (blink, append-only, last-by, ring)
+    # under a fast feed and letting them go, half through `m.release` and half by dropping them
+    # for the garbage collector and the reaper. After each round the session may hold only a
+    # handful of results and streams; at the end it holds none, and the connection no topic.
+    fake_ws_server.keep_frames = False
+    harness = make_ws_session(flush_interval=0.05)
+    core = harness.session._core
+    feed = make_trade_feed(SOAK_SYMBOLS)
+    feed.start()
+    steps = [0] * 8
+
+    def churn(worker: int) -> None:
+        while soak.running.is_set():
+            steps[worker] += 1
+            open_and_let_go(harness, worker, steps[worker])
+
+    with ThreadPoolExecutor(8, thread_name_prefix="soak release") as pool:
+        workers = [pool.submit(churn, worker) for worker in range(8)]
+        try:
+            for _ in soak.rounds():
+                soak_settle(
+                    core,
+                    lambda: core.results.held() <= SOAK_HELD and len(core._streams) <= SOAK_HELD,
+                    f"at most {SOAK_HELD} results and streams",
+                )
+                soak.note(results_opened=sum(steps), rows=sum(feed.sent().values()))
+        finally:
+            soak.running.clear()  # a failed round stops the workers too
+            for worker in workers:
+                worker.result(6 * TIMEOUT)
+    feed.stop()
+    soak_settle(
+        core,
+        lambda: core.results.held() == 0 and not core._streams,
+        "every result and stream to go",
+    )
+    soak_settle(core, lambda: not harness.connections.group.streams, "the routes to empty")
+
+    def topics() -> set[str]:
+        with fake_ws_server._lock:
+            return set(fake_ws_server.connections[-1].topics)
+
+    soak_settle(core, lambda: not topics(), "every topic to be unsubscribed")

@@ -124,7 +124,7 @@ class SessionClients:
         `RestTransport` port so that the futures calendar's `fetch_rows`, which names the wire
         layer's `Cancel` and so stays out of the port, is reachable here. The first call creates the
         session's `RestState`: it creates the `_massive.RestClient` outside every lock, on the
-        session's shared governor and with the session's `RateLimitWarnings` as its refusal
+        session's shared governor and with the session's `RateLimitNotices` as its refusal
         hook (the constructor reads the proxy and certificate settings, but makes no
         request), installs it under the core's `registry_lock` unless a racing call installed
         one first (the loser's client is closed at once), and registers the state's close with
@@ -143,7 +143,7 @@ class SessionClients:
             state = self._rest
         if state is None:
             config = core.config
-            warnings = rate_limits.RateLimitWarnings(core.label, config.rest_basic_subscriptions)
+            warnings = rate_limits.RateLimitNotices(core.label, config.rest_basic_subscriptions)
             candidate = RestState(
                 _massive.RestClient(
                     config.api_key,
@@ -310,3 +310,16 @@ class SessionClients:
         if created:
             core.on_close(client.close)
         return FlatFileHistory(core, client)
+
+    @staticmethod
+    def read_stop() -> _massive.Cancel:
+        """Return a new, unset stop token for one background read (`IngestPorts.read_stop`).
+
+        A plain `Cancel`: the REST transport makes it the parent of the read's own token, so
+        setting it ends the read's waits for the rate governor; the flat-file transport makes
+        it the parent of its call's cancel event. Nothing else refers to it.
+
+        Returns:
+            The token.
+        """
+        return _massive.Cancel()

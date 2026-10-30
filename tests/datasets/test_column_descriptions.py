@@ -306,10 +306,14 @@ def description(dataset: DatasetSpec, name: str) -> str:
 @pytest.mark.parametrize(
     ("dataset", "zone", "first"),
     [
-        (stocks.BARS, "New York time", "a month's, quarter's, or year's first weekday"),
-        (indices.BARS, "New York time", "a month's, quarter's, or year's first weekday"),
-        (forex.BARS, "UTC", "a week's Monday)"),
-        (crypto.BARS, "UTC", "a week's Monday)"),
+        (
+            stocks.BARS,
+            "New York time",
+            "a week's Monday, a month's, quarter's, or year's first weekday",
+        ),
+        (indices.BARS, "New York time", "a week's Sunday, a month's, quarter's, or year's 1st"),
+        (forex.BARS, "UTC", "a week's Sunday, a month's, quarter's, or year's 1st)"),
+        (crypto.BARS, "UTC", "a week's Sunday, a month's, quarter's, or year's 1st)"),
     ],
 )
 def test_a_bars_start_is_described_as_the_window_start(

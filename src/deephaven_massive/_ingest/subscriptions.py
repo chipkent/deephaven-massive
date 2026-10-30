@@ -158,9 +158,10 @@ class Subscriptions:
 
     Each subscribed topic has a watchdog bound to its generation. After `ack_timeout` without
     an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`,
-    logs at ERROR, and asks the client to reconnect if `first_no_ack(topic)` says this is the
-    topic's first `NO_ACK` (the session keeps that record, so it survives this connection). A
-    watchdog whose topic has left the wire or whose generation has ended does nothing more.
+    logs a WARNING (the topic's data is missing), and asks the client to reconnect if
+    `first_no_ack(topic)` says this is the topic's first `NO_ACK` (the session keeps that
+    record, so it survives this connection). A watchdog whose topic has left the wire or whose
+    generation has ended does nothing more.
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused,
@@ -226,6 +227,7 @@ class Subscriptions:
         self._refused: set[str] = set()
         self._admitted: frozenset[str] = frozenset()
         self._deferred: frozenset[str] = frozenset()
+        self._admission_stale = False
         self._sent: set[str] = set()
         self._acked: set[str] = set()
         self._noack: set[str] = set()
@@ -251,6 +253,7 @@ class Subscriptions:
             if static:
                 self._static[topic] += 1
             self._refused.discard(topic)
+        self._admission_stale = True
 
     def remove(self, topics: Iterable[str], *, static: bool = False) -> None:
         """Count one stream fewer wanting each topic; a topic nobody wants leaves D.
@@ -274,6 +277,7 @@ class Subscriptions:
             self._refused.discard(topic)
             self._pending.discard(topic)
             self._cancel(topic)
+        self._admission_stale = True
 
     @property
     def wanted(self) -> bool:
@@ -341,11 +345,18 @@ class Subscriptions:
         """Apply the cap, send the next step if a generation is open and none is in flight.
 
         The cap is applied even with no generation open, so `admitted` always counts the
-        topics the streams have asked for. `on_change` is called every time, also while a
-        step is in flight, so the connection's row shows each partial acknowledgement,
-        refusal, and `NO_ACK` as it happens rather than when the whole step resolves.
+        topics the streams have asked for. It is recomputed only after a change of what the
+        streams want or of what the server refused: an acknowledgement or a `NO_ACK` changes
+        neither, and a step of thousands of topics brings one acknowledgement per topic, so
+        sorting every topic per acknowledgement would stall the loop for seconds.
+
+        `on_change` is called every time, also while a step is in flight, so the connection's
+        row shows each partial acknowledgement, refusal, and `NO_ACK` as it happens rather
+        than when the whole step resolves.
         """
-        self._defer()
+        if self._admission_stale:
+            self._admission_stale = False
+            self._defer()
         if self.generation is not None and not self._pending:
             self._send_step(self.generation)
         self._on_change()
@@ -440,7 +451,7 @@ class Subscriptions:
             self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
             return True
         if not self._pending:
-            logger.warning(
+            logger.info(
                 "a refusal named no topic and no subscription was in flight: %s", status.message
             )
             return True
@@ -465,6 +476,7 @@ class Subscriptions:
             self._pending.discard(topic)
             self._cancel(topic)
         if topics:
+            self._admission_stale = True
             self._on_refused(topics, message)
 
     def _desired(self) -> set[str]:
@@ -476,7 +488,11 @@ class Subscriptions:
         return {t for t in self._refs if t not in self._refused and t not in self._deferred}
 
     def _defer(self) -> None:
-        """Recompute the explicit topics the cap admits and those it defers (see the class)."""
+        """Recompute the explicit topics the cap admits and those it defers (see the class).
+
+        Called by `reconcile` after `add`, `remove`, or a refusal. Recomputing with nothing
+        changed gives the same sets, since topics admitted before keep their place.
+        """
         if self._cap is None:
             return
         explicit = sorted(t for t in self._refs if not is_wildcard(t) and t not in self._refused)
@@ -554,7 +570,7 @@ class Subscriptions:
         self._pending.discard(topic)
         self._noack.add(topic)
         first = self._first_no_ack(topic)
-        logger.error(
+        logger.warning(
             "no acknowledgement for %s after a re-send; %s",
             topic,
             "reconnecting" if first else "it stays wanted (it already caused a reconnect)",

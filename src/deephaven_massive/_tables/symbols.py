@@ -5,9 +5,10 @@ and one function per class and convention), which make no Deephaven call. A user
 watchlist is written in another spelling (`EUR/USD`, Yahoo's `BRK-B`) needs the same conversion
 over a whole table, static or refreshing, before passing it as `symbols=`; that is table code,
 which reads rows and adds a formula column, so it lives here, on the Deephaven side.
-`canonicalize_symbols` is the one lenient path of the library: under `OnError.NULL` it nulls
-the rows it cannot convert instead of failing. The tables it returns are what the symbol-table
-check in `_tables/watchlist.py` (`read_symbols`, `SymbolWatch`) then accepts.
+Under `OnError.LOG` or `OnError.IGNORE`, `canonicalize_symbols` nulls the rows it cannot
+convert instead of failing. It takes its own `on_error` argument rather than a session's
+`MassiveConfig.noncanonical_symbols`, since it needs no session. The tables it returns are what
+the symbol-table check in `_tables/watchlist.py` (`read_symbols`, `SymbolWatch`) then accepts.
 
 Every function here runs on the caller's thread, inside a Deephaven execution context, and the
 formula it installs is pure, so Deephaven may run it on several threads at once.
@@ -23,7 +24,7 @@ from deephaven.table import Table
 
 from deephaven_massive._datasets.symbols import canonical_symbol
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._log_limits import BoundedLog
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -34,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 _SHOWN: Final = 5
 """The most bad values one message lists."""
-_NULL_WARNINGS: Final = 20
-"""The most bad values one `canonicalize_symbols` table logs under `OnError.NULL`."""
+_LOGGED_VALUES: Final = 20
+"""The most bad values one `canonicalize_symbols` table logs under `OnError.LOG`."""
 
 
 def _refused(values: Iterable[str], convert: Callable[[str], str | None]) -> dict[str, str]:
@@ -67,9 +68,9 @@ def canonicalize_symbols(
 ) -> Table:
     """Return a table whose symbol column holds Massive's exact tickers, converted row by row.
 
-    The table form of `canonical_symbol`, and the one lenient path in the library: use it to
-    turn a watchlist written in another spelling (`EUR/USD`, Yahoo's `BRK-B`) into one a
-    dataset accepts as `symbols=`. Each row converts as `canonical_symbol(value, asset_class,
+    The table form of `canonical_symbol`: use it to turn a watchlist written in another
+    spelling (`EUR/USD`, Yahoo's `BRK-B`) into one a dataset accepts as `symbols=`. The
+    converted column keeps its name. Each row converts as `canonical_symbol(value, asset_class,
     convention=convention)` would; a null stays null.
 
     The table's current rows are checked in Python first, one call per distinct value, so a
@@ -77,8 +78,10 @@ def canonicalize_symbols(
     every table is then converted by a formula (`Table.update`), on every row of a static
     table and every row that ticks in a refreshing one. Under `OnError.RAISE` a later bad row
     of a refreshing table fails the table, and a dataset reading it as a watchlist fails too;
-    under `OnError.NULL` a bad row gets a null symbol, which every dataset ignores, and each
-    bad value is logged once at WARNING, at most 20 per table. Call it on a thread with a
+    under `OnError.LOG` a bad row gets a null symbol, which every dataset ignores, and each
+    bad value is logged once at WARNING, at most 20 per table; under `OnError.IGNORE` it gets
+    a null symbol the same way, logged at DEBUG only. This function's `on_error` is its own: a
+    session's `MassiveConfig.noncanonical_symbols` does not apply to it. Call it on a thread with a
     Deephaven execution context, as any table operation; the result belongs to the caller's
     liveness scope. The conversion is pure, so
     Deephaven may run it on several threads at once.
@@ -98,12 +101,16 @@ def canonicalize_symbols(
     Args:
         table: Any table with a `String` column of symbols.
         asset_class: The class of every symbol in the column. Required: nothing is inferred.
-        column: The column to convert; the result keeps every other column unchanged.
+        column: The column to convert, `"Symbol"` by default. The converted values replace
+            the column's values and keep its name, so a column named anything but `Symbol`
+            must be renamed before the table is passed as `symbols=`
+            (`.rename_columns("Symbol = Ticker")`). Every other column is kept unchanged.
         convention: The convention the symbols come from: `SymbolConvention.MASSIVE`, the
             default, for Massive's own spelling and the unambiguous spellings of the class, or,
             for stocks only, `YAHOO`, `NASDAQ`, or `CMS`.
         on_error: `OnError.RAISE` (the default) fails on a value that does not convert;
-            `OnError.NULL` writes a null symbol for it.
+            `OnError.LOG` writes a null symbol for it and logs the value once at WARNING;
+            `OnError.IGNORE` writes a null symbol and logs it at DEBUG only.
 
     Returns:
         A table with the same rows and columns, whose `column` holds canonical tickers (or
@@ -121,13 +128,14 @@ def canonicalize_symbols(
     resolved, chosen, mode = _arguments(
         table, asset_class=asset_class, column=column, convention=convention, on_error=on_error
     )
-    warnings = BoundedWarnings(logger, limit=_NULL_WARNINGS)
+    level = logging.WARNING if mode is OnError.LOG else logging.DEBUG
+    bad = BoundedLog(logger, limit=_LOGGED_VALUES, level=level)
 
     def convert(text: str) -> str | None:
         return canonical_symbol(text, resolved, convention=chosen)
 
     def refuse(value: str, reason: str) -> None:
-        warnings.warn(value, "canonicalize_symbols: %s; its rows get a null %s", reason, column)
+        bad.log(value, "canonicalize_symbols: %s; its rows get a null %s", reason, column)
 
     # The current rows are converted in Python first, over one consistent snapshot of their
     # values (iter_tuple holds the shared lock), so a bad one raises a clean ValueError here,
@@ -139,7 +147,7 @@ def canonicalize_symbols(
         shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
         raise ValueError(
             f"{len(refused)} value(s) of {column} are not {resolved.value} symbols: "
-            f"{shown}. Pass on_error=dm.OnError.NULL to null them instead"
+            f"{shown}. Pass on_error=dm.OnError.LOG to null them instead"
         )
     for value in sorted(refused):  # logged here, in sorted order; the formula repeats none
         refuse(value, refused[value])
@@ -196,8 +204,8 @@ def _row_converter(
     Args:
         convert: The class's converter.
         refuse: Logs a value that does not convert (bounded).
-        mode: `RAISE` lets the converter's `ValueError` fail the table; `NULL` logs the value
-            and returns None.
+        mode: `RAISE` lets the converter's `ValueError` fail the table; `LOG` and `IGNORE`
+            pass the value to `refuse` and return None.
 
     Returns:
         A function from a row's text (or None) to its canonical symbol (or None).

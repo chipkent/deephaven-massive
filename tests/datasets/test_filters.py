@@ -224,6 +224,19 @@ NEWS = DatasetSpec(
             "2025-06-02T12:00:00Z",
             datetime(2025, 6, 2, 12, tzinfo=UTC),
         ),
+        # Text finer than a microsecond rounds outward: an upper bound up, any other down.
+        (
+            NEWS,
+            "published_utc_lt",
+            "2025-01-02T14:30:00.000000500Z",
+            datetime(2025, 1, 2, 14, 30, 0, 1, tzinfo=UTC),
+        ),
+        (
+            NEWS,
+            "published_utc_gte",
+            "2025-01-02T14:30:00.000000500Z",
+            datetime(2025, 1, 2, 14, 30, tzinfo=UTC),
+        ),
         # A calendar-date parameter keeps the day.
         (OPTION_CONTRACTS, "expiration_date_gt", "2026-01-16", date(2026, 1, 16)),
         (
@@ -281,7 +294,7 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
             ),
         ),
         (NEWS, "published_utc_gt", "2025-06-02", "no exact unit to end a day with"),
-        (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes a sequence of text"),
+        (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes no numbers, not 1"),
         (DIVIDENDS, "distribution_type_any_of", 5, "takes a sequence of text"),
     ],
 )
@@ -303,8 +316,34 @@ def test_a_list_of_dates_writes_its_date_items_as_days() -> None:
     assert check(RATINGS, {"date_any_of": (date(2025, 6, 2), "2025-06-03,2025-06-04")}) == {
         "date_any_of": ("2025-06-02", "2025-06-03", "2025-06-04")
     }
-    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes text items, not"):
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes no dates, not"):
         check(RATINGS, {"ticker_any_of": (date(2025, 6, 2),)})
+
+
+SHORT_INTEREST = DatasetSpec(
+    name="stocks.short_interest",
+    summary="A dataset for the tests.",
+    fetch_path="/stocks/v1/short-interest",
+)
+
+
+def test_a_list_of_numbers_writes_each_number_as_its_parameter_does() -> None:
+    # `days_to_cover` is a number, `avg_daily_volume` an integer.
+    assert check(SHORT_INTEREST, {"days_to_cover_any_of": (2, 2.5, "3")}) == {
+        "days_to_cover_any_of": ("2", "2.5", "3")
+    }
+    assert check(SHORT_INTEREST, {"avg_daily_volume_any_of": (100, 200)}) == {
+        "avg_daily_volume_any_of": ("100", "200")
+    }
+    with pytest.raises(ValueError, match=r"'avg_daily_volume_any_of' takes integer values, not"):
+        check(SHORT_INTEREST, {"avg_daily_volume_any_of": (4.5,)})
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes no numbers, not 5"):
+        check(RATINGS, {"ticker_any_of": (5,)})
+    with pytest.raises(ValueError, match=r"filter 'days_to_cover_any_of' takes no dates, not"):
+        check(SHORT_INTEREST, {"days_to_cover_any_of": (date(2025, 6, 2),)})
+    # A bool is never a number: the encoder refuses it as an item of a list.
+    with pytest.raises(ValueError, match=r"'days_to_cover_any_of'.*takes a sequence of text"):
+        check(SHORT_INTEREST, {"days_to_cover_any_of": (True,)})
 
 
 def _two_paths(as_text: tuple[str, ...]) -> tuple[Catalog, DatasetSpec]:

@@ -7,9 +7,10 @@ This module holds both directions of that mapping, which every transport applies
 
 - **Reading.** `canonical_from_wire` reads every spelling the library knows into the canonical
   form, and `WireSymbols` applies it to a column of rows (`ReadSymbols`) and the session's
-  `unknown_symbols` rule to what it cannot read: a bounded WARNING per spelling, or the
-  failure `unknown_symbol_message` words. An index endpoint may send an index without its `I:`
-  prefix, so `canonical_from_wire` adds it there, from the endpoint's class alone: no
+  `unreadable_symbols` setting to what it cannot read: a bounded ERROR record per spelling
+  under `LOG`, a bounded DEBUG record under `IGNORE`, or the failure
+  `unreadable_symbol_message` words under `RAISE`. An index endpoint may send an index without its
+  `I:` prefix, so `canonical_from_wire` adds it there, from the endpoint's class alone: no
   conversion ever looks a name up.
 - **Writing.** `wire_spellings` lists every spelling a flat file may write, for its row
   filter, and `ws_symbol` writes the WebSocket topic form. A joined crypto ticker is never
@@ -18,7 +19,7 @@ This module holds both directions of that mapping, which every transport applies
 
 The grammar these read and write, and its checks and converters, are `symbols.py`'s. Every
 function here is pure and thread-safe and makes no Deephaven call; the one shared state is the
-process-wide bound on the WARNING records of unknown spellings.
+process-wide bound on the records of unreadable spellings.
 """
 
 from __future__ import annotations
@@ -38,8 +39,9 @@ from deephaven_massive._datasets.symbols import (
     read_forex_pair,
     symbol_class,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, UnknownSymbols
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
+from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._log_limits import BoundedLog
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -49,7 +51,7 @@ __all__ = [
     "ReadSymbols",
     "WireSymbols",
     "canonical_from_wire",
-    "unknown_symbol_message",
+    "unreadable_symbol_message",
     "wire_spellings",
     "ws_symbol",
 ]
@@ -174,31 +176,38 @@ def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[st
     return symbol
 
 
-_UNKNOWN_LIMIT: Final = 100
-"""The most unknown wire spellings logged per process; one record then says the rest are not."""
+_UNREADABLE_LIMIT: Final = 100
+"""The most unreadable wire spellings logged per process; one record then says the rest are
+not."""
 
-_unknown_spellings: Final = BoundedWarnings(logger, limit=_UNKNOWN_LIMIT)
+_logged_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.ERROR)
+"""The spellings logged under `OnError.LOG`: at ERROR, since each is a gap in the library."""
+
+_ignored_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.DEBUG)
+"""The spellings logged under `OnError.IGNORE`: at DEBUG only."""
 
 
-def unknown_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
-    """Say which symbols Massive sent in a spelling the library cannot read, and the remedy.
+def unreadable_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
+    """Say which symbols Massive sent in a spelling the library cannot read, and what to do.
+
+    Such a spelling is a gap in the library's grammar, never the caller's fault, so the message
+    asks for a bug report and names the setting that keeps the rows meanwhile.
 
     Args:
         dataset: The dataset that received them, such as `forex.quotes`.
         spellings: The texts, as sent.
 
     Returns:
-        The message a failed request or stream carries; it names the session setting that
-        keeps such rows instead.
+        The message a failed request or stream carries under `OnError.RAISE`.
     """
     texts = sorted(spellings)
     listed = ", ".join(repr(s) for s in texts)
     sent = f"the symbols {listed}, spellings" if texts[1:] else f"the symbol {listed}, a spelling"
     return (
-        f"{dataset}: Massive sent {sent} the library cannot read as Massive's ticker. "
-        "Set MASSIVE_UNKNOWN_SYMBOLS=warn, or pass "
-        "MassiveConfig(unknown_symbols=dm.UnknownSymbols.WARN), to keep such rows with a null "
-        "Symbol and the text in RawSymbol"
+        f"{dataset}: Massive sent {sent} the library cannot read as Massive's ticker. To keep "
+        "such rows with a null Symbol and the text in RawSymbol meanwhile, set "
+        "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=log or pass "
+        f"MassiveConfig(unreadable_symbols=dm.OnError.LOG). {LIBRARY_BUG}"
     )
 
 
@@ -211,13 +220,13 @@ class ReadSymbols:
             spelling the library cannot read.
         raw: The wire text where the spelling could not be read, null elsewhere: the
             `RawSymbol` column of a session that keeps such rows.
-        unknown: The distinct spellings that could not be read, sorted; empty for a clean
+        unreadable: The distinct spellings that could not be read, sorted; empty for a clean
             batch.
     """
 
     symbols: pa.Array
     raw: pa.Array
-    unknown: tuple[str, ...]
+    unreadable: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,25 +234,35 @@ class WireSymbols:
     """How one dataset reads the symbols its rows carry, and what an unreadable one does.
 
     Built once per transport plan (REST converter, WebSocket channel plan, flat-file
-    transform) from the dataset and the session's `MassiveConfig.unknown_symbols`; immutable
-    and shared by every thread of the plan.
+    transform) from the dataset and the session's `MassiveConfig.unreadable_symbols`;
+    immutable and shared by every thread of the plan.
 
     Attributes:
         dataset: The dataset name, for messages.
         asset_class: The dataset's class (`canonical_from_wire`), or `ClassFromPrefix.ANY`
             for one that spans classes.
-        unknown: The session's rule for a spelling `canonical_from_wire` cannot read: under
-            `UnknownSymbols.WARN` each new spelling is logged once at WARNING (a bounded
-            number per process) and its rows keep the text in `ReadSymbols.raw`; under
-            `FAIL` the caller fails the request or stream with `unknown_symbol_message`.
+        unreadable: The session's setting for a spelling `canonical_from_wire` cannot read:
+            under `OnError.LOG` each new spelling is logged once at ERROR with the library-bug
+            text, and under `IGNORE` at DEBUG (a bounded number per process); under both its
+            rows keep the text in `ReadSymbols.raw`. Under `RAISE` the caller fails the request
+            or stream with `unreadable_symbol_message`.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`canonical_from_wire`).
     """
 
     dataset: str
     asset_class: AssetClass | ClassFromPrefix
-    unknown: UnknownSymbols
+    unreadable: OnError
     as_written: bool = False
+
+    @property
+    def keeps(self) -> bool:
+        """Tell whether a row whose spelling cannot be read is kept, with its text in `RawSymbol`.
+
+        Returns:
+            True under `OnError.LOG` and `IGNORE`; False under `RAISE`, which fails it.
+        """
+        return self.unreadable is not OnError.RAISE
 
     def read(self, raw: pa.Array, cache: dict[str, str | None]) -> ReadSymbols:
         """Read a column of wire symbols, calling `canonical_from_wire` once per distinct text.
@@ -256,7 +275,9 @@ class WireSymbols:
 
         Returns:
             The canonical symbols, the unreadable texts, and the distinct unreadable spellings.
-            Under `WARN` each new unreadable spelling is logged once at WARNING.
+            Each new unreadable spelling is logged once: at ERROR with the library-bug text
+            under `LOG`, at DEBUG under `IGNORE`; never under `RAISE`, whose failure the caller
+            reports.
         """
         known = cache
         distinct = pc.call_function("unique", [raw])
@@ -269,17 +290,19 @@ class WireSymbols:
         mapped = pa.array([None if t is None else known[t] for t in texts], pa.string())
         index = pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
         symbols = pc.take(mapped, index)
-        unknown = tuple(sorted(t for t in texts if t is not None and known[t] is None))
+        unreadable = tuple(sorted(t for t in texts if t is not None and known[t] is None))
         missing = pc.call_function("is_null", [symbols])
         unread = pc.call_function("and", [missing, pc.call_function("is_valid", [raw])])
         kept = pc.call_function("if_else", [unread, raw, pa.scalar(None, pa.string())])
-        if self.unknown is UnknownSymbols.WARN:
-            for text in unknown:
-                _unknown_spellings.warn(
+        if self.keeps:
+            spellings = _logged_spellings if self.unreadable is OnError.LOG else _ignored_spellings
+            for text in unreadable:
+                spellings.log(
                     f"{self.dataset}\0{text}",
                     "%s: Massive sent the symbol %r, a spelling the library cannot read; its "
-                    "rows have a null Symbol and keep the text in RawSymbol",
+                    "rows have a null Symbol and keep the text in RawSymbol. %s",
                     self.dataset,
                     text,
+                    LIBRARY_BUG,
                 )
-        return ReadSymbols(symbols, kept, unknown)
+        return ReadSymbols(symbols, kept, unreadable)

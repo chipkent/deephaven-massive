@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, Order, PollMode
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import (
     EVERY_TICKER,
@@ -335,6 +336,86 @@ DISCLOSURE_TAXONOMY: Final = DatasetSpec(
 )
 
 
+@raises_through(one_or_any_of)
+def _ciks(**ciks: object) -> dict[str, object]:
+    """Return the wire parameters of the insider datasets' CIK arguments.
+
+    Every insider path takes each CIK both alone and as `.any_of`, so one CIK is sent as
+    `issuer_cik` (or `owner_cik`) and a sequence as `issuer_cik.any_of`.
+
+    Args:
+        ciks: Each CIK argument by name (`issuer_cik`, `owner_cik`) as passed: one CIK, a
+            sequence of CIKs, or None.
+
+    Returns:
+        Both wire forms of each argument, the unset one None.
+
+    Raises:
+        TypeError: If a CIK is neither text, a sequence, nor None (`one_or_any_of`).
+        ValueError: If a CIK is an empty sequence (`one_or_any_of`).
+    """
+    params: dict[str, object] = {}
+    for name, value in ciks.items():
+        params |= one_or_any_of(name, value, every=f"every {name.removesuffix('_cik')}")
+    return params
+
+
+@raises_through(_ciks, list_query)
+def _insider_query(
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    symbols: Symbols | None,
+    issuer_cik: object,
+    owner_cik: object,
+    start: DateLike | None,
+    end: DateLike | None,
+    sort: str | None,
+    order: Order | None,
+    limit: int | None,
+    filters: Mapping[str, FilterValue] | None,
+) -> Query:
+    """Build the query of an insider dataset that takes an issuer and an owner CIK.
+
+    Form 3, Form 4, and the insider holdings share the arguments and their checks.
+
+    Args:
+        core: The session core.
+        spec: The dataset.
+        symbols: The tickers that filter the request, or None.
+        issuer_cik: The `issuer_cik` argument as passed: one CIK, a sequence, or None.
+        owner_cik: The `owner_cik` argument as passed: one CIK, a sequence, or None.
+        start: The first day of the dataset's date axis, or None.
+        end: The last day of the dataset's date axis, or None.
+        sort: The field to sort by, or None.
+        order: The sort direction, or None.
+        limit: The cap on the total number of rows, or None.
+        filters: The `filters` mapping, or None.
+
+    Returns:
+        The `Query`.
+
+    Raises:
+        TypeError: If a CIK or another argument has the wrong type (`_ciks`, `list_query`).
+        ValueError: If a CIK is an empty sequence, or an argument has a value the dataset
+            refuses (`_ciks`, `list_query`).
+    """
+    return list_query(
+        core,
+        spec,
+        all_alternative=EVERY_TICKER,
+        symbols=symbols,
+        start=start,
+        end=end,
+        params=_ciks(issuer_cik=issuer_cik, owner_cik=owner_cik),
+        arguments=_CIK_ARGUMENTS,
+        sort=sort,
+        order=order,
+        limit=limit,
+        filters=filters,
+    )
+
+
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
     FILINGS_INDEX,
     SECTIONS_10K,
@@ -372,6 +453,7 @@ class _StockFilings(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "stocks.filings"
 
+    @raises_through(list_query, optional_text)
     def index(
         self,
         symbols: Symbols | None = None,
@@ -399,11 +481,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-index,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as a non-`str` form type; `ValueError` if `symbols` is `dm.ALL`, empty, or
-        holds an invalid ticker, a bound is not a date or ISO date, `end` is before `start`, or a
-        filter is unknown, reserved, or of the wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
@@ -422,6 +499,12 @@ class _StockFilings(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type, such as a non-`str` form type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -442,6 +525,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def sections_10k(
         self,
         symbols: Symbols | None = None,
@@ -466,11 +550,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-sections_10k,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
@@ -488,6 +567,12 @@ class _StockFilings(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -507,6 +592,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def text_8k(
         self,
         symbols: Symbols | None = None,
@@ -532,11 +618,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-text_8k,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
@@ -554,6 +635,12 @@ class _StockFilings(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -573,6 +660,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def disclosures_8k(
         self,
         symbols: Symbols | None = None,
@@ -599,10 +687,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-disclosures_8k,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date,
-        `end` is before `start`, or a filter is unknown, reserved, or of the wrong kind.
-
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
@@ -620,6 +704,11 @@ class _StockFilings(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
+                is before `start`, or a filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -639,6 +728,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def risk_factors(
         self,
         symbols: Symbols | None = None,
@@ -663,11 +753,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-risk_factors,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is
-        not a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
-        wrong kind.
-
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
@@ -685,6 +770,12 @@ class _StockFilings(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
+                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
 
         Example:
             ::
@@ -704,10 +795,11 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query, one_or_any_of)
     def institutional_holdings(
         self,
         *,
-        filer_cik: str | None = None,
+        filer_cik: str | Sequence[str] | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -729,13 +821,10 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-institutional_holdings,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if a bound is not a date or ISO date, `end` is
-        before `start`, or a filter is unknown, reserved, or of the wrong kind.
-
         Args:
             filer_cik: The SEC CIK of the filing manager, as text with its leading zeros,
-                such as `"0001067983"`; None for every filer.
+                such as `"0001067983"` (sent as `filer_cik`), or a sequence of them for any of
+                several managers (sent as `filer_cik.any_of`); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound,
                 which `poll()` refuses unless `limit` is set: it would re-read every filing
                 each cycle. A fixed start keeps widening the window of a long-running poll.
@@ -751,6 +840,11 @@ class _StockFilings(Namespace):
         Returns:
             The query; nothing is requested until a verb runs.
 
+        Raises:
+            TypeError: If an argument has the wrong type, such as an `int` CIK.
+            ValueError: If a CIK sequence is empty, a bound is not a date or ISO date, `end` is
+                before `start`, or a filter is unknown, reserved, or of the wrong kind.
+
         Example:
             ::
 
@@ -764,13 +858,14 @@ class _StockFilings(Namespace):
             all_alternative=EVERY_TICKER,
             start=start,
             end=end,
-            params={"filer_cik": optional_text("filer_cik", filer_cik)},
+            params=one_or_any_of("filer_cik", filer_cik, every="every filer"),
             sort=sort,
             order=order,
             limit=limit,
             filters=filters,
         )
 
+    @raises_through(_insider_query)
     def initial_insider_ownership(
         self,
         symbols: Symbols | None = None,
@@ -799,11 +894,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-initial_insider_ownership,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
-        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
-        filter is unknown, reserved, or of the wrong kind.
-
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
@@ -827,6 +917,12 @@ class _StockFilings(Namespace):
         Returns:
             The query; nothing is requested until a verb runs.
 
+        Raises:
+            TypeError: If an argument has the wrong type, such as an `int` CIK.
+            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
+                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
+
         Example:
             ::
 
@@ -846,6 +942,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(_insider_query)
     def insider_transactions(
         self,
         symbols: Symbols | None = None,
@@ -874,11 +971,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_transactions,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
-        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
-        filter is unknown, reserved, or of the wrong kind.
-
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
@@ -902,6 +994,12 @@ class _StockFilings(Namespace):
         Returns:
             The query; nothing is requested until a verb runs.
 
+        Raises:
+            TypeError: If an argument has the wrong type, such as an `int` CIK.
+            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
+                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
+
         Example:
             ::
 
@@ -923,6 +1021,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query, _ciks)
     def insider_activity(
         self,
         symbols: Symbols | None = None,
@@ -961,11 +1060,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_activity,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
-        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
-        filter is unknown, reserved, or of the wrong kind.
-
         Args:
             symbols: Tickers whose issuers to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every issuer.
@@ -989,6 +1083,12 @@ class _StockFilings(Namespace):
         Returns:
             The query; nothing is requested until a verb runs.
 
+        Raises:
+            TypeError: If an argument has the wrong type, such as an `int` CIK.
+            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
+                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
+
         Example:
             ::
 
@@ -1009,6 +1109,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(_insider_query)
     def insider_holdings(
         self,
         symbols: Symbols | None = None,
@@ -1051,11 +1152,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-insider_holdings,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if `symbols` is `dm.ALL` or empty, a CIK
-        sequence is empty, a bound is not a date or ISO date, `end` is before `start`, or a
-        filter is unknown, reserved, or of the wrong kind.
-
         Args:
             symbols: Tickers whose issuers' insiders to return (one `str`, a sequence, or a
                 `Table` with a `Symbol` column, re-read each `poll()` cycle); None for every
@@ -1084,6 +1180,12 @@ class _StockFilings(Namespace):
         Returns:
             The query; nothing is requested until a verb runs.
 
+        Raises:
+            TypeError: If an argument has the wrong type, such as an `int` CIK.
+            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
+                date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
+                the wrong kind.
+
         Example:
             ::
 
@@ -1104,6 +1206,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def risk_factor_taxonomy(
         self,
         *,
@@ -1125,9 +1228,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-risk_factor_taxonomy,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if a filter is unknown, reserved, or of the wrong kind.
-
         Args:
             sort: The field to sort by, such as `"primary_category"`; None for the server
                 default.
@@ -1139,6 +1239,10 @@ class _StockFilings(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If a filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -1155,6 +1259,7 @@ class _StockFilings(Namespace):
             filters=filters,
         )
 
+    @raises_through(list_query)
     def disclosure_taxonomy(
         self,
         *,
@@ -1176,9 +1281,6 @@ class _StockFilings(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#filings-disclosure_taxonomy,
         the web UI's column tooltips, or `columns()`.
 
-        Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type; `ValueError` if a filter is unknown, reserved, or of the wrong kind.
-
         Args:
             sort: The field to sort by, such as `"primary_category"`; None for the server
                 default.
@@ -1190,6 +1292,10 @@ class _StockFilings(Namespace):
 
         Returns:
             The query; nothing is requested until a verb runs.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If a filter is unknown, reserved, or of the wrong kind.
 
         Example:
             ::
@@ -1209,77 +1315,3 @@ class _StockFilings(Namespace):
 
 _CIK_ARGUMENTS: Final = {"issuer_cik.any_of": "issuer_cik", "owner_cik.any_of": "owner_cik"}
 """The argument that sets each CIK list parameter, for the message that rejects it in `filters`."""
-
-
-def _ciks(**ciks: object) -> dict[str, object]:
-    """Return the wire parameters of the insider datasets' CIK arguments.
-
-    Every insider path takes each CIK both alone and as `.any_of`, so one CIK is sent as
-    `issuer_cik` (or `owner_cik`) and a sequence as `issuer_cik.any_of`.
-
-    Args:
-        ciks: Each CIK argument by name (`issuer_cik`, `owner_cik`) as passed: one CIK, a
-            sequence of CIKs, or None.
-
-    Returns:
-        Both wire forms of each argument, the unset one None.
-
-    The `TypeError` and `ValueError` of `one_or_any_of` propagate: a CIK that is neither
-    text, a sequence, nor None, or an empty sequence.
-    """
-    params: dict[str, object] = {}
-    for name, value in ciks.items():
-        params |= one_or_any_of(name, value, every=f"every {name.removesuffix('_cik')}")
-    return params
-
-
-def _insider_query(
-    core: SessionCore,
-    spec: DatasetSpec,
-    *,
-    symbols: Symbols | None,
-    issuer_cik: object,
-    owner_cik: object,
-    start: DateLike | None,
-    end: DateLike | None,
-    sort: str | None,
-    order: Order | None,
-    limit: int | None,
-    filters: Mapping[str, FilterValue] | None,
-) -> Query:
-    """Build the query of an insider dataset that takes an issuer and an owner CIK.
-
-    Form 3, Form 4, and the insider holdings share the arguments and their checks.
-
-    Args:
-        core: The session core.
-        spec: The dataset.
-        symbols: The tickers that filter the request, or None.
-        issuer_cik: The `issuer_cik` argument as passed: one CIK, a sequence, or None.
-        owner_cik: The `owner_cik` argument as passed: one CIK, a sequence, or None.
-        start: The first day of the dataset's date axis, or None.
-        end: The last day of the dataset's date axis, or None.
-        sort: The field to sort by, or None.
-        order: The sort direction, or None.
-        limit: The cap on the total number of rows, or None.
-        filters: The `filters` mapping, or None.
-
-    Returns:
-        The `Query`.
-
-    The errors of `_ciks` and `list_query` propagate.
-    """
-    return list_query(
-        core,
-        spec,
-        all_alternative=EVERY_TICKER,
-        symbols=symbols,
-        start=start,
-        end=end,
-        params=_ciks(issuer_cik=issuer_cik, owner_cik=owner_cik),
-        arguments=_CIK_ARGUMENTS,
-        sort=sort,
-        order=order,
-        limit=limit,
-        filters=filters,
-    )

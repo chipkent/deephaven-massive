@@ -116,8 +116,10 @@ def test_an_undocumented_timeframe_fails_loudly(snapshot: Callable[[str], Snapsh
     with pytest.raises(
         dm.MassiveError,
         match=r"last_trade\.timeframe is 'END-OF-DAY'.*ws_hosts=\{dm\.AssetClass\.STOCKS",
-    ):
+    ) as info:
         run(AssetClass.STOCKS, snapshot("stocks_unknown_timeframe.json"))
+    # A value the library cannot interpret is its own defect, never an expected failure.
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
 
 
 def test_a_business_key_without_trades_streams_from_business(
@@ -178,8 +180,14 @@ def test_a_refused_snapshot_means_no_websocket_access() -> None:
     def refuse(probe: SnapshotProbe) -> Sequence[Mapping[str, object]]:
         raise dm.EntitlementError("HTTP 403 from GET /v3/snapshot", status=403, request_id="r1")
 
-    with pytest.raises(dm.EntitlementError, match=r"^stocks plan has no WebSocket access") as info:
+    with pytest.raises(dm.EntitlementError) as info:
         decide(AssetClass.STOCKS, TICK, ws_hosts={}, fetch=refuse)
+    # The refused request was the library's own, so the message says so.
+    assert str(info.value) == (
+        "stocks plan has no WebSocket access: the stocks subscription refused the library's own "
+        "host check, a REST snapshot request (/v3/snapshot) it sends before the first stocks "
+        "stream; Massive said: HTTP 403 from GET /v3/snapshot"
+    )
     assert (info.value.status, info.value.request_id) == (403, "r1")
 
 

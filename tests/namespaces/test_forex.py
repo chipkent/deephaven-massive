@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import numpy as np
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
@@ -25,6 +26,7 @@ from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
 from deephaven.table import Table
+from deephaven.time import to_j_instant
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
@@ -139,7 +141,10 @@ def _schema(spec: DatasetSpec) -> dict[str, ColumnType]:
     The process catalog also merges the members other namespaces declare into each kind, so
     exact column lists are checked against the namespace's own catalog.
     """
-    return {c.name: c.type for c in Catalog(forex.DATASETS).dataset_schema(spec).columns}
+    return {
+        c.name: c.type
+        for c in Catalog(forex.DATASETS).dataset_schema(spec, raw_symbol=False).columns
+    }
 
 
 def test_quotes_join_the_last_quote_through_its_projection() -> None:
@@ -569,6 +574,48 @@ def test_quotes_history_reads_the_quote_history(
         ("C:EURUSD", 1_625_097_600_000_000_000, 1.18565, 1.18558, 48, 48),
         ("C:EURUSD", 1_625_097_600_000_000_000, 1.18565, 1.18559, 48, 48),
     ]
+
+
+def test_quotes_history_takes_deephaven_instants_rounded_outward(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # The Java Instants a console holds, with nanoseconds a datetime cannot keep: the start
+    # is rounded down and the end up, so the half-open range loses no row.
+    body = fixture_body(load_fixture, "quotes.json")
+    del body["next_url"]  # the sample's next page is on Massive's host
+    fake_rest.reply("/v3/quotes/C%3AEURUSD", Reply(body))
+    start = to_j_instant("2021-07-01T00:00:00.000000500Z")
+    end = to_j_instant("2021-07-01T01:00:00.000000500Z")
+    assert start is not None  # Deephaven's converters are typed Optional
+    assert end is not None
+    rest_session.forex.quotes("C:EURUSD").history(start, end, source=dm.HistorySource.REST)
+    hour = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
+    ((_, params),) = sent(fake_rest)
+    assert params["timestamp.gte"] == [str(hour)]
+    assert params["timestamp.lt"] == [str(hour + 3_600 * NS + 1_000)]
+
+
+def test_quotes_history_takes_numpy_times_and_deephaven_text(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # Deephaven's own text for the start, and a numpy time in UTC, with nanoseconds, for the
+    # end, which rounds up so the half-open range loses no row.
+    body = fixture_body(load_fixture, "quotes.json")
+    del body["next_url"]  # the sample's next page is on Massive's host
+    fake_rest.reply("/v3/quotes/C%3AEURUSD", Reply(body))
+    end = np.datetime64("2021-07-01T01:00:00.000000500", "ns")
+    query = rest_session.forex.quotes("C:EURUSD")
+    query.history("2021-06-30T20:00 America/New_York", end, source=dm.HistorySource.REST)
+    hour = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
+    ((_, params),) = sent(fake_rest)
+    assert params["timestamp.gte"] == [str(hour)]
+    assert params["timestamp.lt"] == [str(hour + 3_600 * NS + 1_000)]
 
 
 BAR_COLUMNS = (

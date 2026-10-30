@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
@@ -39,7 +40,12 @@ from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
+from deephaven_massive._datasets.dates import (
+    calendar_day,
+    check_order,
+    parse_date_like,
+    require_aware,
+)
 from deephaven_massive._datasets.filters import (
     check_filters,
     filter_key,
@@ -52,6 +58,7 @@ from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._query import Query, QueryBase, bar_query_class, query_class
+from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._types import _All, override
 
 if TYPE_CHECKING:
@@ -66,9 +73,12 @@ __all__ = [
     "ADJUSTED_PRICE",
     "ADJUSTED_VOLUME",
     "EVERY_TICKER",
+    "SNAPSHOT_SYMBOLS_PER_REQUEST",
     "Namespace",
+    "accepted_values",
     "adjustment_notes",
     "build_query",
+    "day_argument",
     "list_params",
     "list_query",
     "one_or_any_of",
@@ -96,7 +106,15 @@ ADJUSTED_VOLUME: Final = (
 """The note on every volume column of a dataset with a split-adjustment choice."""
 
 
-EVERY_TICKER: Final = "symbols=None, which returns every ticker"
+SNAPSHOT_SYMBOLS_PER_REQUEST: Final = 250
+"""The most tickers one snapshot request names in its comma-separated ticker list.
+
+Massive's unified snapshot documents 250 as the limit of its `ticker.any_of`; the per-class
+snapshots take the same size, so every long watchlist is split into requests whose URLs stay
+well under the lengths servers refuse (`DatasetSpec.symbols_per_request`)."""
+
+
+EVERY_TICKER: Final = "leave symbols out, which returns every ticker"
 """The alternative to `dm.ALL` that the REST list datasets name in their `ValueError`."""
 
 
@@ -154,6 +172,26 @@ class Namespace:
         return f"<{self._core.label} {self._path}>"
 
 
+def day_argument(spec: DatasetSpec, value: DateLike, name: str) -> date:
+    """Read a dataset's one-day argument, such as a daily summary's `date` or `as_of`.
+
+    The argument takes every `DateLike` form and Deephaven's own date text
+    (`deephaven_time_text`), and must name a calendar day (`dates.calendar_day`).
+
+    Args:
+        spec: The dataset, for messages.
+        value: The argument as the caller passed it.
+        name: The parameter's name, such as `"date"`.
+
+    Returns:
+        The calendar date to send.
+
+    The `ValueError` or `TypeError` of `deephaven_time_text` and `calendar_day` propagates: a
+    time instead of a day, text neither form reads, or a value of another type.
+    """
+    return calendar_day(spec, deephaven_time_text(value, name), name, given=value)
+
+
 def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
     """Validate the `sort` and `order` parameters of a REST list dataset.
 
@@ -183,6 +221,24 @@ def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValu
     if order is not None:
         params["order"] = _require_enum(order, Order, "order")
     return params
+
+
+def accepted_values(core: SessionCore, spec: DatasetSpec, name: str) -> tuple[str, ...]:
+    """Return the values the enum parameter of a dataset's fetch path accepts, as generated.
+
+    Reading them from the generated path, not a copy, makes a dataset method accept exactly
+    what Massive's specification lists, through every refresh.
+
+    Args:
+        core: The session core, whose catalog holds the generated paths.
+        spec: The dataset; its fetch path has an enum parameter `name`.
+        name: The parameter's wire name, such as `"timespan"`.
+
+    Returns:
+        The accepted wire values, in the specification's order.
+    """
+    path = cast("RestPath", core.catalog.source(Transport.REST, cast("str", spec.fetch_path)))
+    return next(param.values for param in path.params if param.name == name)
 
 
 def require_bool(name: str, value: object) -> bool:
@@ -453,15 +509,47 @@ def _check_axis(
         check_order(start, end)
 
 
+def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
+    """Check the `venues` argument of a futures dataset and order it for the request.
+
+    Args:
+        venues: The argument as passed: a set of `dm.FuturesVenue` members, such as
+            `{dm.FuturesVenue.CME}` or the default `frozenset(dm.FuturesVenue)`.
+
+    Returns:
+        The venues in `FuturesVenue` order, whatever the set's order, so equal sets give equal
+        queries and the flat files are read in one order.
+
+    Raises:
+        TypeError: If `venues` is not a set (a single member, a list, or text included), or a
+            member is not a `dm.FuturesVenue`; the message names the set to pass.
+        ValueError: If the set is empty, which would read no flat file.
+    """
+    if not isinstance(venues, AbstractSet):
+        raise TypeError(
+            f"venues must be a set of dm.FuturesVenue, such as {{dm.FuturesVenue.CME}}, not "
+            f"{type(venues).__name__}"
+        )
+    for venue in venues:
+        if not isinstance(venue, FuturesVenue):
+            raise TypeError(
+                f"venues must hold only dm.FuturesVenue members, not {type(venue).__name__}"
+            )
+    if not venues:
+        raise ValueError("venues is empty; leave it out to read every venue")
+    return tuple(venue for venue in FuturesVenue if venue in venues)
+
+
 def build_query(
     core: SessionCore,
     spec: DatasetSpec,
     *,
     symbols: Symbols | None = None,
+    symbols_optional: bool = False,
     all_alternative: str | None = None,
     timespan: Timespan | None = None,
     multiplier: int = 1,
-    venue: FuturesVenue | None = None,
+    venues: AbstractSet[FuturesVenue] | None = None,
     adjusted: bool | None = None,
     start: DateLike | None = None,
     end: DateLike | None = None,
@@ -472,26 +560,33 @@ def build_query(
 ) -> QueryBase:
     """Validate one dataset call and return its query.
 
-    The dataset's `fixed_params` (parameters the library sets itself, such as the options
-    snapshot's `type="options"`) join the typed parameters in `Request.params` and are sent on
+    The dataset's `fixed_params` (parameters the library sets itself, such as the indicators'
+    `expand_underlying=False`) join the typed parameters in `Request.params` and are sent on
     every request. The catalog's `wire parameters` gate guarantees that every REST path of the
     dataset takes each of them, so a fixed parameter can never be blamed on the caller as a
     parameter its path lacks. Each one's whole family is reserved from `filters` ("the library
-    sets type itself; it is not a filter") and left out of the valid keys a refused filter
-    lists.
+    sets expand_underlying itself; it is not a filter") and left out of the valid keys a
+    refused filter lists.
 
     Args:
         core: The session core the query will run on.
         spec: The dataset.
         symbols: The instruments, or None for datasets without them. A Deephaven `Table`
             must have a `Symbol` column; it is boxed by identity in a `SymbolTable` and read
-            when a verb runs.
-        all_alternative: None when the dataset accepts `dm.ALL`; otherwise the alternative to
-            name in the `ValueError`, such as `"m.stocks.snapshots(dm.ALL)"`.
+            when a verb runs. None is refused for an instrument dataset
+            (`Catalog.takes_symbols`) unless `symbols_optional` is set.
+        symbols_optional: True for a dataset whose `symbols` only filters the request, so
+            None asks for every ticker; False (the default) for one that must be told its
+            instruments.
+        all_alternative: None when the dataset accepts `dm.ALL`; otherwise what the
+            `ValueError` tells the caller to do instead, an instruction such as
+            `"use m.stocks.snapshots(dm.ALL)"` or `"leave symbols out, which returns every
+            ticker"`.
         timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it also selects
             the query class through `bar_query_class`.
         multiplier: The bar multiplier.
-        venue: The futures venue, or None for every venue.
+        venues: The futures venues whose flat files `history()` reads (`futures_venues`), or
+            None for a dataset without venues.
         adjusted: Whether bars are adjusted for splits, for a dataset with an `adjusted`
             parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None for an open start: a date
@@ -518,7 +613,9 @@ def build_query(
         picks for a bars dataset).
 
     Raises:
-        ValueError: If `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
+        ValueError: If `symbols` is None for an instrument dataset that needs symbols (the
+            message names the forms it takes, `dm.ALL` among them where the dataset takes
+            it), `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
             `Symbol` column, `params` or `filters` holds `adjusted`, which has its own typed
             argument, or `params` names one of the dataset's `fixed_params`; or if `params`
             sets `order` without `sort` and none of the dataset's REST paths has an `order`
@@ -528,13 +625,23 @@ def build_query(
             on a chosen path that has neither.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
-    Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
-    or `ValueError` of the helper that checks them (`normalize` in `_datasets/symbols.py`,
-    `_require_enum`, `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed,
-    reversed, or calendar-date bounds, `bar_query_class`,
-    `require_positive_int` for `limit`).
+    Invalid symbols, enum arguments, venues, time bounds, a `sort`, parameters, or filters
+    raise the `TypeError` or `ValueError` of the helper that checks them (`normalize` in
+    `_datasets/symbols.py`, `_require_enum`, `futures_venues`, `Catalog.check_sort`,
+    `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed, reversed, or
+    calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`).
     """
     normalized: NormalizedSymbols | None = None
+    if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
+        forms = (
+            "a ticker, a list of tickers, a table with a Symbol column, or dm.ALL for every ticker"
+            if all_alternative is None
+            else "a ticker, a list of tickers, or a table with a Symbol column (it does not "
+            f"take dm.ALL: {all_alternative})"
+        )
+        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+        logger.debug("%s refused: symbols=None on a dataset that needs symbols", spec.name)
+        raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
     if isinstance(symbols, Table):
         if "Symbol" not in symbols.column_names:
             raise ValueError("a symbol table must have a Symbol column")
@@ -542,9 +649,7 @@ def build_query(
     elif symbols is not None:
         normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)
     if isinstance(normalized, _All) and all_alternative is not None:
-        raise ValueError(f"{spec.name} does not accept dm.ALL; use {all_alternative}")
-    if venue is not None:
-        _require_enum(venue, FuturesVenue, "venue")
+        raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:
@@ -556,13 +661,18 @@ def build_query(
             f"{spec.name}: order needs sort, since its paths take the direction as a suffix "
             "of the sort field"
         )
+    sort = typed.get("sort")
+    if isinstance(sort, str):  # `list_params` refused any other type
+        core.catalog.check_sort(spec, sort, ordered="order" in typed)
     cls = query_class(spec)
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
     if timespan is not None and spec.is_bars:
         cls = bar_query_class(spec, timespan, multiplier)
-    first = None if start is None else parse_date_like(start, "start")
-    last = None if end is None else parse_date_like(end, "end")
+    first = None if start is None else parse_date_like(deephaven_time_text(start, "start"), "start")
+    last = (
+        None if end is None else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
+    )
     _check_axis(core, spec, start=first, end=last)
     given = (
         ()
@@ -573,7 +683,7 @@ def build_query(
         symbols=normalized,
         timespan=timespan,
         multiplier=multiplier,
-        venue=venue,
+        venues=None if venues is None else futures_venues(venues),
         adjusted=adjusted,
         start=first,
         end=last,
@@ -606,7 +716,9 @@ def list_query(
     """Build the query of a REST list dataset from its factory's arguments.
 
     A list dataset takes the `sort`, `order`, and `limit` block (`list_params`) beside its own
-    typed parameters, and has only a fetch path, so `build_query` builds a `Query`.
+    typed parameters, and has only a fetch path, so `build_query` builds a `Query`. A ticker
+    filter (`DatasetSpec.symbol_param`) is optional; a ticker in the path, such as Benzinga's
+    consensus ratings, is not.
 
     Args:
         core: The session core.
@@ -628,12 +740,15 @@ def list_query(
     Returns:
         The query.
 
-    Every `TypeError` and `ValueError` of `list_params` and `build_query` propagates.
+    Raises:
+        TypeError: If an argument has the wrong type (`list_params`, `build_query`).
+        ValueError: If an argument has a value the dataset refuses (`build_query`).
     """
     query = build_query(
         core,
         spec,
         symbols=symbols,
+        symbols_optional=spec.symbol_param is not None,
         all_alternative=all_alternative,
         start=start,
         end=end,

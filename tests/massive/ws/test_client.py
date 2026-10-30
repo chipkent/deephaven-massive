@@ -324,6 +324,7 @@ def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
     # upgrade and the greeting have all the time they need; then it jumps past the deadline,
     # so the timeout cuts off the silent server at once. The held backoff wait stops a second
     # attempt.
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     fake_ws_server.auth_replies.append(NoReply.TO_KEY)
     h = make_client(free_waits=0, start=False)
     loop = h.client.loop
@@ -341,8 +342,12 @@ def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
     h.sleeper.wait_for_count(1)
     assert h.recorder.states() == [WsState.CONNECTING, WsState.RECONNECTING]
     assert len(fake_ws_server.connections) == 1
+    # Each attempt logs at DEBUG; the library's connection logs one WARNING per outage.
     assert any(
-        "handshake" in r.getMessage() and "TimeoutError" in r.getMessage() for r in caplog.records
+        r.levelno == logging.DEBUG
+        and "handshake" in r.getMessage()
+        and "TimeoutError" in r.getMessage()
+        for r in caplog.records
     )
 
 
@@ -451,16 +456,17 @@ def test_an_http_429_waits_the_longer_of_retry_after_and_the_backoff(
     assert at == h.clock.time() + wait
 
 
-def test_a_capped_retry_after_is_warned_about(
+def test_a_capped_retry_after_is_logged(
     make_client: Callable[..., Harness],
     fake_ws_server: FakeMassiveServer,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     fake_ws_server.reject_next(429, {"Retry-After": "500"})
     h = make_client(backoff=(2.0, 10.0))
     h.recorder.wait_open(1)
-    [record] = [r for r in caplog.records if "Retry-After" in r.getMessage()]
-    assert record.levelno == logging.WARNING
+    [record] = [r for r in caplog.records if "waiting at most" in r.getMessage()]
+    assert record.levelno == logging.DEBUG  # a reconnect attempt's detail
     assert record.getMessage().endswith("wait 500.0 s (Retry-After); waiting at most 10.0 s")
 
 
@@ -841,6 +847,8 @@ def test_a_raising_callback_stops_the_client_and_is_logged(
     assert recorder.states() == [WsState.CONNECTING, WsState.FAILED]
     error = recorder.of("state")[-1][1]
     assert type(error) is WireError
+    assert error.client_defect  # a bug in the client, which the library reports as a defect
+    assert not error.unreadable
     assert isinstance(error.__cause__, ZeroDivisionError)
     assert error.message == (
         "the WebSocket client for 127.0.0.1/stocks stopped on an internal error: "

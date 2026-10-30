@@ -45,9 +45,10 @@ def test_every_sample_error_names_one_field_with_a_reason() -> None:
     keys = [(e.path, e.wire_key) for e in exclusions.SAMPLE_ERRORS]
     assert len(keys) == len(set(keys))
     assert all(e.reason for e in exclusions.SAMPLE_ERRORS)
-    # The known wrong samples: the futures trade example's undeclared `z`, and a CUSIP written
-    # as a number, its leading zero lost.
+    # The known wrong samples: the futures trade example's undeclared `z`, a CUSIP written as a
+    # number, its leading zero lost, and a futures product's update time written as a bare date.
     assert [(e.path, e.wire_key, e.sample) for e in exclusions.SAMPLE_ERRORS] == [
         ("futures/T", "z", 3),
         ("/vX/reference/ipos", "us_code", 37833100),
+        ("/futures/v1/products", "last_updated", "2025-02-22"),
     ]

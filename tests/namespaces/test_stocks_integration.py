@@ -224,16 +224,17 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Whether a stock week bar starts in the weekend before its Monday, wherever stamped.
+    """Whether a stock week bar covers the week from its Sunday 00:00 New York time.
 
     For each raw week bar of `AAPL` over the four weeks ending with the most recent week without a
-    holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
-    own; `MATCH` marks the bucket. Passes when, for every bar of those weeks, the week from Monday
-    00:00 New York time, the library's week (stamped on the Monday or on the weekend before, which
-    the library keeps for its week), is the closest window, ties allowed. Stocks do not trade at
-    weekends, so every start from Friday evening to Monday morning ties: the check can only catch a
-    week that starts in the middle of the week. A failure names the bars whose closest window starts
-    elsewhere. The last line shows which bars the library's `history()` keeps.
+    holiday, records its stamp and the candidate windows whose day-bar volume is closest to its
+    own (hour bars do not add up to a stock week bar's volume, day bars do); `MATCH` marks the
+    bucket. Passes when, for every bar of those weeks, the week from Sunday 00:00 New York time,
+    where Massive stamps it and the library's week starts, is the closest window, ties allowed.
+    Stocks do not trade at weekends, so every start from Friday evening to Monday morning ties: the
+    check can only catch a week that starts in the middle of the week. A failure names the bars
+    whose closest window starts elsewhere. The last line shows which bars the library's `history()`
+    keeps.
     """
     lines, checked, misses = week_bar_report("stocksTicker", _SYMBOL, "New York")
     for line in lines:
@@ -311,9 +312,23 @@ def _symbol_rows(query: HistoryQuery, day: date) -> Table:
     """Return the test symbol's rows of one day of a `dm.ALL` history over REST.
 
     Returns:
+        The rows, filtered in Deephaven (`_only_the_symbol`).
+    """
+    return _only_the_symbol(query.history(day, day, source=dm.HistorySource.REST))
+
+
+def _only_the_symbol(table: Table) -> Table:
+    """Keep the test symbol's rows of a table.
+
+    The filter runs in a frame that holds only the table. A formula hands the locals of the
+    frame that calls it to the JVM, which keeps them until its own garbage collection: a
+    frame holding the query would keep the query's session, and its reaper thread, alive
+    after the test closed it.
+
+    Returns:
         The rows, filtered in Deephaven.
     """
-    return query.history(day, day, source=dm.HistorySource.REST).where(f"Symbol == `{_SYMBOL}`")
+    return table.where(f"Symbol == `{_SYMBOL}`")
 
 
 def _record_library_stock_stamps(
@@ -349,11 +364,12 @@ def _record_library_stock_stamps(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("50")
-@pytest.mark.requests(18)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_stock_day_and_longer_bar_stamps_from_rest(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     stamp_days: StampDays,
     rest_rows: RestRows,
     stamped_bar: ToStampedBar,
@@ -375,31 +391,37 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     trading day after a half day), beside the range bars of that day; the week bars of the
     half day's week and the week before, and the month bars of the two whole months before
     the current one; and the library's `TimestampStart`, `TimestampEnd`, and `Date` for the
-    same requests. Reading it: 1-day stamps at 00:00, 13:00, or 16:00 New York time, longer
-    bars at 00:00 New York time on their period's first day (or the weekend before a week's
-    Monday), and matching values confirm the library's day label; minute bars ending at 12:59
-    on the half day confirm a whole day cut short; a `MassiveError` in the library lines
-    shows a stamp it refuses.
+    same requests. With Stocks on Basic, which allows 5 requests a minute, it reads the range
+    bars of both days, the grouped-daily row and minute bars of the half day only, and the week
+    and month bars, and leaves out `/prev` and the library's lines. Reading it: 1-day stamps
+    at 00:00, 13:00, or 16:00 New York time, longer bars at 00:00 New York time on their
+    period's first day (or the weekend before a week's Monday), and matching values confirm
+    the library's day label; minute bars ending at 12:59 on the half day confirm a whole day
+    cut short; a `MassiveError` in the library lines shows a stamp it refuses.
     """
     days = stamp_days["day"]
+    basic = "stocks" in classes_on_basic
+    read = days[-1:] if basic else days  # the half day is the last
     grouped = {
         day: [
             stamped_bar(r) for r in rest_rows(_GROUPED, {"date": day}, {}) if r.get("T") == _SYMBOL
         ]
-        for day in days
+        for day in read
     }
     missing = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
-    minutes = [minute_span_report(_SYMBOL, day) for day in days]
-    prevs = prev_bar_report(_SYMBOL)
+    minutes = [minute_span_report(_SYMBOL, day) for day in read]
     spans = {span: stamp_days[span] for span in ("week", "month")}
     periods = period_bar_report(_SYMBOL, spans, {"week": (2, 2), "month": (2, 2)})
-    _record_library_stock_stamps(
-        live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
-    )
+    if basic:
+        evidence("Stocks on Basic: /prev and the library's lines are not read")
+    else:
+        assert prev_bar_report(_SYMBOL), "/prev returned no bar"
+        _record_library_stock_stamps(
+            live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
+        )
     assert not missing, f"no range bar on {missing}"
-    assert all(minutes), f"a stamp day has no minute bars: {dict(zip(days, minutes, strict=True))}"
+    assert all(minutes), f"a stamp day has no minute bars: {dict(zip(read, minutes, strict=True))}"
     assert all(grouped.values()), f"a stamp day has no grouped-daily row: {grouped}"
-    assert prevs, "/prev returned no bar"
     assert periods, "the range did not return one bar for each of two weeks and two months"
 
 
@@ -505,7 +527,7 @@ def test_every_page_echoes_its_adjustment(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("55")
-@pytest.mark.requests(12)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_cash_dividends_are_never_adjusted(
     live_session: dm.MassiveSession,
@@ -521,8 +543,9 @@ def test_cash_dividends_are_never_adjusted(
     date to two days after, with `adjusted=true` and `adjusted=false`. Passes when the ratio
     of the adjusted to the as-traded close takes no step across the ex-dividend date: the same
     ratio on every day, so `adjusted` concerns splits only, as the library documents, and an
-    adjustment for the dividend would show as a step on the ex-date. Skips when the year had
-    no such dividend with bars.
+    adjustment for the dividend would show as a step on the ex-date. With Stocks on Basic
+    only the newest such dividend is tried (`special_dividends` keeps one), so the test sends
+    at most 4 stock requests. Skips when the year had no such dividend with bars.
     """
     dividends = special_dividends(live_session)
     spans = {
@@ -628,7 +651,8 @@ def test_daily_indicator_stamps(
     stamps elsewhere make the library refuse the values, and say which day each value really
     belongs to.
     """
-    start, end = recent_week[0].isoformat(), (recent_week[1] + timedelta(days=1)).isoformat()
+    # The wire client encodes a date parameter from a `date`, never from text.
+    start, end = recent_week[0], recent_week[1] + timedelta(days=1)
     found = 0
     paths = {"AAPL": ("stockTicker", "AAPL"), "X:BTCUSD": ("cryptoTicker", "X:BTCUSD")}
     for symbol, (name, ticker) in paths.items():
@@ -763,7 +787,7 @@ def _with_bars(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("53")
-@pytest.mark.requests(12)
+@pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_split_basis_before_and_on_the_split(
     live_session: dm.MassiveSession,
@@ -780,7 +804,9 @@ def test_split_basis_before_and_on_the_split(
     when, before the split, the as-traded close is the adjusted close times the ratio and the
     adjusted volume the as-traded volume times the ratio (within 1%), and both bases agree on the
     execution date: `adjusted` restates prices before a split by its ratio, as the library
-    documents. Skips when the year had no such split with bars.
+    documents. With Stocks on Basic only the newest such split is tried (`recent_splits` keeps
+    one), so the test sends at most 3 stock requests. Skips when the year had no such split
+    with bars.
     """
     splits = recent_splits(live_session)
     found = _with_bars(

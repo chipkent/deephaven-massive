@@ -12,7 +12,7 @@ from websockets.datastructures import Headers
 from websockets.exceptions import InvalidMessage, InvalidStatus, InvalidURI
 from websockets.http11 import Response
 
-from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
 from deephaven_massive._massive.spec.types import (
     Conversion,
     DriftReport,
@@ -24,7 +24,9 @@ from deephaven_massive._massive.spec.types import (
     WireUnit,
 )
 from deephaven_massive._massive.ws import protocol
+from deephaven_massive._massive.ws import protocol as protocol_module
 from deephaven_massive._massive.ws.protocol import (
+    DROPPED_ERROR_LIMIT,
     MAX_TOPICS_PER_FRAME,
     Data,
     FrameDecoder,
@@ -520,6 +522,24 @@ def test_a_frame_that_is_not_json_is_dropped_and_logged(
     assert decoder.decode("{oops") == []
     assert "not JSON" in caplog.text
     assert caplog.records[0].levelno == logging.ERROR
+    assert caplog.records[0].getMessage().endswith(LIBRARY_BUG_REPORT)
+
+
+def test_dropped_frames_log_a_bounded_number_of_errors(
+    decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    for _ in range(DROPPED_ERROR_LIMIT + 5):
+        assert decoder.decode("{oops") == []
+    ours = [r for r in caplog.records if r.name == protocol_module.__name__]
+    # The limit's ERRORs, one ERROR saying the rest are quieter, then DEBUG only.
+    assert [r.levelno for r in ours] == (
+        [logging.ERROR] * (DROPPED_ERROR_LIMIT + 1) + [logging.DEBUG] * 5
+    )
+    assert ours[DROPPED_ERROR_LIMIT].getMessage() == (
+        f"socket.massive.com/stocks: {DROPPED_ERROR_LIMIT} dropped frames or elements were "
+        "logged; further ones are logged at DEBUG"
+    )
 
 
 def test_an_element_without_ev_is_dropped_and_its_siblings_kept(
@@ -661,10 +681,11 @@ def test_a_wrapped_certificate_failure_is_fatal_too() -> None:
     assert "SSL_CERT_FILE" in error.message
 
 
-def test_an_unreadable_retry_after_is_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+def test_an_unreadable_retry_after_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
     assert _classify(_status_error(429, {"Retry-After": "soon"})) == 0.0
     [record] = caplog.records
-    assert record.levelno == logging.WARNING
+    assert record.levelno == logging.DEBUG
     assert record.getMessage() == (
         "ignoring a Retry-After that is neither seconds nor an HTTP date: 'soon'"
     )

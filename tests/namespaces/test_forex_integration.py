@@ -144,11 +144,12 @@ def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict
 
 @pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("37")
-@pytest.mark.requests(6)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -161,7 +162,8 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     together with the hour-bar rebuild: a source that stamps the bar of day D before 00:00 UTC
     of D (such as 21:00 or 22:00 UTC of D-1, the 17:00 New York open of D's trading day) is
     labelled D-1 by the library, a bug to fix by mapping that source's stamp to the day it
-    closes.
+    closes. With Currencies on Basic, which allows 5 requests a minute, it leaves out the
+    library's `previous_day_bar`, which reads the same `/prev` as the raw request.
     """
     prevs = rest_rows(_PREV, {"forexTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -190,8 +192,11 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
         f"grouped equal to /prev: {[_same(_ohlcv(b), _ohlcv(prev)) for b in grouped]}"
     )
     bars = live_session.forex.bars(_PAIR, dm.Timespan.DAY)
-    prev_bar = live_session.forex.previous_day_bar(_PAIR)
-    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
+    if "currencies" in classes_on_basic:
+        evidence("Currencies on Basic: the library's previous_day_bar is not read")
+    else:
+        prev_bar = live_session.forex.previous_day_bar(_PAIR)
+        evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
     evidence(
         "library history(REST): "
         f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
@@ -377,16 +382,16 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Whether a forex week bar covers the calendar week from Monday 00:00 UTC.
+    """Whether a forex week bar covers the calendar week from Sunday 00:00 UTC.
 
     For each raw week bar of `C:EURUSD` over the four weeks ending with the most recent week without
     a holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
     own; `MATCH` marks the bucket. Decides by comparison, not by an absolute tolerance: passes when,
-    for every bar of those weeks, the week from Monday 00:00 UTC, the calendar week the library
-    assumes, is the closest window, ties allowed; a failure names the bars whose closest window
-    starts elsewhere (such as Sunday 17:00 New York, the trading week's open), and the library's
-    forex week windows must start there. The last line shows which bars the library's `history()`
-    keeps.
+    for every bar of those weeks, the week from Sunday 00:00 UTC, where Massive stamps it and the
+    library starts its forex week, is the closest window, ties allowed (forex does not trade from
+    Friday evening to Sunday evening UTC, so every start in that gap ties); a failure names the
+    bars whose closest window starts elsewhere, and the library's forex week windows must start
+    there. The last line shows which bars the library's `history()` keeps.
     """
     lines, checked, misses = week_bar_report("forexTicker", _PAIR, "UTC")
     for line in lines:

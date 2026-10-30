@@ -84,8 +84,14 @@ def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession)
     query = filings.institutional_holdings(filer_cik="0001067983")
     assert dict(query._request.params) == {"filer_cik": "0001067983"}
     assert query._request.symbols is None
+    several = filings.institutional_holdings(filer_cik=["0001067983", "0000102909"])
+    assert dict(several._request.params) == {"filer_cik.any_of": ("0001067983", "0000102909")}
     with pytest.raises(TypeError, match="filer_cik must be a str"):
         filings.institutional_holdings(filer_cik=cast("Any", 1067983))
+    with pytest.raises(ValueError, match="filer_cik is empty; pass None for every filer"):
+        filings.institutional_holdings(filer_cik=[])
+    with pytest.raises(ValueError, match=r"^filer_cik_any_of is set through its own argument"):
+        filings.institutional_holdings(filters={"filer_cik_any_of": ["0001067983"]})
 
 
 @pytest.mark.parametrize(

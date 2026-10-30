@@ -110,7 +110,7 @@ def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     assert page.count("<a id=") == 1
     assert '<a id="snapshots"></a>\n\n## `m.snapshots`\n\n' in page
     # One dataset, so the note on unreadable symbols agrees with one.
-    assert "`m.snapshots` also has a `RawSymbol` String column" in page
+    assert "\n`m.snapshots` has a `RawSymbol` String column" in page
     assert "m.snapshots" not in rendered()["reference.md"]
 
 
@@ -474,13 +474,15 @@ CATALOG_INSERT = next(
 
 def test_the_rendered_stocks_page() -> None:
     page = render(_CATALOG, _PROVENANCE)["stocks.md"]
-    schema = {c.name: c for c in _CATALOG.dataset_schema(_STOCK_TRADES).columns}
+    columns = _CATALOG.dataset_schema(_STOCK_TRADES, raw_symbol=True).columns
+    schema = {c.name: c for c in columns}
     symbol = schema["Symbol"].description.replace("|", "\\|")
     stamp = schema["Timestamp"].description.replace("|", "\\|")
     # Only crypto trades fill `Received`, so the stocks dataset has no such column.
     assert "Received" not in schema
     day = schema["Date"].description
     insert = schema["TimestampInsert"].description
+    raw = schema["RawSymbol"].description
     every = "REST, flat files, WebSocket"
     head = (
         "| Column | Deephaven type | Description | Supplied by | REST field | Flat-file field "
@@ -498,10 +500,11 @@ def test_the_rendered_stocks_page() -> None:
 
 {_MERGE}
 
-In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), \
-`m.stocks.trades` also has a `RawSymbol` String column, which holds Massive's spelling of a \
-symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every \
-other row. The tables below show the default session, without it.
+`m.stocks.trades` has a `RawSymbol` String column, which holds Massive's spelling of a symbol \
+the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other \
+row. It is the one column whose presence depends on a setting: a session with \
+`unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on \
+such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="trades"></a>
 
@@ -514,6 +517,7 @@ Trades of stocks, tick by tick.
 | `Symbol` | String | {symbol} | {every} | request, `ticker` | `ticker` | `sym` |
 | `Date` | String | {day} | {every} |  |  |  |
 | `Timestamp` | Instant | {stamp} | {every} | `t` | `sip_timestamp` | `t` |
+| `RawSymbol` | String | {raw} | {every} | request, `ticker` | `ticker` | `sym` |
 {price}
 | `TimestampInsert` | Instant | {insert} | {every} |  |  |  |
 
@@ -552,7 +556,7 @@ def test_the_raw_symbol_note_names_the_datasets_that_read_their_symbol_from_rows
         source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
     )
     page = render(catalog, _PROVENANCE)["stocks.md"]
-    assert "`MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.stocks.trades` and `m.stocks.more_trades` also" in (
+    assert "\n`m.stocks.trades` and `m.stocks.more_trades` have a `RawSymbol` String column" in (
         page
     )
     assert page.count("`RawSymbol` String column") == 1
@@ -707,7 +711,7 @@ def test_the_column_report_reads_back_every_dataset_of_the_real_pages() -> None:
     # A first rendering names every dataset as new, with its whole column list.
     report = column_changes({}, pages)
     assert len(report) == len(CATALOG.by_name)
-    snapshots = CATALOG.dataset_schema(CATALOG.by_name["snapshots"])
+    snapshots = CATALOG.dataset_schema(CATALOG.by_name["snapshots"], raw_symbol=True)
     assert f"m.snapshots: new dataset with {len(snapshots.columns)} columns" in report
 
 

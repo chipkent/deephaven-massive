@@ -1,5 +1,6 @@
 """Tests for the canonical symbol grammar, its checks, and the converters."""
 
+import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
@@ -22,7 +23,7 @@ from deephaven_massive._datasets.symbols import (
     symbol_class,
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, UnknownSymbols
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -61,8 +62,6 @@ CANONICAL = [
     (FUT, "CL:BF Q6-U6-V6"),
     (FUT, "CL:BZ U6-V6"),
     (FUT, "6A:XF:AUDUSD:Q6"),
-    (FUT, "esz5"),  # a dataset takes any ticker as written; only the converters check forms
-    (FUT, "BOB 2-1 U6"),
     (IDX, "I:SPX"),
     (IDX, "I:AAVE10RP"),
     (IDX, "I:APy"),
@@ -108,6 +107,32 @@ NOT_CANONICAL = [
     (CRY, "X:"),
     (CRY, "x:BTCUSD"),
 ]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("esz5", r"^'esz5' is not a Massive futures ticker: a contract is upper-case letters"),
+        ("hello world", r"^'hello world' is not a Massive futures ticker: a contract is"),
+        ("BOB 2-1 U6", r"^'BOB 2-1 U6' is not a Massive futures ticker: a contract is"),
+        (" ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
+        ("X:ESZ5", "is a crypto ticker"),
+    ],
+)
+def test_the_general_converter_is_as_strict_for_futures_as_the_contract_one(
+    text: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message) as general:
+        dm.canonical_symbol(text, FUT)
+    with pytest.raises(ValueError, match=message) as contract:
+        dm.canonical_symbol_future(text)
+    assert str(general.value) == str(contract.value)
+
+
+def test_a_dataset_takes_futures_text_the_converters_refuse() -> None:
+    # A dataset takes any futures ticker as Massive writes it; only the converters check forms.
+    for text in ("esz5", "hello world", "BOB 2-1 U6"):
+        assert check_symbol(FUT, text) == text
 
 
 @pytest.mark.parametrize(("asset_class", "text"), CANONICAL)
@@ -518,9 +543,9 @@ def test_normalize_materializes_generators() -> None:
 def test_exhausted_generator_raises() -> None:
     items = (s for s in ["A"])
     list(items)
-    with pytest.raises(ValueError, match=r"^no symbols$"):
+    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
         normalize(STK, cast("Iterable[str]", items))
-    with pytest.raises(ValueError, match=r"^no symbols$"):
+    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
         normalize(STK, [])
 
 
@@ -573,10 +598,10 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
         assert canonical_from_wire(STK, bad, as_written=True) is None
         with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
             check_symbol(STK, bad, as_written=True)
-    reader = WireSymbols("partners.tmx.corporate_events", STK, UnknownSymbols.FAIL, as_written=True)
+    reader = WireSymbols("partners.tmx.corporate_events", STK, OnError.RAISE, as_written=True)
     read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]
-    assert read.unknown == (" x",)
+    assert read.unreadable == (" x",)
 
 
 CONVERTERS = [
@@ -626,3 +651,15 @@ def test_the_spread_converter_names_surrounding_whitespace() -> None:
         ValueError, match=r"^' GCQ6-GCZ6 ' has surrounding whitespace; write 'GCQ6-GCZ6'$"
     ):
         dm.canonical_symbol_future_spread(" GCQ6-GCZ6 ")
+
+
+def test_yahoo_forex_spelling_is_refused_with_massive_form() -> None:
+    message = (
+        "cannot read 'EURUSD=X' as a forex pair: it looks like Yahoo Finance's spelling; "
+        "Massive's forex tickers look like 'C:EURUSD', two three-letter currency codes after "
+        "C:, and this function reads 'EUR/USD', 'EUR-USD', or 'EURUSD'"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        dm.canonical_symbol_forex("EURUSD=X")
+    with pytest.raises(ValueError, match="Yahoo Finance"):
+        dm.canonical_symbol_forex("eurusd=x")

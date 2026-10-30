@@ -617,8 +617,8 @@ def dataset_schema(
         members: The datasets whose sources merge, in member order: the datasets of the
             dataset's kind (`Catalog.members`), or the dataset alone when it is in no kind.
         source: Returns the generated source of a transport and key.
-        raw_symbol: True for a session whose `unknown_symbols` is `WARN`, which keeps the text
-            of an unreadable symbol in `RawSymbol`.
+        raw_symbol: True for a session whose `unreadable_symbols` is `LOG` or `IGNORE`, which
+            keeps the text of an unreadable symbol in `RawSymbol`.
 
     Returns:
         The schema, named after the dataset.

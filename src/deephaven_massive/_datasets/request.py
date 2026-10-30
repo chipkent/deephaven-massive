@@ -29,11 +29,11 @@ if TYPE_CHECKING:
 __all__ = ["ParamValue", "Request", "StreamKey"]
 
 ParamValue: TypeAlias = (
-    "str | int | float | bool | date | datetime | StrEnum | tuple[str | date, ...]"
+    "str | int | float | bool | date | datetime | StrEnum | tuple[str | int | float | date, ...]"
 )
 """A normalized parameter or filter value (sequences become tuples). A sequence may hold dates
-for a list of dates (`date.any_of`); the filter check writes them as ISO-8601 text, so a
-`Request` stores lists of text."""
+for a list of dates (`date.any_of`) and numbers for a list of numbers (`strike_price.any_of`);
+the filter check writes each item as its text, so a `Request` stores lists of text."""
 
 StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols]"
 """The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
@@ -53,7 +53,9 @@ class Request:
         symbols: The normalized symbols, or None for datasets without instruments.
         timespan: The bar timespan (bars and indicators only).
         multiplier: The bar multiplier.
-        venue: The futures venue, which selects flat-file prefixes only.
+        venues: The futures venues whose flat-file prefixes `history()` reads, in
+            `FuturesVenue` order; None for a dataset without venues. They select flat-file
+            prefixes only, never a stream.
         adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
             parameter; None for datasets without one. Flat files hold only unadjusted bars.
             The REST transport sends it, when not None, as the `adjusted` query parameter;
@@ -73,7 +75,7 @@ class Request:
     symbols: NormalizedSymbols | None = None
     timespan: Timespan | None = None
     multiplier: int = 1
-    venue: FuturesVenue | None = None
+    venues: tuple[FuturesVenue, ...] | None = None
     adjusted: bool | None = None
     start: date | datetime | None = None
     end: date | datetime | None = None
@@ -99,7 +101,8 @@ class Request:
 
         Returns:
             Space-separated `name=value` pairs, such as `symbols=('AAPL', 'MSFT')`; `ALL`
-            renders as `ALL`, a symbol table as `<symbol table>`, enums by member name,
+            renders as `ALL`, a symbol table as `<symbol table>`, enums (also a tuple of
+            them, such as the futures `venues`) by member name,
             dates in ISO form, and parameters and filters as dictionaries.
         """
         parts = []
@@ -119,14 +122,15 @@ def _render(value: object) -> str:
     Returns:
         Its display form.
     """
-    if value is ALL:
-        return "ALL"
-    if isinstance(value, SymbolTable):
-        return "<symbol table>"
+    if value is ALL or isinstance(value, SymbolTable):
+        return "ALL" if value is ALL else "<symbol table>"
     if isinstance(value, Enum):
         return f"{type(value).__name__}.{value.name}"
     if isinstance(value, date):
         return value.isoformat()
-    if isinstance(value, tuple) and value and isinstance(value[0], tuple):
-        return "{" + ", ".join(f"{k!r}: {_render(v)}" for k, v in value) + "}"
+    if isinstance(value, tuple) and value:
+        if all(isinstance(item, Enum) for item in value):  # the futures venues
+            return "(" + ", ".join(_render(item) for item in value) + ")"
+        if isinstance(value[0], tuple):  # parameters and filters
+            return "{" + ", ".join(f"{k!r}: {_render(v)}" for k, v in value) + "}"
     return repr(value)

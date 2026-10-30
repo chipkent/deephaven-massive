@@ -19,8 +19,8 @@ the client ends its waits and nobody else's. No call modifies its arguments.
 **Logging.** Each attempt logs one DEBUG line on this module's logger: the full URL, the status,
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
 the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
-up at WARNING: the call that fails logs the one ERROR, so a failure shows once in the
-console. Nothing logs a header.
+up at DEBUG: the call that fails raises the error, which the library logs at the level its
+cause gives, so a failure shows once in the console. Nothing logs a header.
 
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
@@ -32,8 +32,6 @@ import logging
 import random
 import re
 from dataclasses import dataclass, replace
-from datetime import UTC
-from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from urllib.parse import urlsplit
@@ -42,6 +40,7 @@ import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.cancel import Cancel
+from deephaven_massive._massive.net.capture import capture_response
 from deephaven_massive._massive.net.errors import (
     WireError,
     is_proxy_auth_failure,
@@ -59,6 +58,7 @@ from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
+    http_date_seconds,
     retry_after_seconds,
     transient_wait,
 )
@@ -540,7 +540,7 @@ class RestClient:
                 if not isinstance(outcome, _Retryable):
                     return cast("Page", outcome)
                 if retry == MAX_RETRIES:
-                    _log.warning("%s; giving up after %d attempts", outcome.error, retry + 1)
+                    _log.debug("%s; giving up after %d attempts", outcome.error, retry + 1)
                     raise outcome.error
                 wait = transient_wait(retry, _JITTER.random())
                 _log.info(
@@ -630,7 +630,7 @@ class RestClient:
                 )
             # The call that fails logs the one error; this records which reply it was. Never the
             # body: it was not read, or not in full.
-            _log.warning("%s (HTTP %d); not retried", unreadable, response.status)
+            _log.debug("%s (HTTP %d); not retried", unreadable, response.status)
             # The status arrived whole, so the governor hears of it: a refusal pauses the bucket,
             # and any other status is an answer.
             if response.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -656,9 +656,10 @@ class RestClient:
         """Clean a body read in full, log the attempt, and turn it into what `_attempt` returns.
 
         The body is cleaned of the key once, here, before anything reads it, so no row, error,
-        or log line can quote it. A 200 is decoded into a page; any other status is logged at
-        DEBUG with its body, then a 429 goes to the governor as a refusal, and every other status
-        is reported answered.
+        or log line can quote it; the cleaned body, whatever its status, also goes to the
+        reply-capture sink when one is installed (`net.capture`). A 200 is decoded into a page;
+        any other status is logged at DEBUG with its body, then a 429 goes to the governor as a
+        refusal, and every other status is reported answered.
 
         Args:
             job: The call's path, bucket, and cancellation.
@@ -681,6 +682,9 @@ class RestClient:
             try:
                 page = decode_page(data, job.rest_path, request)
             except WireError as unreadable:
+                capture_response(
+                    host=self._host, target=request.target, status=200, request_id=None, body=data
+                )
                 # The attempt's line still names it, with the body the page could not be read
                 # from; the call that fails logs the error itself.
                 if _log.isEnabledFor(logging.DEBUG):
@@ -692,6 +696,13 @@ class RestClient:
                         body_excerpt(data),
                     )
                 raise
+            capture_response(
+                host=self._host,
+                target=request.target,
+                status=200,
+                request_id=page.request_id,
+                body=data,
+            )
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
                 self._base + request.target,
@@ -701,6 +712,13 @@ class RestClient:
             )
             return page
         failure = http_error(response.status, data, request)
+        capture_response(
+            host=self._host,
+            target=request.target,
+            status=response.status,
+            request_id=failure.request_id,
+            body=data,
+        )
         if _log.isEnabledFor(logging.DEBUG):
             # The whole body (up to 2,000 characters, already cleaned of the key), so the line
             # shows every word Massive or a proxy said; the error quotes only its message.
@@ -772,13 +790,14 @@ class RestClient:
 
         Returns:
             A `WireError` with the response's status that names the request and the reason,
-            never the body.
+            never the body, marked `unreadable`: the body arrived whole.
         """
         return WireError(
             f"GET {request.target}: the response from {self._host} {reason}",
             status=response.status,
             host=self._host,
             path=request.target,
+            unreadable=True,
         )
 
     def _permit(self, request: RequestTarget, admission: Admission, stop: Cancel) -> Permit:
@@ -883,7 +902,7 @@ class RestClient:
             response: The response, for its headers.
 
         The governor hears of the refusal even when the hook or the log raises (an interrupt
-        while the WARNING is written), so the bucket pauses and the permit is reported. The
+        while the record is written), so the bucket pauses and the permit is reported. The
         attempt is then made again once the governor allows; the next permit fails instead,
         with status 429, if the call's patience cannot cover the pause.
         """
@@ -903,7 +922,7 @@ class RestClient:
             failure: The 429's error.
             response: The response, for its `Date` and `Retry-After` headers.
         """
-        now = _http_time(response.headers.get("Date"))
+        now = http_date_seconds(response.headers.get("Date"))
         asked = retry_after_seconds(
             response.headers.get("Retry-After"), self._clock.time() if now is None else now
         )
@@ -931,23 +950,3 @@ def _never_sent(error: BaseException) -> bool:
         True when a connection could not be made, or the proxy or its tunnel failed.
     """
     return any(isinstance(item, _UNSENT) for item in linked_errors(error))
-
-
-def _http_time(value: str | None) -> float | None:
-    """Return the time an HTTP `Date` header names, or None when it is absent or unusable.
-
-    Args:
-        value: The header's text, such as `"Wed, 21 Oct 2026 07:28:00 GMT"`, or None.
-
-    Returns:
-        Seconds since the Unix epoch (a date without a zone is read as GMT), or None.
-    """
-    if value is None:
-        return None
-    try:
-        when = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return when.timestamp()

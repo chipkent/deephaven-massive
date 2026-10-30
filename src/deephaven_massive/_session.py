@@ -29,6 +29,7 @@ import itertools
 import logging
 import threading
 import weakref
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, Self, cast
 
 from deephaven.execution_context import get_exec_ctx
@@ -37,7 +38,7 @@ from deephaven.table import Table
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import MassiveError, raises_through
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
 from deephaven_massive._namespaces import (
     crypto,
@@ -74,7 +75,6 @@ from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from types import TracebackType
 
     from deephaven_massive._enums import Order
@@ -162,11 +162,11 @@ def _register(core: SessionCore) -> None:
         alive = [other for other in (ref() for ref in _open_sessions) if other is not None]
         _open_sessions[:] = [weakref.ref(other) for other in alive]
         _open_sessions.append(weakref.ref(core))
-        others = sorted(
+        others = [
             (other.label, other.config)
-            for other in alive
+            for other in alive  # in order of creation, so the oldest such session is named
             if other.config.api_key == core.config.api_key and not other.closed
-        )
+        ]
     for label, config in others:
         differ = [n for n in CONNECTION_SETTINGS if getattr(config, n) != getattr(core.config, n)]
         if differ:
@@ -362,6 +362,7 @@ class MassiveSession:
         """Partner datasets, by vendor: `benzinga`, `etf_global`, `tmx`, `fable`."""
         return self._partners
 
+    @raises_through(build_query, list_params)
     def snapshots(
         self,
         symbols: Symbols,
@@ -400,20 +401,34 @@ class MassiveSession:
             limit: The maximum total number of rows across pages; None for every row. The
                 page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"type": "options"}`.
+                as underscores. `type` is refused: every request sends tickers, and Massive
+                answers `type` beside tickers with HTTP 400; a ticker's prefix selects its class.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or an unknown filter raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            TypeError: If an argument has the wrong type: `symbols` not a `str`, a sequence of
+                `str`, or a table; `sort` not a `str`; `order` not a `dm.Order`; `limit` not an
+                `int`; or `filters` not a mapping.
+            ValueError: If `symbols` is None, `dm.ALL`, empty, or holds a ticker that is not
+                Massive's exact ticker; a table has no `Symbol` column; `limit` is not
+                positive; or a filter is not a parameter of the endpoint or its value does not
+                fit it; or `filters` holds `type`, which Massive refuses beside
+                tickers (each ticker's prefix selects its class).
         """
+        if isinstance(filters, Mapping) and "type" in filters:
+            logger.debug("snapshots: refused the type filter %r, sent beside tickers", filters)
+            raise ValueError(
+                "snapshots takes no type filter: Massive refuses type beside tickers, and each "
+                "ticker's prefix selects its class"
+            )
         query = build_query(
             self._core,
             snapshots.SNAPSHOTS,
             symbols=symbols,
             all_alternative=(
-                "a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
+                "use a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
                 "market"
             ),
             params=list_params(sort=sort, order=order),
@@ -422,6 +437,7 @@ class MassiveSession:
         )
         return cast("Query", query)
 
+    @raises_through(SessionCore.diagnostics_view)
     def connections(self) -> Table:
         """Return the live diagnostics table of connections and host decisions.
 
@@ -433,37 +449,69 @@ class MassiveSession:
         (`channel:field-`). A connection shared with another session of the same API key shows
         in both. Each call returns a new view, a live result like any other: while it is held it
         keeps the session running and current, and after `close()` it keeps showing the final
-        rows. After `close()` this raises `MassiveError` (see `SessionCore.diagnostics_view`).
+        rows.
 
         Returns:
-            A view of the `connections` table, keyed by `Transport`, `AssetClass`, and
-            `Family`; its columns are `CONNECTIONS` in `_tables/diagnostics.py`.
+            A live table keyed by `Transport`, `AssetClass`, and `Family`, with these columns:
+            `Transport` (String), `WebSocket` for a connection or `REST` for a host decision;
+            `AssetClass` (String); `Family` (String), `TICK` or `FMV`; `Host` (String), the
+            host chosen; `Path` (String), such as `/stocks`; `Recency` (String), `REALTIME`,
+            `DELAYED`, or `UNKNOWN`; `Evidence` (String), why the host was chosen; `State`
+            (String), `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT` (another
+            connection with the key holds the slot), `RECONNECTING`, `FAILED`, or `CLOSED`;
+            `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics` (int), the topics
+            wanted, acknowledged, awaiting acknowledgement, and never acknowledged after one
+            re-send; `BufferedRows` (long), rows received and not yet published; `Reconnects`
+            (int); `LastMessageAt`, `NextReconnectAt`, and `UpdatedAt` (Instant), when the last
+            frame arrived, when the next reconnect is due, and when the row was written;
+            `LastError` (String); and `SchemaDrift` (String), the fields frames had beyond the
+            documented schema (`channel:field+`) or lacked (`channel:field-`). How to read it:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
 
-        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
+        Raises:
+            MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
         return self._core.diagnostics_view(self._core.diagnostics.connections)
 
+    @raises_through(SessionCore.diagnostics_view)
     def streams(self) -> Table:
-        """Return the live diagnostics table of streams and `poll()` tables.
+        """Return the live diagnostics table of streams, `poll()` tables, and background reads.
 
-        One row per stream: dataset, symbols, `HeldResults`, deferred option contracts,
-        host, rows published, requests per poll cycle, state, error, and `SchemaDrift`: the
-        fields the stream's payloads had beyond the documented schema (`transport:field+`) or
-        lacked (`transport:field-`), shown apart from the error because drift is not a
-        failure. `Error` also shows warnings that do not stop a stream: the options cap's
-        deferral, and the wait for a WebSocket slot that another connection with the key (for
-        example from another process) holds. Each call returns a new view, a live result like
-        any other: while it is held it keeps the session running and current, and after
-        `close()` it keeps showing the final rows, `CLOSED` included.
+        One row per WebSocket stream, `poll()` table, and background read (`fetch(wait=False)` or
+        `history(..., wait=False)`), told apart by `Kind` (`stream`, `poll`, `read`): the dataset,
+        the query, symbols, `HeldResults`, deferred option contracts, host, rows published, requests
+        per poll cycle, `State`, error, and `SchemaDrift`. A stream or poll is `RUNNING`; a
+        background read is `LOADING` until its whole result lands in its table, then `DONE`, and
+        `FAILED` with the error when its download fails. `SchemaDrift` holds the fields the stream's
+        payloads had beyond the documented schema (`transport:field+`) or lacked
+        (`transport:field-`), shown apart from the error because drift is not a failure. `Error`
+        also shows warnings that do not stop a stream: the options cap's deferral, and the wait for
+        a WebSocket slot that another connection with the key (for example from another process)
+        holds. Each call returns a new view, a live result like any other: while it is held it keeps
+        the session running and current, and after `close()` it keeps showing the final rows,
+        `CLOSED` included.
 
         Returns:
-            A view of the `streams` table, keyed by `StreamId`; its columns are `STREAMS` in
-            `_tables/diagnostics.py`.
+            A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Dataset`
+            (String), such as `stocks.trades`; `Query` (String), the query that opened the
+            stream, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL',)>`, which tells
+            two streams of one dataset apart; `SymbolCount` (int), null for `dm.ALL`;
+            `Symbols` (String), a shortened list; `HeldResults` (int), the stream's tables the
+            library still holds; `Deferred` (int), options contracts held back by the
+            per-connection cap; `Transport` (String), `WebSocket` for a stream or `REST` for a
+            `poll()`; `Host` and `Path` (String); `RowsPublished` (long); `RequestsPerCycle`
+            (int), a `poll()` table's REST requests per cycle; `State` (String), `RUNNING`,
+            `FAILED`, `RELEASED`, or `CLOSED`; `Error` (String), why the stream failed, or a
+            warning that does not stop it; `CreatedAt` (Instant); and `SchemaDrift` (String),
+            the fields payloads had beyond the documented schema (`transport:field+`) or
+            lacked (`transport:field-`). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
 
-        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
+        Raises:
+            MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
         return self._core.diagnostics_view(self._core.diagnostics.streams)
 
+    @raises_through(SessionCore.diagnostics_view)
     def rate_limits(self) -> Table:
         """Return the live diagnostics table of REST rate limits, one row per subscription.
 
@@ -480,25 +528,34 @@ class MassiveSession:
         current, and after `close()` it keeps showing the final rows.
 
         Returns:
-            A view of the `rate_limits` table, keyed by `Bucket`; its columns are `RATE_LIMITS`
-            in `_tables/diagnostics.py`.
+            A live table keyed by `Bucket`, with these columns: `Bucket` (String), a
+            subscription (`stocks`, `options`, `indices`, `currencies`, `futures`) or `other`;
+            `State` (String), `READY`, `PACED`, or `PAUSED`; `RequestsPerMinute` (int), the
+            pace, null while unpaced; `LimitSource` (String), `DECLARED` or `LEARNED`, null while
+            unpaced; `InFlight`, `Waiting`, and `RecentRequests` (int), the requests sent and
+            unanswered, waiting for a slot or a pause's end, and sent within the last 61
+            seconds; `Attempts` and `Refusals` (long), every attempt (retries included) and
+            every HTTP 429 since this process's first session with the key; `PausedUntil`
+            (Instant), null without a pause; `LastRefusal` (String), the latest 429 with its
+            status, path, and request id; and `UpdatedAt` (Instant). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
 
-        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
+        Raises:
+            MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
         return self._core.diagnostics_view(self._core.diagnostics.rate_limits)
 
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
-        The library's hold on the table is released on the session's reaper thread, right
-        away; inside a console command, which holds the update graph's lock, it is released
-        once the command ends. The table keeps ticking only while something else holds it (a
-        derived table, an open UI panel); once nothing does, its stream unsubscribes, or its
-        poller stops. A table derived in the console is held only weakly by the console, so after
-        `del` it keeps its stream running until the JVM next collects it: usually seconds, but
-        unbounded on an idle heap; `close()` stops everything at once. Releasing a result twice
-        does nothing, and `release()` keeps working after `close()`. Static results (`fetch()`,
-        `history()`) are not tracked.
+        The library's hold on the table is released on the session's reaper thread, right away;
+        inside a console command, which holds the update graph's lock, it is released once the
+        command ends. The table keeps ticking only while something else holds it (a derived table,
+        an open UI panel); once nothing does, its stream unsubscribes, its poller stops, or its
+        background read (`wait=False`) stops downloading. A table derived in the console is held
+        only weakly by the console, so after `del` it keeps its stream running until the JVM next
+        collects it: usually seconds, but unbounded on an idle heap; `close()` stops everything at
+        once. Releasing a result twice does nothing, and `release()` keeps working after `close()`.
+        Static results (`fetch()`, `history()` with the default `wait=True`) are not tracked.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -510,8 +567,14 @@ class MassiveSession:
         if not isinstance(table, Table):
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
         if not self._core.results.release(table):
-            raise ValueError("table is not a live result of this session")
+            raise ValueError(
+                "table is not a live result of this session: release() takes a table that a "
+                "live verb (blink(), append_only(), ring(), last_by(), poll()) of this session "
+                "returned. A table derived from one stops with it once you delete it (del) and "
+                "nothing else holds it; a static fetch() or history() table has no stream to stop"
+            )
 
+    @raises_through(SessionCore.close, refuse_update_graph_thread)
     def close(self) -> None:
         """Stop every stream and poller of the session now, and fail every live table. Idempotent.
 
@@ -530,8 +593,11 @@ class MassiveSession:
         closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
         `connections()`, `streams()`, and `rate_limits()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
-        and `release()` keep working. On an
-        update-graph thread it raises `ValueError`, even when the session is already closed.
+        and `release()` keep working.
+
+        Raises:
+            ValueError: On a Deephaven update-graph thread, for example inside a table
+                listener, even when the session is already closed.
 
         Example:
             ::

@@ -25,7 +25,7 @@ from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import rename
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars, PollMode, Timespan
-from deephaven_massive._massive import Source, Transport, sources
+from deephaven_massive._massive import RestPath, Source, Transport, sources
 from deephaven_massive._session import CATALOG
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -445,6 +445,16 @@ def test_an_append_identity_is_never_empty_and_revisions_never_repeat_poll_keys(
     assert change(EXCHANGES, revision_keys=("Name",)).revision_keys == ("Name",)
 
 
+def test_rows_several_symbols_return_are_found_by_poll_keys() -> None:
+    # A row that answers several symbols' requests is kept once, by its poll keys, which
+    # must exist and never be null.
+    with pytest.raises(ValueError, match=r"reference.exchanges: a dataset whose symbols overlap"):
+        change(EXCHANGES, poll_keys=(), revision_keys=("Name",), symbols_overlap=True)
+    with pytest.raises(ValueError, match=r"symbols overlap cannot have nullable_poll_keys"):
+        change(EXCHANGES, nullable_poll_keys={"Id": "absent"}, symbols_overlap=True)
+    assert change(EXCHANGES, symbols_overlap=True).symbols_overlap
+
+
 def test_a_fanout_key_that_is_no_instrument_comes_from_the_rows() -> None:
     bad = SourceKeys(fanout=KeySpec("filer_cik", from_request=True, instrument=False))
     with pytest.raises(ValueError, match=r"no instrument keeps a column of the rows"):
@@ -719,7 +729,7 @@ def test_the_trades_pair_shares_its_columns_in_one_order_with_one_timestamp() ->
 
 
 def test_a_projected_member_renames_through_its_projection() -> None:
-    schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES)
+    schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES, raw_symbol=False)
     assert schema.column_names == ("Symbol", "Date", "Timestamp", "Value", "TimestampInsert")
     assert Catalog((INDEX_VALUES,)).problems() == ()
     # The forex last quote joins the quotes kind with `ask` and `bid` under the kind's names.
@@ -731,17 +741,17 @@ def test_a_projected_member_renames_through_its_projection() -> None:
 def test_keys_rename_to_symbol_timestamp_and_underlying() -> None:
     catalog = Catalog((CONTRACTS, RELATED, FUTURES_TRADES))
     assert catalog.problems() == ()
-    contracts = catalog.dataset_schema(CONTRACTS).column_names
+    contracts = catalog.dataset_schema(CONTRACTS, raw_symbol=False).column_names
     assert contracts[0] == "Symbol"
     assert "Underlying" in contracts
     assert {"Ticker", "UnderlyingTicker"}.isdisjoint(contracts)
     # The peer is the row's symbol, and the company asked about comes from the request.
-    assert catalog.dataset_schema(RELATED).column_names == (
+    assert catalog.dataset_schema(RELATED, raw_symbol=False).column_names == (
         "Symbol",
         "Underlying",
         "TimestampInsert",
     )
-    futures = catalog.dataset_schema(FUTURES_TRADES).column_names
+    futures = catalog.dataset_schema(FUTURES_TRADES, raw_symbol=False).column_names
     assert futures[:3] == ("Symbol", "Date", "Timestamp")
     assert "SessionEndDate" not in futures  # the session is the row's Date
 
@@ -1344,11 +1354,71 @@ def test_coverage_refuses_a_deferral_without_a_reason_or_an_issue(
 # --- Filters ---------------------------------------------------------------------------------
 
 
+INDICATOR = DatasetSpec(
+    name="indicators.sma",
+    summary="A dataset for the tests.",
+    fetch_path="/v1/indicators/sma/{stockTicker}",
+)
+OPTION_CONTRACTS = change(CONTRACTS, symbol_param=None)
+
+
 def test_sources_of_a_catalog_can_be_given() -> None:
     table: dict[str, Source] = {"/v3/reference/exchanges": sources(R)["/v3/reference/exchanges"]}
     given = Catalog((EXCHANGES,), source_tables=lambda t: table if t is R else {})
     assert given.problems() == ()
     assert given.source(R, "/v3/reference/exchanges") is table["/v3/reference/exchanges"]
+
+
+RATINGS = DatasetSpec(
+    name="partners.ratings",
+    summary="A dataset for the tests.",
+    fetch_path="/benzinga/v1/ratings",
+)
+
+
+def test_every_sort_default_massive_documents_passes_the_sort_check() -> None:
+    checked = 0
+    for spec in CATALOG.by_name.values():
+        for path in spec.rest_paths:
+            rest_path = sources(R)[path]
+            assert isinstance(rest_path, RestPath)
+            for param in rest_path.params:
+                if param.name == "sort" and isinstance(param.default, str):
+                    CATALOG.check_sort(spec, param.default, ordered=False)
+                    checked += 1
+    assert checked > 40
+
+
+@pytest.mark.parametrize(
+    ("spec", "sort", "ordered", "message"),
+    [
+        # An enum sort takes one of its listed fields.
+        (OPTION_CONTRACTS, "strike_price", True, None),
+        (
+            OPTION_CONTRACTS,
+            "strike",
+            False,
+            r"sort 'strike' is not a sort field of /v3/reference/options/contracts; it takes \[",
+        ),
+        # A text sort takes fields of the rows, each with an optional direction.
+        (RATINGS, "date.desc, ticker", False, None),
+        (RATINGS, "date", True, None),
+        (RATINGS, "dat.desc", False, r"sort part 'dat\.desc' names no field of"),
+        (RATINGS, "date,,ticker", False, r"sort part '' names no field of"),
+        (RATINGS, "date.desc", True, r"sort part 'date\.desc' has its own direction"),
+        # A dataset whose paths take no sort is left to build_query.
+        (INDICATOR, "anything", False, None),
+    ],
+)
+def test_sort_is_checked_against_the_sort_fields_of_each_path(
+    *, spec: DatasetSpec, sort: str, ordered: bool, message: str | None
+) -> None:
+    catalog = Catalog((spec,))
+    if message is None:
+        catalog.check_sort(spec, sort, ordered=ordered)
+    else:
+        with pytest.raises(ValueError, match=rf"^{spec.name}: {message}"):
+            catalog.check_sort(spec, sort, ordered=ordered)
 
 
 LIBRARY_NAME = re.compile(r"Timestamp(?:[A-Z][A-Za-z0-9]*)?")

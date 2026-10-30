@@ -21,8 +21,11 @@ everything else belongs here:
 - **Rows, rejects, and drift.** Rows go to the connection's flush thread (`Flusher`), which
   publishes them. A rejected row fails the streams that would have received it, its raw wire
   symbol mapped to the canonical one (`_datasets/wire_symbols.py`); a row with no symbol fails only
-  the channel's `dm.ALL` streams and is logged at ERROR. Drift is recorded on the connection's
-  `SchemaDrift` here and handed to the flush thread for the streams' rows.
+  the channel's `dm.ALL` streams and is logged at ERROR as a defect of the library, once per
+  spelling. A connection logs one WARNING per outage, and one when it goes silent during its
+  market's trading hours (`NO_FRAMES_WARNING`), each with its recovery at INFO. Drift is
+  recorded on the connection's `SchemaDrift` here and handed to the flush thread for the
+  streams' rows.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
   reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
@@ -68,7 +71,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
 from deephaven_massive._ingest.ws_connection import (
     OPTIONS_CAP,
@@ -77,10 +80,11 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionGroup,
     ConnectionStream,
 )
+from deephaven_massive._log_limits import mark_failure_logged
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, open_stream_tables
-from deephaven_massive._tables.watchlist import read_symbols
+from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -340,7 +344,8 @@ class WsConnections:
         symbols = request.symbol_key()
         if asset_class is AssetClass.CRYPTO:
             if isinstance(symbols, SymbolTable):
-                self.resolve_pairs(read_symbols(spec, symbols.table))
+                rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
+                self.resolve_pairs(read_symbols(rule, symbols.table).symbols)
             elif isinstance(symbols, tuple):
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
@@ -446,7 +451,7 @@ class WsConnections:
             plan = self._plans.get((spec, channel))
         if plan is None:
             built = ChannelPlan.build(
-                core.catalog, spec, channel, unknown_symbols=core.config.unknown_symbols
+                core.catalog, spec, channel, unreadable_symbols=core.config.unreadable_symbols
             )
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)
@@ -614,16 +619,19 @@ class WsConnections:
         """
         with self._lock:
             current = self._forget(stream_id)
-            touched = {connection} if current is None else {connection, current}
-            for each in touched:
-                each.cap_pending.pop(stream_id, None)
-                each.awaiting.discard(stream_id)
+        touched = {connection} if current is None else {connection, current}
         for each in touched:
             each.flusher.routes.remove(stream_id)
             each.post(each.check_idle)
 
     def _forget(self, stream_id: int) -> Connection | None:
         """Drop a stream's lease from the group; the group's lock is held. Idempotent.
+
+        The connection that held the lease also stops awaiting the stream and stops counting
+        its topics against the options cap, since a stream with no lease is never adopted.
+        This is what clears a successor when a verdict moved the stream and the old connection
+        failed before its hand-over ran: the failure fails the stream, the stream's shutdown
+        returns its lease here, and the hand-over then finds no stream to move.
 
         Args:
             stream_id: The stream; stream ids are unique in the process.
@@ -638,6 +646,7 @@ class WsConnections:
         del group.streams[stream_id]
         del group.owners[stream_id]
         self._mine.discard(stream_id)
+        current.stop_awaiting((stream_id,))
         current.give(self)
         return current
 
@@ -666,7 +675,9 @@ class WsConnections:
                 # A loop that has ended holds no stream any more (`Connection._on_state`).
                 connection.post(connection.release_stream, stream_id)
         except Exception:
-            logger.exception("%s: the shutdown of stream %d failed", self._label, stream_id)
+            logger.exception(
+                "%s: the shutdown of stream %d failed. %s", self._label, stream_id, LIBRARY_BUG
+            )
 
     def _symbols_changed(
         self, stream_id: int, added: frozenset[str], removed: frozenset[str]
@@ -675,7 +686,10 @@ class WsConnections:
 
         Runs on an update-graph thread (or the caller thread for the initial replay), with the
         update-graph lock held: it takes the group's lock only to find the connection, and
-        never blocks.
+        never blocks or raises. A futures change that finds the session closed, or the group
+        left by every session, after the connection was found is dropped and logged at DEBUG:
+        the close tears the stream down, so failing it from here would only blame its
+        watchlist.
 
         Args:
             stream_id: The stream.
@@ -687,7 +701,19 @@ class WsConnections:
         if connection is None:
             return
         if connection.asset_class is AssetClass.FUTURES and added:
-            self.futures_calendar().watch(added)
+            try:
+                calendar = self.futures_calendar()
+            except MassiveError as error:
+                logger.debug(
+                    "stream %d: a watchlist change (%d added, %d removed) was dropped; the "
+                    "session is closing (%s)",
+                    stream_id,
+                    len(added),
+                    len(removed),
+                    error,
+                )
+                return
+            calendar.watch(added)
         if connection.asset_class is not AssetClass.CRYPTO:
             connection.post(connection.change_symbols, stream_id, added, removed)
             return
@@ -715,8 +741,13 @@ class WsConnections:
         except MassiveError as error:
             failure: MassiveError | None = error
         except Exception as error:  # a defect: logged with its trace, and it fails the stream
-            logger.exception("%s: looking up crypto pairs failed", self._label)
-            failure = MassiveError(f"looking up the crypto pairs {sorted(added)} failed: {error!r}")
+            failure = MassiveError(
+                library_bug(f"looking up the crypto pairs {sorted(added)} failed: {error!r}"),
+                cause=ErrorCause.LIBRARY_DEFECT,
+            )
+            # Logged here, with the trace; the stream's failure then logs it at DEBUG only.
+            mark_failure_logged(failure)
+            logger.exception("%s: %s", self._label, failure)
         else:
             failure = None
         with self._lock:
@@ -756,6 +787,7 @@ class WsConnections:
                     f"cannot stream {symbol!r}: {error}",
                     status=error.status,
                     request_id=error.request_id,
+                    cause=error.cause,
                 ) from error
             with self._lock:
                 self.group.pairs[symbol] = pair
@@ -875,8 +907,6 @@ class WsConnections:
         """
         group = self.group
         mine = [(s, cast("Connection", self._forget(s))) for s in sorted(self._mine)]
-        for stream_id, connection in mine:
-            connection.cap_pending.pop(stream_id, None)
         closing = []
         for connection in {*group.connections.values(), *(c for _, c in mine)}:
             if self not in connection.users:
