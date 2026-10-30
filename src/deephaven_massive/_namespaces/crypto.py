@@ -325,8 +325,10 @@ class _Crypto(Namespace):
         keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last
         trade when it is new, so a trade between two cycles is never seen (`trades()` streams
         every one). Some plans lack the endpoint (HTTP 403 raises `EntitlementError`);
-        `snapshots(symbols)` carries each pair's last trade on every plan. A pair with no trade
-        (HTTP 404) is left out, with a WARNING.
+        `snapshots(symbols)` also carries each pair's last trade, on a plan that includes
+        snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A pair with no trade (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
         since the endpoint takes one pair per request: use `m.crypto.snapshots(dm.ALL).fetch()`.
@@ -416,7 +418,7 @@ class _Crypto(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
@@ -424,7 +426,7 @@ class _Crypto(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery: ...
@@ -432,7 +434,7 @@ class _Crypto(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery:
@@ -443,8 +445,9 @@ class _Crypto(Namespace):
         carries its window, from `TimestampStart` to the exclusive `TimestampEnd`, its trading
         day `Date` (ISO `yyyy-MM-dd` text, the UTC day), and `TimestampInsert`, when the library
         received it. `TimestampEnd` is the first instant at which the bar is complete, so join
-        on it (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed
-        bars; an intraday bar ends its length after its start, and a bar of a day or longer at
+        on it (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table`
+        is a table a verb such as `history()` returned) to attach only closed bars; an intraday
+        bar ends its length after its start, and a bar of a day or longer at
         00:00 UTC after its window's last day. `Date` is null for a bar that spans more than one
         UTC date.
 
@@ -493,7 +496,7 @@ class _Crypto(Namespace):
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
-            timespan: The unit of the bar window, a `dm.Timespan`; `MINUTE` by default.
+            timespan: The unit of the bar window, a `dm.Timespan`; required, with no default.
                 `Timespan.SESSION` is for futures only.
             multiplier: How many `timespan` units one bar spans, a positive integer; 1 by
                 default. Only 1 streams.
@@ -515,7 +518,7 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                live = m.crypto.bars("X:BTCUSD").last_by()  # 1-minute bars
+                live = m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()
                 hourly = m.crypto.bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=4).history(
                     "2026-01-01", "2026-01-07"
                 )
@@ -728,8 +731,9 @@ class _Crypto(Namespace):
         Each row is one pair on one day: its open and close prices, and the first and last
         trades of the day (`OpenTrades` and `ClosingTrades`, JSON text). The crypto day runs
         from midnight to midnight UTC, which is the row's `TimestampStart` to `TimestampEnd`;
-        a row Massive marks as not UTC (`IsUtc` false) fails the call with `MassiveError`,
-        since its day would cover other hours.
+        a row Massive marks as not UTC (`IsUtc` false) is served with that UTC window too, and
+        logs one WARNING per session: Massive cut its day elsewhere, so its dates may not line
+        up with the other crypto tables'.
 
         Transports: REST, `/v1/open-close/crypto/{from}/{to}/{date}`, one request per pair.
         `fetch()` returns one row per pair and `poll(interval)` repeats the requests, keyed
@@ -759,13 +763,13 @@ class _Crypto(Namespace):
             The query. No request is made until a verb is called.
 
         Raises:
-            TypeError: For `symbols` of another type than a string, a sequence of strings, a table,
-                or `dm.ALL`, or a `date` that is not a `str`, `date`, or `datetime`.
-            ValueError: For `dm.ALL`, a symbol that is not Massive's `X:` crypto ticker, or that
-                carries another class's prefix, an empty sequence or exhausted generator, or a table
-                without a `Symbol` column, or a `date` that is not ISO-8601 text or is a time
-                without a timezone. Also for `symbols` of None, with a message that names the forms
-                it takes.
+            TypeError: For a `date` of none of the `DateLike` types, or `symbols` of an
+                unsupported type.
+            ValueError: For `dm.ALL`, a `datetime` or other time as `date`, text that is neither
+                an ISO-8601 date nor Deephaven date text, a symbol that is not Massive's `X:`
+                crypto ticker or that carries another class's prefix, an empty sequence or
+                exhausted generator, or a table without a `Symbol` column. Also for `symbols` of
+                None, with a message that names the forms it takes.
 
         Example:
             ::

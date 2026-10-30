@@ -105,7 +105,7 @@ def test_trades_and_quotes_stream_and_have_history(massive_session: dm.MassiveSe
         two = factory("ESZ5", venues={dm.FuturesVenue.COMEX, dm.FuturesVenue.CBOT})
         assert request(two).venues == (dm.FuturesVenue.CBOT, dm.FuturesVenue.COMEX)
         assert request(factory(dm.ALL)).symbols is dm.ALL
-        assert "venues=(FuturesVenue.CME)" in repr(cme)
+        assert "venues={dm.FuturesVenue.CME}" in repr(cme)
 
 
 _PLAIN = cast("Any", "text")
@@ -117,7 +117,7 @@ _PLAIN = cast("Any", "text")
         (lambda f: f.trades("ESZ5", venues=_PLAIN), "venues must be a set of dm.FuturesVenue"),
         (lambda f: f.quotes("ESZ5", venues={_PLAIN}), "venues must hold only dm.FuturesVenue"),
         (
-            lambda f: f.bars("ESZ5", venues=dm.FuturesVenue.CME),
+            lambda f: f.bars("ESZ5", dm.Timespan.MINUTE, venues=dm.FuturesVenue.CME),
             "venues must be a set of dm.FuturesVenue, such as",
         ),
         (lambda f: f.bars("ESZ5", _PLAIN), "timespan must be dm.Timespan"),
@@ -172,13 +172,13 @@ def test_bars_pick_their_class_from_the_timespan(
     assert request(q).multiplier == multiplier
 
 
-def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.futures.bars(dm.ALL, venues={dm.FuturesVenue.NYMEX})
+def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSession) -> None:
+    q = massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues={dm.FuturesVenue.NYMEX})
     assert type(q) is StreamHistoryQuery
     assert request(q).timespan is dm.Timespan.MINUTE
     assert request(q).venues == (dm.FuturesVenue.NYMEX,)
     with pytest.raises(ValueError, match="venues is empty; leave it out to read every venue"):
-        massive_session.futures.bars(dm.ALL, venues=frozenset())
+        massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues=frozenset())
 
 
 def test_bars_reject_the_day_timespan(massive_session: dm.MassiveSession) -> None:
@@ -223,6 +223,28 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
         massive_session.futures.contracts(sort=cast("str", 1))
 
 
+def test_contracts_take_symbols_and_a_day(massive_session: dm.MassiveSession) -> None:
+    contracts = massive_session.futures.contracts
+    q = contracts(["ESZ5", "NQZ5"], as_of="2025-06-02")
+    assert request(q).symbols == ("ESZ5", "NQZ5")
+    assert request(q).params == (("date", date(2025, 6, 2)),)
+    with pytest.raises(ValueError, match=r"does not accept dm\.ALL; leave symbols out"):
+        contracts(dm.ALL)
+    with pytest.raises(ValueError, match="ticker_any_of is set through symbols=, not filters"):
+        contracts(filters={"ticker_any_of": ["ESZ5"]})
+    with pytest.raises(ValueError, match="date is set through its own argument, as_of="):
+        contracts(filters={"date": "2025-06-02"})
+    with pytest.raises(ValueError, match="as_of"):
+        contracts(as_of=datetime(2025, 6, 2, 12, tzinfo=UTC))
+
+
+def test_products_take_a_day(massive_session: dm.MassiveSession) -> None:
+    q = massive_session.futures.products(as_of=date(2025, 6, 2))
+    assert request(q).params == (("date", date(2025, 6, 2)),)
+    with pytest.raises(ValueError, match="date is set through its own argument, as_of="):
+        massive_session.futures.products(filters={"date": "2025-06-02"})
+
+
 def test_products(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.products(
         product_code="GC", sort="name", limit=5, filters={"sector": "precious"}
@@ -240,7 +262,7 @@ def test_exchanges(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.exchanges()
     assert type(q) is Query
     assert request(q) == type(request(q))()
-    assert repr(q) == "<Query futures.exchanges>"
+    assert repr(q) == "m.futures.exchanges()"
     assert request(massive_session.futures.exchanges(limit=2)).limit == 2
 
 
@@ -407,9 +429,20 @@ def test_snapshots_name_the_contract_symbol_and_have_no_single_time() -> None:
     assert {"LastTradePrice", "LastQuoteBid", "SessionSettlementPrice"} <= set(schema.column_names)
 
 
-@pytest.mark.parametrize(
-    "name", ["contracts", "products", "exchanges", "market_status", "schedules"]
-)
+def test_contracts_name_the_contract_symbol_from_the_row() -> None:
+    spec = _spec("contracts")
+    assert CATALOG.takes_symbols(spec)
+    assert spec.keys[(Transport.REST, "/futures/v1/contracts")].declared() == (
+        ("symbol", KeySpec("Ticker")),
+    )
+    assert (spec.symbol_param, spec.symbols_per_request) == ("ticker.any_of", 250)
+    schema = CATALOG.dataset_schema(spec)
+    assert schema.column_names[:2] == ("Symbol", "RawSymbol")
+    assert "Ticker" not in schema.column_names
+    assert spec.poll_keys == ("Symbol", "Date")
+
+
+@pytest.mark.parametrize("name", ["products", "exchanges", "market_status", "schedules"])
 def test_reference_datasets_take_no_symbols(name: str) -> None:
     spec = _spec(name)
     assert not CATALOG.takes_symbols(spec)
@@ -501,7 +534,8 @@ def test_flat_file_fixtures_are_shaped_by_their_prefix(load_fixture: Loader, nam
     text = load_fixture(OWNER, f"{name}.csv").decode()
     header = next(csv.reader(io.StringIO(text)))
     generated = source(Transport.FLAT_FILES, f"us_futures_{{venue}}/{name}")
-    assert header == [f.wire_key for f in generated.fields]
+    # The reader matches headers by name; the generated order puts the prices first.
+    assert sorted(header) == sorted(f.wire_key for f in generated.fields)
 
 
 # End to end: each dataset through the fake REST server, WebSocket server, and S3 bucket.
@@ -738,11 +772,39 @@ def test_contracts_over_rest(
             {"product_code": ["ES"], "active": ["true"], "limit": ["5"]},
         )
     ]
-    assert [(r["Ticker"], r["ProductCode"], r["Active"], r["LastTradeDate"]) for r in out] == [
+    assert [(r["Symbol"], r["ProductCode"], r["Active"], r["LastTradeDate"]) for r in out] == [
         ("ESZ6", "ES", True, "2026-12-18")
     ]
     assert out[0]["TradeTickSize"] == 0.25
-    assert "Symbol" not in out[0]
+    assert out[0]["RawSymbol"] is None
+    assert "Ticker" not in out[0]
+
+
+def test_contract_symbols_and_day_go_on_the_wire(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    serve: Callable[[str, str], None],
+) -> None:
+    serve("/futures/v1/contracts", "contracts.json")
+    rest_session.futures.contracts(["NQZ6", "ESZ6"], as_of="2026-10-07").fetch()
+    assert sent(fake_rest) == [
+        (
+            "/futures/v1/contracts",
+            {"ticker.any_of": ["ESZ6,NQZ6"], "date": ["2026-10-07"], "limit": ["1000"]},
+        )
+    ]
+
+
+def test_a_long_contract_list_is_split_into_requests(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/futures/v1/contracts", Reply({"status": "OK", "results": []}))
+    # 360 contracts: three products, twelve months, ten years.
+    tickers = [f"{p}{m}{y}" for p in ("ES", "NQ", "GC") for y in range(10) for m in "FGHJKMNQUVXZ"]
+    rest_session.futures.contracts(tickers).fetch()
+    sizes = sorted(len(query["ticker.any_of"][0].split(",")) for _, query in sent(fake_rest))
+    assert sizes == [110, 250]
 
 
 def test_several_product_codes_go_in_one_request(
@@ -930,7 +992,7 @@ def at_ms(millis: int) -> datetime:
         (lambda f: f.trades("ESZ4"), "T.ESZ4", 0),
         (lambda f: f.quotes("ESZ4"), "Q.ESZ4", 1),
         (lambda f: f.bars("6CH5", dm.Timespan.SECOND), "A.6CH5", 2),
-        (lambda f: f.bars("6CH5"), "AM.6CH5", 3),
+        (lambda f: f.bars("6CH5", dm.Timespan.MINUTE), "AM.6CH5", 3),
     ],
     ids=["trades", "quotes", "second-bars", "minute-bars"],
 )
@@ -983,6 +1045,29 @@ def test_one_frame_lands_in_blink(
     ws_session.session.release(live)
 
 
+def test_a_contracts_table_feeds_a_stream(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    ws_session: WsSession,
+    load_fixture: Loader,
+    dh_exec_ctx: object,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    # A contracts table's `Symbol` is the contract, so a part of it is a stream's symbol table.
+    listed = [{"ticker": "ESZ4", "product_code": "ES"}, {"ticker": "ESH5", "product_code": "ES"}]
+    fake_rest.reply("/futures/v1/contracts", Reply({"status": "OK", "results": listed}))
+    contracts = rest_session.futures.contracts(product_code="ES").fetch()
+    ws_session.rows.update(SCHEDULE_ROWS)
+    live = ws_session.session.futures.trades(contracts.head(1)).last_by()
+    assert ws_session.connections.futures_calendar().wait_idle(15.0)
+    ws_session.subscribed("T.ESZ4")
+    ws_session.publish(json.loads(load_fixture(OWNER, "ws_frames.json"))[0])
+    (row,) = rows_when(live, lambda arrived: len(arrived) == 1)
+    assert (row["Symbol"], row["Price"]) == ("ESZ4", 6064.5)
+    ws_session.session.release(live)
+
+
 # Flat files: one block of one venue's file per prefix, read back through history().
 
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
@@ -1007,7 +1092,11 @@ CME = dm.FuturesVenue.CME
     [
         (lambda f: f.trades("ESZ4", venues={CME}), "trades_v1", date(2024, 12, 17)),
         (lambda f: f.quotes("GCJ5", venues={CME}), "quotes_v1", date(2024, 12, 17)),
-        (lambda f: f.bars("GCJ5", venues={CME}), "minute_aggs_v1", date(2025, 2, 4)),
+        (
+            lambda f: f.bars("GCJ5", dm.Timespan.MINUTE, venues={CME}),
+            "minute_aggs_v1",
+            date(2025, 2, 4),
+        ),
         (
             lambda f: f.bars("GCJ5", dm.Timespan.SESSION, venues={CME}),
             "session_aggs_v1",

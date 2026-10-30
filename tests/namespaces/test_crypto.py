@@ -189,11 +189,11 @@ def test_trades_schema() -> None:
         ("Symbol", "String"),
         ("Date", "String"),
         ("Timestamp", "Instant"),
+        ("Price", "double"),
+        ("Size", "double"),
         ("Conditions", "long[]"),
         ("Exchange", "long"),
         ("Id", "String"),
-        ("Price", "double"),
-        ("Size", "double"),
         ("ReceivedTimestamp", "Instant"),
         ("TimestampInsert", "Instant"),
     ]
@@ -232,13 +232,13 @@ def test_bars_schema() -> None:
         ("Date", "String"),
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
-        ("Volume", "double"),
         ("Open", "double"),
-        ("Close", "double"),
         ("High", "double"),
         ("Low", "double"),
-        ("Transactions", "long"),
+        ("Close", "double"),
+        ("Volume", "double"),
         ("Vwap", "double"),
+        ("Transactions", "long"),
         ("AverageTradeSize", "long"),
         ("TimestampInsert", "Instant"),
     ]
@@ -277,10 +277,10 @@ def test_daily_open_close_schema() -> None:
         ("Date", "String"),
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
+        ("Open", "double"),
         ("Close", "double"),
         ("ClosingTrades", "String"),
         ("IsUtc", "boolean"),
-        ("Open", "double"),
         ("OpenTrades", "String"),
         ("TimestampInsert", "Instant"),
     ]
@@ -353,7 +353,7 @@ def test_bars_pick_their_class(
 
 
 def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.bars(dm.ALL)
+    q = massive_session.crypto.bars(dm.ALL, dm.Timespan.MINUTE)
     assert type(q) is StreamHistoryQuery
     request = request_of(q)
     # Crypto has no corporate actions: bars carry no adjustment choice.
@@ -448,7 +448,7 @@ def exhausted() -> Iterator[str]:
     [
         lambda c: c.trades(exhausted()),
         lambda c: c.quotes([]),
-        lambda c: c.bars(exhausted()),
+        lambda c: c.bars(exhausted(), dm.Timespan.MINUTE),
         lambda c: c.fmv(exhausted()),
         lambda c: c.snapshots(exhausted()),
         lambda c: c.daily_open_close(exhausted(), "2026-01-02"),
@@ -504,7 +504,9 @@ def test_rest_history_needs_explicit_symbols(massive_session: dm.MassiveSession)
     with pytest.raises(ValueError, match=r"crypto\.trades history over REST needs explicit"):
         massive_session.crypto.trades(dm.ALL).history("2026-01-02", "2026-01-02", source=rest)
     with pytest.raises(ValueError, match=r"crypto\.bars history over REST needs explicit"):
-        massive_session.crypto.bars(dm.ALL).history("2026-01-02", "2026-01-02", source=rest)
+        massive_session.crypto.bars(dm.ALL, dm.Timespan.MINUTE).history(
+            "2026-01-02", "2026-01-02", source=rest
+        )
 
 
 def test_flat_file_history_states_its_constraints(massive_session: dm.MassiveSession) -> None:
@@ -579,7 +581,8 @@ def test_flat_file_fixtures_have_the_generated_header(
 ) -> None:
     reader = csv.reader(io.StringIO(load_fixture(OWNER, name).decode()))
     header = next(reader)
-    assert header == [f.wire_key for f in source(F, prefix).fields]
+    # The reader matches headers by name; the generated order puts the prices first.
+    assert sorted(header) == sorted(f.wire_key for f in source(F, prefix).fields)
     assert all(len(row) == len(header) for row in reader)
 
 
@@ -860,20 +863,32 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
     assert json.loads(row["OpenTrades"])[0]["i"] == "511235746"
 
 
-def test_a_day_summary_not_in_utc_fails(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+def test_a_day_summary_not_in_utc_is_served_with_one_warning(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Its day would not be the UTC day the window is filled with, so its end could be early.
+    # Massive cut its day elsewhere than UTC midnight: the row is served with the UTC day's
+    # window, and the session warns once that its dates may not line up with other tables.
+    caplog.set_level(logging.WARNING)
     path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
     body = json.loads(load_fixture(OWNER, "open_close.json"))
     serve(fake_rest, path, json.dumps({**body, "isUTC": False}).encode())
     serve_pairs(fake_rest)
     q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^crypto\.daily_open_close: Massive sent a day summary with isUTC false",
-    ):
-        q.fetch()
+    [row] = rows(q.fetch())
+    assert (row["Date"], row["IsUtc"]) == ("2020-10-09", False)
+    rows(q.fetch())  # a second read logs nothing more
+    day = int(datetime(2020, 10, 9, tzinfo=UTC).timestamp()) * NS
+    assert (row["TimestampStart"], row["TimestampEnd"]) == (day, day + 86_400 * NS)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    [warning] = [w for w in warnings if "isUTC false" in w]
+    assert warning.startswith(
+        "crypto.daily_open_close: Massive sent a day summary with isUTC false, so its day "
+        "boundary is not the UTC midnight the other crypto tables use"
+    )
 
 
 # --- End to end: WebSocket -----------------------------------------------------------------------
@@ -937,6 +952,8 @@ def test_a_documented_frame_lands_in_blink(
     namespace = ws_session.session.crypto
     if dataset == "bars_second":
         query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.SECOND))
+    elif dataset == "bars":
+        query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.MINUTE))
     else:
         query = getattr(namespace, dataset)(symbol)
     blink = query.blink()
@@ -993,7 +1010,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             ],
         ),
         (
-            lambda c: c.bars("X:BTCUSD"),
+            lambda c: c.bars("X:BTCUSD", dm.Timespan.MINUTE),
             "global_crypto/minute_aggs_v1",
             [
                 ("X:BTCUSD", 1679961600000000000, 27139.64),

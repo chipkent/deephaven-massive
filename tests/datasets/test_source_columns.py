@@ -71,8 +71,7 @@ def test_rename_renames_only_the_declared_keys() -> None:
     )
     columns = rename(quotes, source(*nbbo))
     names = [c.column for c in columns]
-    assert names[0] == "Symbol"
-    assert "Timestamp" in names
+    assert {"Symbol", "Timestamp"} <= set(names)
     assert {"Ticker", "SipTimestamp"}.isdisjoint(names)
     assert "ParticipantTimestamp" in names  # every other field keeps its generated column
     time = next(c for c in columns if c.column == "Timestamp")
@@ -171,12 +170,12 @@ def test_a_projection_keeps_and_names_the_member_fields() -> None:
     )
     names = [c.column for c in rename(forex, source(*last_quote))]
     # The forex last quote's `ask` and `bid` join the quotes kind as AskPrice and BidPrice.
-    assert names == ["Symbol", "AskPrice", "BidPrice", "Exchange", "Timestamp"]
+    assert names == ["Symbol", "BidPrice", "AskPrice", "Exchange", "Timestamp"]
     # Outside the kind, the same source keeps its own names.
     alone = spec("forex.last", {last_quote: SourceKeys()}, asset_class=AssetClass.FOREX)
     assert [c.column for c in rename(alone, source(*last_quote))] == [
-        "Ask",
         "Bid",
+        "Ask",
         "Exchange",
         "Timestamp",
     ]
@@ -384,4 +383,6 @@ def test_a_fanout_key_from_the_request_precedes_the_fields() -> None:
         asset_class=AssetClass.STOCKS,
     )
     names = [c.column for c in rename(fanout, source(*trades))]
-    assert names[:2] == ["Underlying", "Symbol"]
+    # The request's key comes first; the row's own keys keep their generated places.
+    assert names[0] == "Underlying"
+    assert "Symbol" in names

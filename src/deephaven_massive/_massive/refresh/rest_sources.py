@@ -23,7 +23,8 @@ the envelope keys (`spec.types.ENVELOPE_KEYS`) are left out of its fields. Withi
 `$ref` is resolved, `allOf` is merged, a `oneOf` or `anyOf` with one branch is that branch
 (`openapi`), and nested objects are flattened into dotted wire keys (`day.c`), in the order
 the served document lists them (which is the vendor's documented order; Massive serves every
-object's keys alphabetically, and the snapshot never re-sorts them). Each leaf keeps the
+object's keys alphabetically, and the snapshot never re-sorts them), and then in lead order
+(`naming.lead_order`): each object's price, size, and bar fields first. Each leaf keeps the
 description of every object it was flattened out of (`fields.RawField.notes`), so its
 column's description carries the object's notes.
 
@@ -198,7 +199,10 @@ class _PathGenerator(SourceFields):
         result_key, rows = self.rows(operation)
         if rows is None:
             return None
-        fields = [f for raw in rows if (f := self.field(raw)) is not None]
+        fields = naming.lead_order(
+            [f for raw in rows if (f := self.field(raw)) is not None],
+            lambda f: self.concepts[f.column],
+        )
         self.check_columns(fields)
         params = self.parameters(operation)
         self.check_example(result_key, fields)

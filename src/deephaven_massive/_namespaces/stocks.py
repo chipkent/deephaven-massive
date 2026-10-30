@@ -459,8 +459,10 @@ class _Stocks(Namespace):
         per symbol; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
         `mode=dm.PollMode.APPEND` appends each cycle's last trade when it is new, so a trade between
         two cycles is never seen (`trades()` streams every one). Some plans lack the endpoint (HTTP
-        403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's last trade on
-        every plan. A symbol with no trade (HTTP 404) is left out, with a WARNING.
+        403 raises `EntitlementError`); `snapshots(symbols)` also carries each ticker's last
+        trade, on a plan that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A symbol with no trade (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
         since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
@@ -544,8 +546,10 @@ class _Stocks(Namespace):
         `poll()`, one request per symbol; `poll()` replaces the table each cycle, keyed by `Symbol`,
         and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so
         a quote between two cycles is never seen (`quotes()` streams every one). Some plans lack the
-        endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's
-        last quote on every plan. A symbol with no quote (HTTP 404) is left out, with a WARNING.
+        endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` also carries each
+        ticker's last quote, on a plan that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A symbol with no quote (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
         since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
@@ -583,7 +587,7 @@ class _Stocks(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
         adjusted: bool = True,
@@ -592,7 +596,7 @@ class _Stocks(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -601,7 +605,7 @@ class _Stocks(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -621,7 +625,8 @@ class _Stocks(Namespace):
         (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), one request per day.
 
         `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only bars whose
+        (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table` is a
+        table a verb such as `history()` returned) to attach only bars whose
         window had closed; it is not when Massive published the bar. An intraday bar ends
         its length after its start. A bar of a day or longer runs from 00:00 New York time
         of its window's first day to 00:00 after its last, whatever the source: the range
@@ -664,8 +669,8 @@ class _Stocks(Namespace):
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (streams follow its rows), or `dm.ALL`.
-            timespan: The bar unit, a `dm.Timespan` other than `SESSION`; defaults to
-                `MINUTE`.
+            timespan: The bar unit, a `dm.Timespan` other than `SESSION`; required, with no
+                default. `SECOND` and `MINUTE` stream; every other unit is history only.
             multiplier: The number of `timespan` units per bar, a positive `int`; defaults to
                 1. Only 1 streams.
             adjusted: True (the default) for bars adjusted for splits, from REST only; False
@@ -686,7 +691,7 @@ class _Stocks(Namespace):
         Example:
             ::
 
-                live = m.stocks.bars(["AAPL"]).append_only()  # one-minute bars, streamed
+                live = m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()  # streamed
                 daily = m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
                 hourly = m.stocks.bars("SPY", dm.Timespan.HOUR, multiplier=4).history(
                     "2025-01-01", "2025-03-31"
@@ -876,7 +881,8 @@ class _Stocks(Namespace):
         where the plan includes it. Served by REST
         (`/v2/snapshot/locale/us/markets/stocks/tickers`) through `fetch()` and `poll()`, one
         request for every symbol; `poll()` replaces the table each cycle, keyed by `Symbol`.
-        `snapshots(symbols).poll(n)` is the way to get current state on every plan.
+        Snapshots need a paid plan; which plans include them is in
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md.
 
         `fetch()` and `poll()` take no `limit`: the endpoint returns one row per ticker.
         `dm.ALL` returns the full market. Columns:
@@ -980,11 +986,12 @@ class _Stocks(Namespace):
             The query; nothing is requested until a verb runs.
 
         Raises:
-            TypeError: If `date` is not a `str`, `date`, or `datetime`, `adjusted` is not a `bool`,
-                or `symbols` is not an accepted form.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or `date` is a
-                `datetime` or not an ISO-8601 date. Also for `symbols` of None, with a message that
-                names the forms it takes.
+            TypeError: If `symbols` or `date` is of another type, or `adjusted` is not a `bool`.
+            ValueError: If `symbols` is `dm.ALL`, a sequence is empty or an exhausted generator,
+                a symbol is not a valid ticker, a table has no `Symbol` column, or `date` is a
+                `datetime` or other time, or text that is neither an ISO-8601 date nor Deephaven
+                date text. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -1095,9 +1102,9 @@ class _Stocks(Namespace):
         its volume by it; a bar with no later split is already on today's basis. Both dates are
         ISO text, which orders as dates do, so a reverse as-of join finds that split:
         `bars.raj(splits, on=["Symbol", "Date<ExecutionDate"],
-        joins=["F=HistoricalAdjustmentFactor"])`, then `Close * F` and `Volume / F`, with a
-        null `F` meaning 1. A split takes effect overnight: on its execution date all trading,
-        the pre-market included, is already on the new basis.
+        joins=["Factor=HistoricalAdjustmentFactor"])`, then `Close * Factor` and
+        `Volume / Factor`, with a null `Factor` meaning 1. A split takes effect overnight: on
+        its execution date all trading, the pre-market included, is already on the new basis.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
@@ -1140,9 +1147,13 @@ class _Stocks(Namespace):
                 adjusted = bars.raj(
                     splits,
                     on=["Symbol", "Date<ExecutionDate"],
-                    joins=["F=HistoricalAdjustmentFactor"],
+                    joins=["Factor=HistoricalAdjustmentFactor"],
                 ).update(
-                    ["F = isNull(F) ? 1.0 : F", "AdjClose = Close * F", "AdjVolume = Volume / F"]
+                    [
+                        "Factor = isNull(Factor) ? 1.0 : Factor",
+                        "AdjustedClose = Close * Factor",
+                        "AdjustedVolume = Volume / Factor",
+                    ]
                 )
         """
         return list_query(
@@ -1185,7 +1196,8 @@ class _Stocks(Namespace):
         document: if it revised the name (a legal suffix added, say), the row under the old
         name would stay, showing the offering's earlier state beside the new row.
 
-        `limit` caps the total number of rows across pages; the page size is internal.
+        `limit` caps the rows: in total for `symbols=None`, and for each ticker otherwise,
+        since each named ticker is its own request; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every offering. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#ipos,
         the web UI's column tooltips, or `columns()`.
@@ -1199,7 +1211,8 @@ class _Stocks(Namespace):
             sort: The field to sort by, such as `"listing_date"`; None for the server default.
             order: The sort direction, sent as the IPO path's own `order` parameter, so it works
                 with or without `sort`; None for the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
+            limit: The most rows to return, a positive `int`: in total for `symbols=None`,
+                for each ticker otherwise; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"ipo_status": "pending"}`; checked now.
 

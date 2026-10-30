@@ -347,7 +347,7 @@ class StreamRow:
         kind: What feeds the table: a stream, a `poll()` table, or a background read.
         dataset: The dataset name, such as `"stocks.trades"`.
         query: The `repr` of the query whose verb opened the stream, `poll()`, or read, such as
-            `"<StreamHistoryQuery stocks.trades symbols=('AAPL',)>"`, which tells two streams
+            `"m.stocks.trades('AAPL')"`, which tells two streams
             of one dataset apart; cut to `QUERY_SHOWN` characters (`shown_query`).
         symbol_count: How many symbols the stream covers; null for `dm.ALL` and reactive
             tables until the transport fills it in.
@@ -560,7 +560,7 @@ def shown_query(query: str) -> str:
     """Return a query's `repr` as the `Query` column shows it: cut to `QUERY_SHOWN` characters.
 
     Args:
-        query: The query's `repr`, such as `"<Query reference.news start=2025-01-02>"`.
+        query: The query's `repr`, such as `"m.stocks.news(start='2025-01-02')"`.
 
     Returns:
         The text, or its first `QUERY_SHOWN - 1` characters and `…` when it is longer.

@@ -159,10 +159,10 @@ def test_quotes_join_the_last_quote_through_its_projection() -> None:
         "Symbol",
         "Date",
         "Timestamp",
-        "AskExchange",
+        "BidPrice",
         "AskPrice",
         "BidExchange",
-        "BidPrice",
+        "AskExchange",
         "Exchange",
         "TimestampInsert",
     ]
@@ -220,11 +220,12 @@ def test_conversion_keeps_the_vendor_symbol() -> None:
 def test_only_the_canonical_ticker_is_taken(
     massive_session: dm.MassiveSession, symbols: str | list[str]
 ) -> None:
-    factories = (
-        massive_session.forex.quotes,
-        massive_session.forex.fmv,
-        massive_session.forex.bars,
-        massive_session.forex.snapshots,
+    forex_ns = massive_session.forex
+    factories: tuple[Callable[[str | list[str]], QueryBase], ...] = (
+        forex_ns.quotes,
+        forex_ns.fmv,
+        lambda symbols: forex_ns.bars(symbols, dm.Timespan.MINUTE),
+        forex_ns.snapshots,
     )
     for factory in factories:
         assert request(factory("C:EURUSD")).symbols == ("C:EURUSD",)
@@ -281,7 +282,7 @@ def test_bars_pick_their_class_from_the_timespan(
 def test_bars_default_to_one_minute_and_take_no_adjusted(
     massive_session: dm.MassiveSession,
 ) -> None:
-    query = massive_session.forex.bars(dm.ALL)
+    query = massive_session.forex.bars(dm.ALL, dm.Timespan.MINUTE)
     assert type(query) is StreamHistoryQuery
     # Currency pairs have no corporate actions: no `adjusted` is stored, so none is ever sent.
     assert request(query) == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE)
@@ -381,7 +382,7 @@ def test_invalid_pairs_fail_at_construction(
     forex_ns = massive_session.forex
     factories: list[Callable[[str | list[str]], QueryBase]] = [
         forex_ns.quotes,
-        forex_ns.bars,
+        lambda symbols: forex_ns.bars(symbols, dm.Timespan.MINUTE),
         forex_ns.fmv,
         forex_ns.snapshots,
     ]

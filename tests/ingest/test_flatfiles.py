@@ -40,6 +40,7 @@ from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
 from deephaven_massive._ingest import flatfiles
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import HistoryQuery
@@ -59,6 +60,8 @@ R, FF = Transport.REST, Transport.FLAT_FILES
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 """A Monday afternoon, when every file of the first week of March 2025 is published."""
 LOGGER = "deephaven_massive"
+# The once-per-session warnings a transform built outside a session logs to.
+WARNINGS = BoundedLog(logging.getLogger("tests.flatfiles"), limit=10, level=logging.WARNING)
 """The package logger: the AUTO line comes from the query, the S3 line from the transport."""
 
 
@@ -505,6 +508,7 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
         unreadable_symbols=dm.OnError.RAISE,
+        warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -529,6 +533,7 @@ def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
         request=request(dm.ALL),
         window=whole_days(SYNTHETIC, "2025-03-03"),
         unreadable_symbols=dm.OnError.RAISE,
+        warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -553,6 +558,7 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         request=request(dm.ALL),
         window=window,
         unreadable_symbols=dm.OnError.RAISE,
+        warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -2084,6 +2090,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         request=request(dm.ALL),
         window=window,
         unreadable_symbols=dm.OnError.RAISE,
+        warnings=WARNINGS,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()

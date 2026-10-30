@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
-from deephaven_massive._datasets.symbols import check_symbol, symbol_class
+from deephaven_massive._datasets.symbols import check_symbol, is_canonical, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -79,6 +79,9 @@ _SNAPSHOT_TYPE: Final = "options"
 Tickers never travel with it: Massive answers `type` beside `ticker.any_of` with HTTP 400
 ("Cannot specify tickers and type."), and each contract's `O:` prefix already names its class.
 """
+
+_UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
+"""The classes whose tickers an option can be linked to, the ones `underlying` takes."""
 
 _LAST_TRADE: Final = "/v2/last/trade/{optionsTicker}"
 _TRADES: Final = "/v3/trades/{optionsTicker}"
@@ -321,8 +324,9 @@ def _underlying(value: object) -> str:
             or is not canonical; `check_symbol` names the canonical form when it can.
     """
     if not isinstance(value, str):
-        raise TypeError(f"underlying must be a str, not {type(value).__name__}")
-    if symbol_class(value) not in {AssetClass.STOCKS, AssetClass.INDICES}:
+        kind = "dm.ALL" if value is ALL else type(value).__name__
+        raise TypeError(f"underlying must be one ticker, a str, not {kind}")
+    if symbol_class(value) not in _UNDERLYING_CLASSES:
         raise ValueError(
             f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
         )
@@ -380,7 +384,7 @@ class _Options(Namespace):
 
             m = dm.MassiveSession()
             calls = m.options.chain("AAPL", contract_type=dm.ContractType.CALL).fetch()
-            live = m.options.trades(["O:AAPL250117C00150000"]).append_only()
+            live = m.options.trades(calls.head(10)).append_only()  # ten current contracts
     """
 
     __slots__ = ()
@@ -424,6 +428,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # For blink(), name a current contract: this one has expired (see chain())
                 q = m.options.trades("O:AAPL250117C00150000")
                 ticks = q.blink()
                 day = q.history("2025-01-02", "2025-01-02")
@@ -442,8 +447,9 @@ class _Options(Namespace):
         keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last trade
         when it is new, so a trade between two cycles is never seen (`trades()` streams every one).
         Some plans lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)`
-        carries each contract's last trade on every plan. A contract with no trade (HTTP 404) is
-        left out, with a WARNING.
+        also carries each contract's last trade, on a plan that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A contract with no trade (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each contract gives one row. `dm.ALL` is
         refused, since the endpoint takes one contract per request: use
@@ -470,6 +476,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 last = m.options.last_trade(["O:AAPL250117C00150000"]).fetch()
         """
         query = build_query(
@@ -517,6 +524,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 book = m.options.quotes(["O:AAPL250117C00150000"]).last_by()
         """
         return cast("StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols))
@@ -525,7 +533,7 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
         adjusted: bool = True,
@@ -534,7 +542,7 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -543,7 +551,7 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -569,7 +577,8 @@ class _Options(Namespace):
         never appears.
 
         `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed
+        (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table` is a
+        table a verb such as `history()` returned) to attach only closed
         bars; it is not when Massive published the bar. An intraday bar ends its length
         after its start. A bar of a day or longer runs from 00:00 New York time of its
         window's first day to 00:00 after its last, whatever the source: the range and the
@@ -600,8 +609,8 @@ class _Options(Namespace):
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
-            timespan: The bar unit; `Timespan.MINUTE` by default. `Timespan.SESSION` is for
-                futures only.
+            timespan: The bar unit, a `dm.Timespan`; required, with no default.
+                `Timespan.SESSION` is for futures only.
             multiplier: How many units one bar spans, a positive `int`; 1 by default.
             adjusted: Whether REST bars are adjusted for splits of the underlying; True by
                 default. The flat files and the streams are as traded, so `history()` reads the
@@ -621,7 +630,8 @@ class _Options(Namespace):
         Example:
             ::
 
-                minute = m.options.bars("O:AAPL250117C00150000").append_only()
+                # For append_only(), name a current contract: this one has expired (see chain())
+                minute = m.options.bars("O:AAPL250117C00150000", dm.Timespan.MINUTE).append_only()
                 hourly = m.options.bars(
                     "O:AAPL250117C00150000", dm.Timespan.HOUR, multiplier=4
                 ).history("2025-01-02", "2025-01-10")
@@ -687,6 +697,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 prev = m.options.previous_day_bar("O:AAPL250117C00150000").fetch()
         """
         query = build_query(
@@ -736,6 +747,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 fair = m.options.fmv(["O:AAPL250117C00150000"]).last_by()
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
@@ -794,17 +806,21 @@ class _Options(Namespace):
             TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
                 `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an `int`, or
                 `filters` is not a mapping.
-            ValueError: If `underlying` is not Massive's exact stock or index ticker, `limit` is not
-                positive, a filter key is not a parameter of the endpoint or is `contract_type`, or
-                a filter value does not fit its parameter.
+            ValueError: If `underlying` is `dm.ALL` (the message names
+                `m.options.snapshots(dm.ALL)`) or is not Massive's exact stock or index ticker,
+                `limit` is not positive, a filter key is not a parameter of the endpoint or is
+                `contract_type`, or a filter value does not fit its parameter.
 
         Example:
             ::
 
+                from datetime import date, timedelta
+
+                month = (date.today() + timedelta(days=30)).isoformat()
                 near = m.options.chain(
                     "AAPL",
                     contract_type=dm.ContractType.CALL,
-                    filters={"expiration_date_lte": "2025-01-17"},
+                    filters={"expiration_date_lte": month},
                 ).fetch()
                 # Keep the contracts that deliver 100 shares and nothing else.
                 terms = m.options.contracts(underlying="AAPL").fetch()
@@ -817,6 +833,13 @@ class _Options(Namespace):
                     ]
                 )
         """
+        if cast("object", underlying) is ALL:  # the type says str; a console caller may pass it
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug("options.chain refused: underlying=dm.ALL")
+            raise ValueError(
+                "options.chain reads one underlying's chain and does not take dm.ALL; "
+                "m.options.snapshots(dm.ALL) lists every contract"
+            )
         params: dict[str, object] = {
             "underlyingAsset": _underlying(underlying),
             "contract_type": _contract_type(contract_type),
@@ -881,6 +904,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # These contracts have expired: name current ones, from m.options.chain("AAPL")
                 watch = ["O:AAPL250117C00150000", "O:AAPL250117P00150000"]
                 greeks = m.options.snapshots(watch).poll(5)
         """
@@ -972,7 +996,9 @@ class _Options(Namespace):
             TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
                 `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit`
                 is not an `int`, or `filters` is not a mapping.
-            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol, a sequence
+            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol (one
+                stock or index ticker, such as `"AAPL"`, gets a message that names
+                `underlying="AAPL"`), a sequence
                 is empty or an exhausted generator, a table has no `Symbol` column, `underlying` is
                 not Massive's exact stock or index ticker, `as_of` is a `datetime` or not an
                 ISO-8601 date, `limit` is not positive, a filter key is not a parameter of the
@@ -987,6 +1013,17 @@ class _Options(Namespace):
                     filters={"strike_price_gte": 100, "expiration_date_lte": "2026-01-16"},
                 ).fetch()
         """
+        if (
+            isinstance(symbols, str)
+            and symbol_class(symbols) in _UNDERLYING_CLASSES
+            and is_canonical(ClassFromPrefix.ANY, symbols)
+        ):
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug("options.contracts refused: symbols=%r is an underlying", symbols)
+            raise ValueError(
+                f"{symbols!r} is an underlying, not an options contract: list its contracts "
+                f"with m.options.contracts(underlying={symbols!r})"
+            )
         params: dict[str, object] = {
             "underlying_ticker": None if underlying is None else _underlying(underlying),
             "contract_type": _contract_type(contract_type),

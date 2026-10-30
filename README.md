@@ -158,13 +158,18 @@ from deephaven import merge
 def history_and_live(symbol, start):
     """Adjusted minute bars from `start`, then live ones; call it again after a split."""
     bars = m.stocks.bars(symbol, dm.Timespan.MINUTE)
-    return merge([bars.history(start), bars.append_only()])
+    live = bars.append_only()  # subscribe first, so no bar falls between history and live
+    past = bars.history(start)
+    return merge([past, live]).last_by(["Symbol", "TimestampStart"])
 ```
+
+`history()` reads a watchlist table once, when you call it: a symbol added to the watchlist
+later gets live rows but no backfill.
 
 **History and live bars can differ slightly.** Massive recomputes its REST bars with trades
 reported late, after the live bar went out, so a minute's REST bar can differ a little from the
-live bar of the same minute. In the recipe above, the history rows carry REST's values and the
-rows that arrive afterwards carry the stream's.
+live bar of the same minute. In the recipe above, the history rows carry REST's values, and a
+minute the stream also delivered carries the stream's.
 
 **What can still mix bases.** A long download that runs while Massive applies a split overnight
 can return pages on both bases, and nothing can detect it: download again after the split.

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
+import platform
 import re
 import sys
 import threading
+from datetime import datetime
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -111,7 +113,19 @@ def test_enable_debug_logging_appends_to_a_file(tmp_path: Path) -> None:
         "deephaven_massive._query",
         "über AAPL",
     )
-    assert f"to {path} (from enable_debug_logging())" in lines[1]
+    assert f"to {path.resolve()} (from enable_debug_logging())" in lines[1]
+
+
+def test_the_line_names_the_resolved_path_of_a_relative_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    monkeypatch.chdir(tmp_path)
+    dm.enable_debug_logging("link/massive.log")
+    text = (tmp_path / "real" / "massive.log").read_text(encoding="utf-8")
+    resolved = (tmp_path / "real" / "massive.log").resolve()
+    assert f"logging deephaven_massive at DEBUG to {resolved} (from enable_debug_logging())" in text
 
 
 def test_a_second_call_replaces_and_closes_the_first_handler(
@@ -167,17 +181,34 @@ def test_the_file_variable_sends_the_lines_to_a_file(
 
 
 @pytest.mark.parametrize("value", ["", "  "])
-def test_an_unset_or_blank_level_changes_nothing(
-    value: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_an_unset_or_blank_level_and_file_change_nothing(
+    value: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", value)
-    # The file variable alone does nothing.
-    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", str(tmp_path / "massive.log"))
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", value)
     handlers = list(LIBRARY.handlers)
     _debug_log.configure_from_environment()
     assert LIBRARY.handlers == handlers
     assert LIBRARY.level == logging.NOTSET
-    assert not (tmp_path / "massive.log").exists()
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_the_file_variable_alone_logs_at_debug(
+    value: str | None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    if value is not None:
+        monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", value)
+    path = tmp_path / "massive.log"
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", str(path))
+    _debug_log.configure_from_environment()
+    assert LIBRARY.level == logging.DEBUG
+    CHILD.debug("a DEBUG line")
+    text = path.read_text(encoding="utf-8")
+    assert (
+        f"logging deephaven_massive at DEBUG to {path.resolve()} "
+        "(from the environment; DEEPHAVEN_MASSIVE_LOG unset, so DEBUG)"
+    ) in text
+    assert _lines(text)[-1][3] == "a DEBUG line"
 
 
 def test_an_unknown_level_names_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,7 +244,7 @@ def test_the_variables_lose_a_race_with_the_function(tmp_path: Path) -> None:
     dm.enable_debug_logging()
     handlers = list(LIBRARY.handlers)
     path = tmp_path / "massive.log"
-    _debug_log._install(logging.ERROR, path, environment=True)
+    _debug_log._install(logging.ERROR, path, environment=True, source="the environment")
     assert (LIBRARY.handlers, LIBRARY.level) == (handlers, logging.DEBUG)
     assert path.read_text(encoding="utf-8") == ""
 
@@ -259,8 +290,11 @@ def test_turning_the_log_on_describes_the_process(
     [line] = [m for m in caplog.messages if m.startswith("deephaven-massive ")]
     gil = "on" if getattr(sys, "_is_gil_enabled", lambda: True)() else "off"
     setting = "set" if proxy else "unset"
+    local = datetime.now().astimezone()
     assert line.startswith(
-        f"deephaven-massive {dm.__version__}, Python {sys.version.split()[0]} (GIL {gil}), "
+        f"deephaven-massive {dm.__version__} (git commit {_debug_log._commit()}), "
+        f"Python {sys.version.split()[0]} (GIL {gil}), {platform.platform()}, "
+        f"local time UTC{local.strftime('%z')} ({local.tzname()}); "
     )
     for part in (
         f"pyarrow {importlib.metadata.version('pyarrow')}",
@@ -289,6 +323,49 @@ def test_nothing_describes_the_process_when_info_is_off(
     with caplog.at_level(logging.ERROR, logger=_debug_log.__name__):
         _debug_log.configure_from_environment()
     assert caplog.messages == []
+
+
+class _Distribution:
+    # Stands in for an installed distribution whose `direct_url.json` holds `text`.
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+
+    def read_text(self, filename: str) -> str | None:
+        assert filename == "direct_url.json"
+        return self.text
+
+
+def test_the_commit_comes_from_the_install_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = '{"url": "https://github.com/x/y", "vcs_info": {"vcs": "git", "commit_id": "abc123"}}'
+    monkeypatch.setattr(_debug_log, "distribution", lambda _name: _Distribution(text))
+    assert _debug_log._commit() == "abc123"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,  # no direct_url.json: installed from an index
+        '{"url": "file:///src", "dir_info": {"editable": true}}',  # a local directory
+        '{"vcs_info": {"vcs": "git"}}',  # no commit_id
+        '{"vcs_info": {"commit_id": ""}}',
+        '{"vcs_info": {"commit_id": 7}}',
+        "not json",
+        "[1, 2]",  # JSON, but not an object
+    ],
+)
+def test_a_commit_that_is_not_recorded_says_so(
+    text: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_debug_log, "distribution", lambda _name: _Distribution(text))
+    assert _debug_log._commit() == "not recorded"
+
+
+def test_a_missing_distribution_has_no_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(name: str) -> _Distribution:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(_debug_log, "distribution", missing)
+    assert _debug_log._commit() == "not recorded"
 
 
 def test_a_missing_distribution_is_named_not_installed() -> None:
@@ -363,6 +440,6 @@ def test_disable_debug_logging_wins_over_an_environment_read_in_flight(tmp_path:
     # the handler the variables built is closed instead of installed.
     dm.disable_debug_logging()
     path = tmp_path / "massive.log"
-    _debug_log._install(logging.DEBUG, path, environment=True)
+    _debug_log._install(logging.DEBUG, path, environment=True, source="the environment")
     assert (LIBRARY.level, _debug_log._switch.handler) == (logging.NOTSET, None)
     assert path.read_text(encoding="utf-8") == ""

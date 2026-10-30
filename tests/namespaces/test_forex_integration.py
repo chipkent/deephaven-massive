@@ -429,7 +429,7 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     spelling.
     """
     quotes = live_session.forex.quotes(_PAIR).append_only()
-    bars = live_session.forex.bars(_PAIR).append_only()
+    bars = live_session.forex.bars(_PAIR, dm.Timespan.MINUTE).append_only()
     acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
     status = market_status("fx")
     deadline = time.monotonic() + _STREAM_WAIT

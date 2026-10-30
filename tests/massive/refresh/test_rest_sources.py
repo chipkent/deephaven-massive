@@ -577,10 +577,11 @@ def test_nested_objects_flatten_in_order_with_refs_and_all_of() -> None:
     paths, _ = generate_rest(
         _snapshot({_PATH: _item(row)}, schemas=schemas), _hand(identity={"day": ""})
     )
+    # Then the lead order moves the top-level `close` to the top level's first place.
     assert [(f.wire_key, f.column, f.required) for f in paths[0].fields] == [
-        ("ticker", "Ticker", True),
-        ("day.close", "DayClose", False),
         ("close", "Close", False),
+        ("day.close", "DayClose", False),
+        ("ticker", "Ticker", True),
     ]
 
 

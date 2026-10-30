@@ -144,20 +144,22 @@ def test_the_library_owns_its_time_columns() -> None:
 
 
 def test_a_rule_follows_the_dataset_and_the_request() -> None:
+    log = session_warnings()
     request = Request(timespan=T.HOUR, multiplier=4)
-    assert time_rule(stocks.BARS, request, asset_class=A.STOCKS) == TimeRule(
+    assert time_rule(stocks.BARS, request, asset_class=A.STOCKS, warnings=log) == TimeRule(
         "stocks.bars", RowTimes.BAR, A.STOCKS, T.HOUR, 4
     )
-    assert time_rule(stocks.DAILY_OPEN_CLOSE, Request(), asset_class=A.STOCKS) == TimeRule(
-        "stocks.daily_open_close", RowTimes.DAY, A.STOCKS, T.DAY
-    )
-    assert time_rule(stocks.TRADES, Request(), asset_class=A.STOCKS) == TimeRule(
+    # Only a daily summary's rule keeps the warnings, for a day not cut at UTC midnight.
+    daily = time_rule(stocks.DAILY_OPEN_CLOSE, Request(), asset_class=A.STOCKS, warnings=log)
+    assert daily == TimeRule("stocks.daily_open_close", RowTimes.DAY, A.STOCKS, T.DAY, warnings=log)
+    assert time_rule(stocks.TRADES, Request(), asset_class=A.STOCKS, warnings=log) == TimeRule(
         "stocks.trades", RowTimes.TICK, A.STOCKS
     )
     # An indicator follows its symbol's class.
-    sma = time_rule(indicators.SMA, Request(timespan=T.DAY), asset_class=A.CRYPTO)
+    sma = time_rule(indicators.SMA, Request(timespan=T.DAY), asset_class=A.CRYPTO, warnings=log)
     assert (sma.row_times, sma.asset_class, sma.timespan) == (RowTimes.BAR, A.CRYPTO, T.DAY)
-    assert time_rule(stocks.SNAPSHOTS, Request(), asset_class=A.STOCKS).row_times is RowTimes.NONE
+    snapshots = time_rule(stocks.SNAPSHOTS, Request(), asset_class=A.STOCKS, warnings=log)
+    assert snapshots.row_times is RowTimes.NONE
 
 
 # --- Arrival time ---------------------------------------------------------------------------
@@ -530,30 +532,63 @@ def test_a_futures_week_or_month_ends_with_the_latest_period_its_label_allows() 
 
 
 def test_a_daily_summary_covers_its_date() -> None:
-    stock = TimeRule("stocks.daily_open_close", RowTimes.DAY, A.STOCKS, T.DAY)
+    log = session_warnings()
+    stock = TimeRule("stocks.daily_open_close", RowTimes.DAY, A.STOCKS, T.DAY, warnings=log)
     sent = bars([None, None, None], dates=["2025-03-09", "2025-03-09", None])
     assert fill(stock, sent) == {
         DATE: ["2025-03-09", "2025-03-09", None],
         START: ["2025-03-09T05:00:00+00:00"] * 2 + [None],
         END: ["2025-03-10T04:00:00+00:00"] * 2 + [None],
     }
-    index = TimeRule("indices.daily_open_close", RowTimes.DAY, A.INDICES, T.DAY)
+    index = TimeRule("indices.daily_open_close", RowTimes.DAY, A.INDICES, T.DAY, warnings=log)
     assert fill(index, bars([None], dates=["2025-03-03"]))[END] == ["2025-03-04T06:00:00+00:00"]
-    crypto = TimeRule("crypto.daily_open_close", RowTimes.DAY, A.CRYPTO, T.DAY)
+    crypto = TimeRule("crypto.daily_open_close", RowTimes.DAY, A.CRYPTO, T.DAY, warnings=log)
     assert fill(crypto, bars([None], dates=["2025-03-03"]))[START] == ["2025-03-03T00:00:00+00:00"]
 
 
 def test_the_real_futures_datasets_get_their_session_rule() -> None:
-    assert time_rule(futures.TRADES, Request(), asset_class=A.FUTURES).asset_class is A.FUTURES
+    trades = time_rule(
+        futures.TRADES, Request(), asset_class=A.FUTURES, warnings=session_warnings()
+    )
+    assert trades.asset_class is A.FUTURES
     assert (
         date(2025, 3, 3).isoformat()
         in fill(
             time_rule(
-                futures.BARS, Request(timespan=T.SESSION, multiplier=1), asset_class=A.FUTURES
+                futures.BARS,
+                Request(timespan=T.SESSION, multiplier=1),
+                asset_class=A.FUTURES,
+                warnings=session_warnings(),
             ),
             bars(["2025-03-02T23:00:00"], dates=["2025-03-03"]),
         )[DATE]
     )
+
+
+def test_a_daily_rule_needs_the_session_s_warnings() -> None:
+    with pytest.raises(ValueError, match="a daily rule needs the session's warnings"):
+        TimeRule("crypto.daily_open_close", RowTimes.DAY, A.CRYPTO, T.DAY)
+
+
+def test_a_day_summary_not_in_utc_is_served_with_one_warning() -> None:
+    # Massive cut the day elsewhere than UTC midnight: the row keeps the UTC day's window, and
+    # the session warns once per dataset that its dates may not line up.
+    log = Mock(spec=BoundedLog)
+    rule = TimeRule("crypto.daily_open_close", RowTimes.DAY, A.CRYPTO, T.DAY, warnings=log)
+    rows = bars([None, None], dates=["2025-03-03", "2025-03-04"]).append_column(
+        "IsUtc", pa.array([True, False])
+    )
+    filled = rule.fill(rows, received=7)
+    assert iso(filled.column(START)) == ["2025-03-03T00:00:00+00:00", "2025-03-04T00:00:00+00:00"]
+    (call,) = log.log.call_args_list
+    assert call.args[0] == "day summary not in UTC crypto.daily_open_close"
+    assert "isUTC false" in call.args[1]
+    assert "may not line up" in call.args[1]
+    # A batch whose rows are all in UTC, or whose flags are unknown, warns of nothing.
+    log.reset_mock()
+    utc = bars([None], dates=["2025-03-03"]).append_column("IsUtc", pa.array([None], pa.bool_()))
+    rule.fill(utc, received=7)
+    log.log.assert_not_called()
 
 
 # --- The bar-stamp rule ---------------------------------------------------------------------

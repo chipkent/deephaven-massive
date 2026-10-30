@@ -183,6 +183,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
+    from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
 
@@ -347,6 +348,7 @@ class _Transform:
         request: Request,
         window: HistoryWindow,
         unreadable_symbols: OnError,
+        warnings: BoundedLog,
         stamps: StampRule | None = None,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
@@ -370,6 +372,8 @@ class _Transform:
                 every time of their files, which hold exactly the requested sessions.
             unreadable_symbols: The session's setting for a ticker spelling the library cannot
                 read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
+            warnings: The session's once-per-session warnings, which the time rule of a daily
+                summary logs to (`row_times.time_rule`).
             stamps: How the bars' stamps are treated (`row_times.stamp_rule`), or None
                 to keep them; the files hold only 1-day bars of the classes that have one.
 
@@ -429,7 +433,7 @@ class _Transform:
             date_columns=schema.date_columns,
             session_header=session_header,
             prefix=prefix,
-            times=time_rule(spec, request, asset_class=file_class),
+            times=time_rule(spec, request, asset_class=file_class, warnings=warnings),
             time_name=time_name,
             symbols=WireSymbols(
                 spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
@@ -623,6 +627,7 @@ class FlatFileHistory:
             request=request,
             window=window,
             unreadable_symbols=self._core.config.unreadable_symbols,
+            warnings=self._core.warnings,
             stamps=stamp_rule(spec, request, warnings=self._core.warnings),
         )
         keys = _keys(prefix, request.venues, dates)

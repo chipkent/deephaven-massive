@@ -209,13 +209,13 @@ EXAMPLES: Final = (
     ),
     Example(
         "stream-stock-minute-bars",
-        lambda m, _: m.stocks.bars(["AAPL", "NVDA"]).append_only(),
+        lambda m, _: m.stocks.bars(["AAPL", "NVDA"], dm.Timespan.MINUTE).append_only(),
         needs=("stocks:starter",),
         stream=True,
     ),
     Example(
         "stream-crypto-minute-bars",
-        lambda m, _: m.crypto.bars("X:BTCUSD").append_only(),
+        lambda m, _: m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).append_only(),
         needs=("currencies:starter",),
         stream=True,
     ),

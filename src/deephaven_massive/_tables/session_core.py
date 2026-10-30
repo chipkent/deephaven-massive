@@ -495,7 +495,8 @@ class SessionCore:
         or raised.
 
         Args:
-            call: The verb, as the warning names it, such as `"stocks.bars history()"`.
+            call: The verb, as the warning names it, such as
+                `"m.stocks.bars('AAPL', dm.Timespan.DAY).history()"`.
             body: The verb's work.
 
         Returns:

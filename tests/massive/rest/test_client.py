@@ -672,6 +672,28 @@ def test_a_429_waits_its_retry_after(
     assert clock.monotonic() == 7.0
 
 
+def test_a_429_logs_once_at_info_and_the_retry_logs_its_wait(
+    client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    limited = Reply({"message": "slow down"}, status=429, headers={"Retry-After": "7"})
+    fake_rest.reply("/v3/trades/AAPL", limited, _ok())
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    infos = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert infos == [
+        (
+            "stocks: paused 7.0 s (Retry-After 7 s) after HTTP 429; the refusal: HTTP 429 from GET "
+            "/v3/trades/AAPL on 127.0.0.1: slow down"
+        )
+    ]
+    url = f"{fake_rest.url}/v3/trades/AAPL"
+    gets = [m for m in caplog.messages if m.startswith(f"GET {url} -> ")]
+    assert gets[0].startswith(f"GET {url} -> 429 (request_id None) in 0.000 s, waited 0.0 s ")
+    assert gets[1] == (
+        f"GET {url} -> 200 (request_id req-1): 1 rows in 0.000 s, waited 7.0 s for a permit"
+    )
+
+
 def test_a_429_with_an_http_date_waits_until_then_by_the_responses_own_clock(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
@@ -1312,7 +1334,9 @@ def test_a_200_whose_page_cannot_be_read_is_logged_with_its_body(
     ):
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     [line] = [m for m in caplog.messages if " -> 200 " in m]
-    assert line.startswith(f"GET {fake_rest.url}/v3/trades/AAPL -> 200 in 0.000 s, but the page ")
+    assert line.startswith(
+        f"GET {fake_rest.url}/v3/trades/AAPL -> 200 in 0.000 s, waited 0.0 s for a permit, but "
+    )
     assert line.endswith(f"cannot be read ({info.value}); body: <html>not json</html>")
 
 
@@ -1332,11 +1356,17 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     # Each attempt names the whole URL; a failed one quotes its body, up to 2,000 characters.
     assert (
         logging.DEBUG,
-        f"GET {url}/v3/trades/AAPL?limit=1 -> 503 (request_id None) in 0.000 s; body: ",
+        (
+            f"GET {url}/v3/trades/AAPL?limit=1 -> 503 (request_id None) in 0.000 s, waited 0.0 s "
+            "for a permit; body: "
+        ),
     ) in messages
     assert (
         logging.DEBUG,
-        f"GET {url}/v3/trades/MSFT -> 502 (request_id None) in 0.000 s; body: {body[:2000]}",
+        (
+            f"GET {url}/v3/trades/MSFT -> 502 (request_id None) in 0.000 s, waited 0.0 s for a "
+            f"permit; body: {body[:2000]}"
+        ),
     ) in messages
     assert (
         logging.INFO,
@@ -1347,7 +1377,10 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     ) in messages
     assert (
         logging.DEBUG,
-        f"GET {url}/v3/trades/AAPL?limit=1 -> 200 (request_id r1): 1 rows in 0.000 s",
+        (
+            f"GET {url}/v3/trades/AAPL?limit=1 -> 200 (request_id r1): 1 rows in 0.000 s, waited "
+            "0.0 s for a permit"
+        ),
     ) in messages
     # The error quotes only the envelope's message, cut to 200 characters.
     assert (

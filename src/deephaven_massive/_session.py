@@ -25,6 +25,7 @@ says what ran.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import logging
 import threading
@@ -63,7 +64,7 @@ from deephaven_massive._namespaces.indicators import _Indicators
 from deephaven_massive._namespaces.indices import _Indices
 from deephaven_massive._namespaces.options import _Options
 from deephaven_massive._namespaces.partners import _Partners
-from deephaven_massive._namespaces.query_building import build_query, list_params
+from deephaven_massive._namespaces.query_building import build_query, list_params, shows_call
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._tables.execution_context import (
@@ -128,18 +129,31 @@ def _next_number() -> int:
 
 
 def _log_session(label: str, config: MassiveConfig) -> None:
-    """Log, at INFO, a new session's label and its configuration, without its secrets.
+    """Log, at INFO, a new session's label and its configuration, without its credentials.
 
-    The configuration's `repr` leaves out both secrets; each is shown only as set or unset. The
-    process itself (versions, the GIL, the snapshot, the proxy and CA settings) is described
-    once, when the log is turned on.
+    The line holds every field the configuration's `repr` shows except `s3_access_key_id`: the
+    API key, the S3 access key id, and the S3 secret are each shown only as set or unset, since
+    a log is attached to bug reports. The two S3 credentials are set together or not at all.
+    The process itself (versions, the GIL, the snapshot, the proxy and CA settings) is
+    described once, when the log is turned on.
 
     Args:
         label: The session's label, such as `"MassiveSession #1"`.
         config: The session's configuration.
     """
-    secret = "set" if config.s3_secret_access_key is not None else "unset"
-    logger.info("%s: %r with api_key set, s3_secret_access_key %s", label, config, secret)
+    shown = ", ".join(
+        f"{field.name}={getattr(config, field.name)!r}"
+        for field in dataclasses.fields(config)
+        if field.repr and field.name != "s3_access_key_id"
+    )
+    s3 = "set" if config.s3_access_key_id is not None else "unset"
+    logger.info(
+        "%s: MassiveConfig(%s) with api_key set, s3_access_key_id %s, s3_secret_access_key %s",
+        label,
+        shown,
+        s3,
+        s3,
+    )
 
 
 def _register(core: SessionCore) -> None:
@@ -238,11 +252,9 @@ class MassiveSession:
     def __init__(self, config: MassiveConfig | None = None) -> None:
         """Start a session.
 
-        When `config` is None, `MassiveConfig()` reads the environment and raises its own
-        `AuthenticationError` if no API key is configured (it is not repeated under Raises
-        because this method does not raise it itself). On a Deephaven update-graph thread, for
-        example inside a table listener, it raises `ValueError`; a thread that holds the update
-        graph's lock, as the Deephaven console does for every command, may create a session.
+        A thread that holds the update graph's lock, as the Deephaven console does for every
+        command, may create a session; a Deephaven update-graph thread, for example inside a
+        table listener, may not.
 
         Args:
             config: The configuration; None means `MassiveConfig()`, which reads the API key
@@ -250,6 +262,9 @@ class MassiveSession:
 
         Raises:
             TypeError: If `config` is not a `MassiveConfig`.
+            AuthenticationError: From `MassiveConfig()` when `config` is None and no API key
+                is in the environment.
+            ValueError: On a Deephaven update-graph thread.
             MassiveError: If no Deephaven `ExecutionContext` is active on this thread (the
                 session must be created inside a Deephaven worker), or if the context's query
                 scope is not the Python script session's own, as with
@@ -362,6 +377,7 @@ class MassiveSession:
         """Partner datasets, by vendor: `benzinga`, `etf_global`, `tmx`, `fable`."""
         return self._partners
 
+    @shows_call("m")
     @raises_through(build_query, list_params)
     def snapshots(
         self,
@@ -492,16 +508,19 @@ class MassiveSession:
         `CLOSED` included.
 
         Returns:
-            A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Dataset`
-            (String), such as `stocks.trades`; `Query` (String), the query that opened the
-            stream, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL',)>`, which tells
-            two streams of one dataset apart; `SymbolCount` (int), null for `dm.ALL`;
-            `Symbols` (String), a shortened list; `HeldResults` (int), the stream's tables the
-            library still holds; `Deferred` (int), options contracts held back by the
-            per-connection cap; `Transport` (String), `WebSocket` for a stream or `REST` for a
-            `poll()`; `Host` and `Path` (String); `RowsPublished` (long); `RequestsPerCycle`
-            (int), a `poll()` table's REST requests per cycle; `State` (String), `RUNNING`,
-            `FAILED`, `RELEASED`, or `CLOSED`; `Error` (String), why the stream failed, or a
+            A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Kind`
+            (String), `stream` for a WebSocket stream, `poll` for a `poll()` table, or `read`
+            for a background read; `Dataset` (String), such as `stocks.trades`; `Query`
+            (String), the query that opened the stream, the call that built it, such as
+            `m.stocks.trades('AAPL')`, which tells two streams of
+            one dataset apart; `SymbolCount` (int), null for `dm.ALL`; `Symbols` (String), a
+            shortened list; `HeldResults` (int), the stream's tables the library still holds;
+            `Deferred` (int), options contracts held back by the per-connection cap;
+            `Transport` (String), `WebSocket` for a stream, `REST` for a `poll()` or a REST
+            read, or `flat files` for a read from flat files; `Host` and `Path` (String);
+            `RowsPublished` (long); `RequestsPerCycle` (int), a `poll()` table's REST requests
+            per cycle; `State` (String), `RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or
+            `CLOSED`; `Error` (String), why the stream failed, or a
             warning that does not stop it; `CreatedAt` (Instant); and `SchemaDrift` (String),
             the fields payloads had beyond the documented schema (`transport:field+`) or
             lacked (`transport:field-`). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
@@ -568,10 +587,11 @@ class MassiveSession:
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
         if not self._core.results.release(table):
             raise ValueError(
-                "table is not a live result of this session: release() takes a table that a "
-                "live verb (blink(), append_only(), ring(), last_by(), poll()) of this session "
-                "returned. A table derived from one stops with it once you delete it (del) and "
-                "nothing else holds it; a static fetch() or history() table has no stream to stop"
+                "table is not a live result of this session: release() takes a table that this "
+                "session returned from blink(), append_only(), ring(), last_by(), poll(), "
+                "fetch(wait=False), history(..., wait=False), connections(), streams(), or "
+                "rate_limits(). For a table derived from one, release the live table it came "
+                "from; a static fetch() or history() table has nothing to release"
             )
 
     @raises_through(SessionCore.close, refuse_update_graph_thread)

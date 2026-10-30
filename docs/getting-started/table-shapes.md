@@ -94,7 +94,7 @@ Every row received since the call, oldest first. It grows without limit, so use 
 bounded session or a quiet dataset.
 
 ```python
-today = m.stocks.bars(["AAPL", "MSFT"]).append_only()  # one-minute bars as they close
+today = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).append_only()  # as they close
 ```
 
 ### `ring(n)`

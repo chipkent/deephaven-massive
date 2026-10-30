@@ -35,7 +35,9 @@ Parameter mistakes are not `MassiveError`s: a wrong *value* raises `ValueError` 
 *type* (for example a plain string where an enum member is required) raises `TypeError`, both
 synchronously on the calling thread.
 
-Static verbs (`fetch()`, `history()`) raise these exceptions directly. A live table fails with
+Static verbs (`fetch()`, `history()`) raise these exceptions directly; with `wait=False`, a
+failure after the call has returned fails the verb's table instead of raising (a parameter
+mistake still raises at the call). A live table fails with
 one (its publisher's `publish_failure`), so the failure shows where Deephaven users look; it is
 also logged, at the level its cause gives, and shown in `m.streams()`.
 
@@ -108,8 +110,9 @@ class ErrorCause(StrEnum):
 
             import deephaven_massive as dm
 
+            m = dm.MassiveSession()
             try:
-                raise dm.MassiveError("rate limited", status=429)
+                divs = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
             except dm.MassiveError as e:
                 if e.cause is dm.ErrorCause.LIBRARY_DEFECT:
                     print(f"please report: {e}")
@@ -145,8 +148,9 @@ class MassiveError(Exception):
 
             import deephaven_massive as dm
 
+            m = dm.MassiveSession()
             try:
-                raise dm.MassiveError("rate limited", status=429, request_id="abc123")
+                divs = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
             except dm.MassiveError as e:
                 if e.status == 429:
                     print(f"slow down (request {e.request_id}): {e}")

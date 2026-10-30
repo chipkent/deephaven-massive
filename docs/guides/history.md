@@ -57,7 +57,6 @@ A bar's window depends on its size and class:
 Massive starts every week on Sunday at 00:00 in the class's time zone and stamps the week's bar
 there; a week bar stamped on any other day stops the read with an error. There is no holiday
 calendar: a stock week whose Friday is a holiday still runs Monday to Friday.
-=====
 
 Time bounds keep only whole calendar days of daily bars. Monday 09:30 to Friday 16:00 New York
 time returns Tuesday to Thursday, so pass dates when you want daily bars.

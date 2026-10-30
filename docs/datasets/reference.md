@@ -279,11 +279,11 @@ The upcoming market holidays and early closes, one row per exchange and day.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
-| `Close` | Instant | The market close time on the holiday (if it's not closed). | REST | `close` |
+| `Open` | Instant | The market open time on the holiday (if it's not closed). | REST | `open` |
 | `Date` | String | The date of the holiday. | REST | `date` |
+| `Close` | Instant | The market close time on the holiday (if it's not closed). | REST | `close` |
 | `Exchange` | String | Which market the record is for. | REST | `exchange` |
 | `Name` | String | The name of the holiday. | REST | `name` |
-| `Open` | Instant | The market open time on the holiday (if it's not closed). | REST | `open` |
 | `Status` | String | The status of the market on the holiday. | REST | `status` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 

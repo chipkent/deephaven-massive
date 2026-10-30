@@ -194,7 +194,7 @@ class _Indicators(Namespace):
             start: The lower bound of `TimestampStart`, or None.
             end: The upper bound of `TimestampStart`, or None.
             order: The timestamp order, or None.
-            limit: The total-row cap, or None.
+            limit: The cap on each symbol's rows, or None.
             filters: Further query parameters, or None.
 
         Returns:
@@ -277,8 +277,9 @@ class _Indicators(Namespace):
                 for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
+            limit: The most rows to read for each symbol, a positive `int` (each symbol is
+                its own request, so one symbol's values never crowd out another's); None for
+                every row. The page size is internal.
             filters: Further query parameters of the endpoints, by wire name with dots written
                 as underscores; the timestamp axis is set only through `start` and `end`.
 
@@ -354,8 +355,9 @@ class _Indicators(Namespace):
                 for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
+            limit: The most rows to read for each symbol, a positive `int` (each symbol is
+                its own request, so one symbol's values never crowd out another's); None for
+                every row. The page size is internal.
             filters: Further query parameters of the endpoints, by wire name with dots written
                 as underscores; the timestamp axis is set only through `start` and `end`.
 
@@ -431,8 +433,9 @@ class _Indicators(Namespace):
                 for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
+            limit: The most rows to read for each symbol, a positive `int` (each symbol is
+                its own request, so one symbol's values never crowd out another's); None for
+                every row. The page size is internal.
             filters: Further query parameters of the endpoints, by wire name with dots written
                 as underscores; the timestamp axis is set only through `start` and `end`.
 
@@ -515,8 +518,9 @@ class _Indicators(Namespace):
                 for the latest.
             order: The timestamp order, sent as the endpoints' own `order` parameter (they
                 have no `sort`); None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
+            limit: The most rows to read for each symbol, a positive `int` (each symbol is
+                its own request, so one symbol's values never crowd out another's); None for
+                every row. The page size is internal.
             filters: Further query parameters of the endpoints, by wire name with dots written
                 as underscores; the timestamp axis is set only through `start` and `end`.
 

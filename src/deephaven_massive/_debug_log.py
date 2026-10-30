@@ -10,12 +10,12 @@ logger's level:
 
 - **Environment variables**, read once per process, when the first `MassiveSession` is created
   (`configure_from_environment`). `DEEPHAVEN_MASSIVE_LOG` takes a level name (`DEBUG`, `INFO`,
-  `WARN`, `WARNING`, `ERROR`, `CRITICAL`, in any case), and `DEEPHAVEN_MASSIVE_LOG_FILE`, when
-  also set, sends the lines to that file instead of stderr. They are read at the first session
-  rather than at import because a script that starts `deephaven_server.Server` may import the
-  library before the server replaces `sys.stderr`: a handler made then would keep writing to
-  the old stream, which Deephaven never sees. A session needs the running server, so by then
-  `sys.stderr` is final.
+  `WARN`, `WARNING`, `ERROR`, `CRITICAL`, in any case), and `DEEPHAVEN_MASSIVE_LOG_FILE` sends
+  the lines to that file instead of stderr; the file alone turns the log on at DEBUG. They are
+  read at the first session rather than at import because a script that starts
+  `deephaven_server.Server` may import the library before the server replaces `sys.stderr`: a
+  handler made then would keep writing to the old stream, which Deephaven never sees. A session
+  needs the running server, so by then `sys.stderr` is final.
 - **`enable_debug_logging(output=LogOutput.STDERR)`**, for a console that is already running,
   where a new environment variable takes effect only after a worker restart.
 
@@ -23,10 +23,11 @@ logger's level:
 level back to `NOTSET`, as it was at import.
 
 Each time the log is turned on, by either way, it logs one INFO line describing the process:
-the library's version, Python's and whether its GIL is enabled, the version of every dependency
-the library declares, the date of the Massive specification snapshot the schemas came from, and
-whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set (never their values). Each new session then
-logs its own configuration, so the log of a failing run says exactly what ran.
+the library's version and the git commit it was installed from, Python's and whether its GIL is
+enabled, the operating system and the local time's offset from UTC, the version of every
+dependency the library declares, the date of the Massive specification snapshot the schemas
+came from, and whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set (never their values). Each
+new session then logs its own configuration, so the log of a failing run says exactly what ran.
 
 The handler writes one line per record, with the time in UTC:
 `2026-10-28 14:03:07,112Z DEBUG [massive #1 call-7 rest_0] deephaven_massive._massive.rest.client:
@@ -85,14 +86,18 @@ Deephaven server exists.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import platform
 import re
 import sys
 import threading
 import time
+from datetime import datetime
 from enum import Enum
-from importlib.metadata import PackageNotFoundError, requires, version
+from importlib.metadata import PackageNotFoundError, distribution, requires, version
+from pathlib import Path
 from typing import Final
 
 from deephaven_massive import _massive
@@ -111,7 +116,7 @@ LEVEL_VARIABLE: Final = "DEEPHAVEN_MASSIVE_LOG"
 """The environment variable that turns the log on at a level, such as `DEBUG`."""
 
 FILE_VARIABLE: Final = "DEEPHAVEN_MASSIVE_LOG_FILE"
-"""The environment variable that sends the log to a file instead of stderr."""
+"""The environment variable that sends the log to a file instead of stderr (at DEBUG, alone)."""
 
 FORMAT: Final = "%(asctime)sZ %(levelname)s [%(threadName)s] %(name)s: %(message)s"
 """The line format; `asctime` is in UTC, hence the `Z`."""
@@ -211,7 +216,7 @@ def enable_debug_logging(output: LogOutput | str | os.PathLike[str] = LogOutput.
         raise TypeError(
             f"output must be a dm.LogOutput or a file path, not {type(output).__name__}"
         )
-    _install(logging.DEBUG, output, environment=False)
+    _install(logging.DEBUG, output, environment=False, source="enable_debug_logging()")
 
 
 def disable_debug_logging() -> None:
@@ -259,8 +264,9 @@ def configure_from_environment() -> None:
     """Apply `DEEPHAVEN_MASSIVE_LOG` and `DEEPHAVEN_MASSIVE_LOG_FILE`, once per process.
 
     `MassiveSession()` calls it when a session is created; only the first call reads the
-    variables, and only when `enable_debug_logging` has not run. An unset or blank
-    `DEEPHAVEN_MASSIVE_LOG` changes nothing (`DEEPHAVEN_MASSIVE_LOG_FILE` alone is ignored).
+    variables, and only when `enable_debug_logging` has not run. With both unset or blank it
+    changes nothing. `DEEPHAVEN_MASSIVE_LOG_FILE` alone turns the log on at DEBUG, since
+    naming a file asks for a log in it, and the line that says the log is on names the default.
     The variables count as read even when they raise, so a later session does not raise again.
 
     Raises:
@@ -274,30 +280,38 @@ def configure_from_environment() -> None:
             return
         _switch.environment_read = True
     value = os.environ.get(LEVEL_VARIABLE, "").strip()
-    if not value:
+    path = os.environ.get(FILE_VARIABLE, "").strip()
+    if not value and not path:
         return
-    level = _LEVELS.get(value.upper())
+    level = _LEVELS.get(value.upper()) if value else logging.DEBUG
     if level is None:
         raise ValueError(
             f"{LEVEL_VARIABLE}={value!r} is not a logging level; use one of {', '.join(_LEVELS)}"
         )
-    path = os.environ.get(FILE_VARIABLE, "").strip()
+    source = "the environment" if value else f"the environment; {LEVEL_VARIABLE} unset, so DEBUG"
     try:
-        _install(level, path or LogOutput.STDERR, environment=True)
+        _install(level, path or LogOutput.STDERR, environment=True, source=source)
     except OSError as error:
         raise OSError(
             f"{FILE_VARIABLE}={path!r} cannot be opened for appending: {error.strerror or error}"
         ) from error
 
 
-def _install(level: int, output: LogOutput | str | os.PathLike[str], *, environment: bool) -> None:
+def _install(
+    level: int, output: LogOutput | str | os.PathLike[str], *, environment: bool, source: str
+) -> None:
     """Replace the library's handler with a new one, set the logger's level, log the environment.
+
+    The INFO line that says the log is on names the level, where the lines go (`stderr`, or the
+    file's absolute path with every symbolic link resolved, so a relative path in a variable
+    still says which file), and `source`.
 
     Args:
         level: The level of the `deephaven_massive` logger.
         output: `LogOutput.STDERR`, or the file to append to.
         environment: True when the environment variables asked for it: the handler is then
             not installed if `enable_debug_logging` has run meanwhile.
+        source: What turned the log on, for the line, such as `"enable_debug_logging()"`.
 
     The `OSError` of opening a file propagates before anything changes.
     """
@@ -329,8 +343,8 @@ def _install(level: int, output: LogOutput | str | os.PathLike[str], *, environm
     logger.info(
         "logging deephaven_massive at %s to %s (from %s)",
         logging.getLevelName(level),
-        output.value if isinstance(output, LogOutput) else os.fspath(output),
-        "the environment" if environment else "enable_debug_logging()",
+        output.value if isinstance(output, LogOutput) else Path(output).resolve(),
+        source,
     )
     _log_environment()
 
@@ -338,22 +352,30 @@ def _install(level: int, output: LogOutput | str | os.PathLike[str], *, environm
 def _log_environment() -> None:
     """Log, at INFO, what a bug report needs to know about the process.
 
-    The line names the library's version; Python's, with whether the GIL is enabled (it is off
-    on a free-threaded build run with `PYTHON_GIL=0`); the version of every dependency the
-    library declares (`orjson` installed means it decodes JSON, else the standard library
-    does); the date of the Massive specification snapshot the schemas were generated from; and
-    whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values, since a proxy URL may
-    hold a password. Nothing is computed when INFO is off for this logger.
+    The line names the library's version and the git commit it was installed from (`_commit`);
+    Python's, with whether the GIL is enabled (it is off on a free-threaded build run with
+    `PYTHON_GIL=0`); the operating system and machine (`platform.platform()`); the local
+    time's offset from UTC and its zone name, which say how the log's UTC times map to the
+    clock of the machine that wrote it; the version of every dependency the library declares
+    (`orjson` installed means it decodes JSON, else the standard library does); the date of
+    the Massive specification snapshot the schemas were generated from; and whether
+    `HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values, since a proxy URL may hold a
+    password. Nothing is computed when INFO is off for this logger.
     """
     if not logger.isEnabledFor(logging.INFO):
         return
     gil = "on" if getattr(sys, "_is_gil_enabled", lambda: True)() else "off"
+    local = datetime.now().astimezone()
     logger.info(
-        "deephaven-massive %s, Python %s (GIL %s), %s; Massive spec snapshot of %s; "
-        "HTTPS_PROXY %s, SSL_CERT_FILE %s",
+        "deephaven-massive %s (git commit %s), Python %s (GIL %s), %s, local time UTC%s (%s); "
+        "%s; Massive spec snapshot of %s; HTTPS_PROXY %s, SSL_CERT_FILE %s",
         _version("deephaven-massive"),
+        _commit(),
         sys.version.split()[0],
         gil,
+        platform.platform(),
+        local.strftime("%z"),
+        local.tzname(),
         _dependency_versions(),
         _massive.provenance().fetched,
         "set" if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") else "unset",
@@ -374,6 +396,25 @@ def _version(distribution: str) -> str:
         return version(distribution)
     except PackageNotFoundError:
         return "not installed"
+
+
+def _commit() -> str:
+    """Return the git commit the library was installed from, for the environment line.
+
+    An installer given a version-control URL (`git+https://...@<branch>`) records the commit it
+    checked out in the distribution's `direct_url.json` (PEP 610) as `vcs_info.commit_id`. A
+    release from an index, or an install from a local directory, records none.
+
+    Returns:
+        The commit id, or `"not recorded"` when the distribution, the file, or the field is
+        missing, or the file is not the JSON object PEP 610 describes.
+    """
+    try:
+        text = distribution("deephaven-massive").read_text("direct_url.json")
+        commit = json.loads(text or "{}").get("vcs_info", {}).get("commit_id")
+    except (PackageNotFoundError, ValueError, AttributeError):
+        commit = None
+    return commit if isinstance(commit, str) and commit else "not recorded"
 
 
 def _dependency_versions() -> str:

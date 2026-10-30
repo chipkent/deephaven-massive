@@ -21,13 +21,16 @@ forever. A fatal failure (a rejected key, a TLS certificate failure, an HTTP sta
 retrying cannot fix) ends it with `FAILED`. `close()` ends it with `CLOSED` at once, whatever it
 is waiting for.
 
-**Logging.** The client's thread is named `<thread_prefix> ws <host><path>`. It logs connecting,
-authenticating, and closing at INFO, each backoff, refused handshake, and reconnect attempt at
-DEBUG (the library's connection logs one WARNING per outage), a handshake that breaks protocol
-or an internal error at ERROR with how to report it; each status object Massive sends
-(an acknowledgement, a refusal) and each subscription frame it sends at DEBUG; and each rejected
-row, whole, at DEBUG (`ws.protocol`). Never the authentication frame: websockets' own frame log
-is kept off, and a server text that echoes the key has it replaced with `***`.
+**Logging.** The client's thread is named `<thread_prefix> ws <host><path>`. It logs each
+authenticated connection and each close (its code, the server's reason, and how long the
+connection was up) at INFO; each connection attempt, failed connect, backoff, and refused
+handshake, a refusal for want of a free connection (`max_connections`) included, at DEBUG,
+since every attempt of an outage repeats them (the library's connection logs one WARNING per
+outage); a handshake that breaks protocol or an internal error at ERROR with how to report it;
+each status object Massive sends (an acknowledgement, a refusal) and each subscription frame it
+sends at DEBUG; and each rejected row, whole, at DEBUG (`ws.protocol`). Never the
+authentication frame: websockets' own frame log is kept off, and a server text that
+echoes the key has it replaced with `***`.
 
 This module imports the standard library, `websockets`, `net`, and `spec` (through
 `ws.protocol`).
@@ -521,7 +524,7 @@ class WsClient:
             How it ended, or the fatal error.
         """
         self._on_state(WsState.CONNECTING, None)
-        logger.info("connecting to %s", self._url)
+        logger.debug("connecting to %s", self._url)
         deadline = asyncio.get_running_loop().time() + HANDSHAKE_TIMEOUT
         try:
             async with asyncio.timeout_at(deadline):
@@ -539,7 +542,7 @@ class WsClient:
             )
             if isinstance(verdict, WireError):
                 return verdict
-            logger.info("could not connect to %s: %r", self._url, error)
+            logger.debug("could not connect to %s: %r", self._url, error)
             return _Ended(least_wait=verdict)
         try:
             return await self._authenticate_and_run(websocket, deadline)
@@ -574,7 +577,8 @@ class WsClient:
         if isinstance(reply, WireError):
             return reply
         if reply == _NO_SLOT:
-            logger.warning(
+            # Each attempt of an outage gets this answer; the library warns once per outage.
+            logger.debug(
                 "%s refused the connection: the account has no free connection (max_connections)",
                 self._url,
             )
@@ -653,8 +657,17 @@ class WsClient:
         finally:
             self._current = None
             sender.cancel()
-        logger.info("the connection to %s closed (code %s)", self._url, websocket.close_code)
-        return _Ended(uptime=self._clock.monotonic() - opened_at, waiting_slot=no_slot)
+        uptime = self._clock.monotonic() - opened_at
+        # The reason is the server's text, so it is cleaned of the key like any frame.
+        reason = self._clean(websocket.close_reason or "")
+        logger.info(
+            "the connection to %s closed (code %s, reason %r) after %.1f s up",
+            self._url,
+            websocket.close_code,
+            reason,
+            uptime,
+        )
+        return _Ended(uptime=uptime, waiting_slot=no_slot)
 
     def _clean(self, frame: str | bytes) -> str | bytes:
         """Return a received frame with the API key replaced, should the server echo it.

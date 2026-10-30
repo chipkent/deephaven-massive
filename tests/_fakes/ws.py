@@ -236,13 +236,14 @@ class FakeMassiveServer:
         """
         self._call(lambda ws: ws.send(frame))
 
-    def close(self, code: int = 1000) -> None:
+    def close(self, code: int = 1000, reason: str = "") -> None:
         """Close the latest connection with `code` and wait for the closing handshake.
 
         Args:
             code: The close code; 1000 is a clean close, 1011 a server error.
+            reason: The close frame's reason text; empty for none.
         """
-        self._call(lambda ws: ws.close(code))
+        self._call(lambda ws: ws.close(code, reason))
 
     def hold_reads(self, *, held: bool) -> None:
         """Stop or resume reading from the latest connection.

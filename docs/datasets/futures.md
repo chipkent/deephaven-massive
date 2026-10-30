@@ -6,7 +6,7 @@ Each section lists one dataset's columns in the order every verb returns them. *
 
 A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
 
-`m.futures.trades`, `m.futures.quotes`, `m.futures.bars`, and `m.futures.snapshots` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
+`m.futures.trades`, `m.futures.quotes`, `m.futures.bars`, `m.futures.snapshots`, and `m.futures.contracts` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="trades"></a>
 
@@ -20,11 +20,11 @@ Trades of futures contracts, tick by tick.
 | `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session that ends at the next 17:00 Chicago time (a Saturday's or Sunday's moves to Monday), corrected to the session Massive's futures schedules place the row in; a row the schedules do not cover keeps that date, and the stream's m.streams() row shows the error. From REST `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format."; flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket | `session_end_date` | `session_end_date` |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision."; flat files `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
+| `Price` | double | The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier. | REST, flat files, WebSocket | `price` | `price` | `p` |
+| `Size` | double | The total number of contracts exchanged between buyers and sellers on a given trade. | REST, flat files, WebSocket | `size` | `size` | `s` |
 | `Correction` | long | The trade correction indicator. | flat files |  | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
-| `Price` | double | The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier. | REST, flat files, WebSocket | `price` | `price` | `p` |
 | `SequenceNumber` | long | The unique sequence number assigned to this trade. | REST, flat files, WebSocket | `sequence_number` | `sequence_number` | `q` |
-| `Size` | double | The total number of contracts exchanged between buyers and sellers on a given trade. | REST, flat files, WebSocket | `size` | `size` | `s` |
 | `ReportSequence` | long | The reporting sequence number. | REST, flat files | `report_sequence` | `report_sequence` |  |
 | `Channel` | long | The CME multicast channel this event was sourced from. | REST | `channel` |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
@@ -50,14 +50,14 @@ Quotes of futures contracts: every change of the best bid and offer.
 | `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session that ends at the next 17:00 Chicago time (a Saturday's or Sunday's moves to Monday), corrected to the session Massive's futures schedules place the row in; a row the schedules do not cover keeps that date, and the stream's m.streams() row shows the error. From REST `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format."; flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket | `session_end_date` | `session_end_date` |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; flat files `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
-| `AskPrice` | double | The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
-| `AskSize` | double | The quote size represents the number of futures contracts available at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
 | `BidPrice` | double | The bid price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket | `bid_price` | `bid_price` | `bp` |
 | `BidSize` | double | The quote size represents the number of futures contracts available at the given bid price. | REST, flat files, WebSocket | `bid_size` | `bid_size` | `bs` |
+| `AskPrice` | double | The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
+| `AskSize` | double | The quote size represents the number of futures contracts available at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
 | `SequenceNumber` | long | The unique sequence number assigned to this quote by the exchange. | REST, flat files | `sequence_number` | `sequence_number` |  |
 | `ReportSequence` | long | The reporting sequence number. | REST, flat files | `report_sequence` | `report_sequence` |  |
-| `AskTimestamp` | Instant | The time when the ask price was submitted to the exchange. | REST, flat files, WebSocket | `ask_timestamp` | `ask_timestamp` | `at` |
 | `BidTimestamp` | Instant | The time when the bid price was submitted to the exchange. | REST, flat files, WebSocket | `bid_timestamp` | `bid_timestamp` | `bt` |
+| `AskTimestamp` | Instant | The time when the ask price was submitted to the exchange. | REST, flat files, WebSocket | `ask_timestamp` | `ask_timestamp` | `at` |
 | `Channel` | long | The CME multicast channel this event was sourced from. | REST | `channel` |  |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
@@ -84,11 +84,11 @@ Open, high, low, close, and volume bars of futures contracts.
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant: Massive's own window start. From REST `window_start`: "The timestamp of the beginning of the candlestick’s aggregation window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `window_start` | `window_start` | `s` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start (a one-second WebSocket bar at the later of that and Massive's `e`); a session bar at 17:00 Chicago time on its session date; a bar of several sessions, or of a week or longer, at the latest end its label allows, since whether Massive labels it with its first or its last session is not verified. | REST, flat files, WebSocket |  |  | `e` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
-| `Volume` | double | The number of contracts that traded within the timeframe. | REST, flat files, WebSocket | `volume` | `volume` | `v` |
 | `Open` | double | The opening price within the timeframe. | REST, flat files, WebSocket | `open` | `open` | `o` |
-| `Close` | double | The last price within the timeframe. | REST, flat files, WebSocket | `close` | `close` | `c` |
 | `High` | double | The highest price within the timeframe. | REST, flat files, WebSocket | `high` | `high` | `h` |
 | `Low` | double | The lowest price within the timeframe. | REST, flat files, WebSocket | `low` | `low` | `l` |
+| `Close` | double | The last price within the timeframe. | REST, flat files, WebSocket | `close` | `close` | `c` |
+| `Volume` | double | The number of contracts that traded within the timeframe. | REST, flat files, WebSocket | `volume` | `volume` | `v` |
 | `Transactions` | long | The number of transactions that occurred within the timeframe. | REST, flat files, WebSocket | `transactions` | `transactions` | `n` |
 | `DollarVolume` | double | The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume. | REST, flat files, WebSocket | `dollar_volume` | `dollar_volume` | `dv` |
 | `SettlementPrice` | double | The price the contract settled at for this session. Included for session, week, month, quarter, and year candles; for multi-session candles it is the settlement of the final session in the period. Not returned for intraday candles (sec, min, hour). | REST, flat files | `settlement_price` | `settlement_price` |  |
@@ -121,34 +121,34 @@ Snapshots of futures contracts: the latest trade, quote, minute bar, and session
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `ProductCode` | String | The identifier for the contract's product. | REST | `product_code` |
 | `DetailsSettlementDate` | Instant | The day that this contract is settled. | REST | `details.settlement_date` |
-| `LastMinuteClose` | double | The price at the end of the minute bar. | REST | `last_minute.close` |
-| `LastMinuteHigh` | double | The highest price reached in the minute bar. | REST | `last_minute.high` |
-| `LastMinuteLastUpdated` | Instant | The timestamp indicating the most recent update to the minute bar. | REST | `last_minute.last_updated` |
-| `LastMinuteLow` | double | The lowest price reached in the minute bar. | REST | `last_minute.low` |
 | `LastMinuteOpen` | double | The opening price at the start of the minute bar. | REST | `last_minute.open` |
-| `LastMinuteTimeframe` | String | The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED. | REST | `last_minute.timeframe` |
+| `LastMinuteHigh` | double | The highest price reached in the minute bar. | REST | `last_minute.high` |
+| `LastMinuteLow` | double | The lowest price reached in the minute bar. | REST | `last_minute.low` |
+| `LastMinuteClose` | double | The price at the end of the minute bar. | REST | `last_minute.close` |
 | `LastMinuteVolume` | long | The number of contracts traded in the minute bar. | REST | `last_minute.volume` |
-| `LastQuoteAsk` | double | The lowest price a seller is willing to accept. | REST | `last_quote.ask` |
-| `LastQuoteAskSize` | long | The number of contracts available at the ask price. | REST | `last_quote.ask_size` |
-| `LastQuoteAskTimestamp` | Instant | The time when the best ask price was last updated. | REST | `last_quote.ask_timestamp` |
+| `LastMinuteLastUpdated` | Instant | The timestamp indicating the most recent update to the minute bar. | REST | `last_minute.last_updated` |
+| `LastMinuteTimeframe` | String | The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED. | REST | `last_minute.timeframe` |
 | `LastQuoteBid` | double | The highest price a buyer is willing to pay. | REST | `last_quote.bid` |
 | `LastQuoteBidSize` | long | The number of contracts available at the bid price. | REST | `last_quote.bid_size` |
+| `LastQuoteAsk` | double | The lowest price a seller is willing to accept. | REST | `last_quote.ask` |
+| `LastQuoteAskSize` | long | The number of contracts available at the ask price. | REST | `last_quote.ask_size` |
 | `LastQuoteBidTimestamp` | Instant | The time when the best bid price was last updated. | REST | `last_quote.bid_timestamp` |
+| `LastQuoteAskTimestamp` | Instant | The time when the best ask price was last updated. | REST | `last_quote.ask_timestamp` |
 | `LastQuoteLastUpdated` | Instant | The time when the quote was generated at the exchange to nanosecond precision. | REST | `last_quote.last_updated` |
 | `LastQuoteTimeframe` | String | The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED. | REST | `last_quote.timeframe` |
-| `LastTradeLastUpdated` | Instant | The time when the trade was generated at the exchange to nanosecond precision. | REST | `last_trade.last_updated` |
 | `LastTradePrice` | double | The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier. | REST | `last_trade.price` |
 | `LastTradeSize` | long | The total number of contracts exchanged between buyers and sellers on a given trade. | REST | `last_trade.size` |
+| `LastTradeLastUpdated` | Instant | The time when the trade was generated at the exchange to nanosecond precision. | REST | `last_trade.last_updated` |
 | `LastTradeTimeframe` | String | The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED. | REST | `last_trade.timeframe` |
-| `SessionChange` | double | The change in price during this session. | REST | `session.change` |
-| `SessionChangePercent` | double | The percentage change in price during this session. | REST | `session.change_percent` |
-| `SessionClose` | double | The price at the end of the session. | REST | `session.close` |
+| `SessionOpen` | double | The opening price at the start of the session. | REST | `session.open` |
 | `SessionHigh` | double | The highest price reached in the session. | REST | `session.high` |
 | `SessionLow` | double | The lowest price reached in the session. | REST | `session.low` |
-| `SessionOpen` | double | The opening price at the start of the session. | REST | `session.open` |
+| `SessionClose` | double | The price at the end of the session. | REST | `session.close` |
+| `SessionVolume` | long | The number of contracts traded in the session. | REST | `session.volume` |
+| `SessionChange` | double | The change in price during this session. | REST | `session.change` |
+| `SessionChangePercent` | double | The percentage change in price during this session. | REST | `session.change_percent` |
 | `SessionPreviousSettlement` | double | The settlement price of the previous session. | REST | `session.previous_settlement` |
 | `SessionSettlementPrice` | double | The final settlement price at the end of the session. | REST | `session.settlement_price` |
-| `SessionVolume` | long | The number of contracts traded in the session. | REST | `session.volume` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
@@ -163,6 +163,8 @@ Futures contracts: the specification of every listed contract.
 
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker for the contract." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `Active` | boolean | Whether or not a given contract was tradeable at the given point in time. Active is true when (first_trade_date <= date <= last_trade_date) and false otherwise. | REST | `active` |
 | `Date` | String | The day, YYYY-MM-DD, whose point-in-time state the row describes: whether the contract was tradeable that day (`active`) and its days to maturity from it. | REST | `date` |
 | `DaysToMaturity` | long | The number of calendar days between the 'date' and the contract's final settlement date. | REST | `days_to_maturity` |
@@ -178,7 +180,6 @@ Futures contracts: the specification of every listed contract.
 | `SettlementDate` | String | The date on which this contract settles. | REST | `settlement_date` |
 | `SettlementTickSize` | double | The tick size for settlement. | REST | `settlement_tick_size` |
 | `SpreadTickSize` | double | The tick size for spreads. | REST | `spread_tick_size` |
-| `Ticker` | String | The ticker for the contract. | REST | `ticker` |
 | `TradeTickSize` | double | The tick size for trades. | REST | `trade_tick_size` |
 | `TradingVenue` | String | The trading venue (MIC) for the exchange on which this contract trades. | REST | `trading_venue` |
 | `Type` | String | The type of contract, one of 'single' or 'combo'. Leaving this filter blank will query for contracts where type is 'single', 'combo' or empty. This field only exists on contracts as of 2025-03-12 and later. It will be null when date < 2025-03-12. | REST | `type` |
