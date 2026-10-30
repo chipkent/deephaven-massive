@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
 
@@ -357,6 +358,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every partner dataset, one `DatasetSpec` each, in the order of the namespace tree."""
 
 
+@raises_through(build_query, list_params)
 def _list_query(
     core: SessionCore,
     spec: DatasetSpec,
@@ -385,8 +387,11 @@ def _list_query(
         filters: The `filters` mapping, or None.
 
     Returns:
-        The query. Invalid arguments raise the `TypeError` or `ValueError` of `build_query`
-        and `list_params`.
+        The query.
+
+    Raises:
+        TypeError: If an argument has the wrong type (`build_query`, `list_params`).
+        ValueError: If an argument has a value the dataset refuses (`build_query`).
     """
     query = build_query(
         core,
@@ -431,6 +436,7 @@ class _Benzinga(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "partners.benzinga"
 
+    @raises_through(_list_query)
     def analysts(
         self,
         *,
@@ -473,6 +479,12 @@ class _Benzinga(Namespace):
             `ValueError` for an unknown filter, a filter value of the wrong kind, or a
             `limit` that is not positive.
 
+        Raises:
+            TypeError: If `sort` is not a `str`; `order` is not a `dm.Order`; `limit` is not an
+                `int`; or `filters` is not a mapping or holds a value of an unsupported type.
+            ValueError: If `limit` is not positive; or a filter is not a parameter of the endpoint,
+                is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -484,6 +496,7 @@ class _Benzinga(Namespace):
             self._core, BENZINGA_ANALYSTS, sort=sort, order=order, limit=limit, filters=filters
         )
 
+    @raises_through(_list_query)
     def analyst_insights(
         self,
         symbols: Symbols | None = None,
@@ -530,6 +543,14 @@ class _Benzinga(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -546,6 +567,7 @@ class _Benzinga(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def ratings(
         self,
         symbols: Symbols | None = None,
@@ -592,6 +614,14 @@ class _Benzinga(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -607,6 +637,7 @@ class _Benzinga(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def consensus_ratings(
         self, symbols: Symbols, *, filters: Mapping[str, FilterValue] | None = None
     ) -> Query:
@@ -647,6 +678,13 @@ class _Benzinga(Namespace):
             a table without a `Symbol` column, an unknown filter, or a filter value that is
             not a date.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; or `filters` is
+                not a mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is None, `dm.ALL`, empty, or holds a ticker that is not
+                Massive's exact ticker; or a filter is not a parameter of the endpoint, is set by a
+                typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -663,6 +701,7 @@ class _Benzinga(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def bulls_bears_say(
         self,
         symbols: Symbols | None = None,
@@ -708,6 +747,14 @@ class _Benzinga(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -723,6 +770,7 @@ class _Benzinga(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def guidance(
         self,
         symbols: Symbols | None = None,
@@ -771,6 +819,14 @@ class _Benzinga(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -787,6 +843,7 @@ class _Benzinga(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def earnings(
         self,
         symbols: Symbols | None = None,
@@ -834,6 +891,14 @@ class _Benzinga(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -850,6 +915,7 @@ class _Benzinga(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def firms(
         self,
         *,
@@ -890,6 +956,12 @@ class _Benzinga(Namespace):
             an argument of the wrong type, and `ValueError` for an unknown filter, a filter
             value of the wrong kind, or a `limit` that is not positive.
 
+        Raises:
+            TypeError: If `sort` is not a `str`; `order` is not a `dm.Order`; `limit` is not an
+                `int`; or `filters` is not a mapping or holds a value of an unsupported type.
+            ValueError: If `limit` is not positive; or a filter is not a parameter of the endpoint,
+                is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -899,6 +971,7 @@ class _Benzinga(Namespace):
             self._core, BENZINGA_FIRMS, sort=sort, order=order, limit=limit, filters=filters
         )
 
+    @raises_through(_list_query)
     def news(
         self,
         *,
@@ -967,6 +1040,16 @@ class _Benzinga(Namespace):
             filter on `published`, a filter value of the wrong kind, or a `limit` that is not
             positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `start` or
+                `end` is not a `str`, `date`, or `datetime`; `sort` is not a `str`; `order` is not a
+                `dm.Order`; `limit` is not an `int`; or `filters` is not a mapping or holds a value
+                of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; a bound cannot be parsed or is naive, or the range ends before it
+                starts; `limit` is not positive; or a filter is not a parameter of the endpoint, is
+                set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1018,6 +1101,7 @@ class _EtfGlobal(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "partners.etf_global"
 
+    @raises_through(_list_query)
     def analytics(
         self,
         symbols: Symbols | None = None,
@@ -1062,6 +1146,14 @@ class _EtfGlobal(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1077,6 +1169,7 @@ class _EtfGlobal(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def constituents(
         self,
         symbols: Symbols | None = None,
@@ -1123,6 +1216,14 @@ class _EtfGlobal(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1140,6 +1241,7 @@ class _EtfGlobal(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def fund_flows(
         self,
         symbols: Symbols | None = None,
@@ -1184,6 +1286,14 @@ class _EtfGlobal(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1201,6 +1311,7 @@ class _EtfGlobal(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def profiles(
         self,
         symbols: Symbols | None = None,
@@ -1246,6 +1357,14 @@ class _EtfGlobal(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1261,6 +1380,7 @@ class _EtfGlobal(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def taxonomies(
         self,
         symbols: Symbols | None = None,
@@ -1306,6 +1426,14 @@ class _EtfGlobal(Namespace):
             symbol, an unknown filter, a filter value of the wrong kind, or a `limit` that is
             not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; `limit` is not positive; or a filter is not a parameter of the
+                endpoint, is set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1347,6 +1475,7 @@ class _Tmx(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "partners.tmx"
 
+    @raises_through(_list_query)
     def corporate_events(
         self,
         symbols: Symbols | None = None,
@@ -1402,6 +1531,16 @@ class _Tmx(Namespace):
             symbol, an `end` before `start`, an unknown filter or a filter on `date`, a
             filter value of the wrong kind, or a `limit` that is not positive.
 
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table; `start` or
+                `end` is not a `str`, `date`, or `datetime`; `sort` is not a `str`; `order` is not a
+                `dm.Order`; `limit` is not an `int`; or `filters` is not a mapping or holds a value
+                of an unsupported type.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
+                exact ticker; a bound cannot be parsed or is naive, or the range ends before it
+                starts; `limit` is not positive; or a filter is not a parameter of the endpoint, is
+                set by a typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1454,6 +1593,7 @@ class _Fable(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "partners.fable"
 
+    @raises_through(_list_query)
     def merchant_aggregates(
         self,
         *,
@@ -1508,6 +1648,14 @@ class _Fable(Namespace):
             or outside a parameter's values (`channel` takes `online`, `offline`, or `bnpl`),
             or a `limit` that is not positive.
 
+        Raises:
+            TypeError: If `start` or `end` is not a `str`, `date`, or `datetime`; `sort` is not a
+                `str`; `order` is not a `dm.Order`; `limit` is not an `int`; or `filters` is not a
+                mapping or holds a value of an unsupported type.
+            ValueError: If a bound cannot be parsed or is naive, or the range ends before it starts;
+                `limit` is not positive; or a filter is not a parameter of the endpoint, is set by a
+                typed argument, or has a value of the wrong kind.
+
         Example:
             ::
 
@@ -1527,6 +1675,7 @@ class _Fable(Namespace):
             filters=filters,
         )
 
+    @raises_through(_list_query)
     def merchant_hierarchy(
         self,
         *,
@@ -1568,6 +1717,12 @@ class _Fable(Namespace):
             an argument of the wrong type, and `ValueError` for an unknown filter, a filter
             value of the wrong kind or outside a parameter's values (`listing_status` takes
             `public` or `private`), or a `limit` that is not positive.
+
+        Raises:
+            TypeError: If `sort` is not a `str`; `order` is not a `dm.Order`; `limit` is not an
+                `int`; or `filters` is not a mapping or holds a value of an unsupported type.
+            ValueError: If `limit` is not positive; or a filter is not a parameter of the endpoint,
+                is set by a typed argument, or has a value of the wrong kind.
 
         Example:
             ::

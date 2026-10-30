@@ -37,7 +37,7 @@ from deephaven.table import Table
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import MassiveError, raises_through
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
 from deephaven_massive._namespaces import (
     crypto,
@@ -358,6 +358,7 @@ class MassiveSession:
         """Partner datasets, by vendor: `benzinga`, `etf_global`, `tmx`, `fable`."""
         return self._partners
 
+    @raises_through(build_query, list_params)
     def snapshots(
         self,
         symbols: Symbols,
@@ -401,15 +402,21 @@ class MassiveSession:
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or an unknown filter raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            TypeError: If an argument has the wrong type: `symbols` not a `str`, a sequence of
+                `str`, or a table; `sort` not a `str`; `order` not a `dm.Order`; `limit` not an
+                `int`; or `filters` not a mapping.
+            ValueError: If `symbols` is None, `dm.ALL`, empty, or holds a ticker that is not
+                Massive's exact ticker; a table has no `Symbol` column; `limit` is not
+                positive; or a filter is not a parameter of the endpoint or its value does not
+                fit it.
         """
         query = build_query(
             self._core,
             snapshots.SNAPSHOTS,
             symbols=symbols,
             all_alternative=(
-                "a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
+                "use a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
                 "market"
             ),
             params=list_params(sort=sort, order=order),
@@ -418,6 +425,7 @@ class MassiveSession:
         )
         return cast("Query", query)
 
+    @raises_through(SessionCore.diagnostics_view)
     def connections(self) -> Table:
         """Return the live diagnostics table of connections and host decisions.
 
@@ -429,16 +437,18 @@ class MassiveSession:
         (`channel:field-`). A connection shared with another session of the same API key shows
         in both. Each call returns a new view, a live result like any other: while it is held it
         keeps the session running and current, and after `close()` it keeps showing the final
-        rows. After `close()` this raises `MassiveError` (see `SessionCore.diagnostics_view`).
+        rows.
 
         Returns:
             A view of the `connections` table, keyed by `Transport`, `AssetClass`, and
             `Family`; its columns are `CONNECTIONS` in `_tables/diagnostics.py`.
 
-        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
+        Raises:
+            MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
         return self._core.diagnostics_view(self._core.diagnostics.connections)
 
+    @raises_through(SessionCore.diagnostics_view)
     def streams(self) -> Table:
         """Return the live diagnostics table of streams and `poll()` tables.
 
@@ -456,10 +466,12 @@ class MassiveSession:
             A view of the `streams` table, keyed by `StreamId`; its columns are `STREAMS` in
             `_tables/diagnostics.py`.
 
-        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
+        Raises:
+            MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
         return self._core.diagnostics_view(self._core.diagnostics.streams)
 
+    @raises_through(SessionCore.diagnostics_view)
     def rate_limits(self) -> Table:
         """Return the live diagnostics table of REST rate limits, one row per subscription.
 
@@ -479,7 +491,8 @@ class MassiveSession:
             A view of the `rate_limits` table, keyed by `Bucket`; its columns are `RATE_LIMITS`
             in `_tables/diagnostics.py`.
 
-        After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
+        Raises:
+            MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
         """
         return self._core.diagnostics_view(self._core.diagnostics.rate_limits)
 
@@ -508,6 +521,7 @@ class MassiveSession:
         if not self._core.results.release(table):
             raise ValueError("table is not a live result of this session")
 
+    @raises_through(SessionCore.close, refuse_update_graph_thread)
     def close(self) -> None:
         """Stop every stream and poller of the session now, and fail every live table. Idempotent.
 
@@ -526,8 +540,11 @@ class MassiveSession:
         closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
         `connections()`, `streams()`, and `rate_limits()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
-        and `release()` keep working. On an
-        update-graph thread it raises `ValueError`, even when the session is already closed.
+        and `release()` keep working.
+
+        Raises:
+            ValueError: On a Deephaven update-graph thread, for example inside a table
+                listener, even when the session is already closed.
 
         Example:
             ::

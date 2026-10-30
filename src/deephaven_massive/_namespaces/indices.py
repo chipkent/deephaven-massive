@@ -35,6 +35,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
 
@@ -182,6 +183,7 @@ class _Indices(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "indices"
 
+    @raises_through(build_query)
     def values(self, symbols: Symbols) -> StreamHistoryQuery:
         """Index levels, tick by tick, as computed by the index providers.
 
@@ -214,10 +216,12 @@ class _Indices(Namespace):
             A query with the stream verbs and `history()`. Nothing is requested until a verb
             is called.
 
-        A symbol that is not a valid index symbol (one with another asset class's prefix, for
-        example), an empty symbol list, or a table without a `Symbol` column raises
-        `ValueError`; `symbols` of any other type than a `str`, a sequence of `str`, a table,
-        or `dm.ALL` raises `TypeError`.
+        Raises:
+            TypeError: For `symbols` of any other type than a `str`, a sequence of `str`, a table,
+                or `dm.ALL`.
+            ValueError: For a symbol that is not a valid index symbol (one with another asset
+                class's prefix, for example), an empty symbol list, or a table without a `Symbol`
+                column. Also for `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -240,6 +244,7 @@ class _Indices(Namespace):
     def bars(
         self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
     ) -> HistoryQuery: ...
+    @raises_through(build_query)
     def bars(
         self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
     ) -> HistoryQuery:
@@ -307,11 +312,13 @@ class _Indices(Namespace):
             A `StreamHistoryQuery` or `HistoryQuery`, as above. Nothing is requested until a
             verb is called.
 
-        A `timespan` that is not a `dm.Timespan` (`dm.Timespan("minute")` converts text), a
-        `multiplier` that is not an `int`, or `symbols` of an unsupported type raises
-        `TypeError`. `Timespan.SESSION`, a `multiplier` that is not positive, a symbol that is
-        not a valid index symbol, an empty symbol list, or a table without a `Symbol` column
-        raises `ValueError`.
+        Raises:
+            TypeError: For a `timespan` that is not a `dm.Timespan` (`dm.Timespan("minute")`
+                converts text), a `multiplier` that is not an `int`, or `symbols` of an unsupported
+                type.
+            ValueError: For `Timespan.SESSION`, a `multiplier` that is not positive, a symbol that
+                is not a valid index symbol, an empty symbol list, or a table without a `Symbol`
+                column. Also for `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -328,6 +335,7 @@ class _Indices(Namespace):
             ),
         )
 
+    @raises_through(build_query)
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous trading day's open, high, low, and close of each index.
 
@@ -361,9 +369,12 @@ class _Indices(Namespace):
         Returns:
             A query with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
-        `dm.ALL`, a symbol that is not a valid index symbol, an empty symbol list, or a table
-        without a `Symbol` column raises `ValueError`; `symbols` of any other type than a
-        `str`, a sequence of `str`, or a table raises `TypeError`.
+        Raises:
+            TypeError: For `symbols` of any other type than a `str`, a sequence of `str`, or a
+                table.
+            ValueError: For `dm.ALL`, a symbol that is not a valid index symbol, an empty symbol
+                list, or a table without a `Symbol` column. Also for `symbols` of None, with a
+                message that names the forms it takes.
 
         Example:
             ::
@@ -382,6 +393,7 @@ class _Indices(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, list_params)
     def snapshots(
         self,
         symbols: Symbols,
@@ -426,12 +438,15 @@ class _Indices(Namespace):
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
-        A `sort` that is not a `str`, an `order` that is not a `dm.Order`, a `limit` that is
-        not an `int`, a `filters` that is not a mapping, or `symbols` of an unsupported type
-        raises `TypeError`. A `limit` that is not positive, a filter key that is not a
-        parameter of the snapshot or a value of the wrong kind (the message lists the valid
-        keys), a symbol that is not a valid index symbol, an empty symbol list, or a table
-        without a `Symbol` column raises `ValueError`.
+        Raises:
+            TypeError: For a `sort` that is not a `str`, an `order` that is not a `dm.Order`, a
+                `limit` that is not an `int`, a `filters` that is not a mapping, or `symbols` of an
+                unsupported type.
+            ValueError: For a `limit` that is not positive, a filter key that is not a parameter of
+                the snapshot or a value of the wrong kind (the message lists the valid keys), a
+                symbol that is not a valid index symbol, an empty symbol list, or a table without a
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -451,6 +466,7 @@ class _Indices(Namespace):
             ),
         )
 
+    @raises_through(build_query, calendar_day)
     def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
         """One day's opening, closing, high, and low levels of each index.
 
@@ -480,10 +496,13 @@ class _Indices(Namespace):
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
-        A `date` that is not a `str`, `date`, or `datetime`, or `symbols` of an unsupported
-        type, raises `TypeError`. `dm.ALL`, a `datetime` or text that is not an ISO-8601 date as
-        `date`, a symbol that is not a valid index symbol, an empty symbol list, or a table
-        without a `Symbol` column raises `ValueError`.
+        Raises:
+            TypeError: For a `date` that is not a `str`, `date`, or `datetime`, or `symbols` of an
+                unsupported type.
+            ValueError: For `dm.ALL`, a `datetime` or text that is not an ISO-8601 date as `date`, a
+                symbol that is not a valid index symbol, an empty symbol list, or a table without a
+                `Symbol` column. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::

@@ -173,6 +173,15 @@ class RestTransport(Protocol):
             request: The normalized arguments.
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+
+        Raises:
+            ValueError: Before any request, if a path the call reads does not take a parameter
+                or filter the request sets.
+            AuthenticationError: If Massive rejects the API key (HTTP 401).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
+                schema, a symbol's later page answers HTTP 404, or a request fails in any other
+                way.
         """
         ...
 
@@ -193,6 +202,11 @@ class RestTransport(Protocol):
             interval: The time between cycles.
             mode: How cycles combine.
             query: The `repr` of the query, for the `Query` column of `m.streams()`.
+
+        Raises:
+            ValueError: Before the table exists, if a path the call can read does not take a
+                parameter or filter the request sets. A cycle's failure later fails the table
+                instead of raising.
         """
         ...
 
@@ -207,6 +221,14 @@ class RestTransport(Protocol):
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
+
+        Raises:
+            AuthenticationError: If Massive rejects the API key (HTTP 401).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
+                schema, a page of adjusted bars echoes another basis than the request, a
+                symbol's later page answers HTTP 404, a bar of a day or longer is stamped at a
+                time Massive is not known to use, or a request fails in any other way.
         """
         ...
 
@@ -235,6 +257,16 @@ class StreamTransport(Protocol):
             request: The normalized arguments.
             channel: The WebSocket channel.
             stream_id: The id the session minted for the stream.
+
+        Raises:
+            ValueError: If explicit options contracts would put more than 1,000 topics on the
+                session's `/options` connection.
+            AuthenticationError: If Massive rejects the API key on the request that decides the
+                WebSocket host.
+            EntitlementError: If the plan has no WebSocket access for the class (the request
+                that decides the host is refused).
+            MassiveError: If the session is closed, the host cannot be decided, or Massive's
+                crypto ticker list cannot be read or does not hold a crypto pair.
         """
         ...
 
@@ -266,6 +298,15 @@ class FlatFileTransport(Protocol):
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+
+        Raises:
+            AuthenticationError: If S3 rejects the flat-file credentials.
+            EntitlementError: If the plan does not include the files (S3 answers 403); for
+                futures files the message names the venue and the `venue=` parameter.
+            MassiveError: If the bucket or endpoint is wrong, the last requested day's file is
+                missing within a day of its publication time, a bar of a day or longer is
+                stamped at a time Massive is not known to use, or a read fails in any other
+                way.
         """
         ...
 
