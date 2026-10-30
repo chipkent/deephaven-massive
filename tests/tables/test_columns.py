@@ -73,7 +73,8 @@ def test_every_column_type_has_a_deephaven_type() -> None:
         ColumnType.INT: dtypes.int32,
         ColumnType.STRING: dtypes.string,
         ColumnType.BOOLEAN: dtypes.bool_,
-        ColumnType.INT_ARRAY: dtypes.int32_array,
+        ColumnType.LONG_ARRAY: dtypes.long_array,
+        ColumnType.STRING_ARRAY: dtypes.string_array,
     }
 
 

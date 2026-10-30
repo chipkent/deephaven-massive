@@ -6,17 +6,16 @@ carry their long-form PascalCase columns and wire types. This module turns those
 the dataset's table shape:
 
 - `ColumnType`, the closed set of Deephaven column types (`Instant`, `double`, `long`, `int`,
-  `String`, `boolean`, `int[]`), each with its Arrow type, and `COLUMN_TYPES`, the fixed map
-  from a field's `WireType` to its column type. Every calendar date is ISO `yyyy-MM-dd` text,
-  a `String`, so a date joins and compares as text; `Column.calendar_date` marks those
-  columns, and the Deephaven side stores one shared `String` per distinct date
-  (`_tables/columns.py` `dataset_table`), so a date costs a reference per row. A date is a
-  stored column, never a `LocalDate` and never a view computed on read; instants stay
-  `Instant`. The library's time columns (`row_times.py`) own their names: no vendor field
-  keeps `Timestamp` or any `Timestamp<Qualifier>` outside a declared key, and on a tick, bar,
-  or daily-summary dataset none keeps `Date` either (a vendor `date` stays `Date` only on a
-  dataset without the library's `Date`, such as the economy data); no refresh `NAMES` entry
-  may coin one.
+  `String`, `boolean`, `long[]`, `String[]`), each with its Arrow type, and `COLUMN_TYPES`, the
+  fixed map from a field's `WireType` to its column type. Every calendar date is ISO `yyyy-MM-dd`
+  text, a `String`, so a date joins and compares as text; `Column.calendar_date` marks those
+  columns, and the Deephaven side stores one shared `String` per distinct date (`_tables/columns.py`
+  `dataset_table`), so a date costs a reference per row. A date is a stored column, never a
+  `LocalDate` and never a view computed on read; instants stay `Instant`. The library's time columns
+  (`row_times.py`) own their names: no vendor field keeps `Timestamp` or any `Timestamp<Qualifier>`
+  outside a declared key, and on a tick, bar, or daily-summary dataset none keeps `Date` either (a
+  vendor `date` stays `Date` only on a dataset without the library's `Date`, such as the economy
+  data); no refresh `NAMES` entry may coin one.
 - `Schema`, an ordered set of typed columns that turns row dictionaries into an Arrow table
   (used by the diagnostics tables, whose rows are built in Python).
 - `rename`, the run-time key rename of one source for one dataset: the source's fields, through the
@@ -26,12 +25,14 @@ the dataset's table shape:
   source does not carry (one filled from the request) added as a constant `String` column. Nothing
   else changes. `required_fields` resolves the keys a source must carry back to the generated fields
   behind them, for the wire clients' required-key checks.
-- `dataset_schema`, the merge: the ordered union by column name of the renamed columns of
-  every source of every member of the dataset's kind (`Catalog.members`), with the library's
-  own time columns (`row_times`): `Symbol`, `Date`, and `Timestamp` or `TimestampStart` and
-  `TimestampEnd` first, `TimestampInsert` last, each column's wire type the common type
-  (`WireType.common_type`) of every contribution. Every member of a kind therefore has the
-  same columns: crypto trades carry the stocks-only `Tape`, always null. Each column also gets
+- `dataset_schema`, the merge: the columns of the dataset's kind (`Catalog.members`) that some
+  source of the dataset itself fills, in the kind's order, with the library's own time columns
+  (`row_times`): `Symbol`, `Date`, and `Timestamp` or `TimestampStart` and `TimestampEnd`
+  first, `TimestampInsert` last, each column's wire type the common type
+  (`WireType.common_type`) of every contribution across the kind. A column only another member
+  of the kind fills is left out, so crypto trades have no stocks-only `Tape`, while the columns
+  two members share keep one name, type, and place, so their tables merge on them. Each column
+  also gets
   one description chosen for the dataset, the transports that fill it, and the wire keys behind
   it (`Column`); every result's column descriptions and the queries' `columns()` tables read
   them from here. `Catalog` caches the result per dataset; this module holds no state.
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "COLUMN_TYPES",
+    "JSON_TEXT_NOTE",
     "KEY_COLUMNS",
     "OPTION_ROOT",
     "RAW_SYMBOL",
@@ -109,7 +111,8 @@ class ColumnType(StrEnum):
     Each member knows its Arrow type (`arrow_type`); its Deephaven type is `dh_type` in
     `_tables/columns.py`. A dataset column's type follows from its wire type (`COLUMN_TYPES`):
     timestamps are `Instant`, calendar dates ISO `yyyy-MM-dd` text (`String`), and condition
-    codes `int[]`. `INT` is used only by the library's own diagnostics tables.
+    codes `long[]`, lists of text `String[]`. `INT` is used only by the library's own diagnostics
+    tables.
     """
 
     INSTANT = "Instant"
@@ -118,7 +121,8 @@ class ColumnType(StrEnum):
     INT = "int"
     STRING = "String"
     BOOLEAN = "boolean"
-    INT_ARRAY = "int[]"
+    LONG_ARRAY = "long[]"
+    STRING_ARRAY = "String[]"
 
     @property
     def arrow_type(self) -> pa.DataType:
@@ -133,7 +137,8 @@ _ARROW_TYPES: Final[Mapping[ColumnType, pa.DataType]] = {
     ColumnType.INT: pa.int32(),
     ColumnType.STRING: pa.string(),
     ColumnType.BOOLEAN: pa.bool_(),
-    ColumnType.INT_ARRAY: pa.list_(pa.int32()),
+    ColumnType.LONG_ARRAY: pa.list_(pa.int64()),
+    ColumnType.STRING_ARRAY: pa.list_(pa.string()),
 }
 
 COLUMN_TYPES: Final[Mapping[WireType, ColumnType]] = {
@@ -145,7 +150,8 @@ COLUMN_TYPES: Final[Mapping[WireType, ColumnType]] = {
     WireType.DATE: ColumnType.STRING,
     WireType.EPOCH: ColumnType.INSTANT,
     WireType.ISO_INSTANT: ColumnType.INSTANT,
-    WireType.INT_ARRAY: ColumnType.INT_ARRAY,
+    WireType.LONG_ARRAY: ColumnType.LONG_ARRAY,
+    WireType.STRING_ARRAY: ColumnType.STRING_ARRAY,
 }
 """The column type of each wire type: `string` and `json-text` are both text, a `date` is ISO
 `yyyy-MM-dd` text too (every calendar date the library produces is), and an `epoch` and an
@@ -197,12 +203,11 @@ class Column:
         type: The column's type.
         description: What the column holds, chosen per dataset from its fields' descriptions
             (the vendor's, or the refresh's correction where the vendor's is wrong) or written
-            by the library for the key columns and for a column only other datasets of the
-            kind supply (see `dataset_schema`); empty when nothing describes it.
+            by the library for the key columns and the columns it computes (see
+            `dataset_schema`); empty when nothing describes it.
         supplied_by: The transports whose sources of this dataset fill the column (a key
-            filled from the request counts), in the order `REST`, `FLAT_FILES`, `WS`; empty
-            for a column only other datasets of the kind supply, which this dataset leaves
-            null.
+            filled from the request counts), in the order `REST`, `FLAT_FILES`, `WS`; never
+            empty for a dataset column, since a dataset keeps only the columns it can fill.
         wire_keys: For each transport of `supplied_by`, the distinct wire keys behind the
             column, in the order of the dataset's sources, before any projection renames
             them; None stands for a key filled from the request. Excluded from hashing.
@@ -230,9 +235,9 @@ def _coerce(value: object, column_type: ColumnType) -> object:
     Four conversions Arrow does not do by itself: an ISO-8601 date-time string
     (`2024-06-24T18:33:53Z`) becomes epoch nanoseconds for an `Instant` column, read as UTC when it
     carries no offset, keeping every fraction digit down to the nanosecond; a dict or list becomes
-    its JSON text for a `String` column; a single integer becomes a one-element list for an `int[]`
+    its JSON text for a `String` column; a single integer becomes a one-element list for a `long[]`
     column; and an integral `float` becomes an `int` for a `long` or `int` column, and for each
-    element of an `int[]` list, while any other `float` there is rejected, because Arrow would
+    element of a `long[]` list, while any other `float` there is rejected, because Arrow would
     silently truncate `7140.08` to `7140`. Everything else passes through for Arrow to check; in
     particular a naive `datetime` object in an `Instant` column is read as UTC, as Arrow reads it.
 
@@ -245,16 +250,16 @@ def _coerce(value: object, column_type: ColumnType) -> object:
 
     Raises:
         ValueError: If a `float` with a fractional part, or a NaN or infinity, fills a `long`
-            or `int` column or an element of an `int[]` list (`Schema.to_arrow` reports it as
+            or `int` column or an element of a `long[]` list (`Schema.to_arrow` reports it as
             a schema mismatch).
     """
     if column_type is ColumnType.INSTANT and isinstance(value, str):
         return _iso_to_epoch_ns(value)
     if column_type is ColumnType.STRING and isinstance(value, dict | list):
         return json.dumps(value, sort_keys=True)
-    if column_type is ColumnType.INT_ARRAY and isinstance(value, int | list):
+    if column_type is ColumnType.LONG_ARRAY and isinstance(value, int | list):
         items: list[object] = value if isinstance(value, list) else [value]
-        return [None if v is None else _coerce(v, ColumnType.INT) for v in items]
+        return [None if v is None else _coerce(v, ColumnType.LONG) for v in items]
     if column_type in _INTEGER_TYPES and isinstance(value, float):
         if not value.is_integer():
             raise ValueError(f"{value!r} is not an integer")
@@ -592,8 +597,8 @@ def _by_position(
 
     The merge walks them in this order, so a schema's column order follows the generated
     memberships, never the order of the spec's role paths or mappings, nor how a group is
-    split over datasets: the trades of stocks give the same columns, in the same order,
-    whether `stocks.trades` reads the last-trade path or `stocks.last_trade` does. The
+    split over datasets: the trades of stocks give their columns in the same order whether
+    `stocks.trades` reads the last-trade path or `stocks.last_trade` does. The
     members come grouped (`Catalog.members` orders them by group), and within a group the
     sources of all its members are ordered together. Every source of a kind dataset holds a
     position (the kind-membership gate); a dataset in no kind has none, so its sources keep
@@ -664,6 +669,13 @@ _DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     ),
 }
 """The library's description of each derived column."""
+
+_OTHER_ROWS: Final = "Null on a row of any other class."
+"""The sentence that ends `OptionRoot`'s description on a dataset of options and other rows."""
+
+JSON_TEXT_NOTE: Final = "The column holds Massive's value as JSON text."
+"""The sentence that ends the description of every column of nested values kept as JSON text:
+an object, a list of objects, or a value of several shapes (`WireType.JSON_TEXT`)."""
 
 _QUOTED_ENDS: Final = ('."', '?"', '!"')
 """The endings of a quoted description that already closes a sentence, so the key column's
@@ -943,33 +955,48 @@ def _description(
     name: str,
     *,
     own: Sequence[_Contribution],
-    suppliers: Sequence[str],
     library: bool,
+    json_text: bool,
 ) -> str:
     """Pick one column's description for one dataset (the rules of `dataset_schema`).
 
     Args:
         spec: The dataset.
         name: The column.
-        own: The dataset's own contributions to the column, in description order; empty when
-            only other members of the kind supply it.
-        suppliers: The members of the kind that supply the column, by name, in member order.
+        own: The dataset's own contributions to the column, in description order.
         library: True when the library describes the column: one of the dataset's declared key
             columns, or a time column the library fills (`Date`, `TimestampStart`,
             `TimestampEnd`, `TimestampInsert`). A vendor field that merely carries one of those
             names in a dataset that has no such column of its own is described as any other.
+        json_text: True for a column whose values are nested objects or lists kept as JSON
+            text (`WireType.JSON_TEXT`), so the description says how to read the text.
 
     Returns:
         The description, with the dataset's note on the column (`DatasetSpec.column_notes`)
-        after it; empty when nothing describes the column.
+        after it, then `JSON_TEXT_NOTE` on a JSON-text column; empty when nothing describes
+        the column.
     """
-    note = spec.column_notes.get(name, "")
-    text = _chosen(spec, name, own=own, suppliers=suppliers, library=library)
-    if not text or not note:
-        return text or note
-    # The vendor's text may lack its closing period; the note is a sentence of its own.
+    text = _chosen(spec, name, own=own, library=library)
+    for sentence in (spec.column_notes.get(name, ""), JSON_TEXT_NOTE if json_text else ""):
+        text = _sentences(text, sentence)
+    return text
+
+
+def _sentences(text: str, sentence: str) -> str:
+    """Return a description with one more sentence after it.
+
+    Args:
+        text: The description so far; may be empty, and the vendor's may lack its closing
+            period.
+        sentence: The sentence to add; empty adds nothing.
+
+    Returns:
+        `text`, closed with a period where it has no end of its own, then `sentence`.
+    """
+    if not text or not sentence:
+        return text or sentence
     stop = "" if text.endswith((".", "!", "?", *_QUOTED_ENDS)) else "."
-    return f"{text}{stop} {note}"
+    return f"{text}{stop} {sentence}"
 
 
 def _chosen(
@@ -977,7 +1004,6 @@ def _chosen(
     name: str,
     *,
     own: Sequence[_Contribution],
-    suppliers: Sequence[str],
     library: bool,
 ) -> str:
     """Pick one column's description, before the dataset's note (`_description`).
@@ -986,7 +1012,6 @@ def _chosen(
         spec: The dataset.
         name: The column.
         own: The dataset's own contributions to the column, in description order.
-        suppliers: The members of the kind that supply the column, by name, in member order.
         library: True when the library describes the column.
 
     Returns:
@@ -1010,9 +1035,6 @@ def _chosen(
         listed = "; ".join(parts)
         end = "" if listed.endswith(_QUOTED_ENDS) else "."
         return f"{sentence} From {listed}{end}"
-    if not own:
-        named = ", ".join(f"`{member}`" for member in suppliers)
-        return f"Always null for `{spec.name}`; supplied by {named}."
     for _, column in own:
         described = column.field.description_for(asset_class) if column.field else ""
         if described:
@@ -1026,9 +1048,9 @@ def _column(
     *,
     column_type: ColumnType,
     own: Sequence[_Contribution],
-    suppliers: Sequence[str],
     library: bool,
     filled: tuple[Transport, ...],
+    json_text: bool,
 ) -> Column:
     """Build one column of a dataset schema with its description, transports, and wire keys.
 
@@ -1037,11 +1059,11 @@ def _column(
         name: The column.
         column_type: Its merged type.
         own: The dataset's own contributions to the column, in description order.
-        suppliers: The members of the kind that supply the column, by name, in member order.
         library: True when the library describes the column (`_description`).
         filled: The transports on which the library fills the column itself (every transport
             of the dataset for a library time column, none otherwise); they are listed in
             `Column.supplied_by` with the transports that contribute it.
+        json_text: True for a column of nested values kept as JSON text (`_description`).
 
     Returns:
         The column.
@@ -1056,7 +1078,7 @@ def _column(
     return Column(
         name,
         column_type,
-        _description(spec, name, own=own, suppliers=suppliers, library=library),
+        _description(spec, name, own=own, library=library, json_text=json_text),
         supplied,
         MappingProxyType({transport: tuple(keys) for transport, keys in wire_keys.items()}),
     )
@@ -1066,8 +1088,8 @@ def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
     """Widen one source column to its dataset column's Arrow type, by the lattice joins.
 
     A source joins its kind with its own wire type, which the merged column may widen
-    (`WireType.common_type`): a `long` in a `double` column is cast, and a `long` in an
-    `int[]` column becomes a one-element list (a null stays null). A column already of its
+    (`WireType.common_type`): a `long` in a `double` column is cast, and a `long` in a
+    `long[]` column becomes a one-element list (a null stays null). A column already of its
     type is cast to itself, at no cost. Every transport converts its decoded columns with it,
     so they all widen alike.
     A `long` beyond 2**53 in a `double` column takes the nearest `double`, as the lattice join
@@ -1112,20 +1134,23 @@ def _derived(spec: DatasetSpec, symbol: Column | None, *, raw_symbol: bool) -> l
         raw_symbol: Whether the session keeps unreadable symbols in `RawSymbol`.
 
     Returns:
-        `OptionRoot` for an options dataset with a `Symbol`, then `RawSymbol` when
-        `raw_symbol` is set and the dataset reads its symbol from rows. Each is a `String`
-        column with the transports and wire keys of `Symbol`, from which it is computed.
+        `OptionRoot` for an options dataset, or one whose rows include options contracts
+        (`DatasetSpec.option_rows`), with a `Symbol`, then `RawSymbol` when `raw_symbol` is
+        set and the dataset reads its symbol from rows. Each is a `String` column with the
+        transports and wire keys of `Symbol`, from which it is computed.
     """
     if symbol is None:
         return []
-    names = [OPTION_ROOT] if spec.asset_class is AssetClass.OPTIONS else []
+    options = spec.asset_class is AssetClass.OPTIONS or spec.option_rows
+    names = [OPTION_ROOT] if options else []
     if raw_symbol and _reads_symbol(spec):
         names.append(RAW_SYMBOL)
+    mixed = _OTHER_ROWS if spec.option_rows else ""
     return [
         Column(
             name,
             ColumnType.STRING,
-            _DERIVED_SENTENCES[name],
+            _sentences(_DERIVED_SENTENCES[name], mixed if name == OPTION_ROOT else ""),
             symbol.supplied_by,
             symbol.wire_keys,
         )
@@ -1142,19 +1167,23 @@ def dataset_schema(
 ) -> Schema:
     """Merge the renamed columns of every member's sources into one dataset's schema.
 
-    The ordered union by column name of `rename(member, s)` for every source `s` of every
-    member, group by group in member order, each group's sources in their positions in it,
-    whichever member reads them (declared order for a source without one; `_by_position`),
-    then field order, with the library's time
-    columns for the dataset's row times (`DatasetSpec.times`): `Date` for ticks, `Date`,
-    `TimestampStart`, and `TimestampEnd` for bars and daily summaries, and `TimestampInsert` for
-    every dataset. `Symbol`, `Date`, `Timestamp`, `TimestampStart`, and `TimestampEnd` come
-    first, in that order, where the dataset declares them as keys or the library fills them;
-    `TimestampInsert` comes last; every other column, `Underlying` included, takes its place
-    by first appearance. Each column's type is the `WireType.common_type` of every
-    contribution, mapped through `COLUMN_TYPES` (a library `Date` is a date, so ISO text,
-    and the other library columns instants). `Catalog.dataset_schema` calls it once per
-    dataset and caches the result.
+    The kind's order is the ordered union by column name of `rename(member, s)` for every
+    source `s` of every member, group by group in member order, each group's sources in their
+    positions in it, whichever member reads them (declared order for a source without one;
+    `_by_position`), then field order. The dataset keeps, in that order, only the columns some
+    source of its own fills, on any transport, with the library's time columns for the
+    dataset's row times (`DatasetSpec.times`): `Date` for ticks, `Date`, `TimestampStart`, and
+    `TimestampEnd` for bars and daily summaries, and `TimestampInsert` for every dataset.
+    `Symbol`, `Date`, `Timestamp`, `TimestampStart`, and `TimestampEnd` come first, in that
+    order, where the dataset declares them as keys or the library fills them; `TimestampInsert`
+    comes last; every other column, `Underlying` included, takes its place by first appearance.
+    A column only other members of the kind fill is left out, so a dataset's columns depend on
+    its declared sources alone, never on a call's arguments, and a history table and a live
+    table of one dataset have the same columns. Each column's type is the
+    `WireType.common_type` of every contribution across the kind, so the columns two members
+    share have one type and their tables merge on them. It is mapped through `COLUMN_TYPES` (a
+    library `Date` is a date, so ISO text, and the other library columns instants).
+    `Catalog.dataset_schema` calls it once per dataset and caches the result.
 
     Each column also gets its transports and wire keys from the dataset's own sources
     (`Column.supplied_by`, `Column.wire_keys`; a library time column lists every transport of
@@ -1163,16 +1192,13 @@ def dataset_schema(
     ("dollar value per whole share") is wrong for crypto. A field's description is the one for
     the dataset's asset class (`Field.description_for`): the per-class description a source
     that serves several classes gives, else its own, which is the vendor's or the refresh's
-    correction of it. Three rules choose it:
+    correction of it. Two rules choose it:
 
     1. A column the dataset's own sources supply takes the first non-empty field description
        among them, trying the transports in the order REST, flat files, WebSocket and, within
        one transport, the sources in their declared order (role paths, then channels, then
        prefixes). REST comes first because its text is the most complete.
-    2. A column that exists only through the kind's union, which no source of the dataset
-       supplies, says so and names the members that do, in member order:
-       ``Always null for `crypto.trades`; supplied by `stocks.trades`.``
-    3. The library describes its own columns: `Symbol`, `Timestamp`, and `Underlying` when
+    2. The library describes its own columns: `Symbol`, `Timestamp`, and `Underlying` when
        they are declared key columns, and the time columns it fills (`Date`,
        `TimestampStart`, `TimestampEnd`, `TimestampInsert`), each with a sentence of its own
        that says what the column means for this dataset ("The row's primary time, as an
@@ -1211,7 +1237,6 @@ def dataset_schema(
             and an unknown source whatever `source` raises.
     """
     types: dict[str, WireType] = {}
-    suppliers: dict[str, list[str]] = {}
     for member, transport, key, found in _by_position(members, source):
         for contribution in rename(member, found):
             prior = types.get(contribution.column)
@@ -1227,9 +1252,6 @@ def dataset_schema(
                     f"{transport.value} {key}"
                 )
             types[contribution.column] = joined
-            named = suppliers.setdefault(contribution.column, [])
-            if member.name not in named:
-                named.append(member.name)
     library = _library_names(spec)
     for name in library:
         prior = types.get(name)
@@ -1242,10 +1264,16 @@ def dataset_schema(
         types[name] = joined
     declared = {key_column(spec, r, k) for keys in spec.keys.values() for r, k in keys.declared()}
     described = declared | set(library)
-    leading = [name for name in _LEADING if name in described]
-    rest = [name for name in types if name not in leading and name != INSERT]
-    order = [*leading, *rest, *((INSERT,) if INSERT in types else ())]
     own = _own_contributions(spec, source)
+    leading = [name for name in _LEADING if name in described]
+    # A column only other members of the kind fill is left out: no transport of this dataset
+    # could ever fill it, whatever the call's arguments.
+    rest = [
+        name
+        for name in types
+        if name not in leading and name != INSERT and (name in own or name in described)
+    ]
+    order = [*leading, *rest, *((INSERT,) if INSERT in types else ())]
     transports = tuple(t for t in _TRANSPORT_ORDER if any(d is t for d, _ in spec.sources))
     columns = [
         replace(
@@ -1254,9 +1282,9 @@ def dataset_schema(
                 name,
                 column_type=COLUMN_TYPES[types[name]],
                 own=own.get(name, ()),
-                suppliers=suppliers.get(name, ()),
                 library=name in described and (name in _KEY_SENTENCES or name in library),
                 filled=transports if name in library else (),
+                json_text=types[name] is WireType.JSON_TEXT,
             ),
             calendar_date=types[name] is WireType.DATE,
         )

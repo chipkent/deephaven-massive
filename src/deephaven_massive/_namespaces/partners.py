@@ -21,17 +21,17 @@ news, its time (`Timestamp`), the wire parameters behind `symbols`, `start`, and
 keys of a keyed `poll()` table, and the page size, which is each endpoint's documented maximum.
 Columns, types, and descriptions come from the generated schemas, never from this module.
 
-Instruments. The Benzinga datasets that take tickers and the ETF Global datasets take
-Massive's stock tickers (`AAPL`, `BRK.B`), so their specs carry
-`AssetClass.STOCKS` and a symbol with another class's prefix (`X:BTCUSD`) is rejected when the
-query is built. Their rows each describe one instrument, which becomes the `Symbol` column (an
-ETF Global row's ETF, its `composite_ticker`; for consensus ratings, the symbol requested; for
-a TMX event or a Benzinga row without a ticker, null). Benzinga news names several tickers per
-article, so it has no `Symbol`, keeps its `Tickers` column (JSON text), and uses `symbols` only
-to filter the request. Benzinga analysts and firms, and both Fable datasets, take no symbols at all.
-The TMX corporate events come from Wall Street Horizon's global calendar, whose tickers are not
-US-market ones (each event names its venue's MIC and an ISIN), so that dataset takes and keeps
-its tickers exactly as Massive writes them (`DatasetSpec.symbols_as_written`).
+Instruments. The Benzinga datasets that take tickers and the ETF Global datasets take Massive's
+stock tickers (`AAPL`, `BRK.B`), so their specs carry `AssetClass.STOCKS` and a symbol with another
+class's prefix (`X:BTCUSD`) is rejected when the query is built. Their rows each describe one
+instrument, which becomes the `Symbol` column (an ETF Global row's ETF, its `composite_ticker`; for
+consensus ratings, the symbol requested; for a TMX event or a Benzinga row without a ticker, null).
+Benzinga news names several tickers per article, so it has no `Symbol`, keeps its `Tickers` column
+(a `String[]`), and uses `symbols` only to filter the request. Benzinga analysts and firms, and both
+Fable datasets, take no symbols at all. The TMX corporate events come from Wall Street Horizon's
+global calendar, whose tickers are not US-market ones (each event names its venue's MIC and an
+ISIN), so that dataset takes and keeps its tickers exactly as Massive writes them
+(`DatasetSpec.symbols_as_written`).
 """
 
 from __future__ import annotations
@@ -911,9 +911,13 @@ class _Benzinga(Namespace):
         """Benzinga news articles, with headline, teaser, body, and the tickers each one names.
 
         One row per article: its publication time as `Timestamp`, author, title, teaser, body,
-        URL, and the JSON lists of tickers, channels, tags, and images. An article names any
-        number of tickers, so the rows have no `Symbol` column: `Tickers` holds the list as
-        JSON text, and `symbols` only selects the articles that name at least one of them.
+        URL, and the lists of tickers, channels, tags, and images, each a `String[]` column.
+        An article names any number of tickers, so the rows have no `Symbol` column: `Tickers`
+        holds the list, and `symbols` only selects the articles that name at least one of
+        them. To keep the articles that name one ticker, filter with the query language's
+        `inObj`, which needs a list, as in
+        `table.where("Tickers != null && inObj(`AAPL`, Tickers)")`; for one row per article and
+        ticker, `table.ungroup("Tickers")`.
 
         Served by REST only, from `GET /benzinga/v2/news`: `fetch()` reads every page into a
         static table, and `poll(interval)` re-reads the endpoint into a live table that, by

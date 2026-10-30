@@ -1,4 +1,4 @@
-"""Tests for the `m.reference` namespace and the record of the unified snapshot."""
+"""Tests for the `m.reference` namespace."""
 
 import json
 import logging
@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 import pyarrow as pa
 import pytest
+from deephaven import arrow as dh_arrow
 from deephaven import dtypes, input_table, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
@@ -46,7 +47,6 @@ NAMES = [
     "conditions",
     "market_status",
     "market_holidays",
-    "snapshots",
 ]
 
 
@@ -129,7 +129,7 @@ def test_news_keeps_its_tickers_and_appends() -> None:
     assert spec.poll_mode is dm.PollMode.APPEND
     types = _types(spec)
     assert "Symbol" not in types
-    assert types["Tickers"] is ColumnType.STRING
+    assert types["Tickers"] is ColumnType.STRING_ARRAY
     assert types["PublishedUtc"] is ColumnType.INSTANT
 
 
@@ -168,28 +168,9 @@ def test_market_holidays_hours_are_instants() -> None:
     assert types["Date"] is ColumnType.STRING
 
 
-def test_the_unified_snapshot_record() -> None:
-    spec = reference.SNAPSHOTS
-    assert CATALOG.by_name["reference.snapshots"] is spec
-    assert spec.fetch_path == "/v3/snapshot"
-    assert spec.symbol_param == "ticker.any_of"
-    assert spec.page_size == 250
-    assert not spec.per_symbol
-    schema = CATALOG.dataset_schema(spec)
-    assert schema.column_names[0] == "Symbol"
-    types = _types(spec)
-    # An option's underlying stays in its own column: the other classes' rows have none.
-    assert "Underlying" not in types
-    assert types["UnderlyingAssetTicker"] is ColumnType.STRING
-    assert types["LastTradeConditions"] is ColumnType.INT_ARRAY
-    assert types["LastUpdated"] is ColumnType.INSTANT
-    assert {"Error", "Message"} <= set(types)
-
-
 @pytest.mark.parametrize("name", NAMES)
 def test_the_summary_opens_the_docstring(name: str) -> None:
-    owner = dm.MassiveSession if name == "snapshots" else reference._Reference
-    doc = getattr(owner, name).__doc__
+    doc = getattr(reference._Reference, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"reference.{name}"].summary
 
 
@@ -479,7 +460,7 @@ SAMPLES = [
         {"Date": date(2022, 6, 9), "TickerChangeTicker": "META", "Type": "ticker_change"},
     ),
     Sample(reference.RELATED_COMPANIES, "related_companies", {"Ticker": "MSFT"}),
-    Sample(reference.NEWS, "news", {"Tickers": '["UBS"]', "PublisherName": "Investing.com"}),
+    Sample(reference.NEWS, "news", {"Tickers": ["UBS"], "PublisherName": "Investing.com"}),
     Sample(reference.EXCHANGES, "exchanges", {"Id": 1, "Mic": "XASE"}),
     Sample(
         reference.CONDITIONS,
@@ -495,18 +476,6 @@ SAMPLES = [
         reference.MARKET_HOLIDAYS,
         "market_holidays",
         {"Exchange": "NYSE", "Date": date(2020, 11, 26), "Status": "closed"},
-    ),
-    # The vendor's sample sends `details.underlying_ticker`, which its schema lacks.
-    Sample(
-        reference.SNAPSHOTS,
-        "snapshots",
-        {
-            "Ticker": "O:NCLH221014C00005000",
-            "UnderlyingAssetTicker": "AAPL",
-            "GreeksDelta": 0.5520187372272933,
-            "LastTradeConditions": [209],
-        },
-        extra=("details.underlying_ticker",),
     ),
 ]
 
@@ -673,7 +642,7 @@ def test_news_fetch(
     assert params["published_utc.gte"] == ["2024-06-24T04:00:00Z"]
     assert params["published_utc.lt"] == ["2024-06-25T04:00:00Z"]
     assert "Symbol" not in out[0]
-    assert out[0]["Tickers"] == '["UBS"]'
+    assert out[0]["Tickers"] == ["UBS"]
     assert out[0]["PublishedUtc"] == datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
 
 
@@ -685,6 +654,7 @@ def _article(article_id: str, published: str, *tickers: str) -> dict[str, object
         "title": f"Article {article_id}",
         "article_url": f"https://example.com/{article_id}",
         "publisher": {"name": "Example"},
+        "keywords": ["markets"],
     }
 
 
@@ -791,7 +761,7 @@ def test_lookup_fetches(
     ]
     assert [r["Code"] for r in types] == ["CS", "ETF"]
     assert [(r["Id"], r["Acronym"]) for r in exchanges] == [(1, "AMEX"), (62, None)]
-    assert conditions[0]["DataTypes"] == '["trade"]'
+    assert conditions[0]["DataTypes"] == ["trade"]
     assert conditions[0]["UpdateRulesMarketCenterUpdatesVolume"] is True
     assert len(status) == 1
     assert status[0]["ServerTime"] == datetime(2020, 11, 10, 22, 37, 37, tzinfo=UTC)
@@ -801,43 +771,6 @@ def test_lookup_fetches(
     assert holidays[3]["Open"] == datetime(2020, 11, 27, 14, 30, tzinfo=UTC)
     assert holidays[3]["Close"] == datetime(2020, 11, 27, 18, tzinfo=UTC)
     assert holidays[0]["Open"] is None  # a full holiday has no hours
-
-
-def test_unified_snapshots_fetch(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Fixture,
-    dh_to_pylist: ToRows,
-) -> None:
-    fake_rest.reply("/v3/snapshot", sample(load_fixture, "snapshots"))
-    symbols = ["O:NCLH221014C00005000", "AAPL", "TSLAAPL"]
-    out = dh_to_pylist(rest_session.snapshots(symbols).fetch())
-    assert sent(fake_rest) == [
-        (
-            "/v3/snapshot",
-            {"ticker.any_of": ["AAPL,O:NCLH221014C00005000,TSLAAPL"], "limit": ["250"]},
-        )
-    ]
-    by_symbol = {r["Symbol"]: r for r in out}
-    assert set(by_symbol) == set(symbols)
-    option = by_symbol["O:NCLH221014C00005000"]
-    assert option["UnderlyingAssetTicker"] == "AAPL"
-    assert option["LastTradeConditions"] == [209]
-    assert option["LastTradeSipTimestamp"].value == 1675280958783136800  # every nanosecond
-    # A ticker Massive does not know keeps its row, with the error.
-    assert by_symbol["TSLAAPL"]["Error"] == "NOT_FOUND"
-
-
-def test_unified_snapshots_send_250_tickers_a_request(
-    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    fake_rest.reply("/v3/snapshot", Reply(envelope([])))
-    symbols = [f"T{i:03d}" for i in range(251)]
-    rest_session.snapshots(symbols).fetch()
-    batches = [q["ticker.any_of"][0].split(",") for _, q in sent(fake_rest)]
-    assert sorted(len(batch) for batch in batches) == [1, 250]
-    assert sorted(s for batch in batches for s in batch) == symbols
 
 
 # --- Polling the market status ------------------------------------------------------------
@@ -910,7 +843,18 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     revised = {spec.name: spec.revision_keys for spec in reference.DATASETS if spec.revision_keys}
     assert revised == {
         "reference.market_status": ("ServerTime",),
-        "reference.snapshots": ("LastUpdated", "LastQuoteLastUpdated", "LastTradeLastUpdated"),
     }
     for name, keys in revised.items():
         assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)
+
+
+def test_the_documented_ticker_filter_keeps_the_articles_that_name_one(
+    dh_exec_ctx: object,
+) -> None:
+    # The idioms the news docstrings give for a `String[]` column, a null list included.
+    tickers = pa.array([["AAPL", "MSFT"], None, ["UBS"], []], pa.list_(pa.string()))
+    table = dh_arrow.to_table(pa.table({"Tickers": tickers, "Id": [1, 2, 3, 4]}))
+    named = table.where("Tickers != null && inObj(`AAPL`, Tickers)")
+    assert [row["Id"] for row in dh_arrow.to_arrow(named).to_pylist()] == [1]
+    rows = dh_arrow.to_arrow(table.ungroup("Tickers")).to_pylist()
+    assert [(row["Id"], row["Tickers"]) for row in rows] == [(1, "AAPL"), (1, "MSFT"), (3, "UBS")]

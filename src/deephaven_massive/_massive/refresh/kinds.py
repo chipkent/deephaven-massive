@@ -9,7 +9,7 @@ source order. Once every transport is generated, this module:
    entry that names a source the snapshot does not generate (`stale-entry`);
 2. checks that one column joins to one `WireType` within a kind (`type-agreement`), by
    `WireType.common_type`, the rule the run-time schema merge uses too: `long` with
-   `double` gives `double`, `long` with `int-array` gives `int-array`, two `epoch`s give an
+   `double` gives `double`, `long` with `long-array` gives `long-array`, two `epoch`s give an
    `epoch` (each source keeping its unit), and any other pair is a conflict, printed with
    both fields' descriptions since it is first a possible naming error;
 3. checks that, within a group whose sources span two or more transports, every column is on

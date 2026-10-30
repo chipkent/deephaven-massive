@@ -51,7 +51,8 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
     assert rows["stocks.bars"]["Verbs"] == stream_and_history
     ratios = rows["stocks.financials.ratios"]
     assert ratios["Documentation"] == f"{_PAGES}stocks.md#financials-ratios"
-    assert rows["reference.snapshots"]["Call"] == "m.snapshots"
+    assert rows["snapshots"]["Call"] == "m.snapshots"
+    assert rows["snapshots"]["Documentation"] == f"{_PAGES}snapshots.md#snapshots"
 
 
 def test_the_list_can_be_filtered_by_verb(dh_to_pylist: ToPylist) -> None:

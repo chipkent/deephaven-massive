@@ -55,7 +55,8 @@ def test_wire_type_values_are_the_generated_spellings() -> None:
         "date",
         "epoch",
         "iso-instant",
-        "int-array",
+        "long-array",
+        "string-array",
         "json-text",
     ]
 
@@ -453,9 +454,9 @@ def test_values_are_frozen_and_hash_by_value(
     [
         (WireType.LONG, WireType.DOUBLE, WireType.DOUBLE),
         (WireType.DOUBLE, WireType.LONG, WireType.DOUBLE),
-        (WireType.LONG, WireType.INT_ARRAY, WireType.INT_ARRAY),
+        (WireType.LONG, WireType.LONG_ARRAY, WireType.LONG_ARRAY),
         (WireType.STRING, WireType.LONG, None),
-        (WireType.DOUBLE, WireType.INT_ARRAY, None),
+        (WireType.DOUBLE, WireType.LONG_ARRAY, None),
         (WireType.EPOCH, WireType.LONG, None),
         (WireType.ISO_INSTANT, WireType.EPOCH, None),
         (WireType.STRING, WireType.JSON_TEXT, None),
