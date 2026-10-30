@@ -1246,7 +1246,8 @@ class Flusher:
                         found = updates.get(sink, StreamUpdate())
                         updates[sink] = replace(found, error=message)
         for failure in converted.failures:
-            error = MassiveError(failure.message)
+            # A row the library cannot convert or read is its own defect, never expected.
+            error = MassiveError(failure.message, cause=ErrorCause.LIBRARY_DEFECT)
             for sink in readers:
                 if failure.every_stream or sink.receives(failure.symbol):
                     sink.fail(error)

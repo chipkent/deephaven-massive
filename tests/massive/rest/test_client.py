@@ -316,6 +316,7 @@ def test_a_body_that_does_not_decompress_is_never_retried_and_is_logged(
     with pytest.raises(WireError, match="does not decompress") as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.status == 200
+    assert caught.value.unreadable  # the body arrived whole but cannot be read
     assert "not gzip" not in caught.value.message  # the body itself is never quoted
     # The call that raises is what the user sees, so the client records the reply at DEBUG.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

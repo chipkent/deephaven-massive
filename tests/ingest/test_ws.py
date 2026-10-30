@@ -375,16 +375,22 @@ def test_a_timestamp_out_of_bounds_fails_only_its_streams(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
     rows_when: RowsWhen,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     aapl = ws_session.query(TRADES, ["AAPL"]).append_only()
     msft = ws_session.query(TRADES, ["MSFT"]).blink()
     ws_session.subscribed("T.AAPL", "T.MSFT")
-    ws_session.send(trade("MSFT", t=5), trade("AAPL"))
-    ws_session.flush()
-    rows_when(aapl, lambda rows: len(rows) == 1)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        ws_session.send(trade("MSFT", t=5), trade("AAPL"))
+        ws_session.flush()
+        rows_when(aapl, lambda rows: len(rows) == 1)
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
     assert "timestamp unit mismatch for test.trades.Timestamp: 5 ms" in rows[1]["Error"]
+    # A value the library cannot convert is its defect: an ERROR with how to report it.
+    [failed] = [r for r in caplog.records if "timestamp unit mismatch" in r.getMessage()]
+    assert failed.levelno == logging.ERROR
+    assert failed.getMessage().endswith(LIBRARY_BUG)
     del msft
 
 

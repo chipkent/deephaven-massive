@@ -771,13 +771,14 @@ class RestClient:
 
         Returns:
             A `WireError` with the response's status that names the request and the reason,
-            never the body.
+            never the body, marked `unreadable`: the body arrived whole.
         """
         return WireError(
             f"GET {request.target}: the response from {self._host} {reason}",
             status=response.status,
             host=self._host,
             path=request.target,
+            unreadable=True,
         )
 
     def _permit(self, request: RequestTarget, admission: Admission, stop: Cancel) -> Permit:

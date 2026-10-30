@@ -247,12 +247,14 @@ def _as_rows(value: object, request: RequestTarget) -> list[dict[str, object]]:
         raise WireError(
             **request.context(
                 "HTTP 200", "the rows are neither a JSON object nor a list", status=200
-            )
+            ),
+            unreadable=True,
         )
     for index, row in enumerate(value):
         if not isinstance(row, dict):
             raise WireError(
-                **request.context("HTTP 200", f"row {index} is not a JSON object", status=200)
+                **request.context("HTTP 200", f"row {index} is not a JSON object", status=200),
+                unreadable=True,
             )
     return value
 
@@ -300,7 +302,8 @@ def _envelope(body: dict[str, object], request: RequestTarget) -> tuple[str, str
     request_id = _request_id(body.get("request_id"))
     if not isinstance(status, str):
         raise WireError(
-            **request.context("HTTP 200", "the envelope's status is not text", status=200)
+            **request.context("HTTP 200", "the envelope's status is not text", status=200),
+            unreadable=True,
         )
     if status in {"NOT_AUTHORIZED", "ERROR"}:
         message = body.get("message") or body.get("error") or "no message"
@@ -351,7 +354,9 @@ def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTa
 
     Raises:
         WireError: If the body is not UTF-8 JSON (quoting its first 200 bytes), has the wrong
-            shape, or lacks the result key under a status other than `OK` or `DELAYED`.
+            shape, or lacks the result key under a status other than `OK` or `DELAYED`; each
+            of these is marked `unreadable`, while a status `ERROR` is Massive's answer and
+            is not.
     """
     try:
         body = codec.loads(data)
@@ -361,12 +366,16 @@ def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTa
                 "HTTP 200",
                 f"the body is not JSON ({error}): {bytes(data[:_EXCERPT])!r}",
                 status=200,
-            )
+            ),
+            unreadable=True,
         ) from error
     if isinstance(body, list) and rest_path.result_key is None:
         return Page(status="", request_id=None, rows=_as_rows(body, request), body=body)
     if not isinstance(body, dict):
-        raise WireError(**request.context("HTTP 200", "the body is not a JSON object", status=200))
+        raise WireError(
+            **request.context("HTTP 200", "the body is not a JSON object", status=200),
+            unreadable=True,
+        )
     status, request_id = _envelope(body, request)
     drift = DriftReport(statuses=frozenset({status} - GOOD_STATUSES - {""}))
     if rest_path.result_key is None:
@@ -384,6 +393,7 @@ def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTa
                 f"the body has no {rest_path.result_key!r}",
                 status=200,
                 request_id=request_id,
-            )
+            ),
+            unreadable=True,
         )
     return Page(status=status, request_id=request_id, rows=rows, body=body, drift=drift)
