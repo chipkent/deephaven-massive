@@ -2002,7 +2002,12 @@ def test_a_move_whose_old_connection_fails_first_releases_the_successor(
     assert held.wait(TIMEOUT)
     group._move(old, DELAYED)
     successor = ws_session.connection("wss://delayed.test/options")
-    release.set()
+    try:  # a symbol change that reaches the successor first is kept for the awaited stream
+        added = frozenset({"O:SPY251219C00610000"})
+        ws_session.on_loop(successor, lambda: successor.change_symbols(1, added, frozenset()))
+        assert ws_session.on_loop(successor, lambda: sorted(successor._early)) == [1]
+    finally:  # a failed check must not leave the old loop held
+        release.set()
     assert old.join(TIMEOUT)
     wait_for(lambda: not group.streams)  # the failed stream shut down and returned its lease
     with group.lock:
