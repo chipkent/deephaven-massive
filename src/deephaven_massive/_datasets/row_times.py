@@ -45,8 +45,8 @@ become `Date`.
   and options a period's first weekday, a week's Monday; for every other class its first
   calendar day, a week's Sunday) to 00:00 after its last day (last weekday for stocks and
   options; for indices, which can update around the clock, the period's last calendar day and
-  one hour more); stock, option, and index days count as trading days with a holiday
-  allowance (`bar_periods.last_trading_day`); `Date` is null.
+  one hour more); a bar of several days spans that many calendar days, weekends included, as
+  Massive counts them; `Date` is null.
 - **Futures session bar.** Massive's `window_start` to 17:00 Chicago time on its session date;
   `Date` is that date.
 - **Futures bar of several sessions.** `window_start` to 17:00 Chicago time on the latest day

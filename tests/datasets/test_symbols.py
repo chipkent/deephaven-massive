@@ -43,7 +43,8 @@ CANONICAL = [
     (STK, "KIMpL"),  # Kimco's series L preferred: the lower-case p is meaningful
     (STK, "DCOMp"),
     (STK, "NTEST.Q"),
-    (STK, "AAC.WS"),
+    (STK, "AAC.WS"),  # the NYSE warrant forms Massive lists
+    (STK, "NE.WS.A"),
     (STK, "CELGr"),
     (STK, "AAPLw"),
     (STK, "TSLAAPL"),
@@ -143,6 +144,8 @@ def test_canonical_text_is_canonical_and_converts_to_itself(
     assert dm.canonical_symbol(text, asset_class) == text
     assert check_symbol(asset_class, text) == text
     assert canonical_from_wire(asset_class, text) == text
+    if asset_class is STK:  # the converter Deephaven query strings call agrees
+        assert dm.canonical_symbol_stock(text) == text
 
 
 @pytest.mark.parametrize(("asset_class", "text"), NOT_CANONICAL)

@@ -122,11 +122,45 @@ EXCHANGES: Final = DatasetSpec(
     fetch_path="/v3/reference/exchanges",
     poll_keys=("AssetClass", "Id"),
 )
+_UPDATE_RULES: Final = tuple(
+    f"UpdateRules{scope}Updates{what}"
+    for scope in ("Consolidated", "MarketCenter")
+    for what in ("HighLow", "OpenClose", "Volume")
+)
+"""The condition columns that say whether a trade with the condition updates a bar's values."""
 CONDITIONS: Final = DatasetSpec(
     name="reference.conditions",
     summary="The trade and quote condition codes, with what each means and how it updates bars.",
     fetch_path="/v3/reference/conditions",
-    poll_keys=("AssetClass", "Type", "Id"),
+    # Massive lists two different conditions as stocks `quote_condition` 30, and no column is
+    # known to tell them apart, so a row is identified by every column Massive sends: a keyed
+    # poll() table keeps every distinct condition and merges only exact repeats.
+    poll_keys=(
+        "AssetClass",
+        "Type",
+        "Id",
+        "Name",
+        "DataTypes",
+        "Abbreviation",
+        "Description",
+        "Exchange",
+        "Legacy",
+        "SipMappingCta",
+        "SipMappingOpra",
+        "SipMappingUtp",
+        *_UPDATE_RULES,
+    ),
+    nullable_poll_keys={
+        **dict.fromkeys(
+            ("Abbreviation", "Description", "Legacy", *_UPDATE_RULES),
+            "Massive marks the field optional",
+        ),
+        "Exchange": "present only for a condition whose data comes from one exchange alone",
+        **dict.fromkeys(
+            ("SipMappingCta", "SipMappingOpra", "SipMappingUtp"),
+            "empty for a SIP that has no code for the condition",
+        ),
+    },
     page_size=_LIST_PAGE,
 )
 MARKET_STATUS: Final = DatasetSpec(

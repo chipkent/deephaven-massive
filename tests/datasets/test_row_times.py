@@ -376,7 +376,7 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     assert fill(days, bars(["2025-03-03T05:00:00"])) == {
         DATE: [None],
         START: ["2025-03-03T05:00:00+00:00"],
-        END: ["2025-03-07T05:00:00+00:00"],
+        END: ["2025-03-06T05:00:00+00:00"],
     }
     # An index can update around the clock, so its week holds its weekend: it runs from its
     # Sunday to an hour after the next Sunday begins.
@@ -388,15 +388,18 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     }
 
     index_days = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.DAY, 2)
-    assert fill(index_days, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-06T06:00:00+00:00"]
+    assert fill(index_days, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-05T06:00:00+00:00"]
 
 
-def test_stock_bars_of_several_days_count_trading_days_with_a_holiday_allowance() -> None:
-    # Whether Massive counts calendar or trading days is not documented, so a bar of n days
-    # ends after the latest day n trading days can reach: a 2-day stock bar from a Friday may
-    # hold the Monday, or the Tuesday when Monday is a holiday. Crypto trades every day.
+def test_bars_of_several_days_count_calendar_days() -> None:
+    # Massive counts calendar days: a 2-day stock bar stamped on a Friday holds Friday and
+    # Saturday and ends at 00:00 on Sunday, and the next is stamped on that Sunday. Options
+    # and indices read the same aggregates; crypto trades every day.
     days = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 2)
-    assert fill(days, bars(["2025-03-07T05:00:00"]))[END] == ["2025-03-12T04:00:00+00:00"]
+    sent = bars(["2025-03-07T05:00:00", "2025-03-09T05:00:00"])
+    assert fill(days, sent)[END] == ["2025-03-09T05:00:00+00:00", "2025-03-11T04:00:00+00:00"]
+    options = TimeRule("options.bars", RowTimes.BAR, A.OPTIONS, T.DAY, 3)
+    assert fill(options, bars(["2025-03-07T05:00:00"]))[END] == ["2025-03-10T04:00:00+00:00"]
     one = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 1)
     assert fill(one, bars(["2025-03-07T05:00:00"]))[END] == ["2025-03-08T05:00:00+00:00"]
     crypto = TimeRule("crypto.bars", RowTimes.BAR, A.CRYPTO, T.DAY, 2)

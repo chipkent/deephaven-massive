@@ -102,7 +102,8 @@ __all__ = [
 
 _STOCK: Final = re.compile(r"^[A-Z0-9]+(?:\.[A-Z0-9]+|p[A-Z]?|[rw])*$")
 """A canonical stock ticker: an upper-case root, then the CQS suffixes Massive keeps: `.X` (a
-class or another dotted suffix, `BRK.B`, `NTEST.Q`), `p` and an optional series (`KIMpL`), and
+class or another dotted suffix, `BRK.B`, `NTEST.Q`, and one or more of them, as in the NYSE
+warrants `AAC.WS` and `NE.WS.A`), `p` and an optional series (`KIMpL`), and
 the lower-case markers `r` (rights) and `w` (when issued)."""
 _OCC: Final = re.compile(r"^O:(?P<root>[A-Z0-9]{1,6})(?P<expiry>\d{6})[CP]\d{8}$")
 """A canonical option symbol: `O:`, the OCC root (no dot), `YYMMDD`, `C` or `P`, and the strike
