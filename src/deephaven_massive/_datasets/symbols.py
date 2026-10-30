@@ -69,6 +69,7 @@ from deephaven_massive._enums import (
     UnknownSymbols,
     _require_enum,
 )
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._types import _All
 
@@ -1334,7 +1335,8 @@ def option_roots(symbols: pa.Array) -> pa.Array:
 
 _UNKNOWN_LIMIT: Final = 100
 """The most unknown wire spellings logged per process; one record then says the rest are not."""
-_unknown_spellings: Final = BoundedWarnings(logger, limit=_UNKNOWN_LIMIT)
+# A spelling the library cannot read is a gap in its grammar, so each one is an ERROR.
+_unknown_spellings: Final = BoundedWarnings(logger, limit=_UNKNOWN_LIMIT, level=logging.ERROR)
 
 
 def unknown_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
@@ -1390,9 +1392,10 @@ class WireSymbols:
         asset_class: The dataset's class (`canonical_from_wire`), or `ClassFromPrefix.ANY`
             for one that spans classes.
         unknown: The session's rule for a spelling `canonical_from_wire` cannot read: under
-            `UnknownSymbols.WARN` each new spelling is logged once at WARNING (a bounded
-            number per process) and its rows keep the text in `ReadSymbols.raw`; under
-            `FAIL` the caller fails the request or stream with `unknown_symbol_message`.
+            `UnknownSymbols.WARN` each new spelling is logged once at ERROR as a defect of the
+            library (a bounded number per process) and its rows keep the text in
+            `ReadSymbols.raw`; under `FAIL` the caller fails the request or stream with
+            `unknown_symbol_message`.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`canonical_from_wire`).
     """
@@ -1413,7 +1416,8 @@ class WireSymbols:
 
         Returns:
             The canonical symbols, the unreadable texts, and the distinct unreadable spellings.
-            Under `WARN` each new unreadable spelling is logged once at WARNING.
+            Under `WARN` each new unreadable spelling is logged once at ERROR, as a defect of
+            the library.
         """
         known = cache
         distinct = pc.call_function("unique", [raw])
@@ -1435,8 +1439,9 @@ class WireSymbols:
                 _unknown_spellings.warn(
                     f"{self.dataset}\0{text}",
                     "%s: Massive sent the symbol %r, a spelling the library cannot read; its "
-                    "rows have a null Symbol and keep the text in RawSymbol",
+                    "rows have a null Symbol and keep the text in RawSymbol. %s",
                     self.dataset,
                     text,
+                    LIBRARY_BUG,
                 )
         return ReadSymbols(symbols, kept, unknown)

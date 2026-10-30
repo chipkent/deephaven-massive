@@ -29,7 +29,7 @@ is still loading (a contract or product asked for less than `LOAD_PATIENCE` ago)
 rule's date silently, so a stream's start raises no error. A row the calendar cannot place is a
 miss: past the last loaded session, a contract Massive's contracts do not list, a lookup that
 failed, or a contract or product still not loaded `LOAD_PATIENCE` after it was asked for. A
-miss keeps the rule's date, is logged at ERROR once per product (or contract) and session date,
+miss keeps the rule's date, is logged at WARNING once per product (or contract) and session date,
 and is returned with every batch it occurs in, so the flush shows it in the `Error` of every
 stream that receives the contract, until that stream's rows all place again. A lookup that
 fails in any way, an answer the calendar cannot read included, makes its contracts' rows
@@ -68,7 +68,7 @@ import pyarrow as pa
 from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._ingest.rate_limits import bucket_of
 from deephaven_massive._massive import Cancel
 
@@ -327,7 +327,7 @@ class FuturesCalendar:
         Returns:
             The dates to keep, ISO text, one per row; and every miss of the batch, once each,
             as `(symbol, message)`: a row the calendar cannot place, which keeps the rule's
-            date. A miss is logged at ERROR the first time it is seen, and returned with every
+            date. A miss is logged at WARNING the first time it is seen, and returned with every
             batch it occurs in, so every stream that receives the contract shows it.
         """
         now = self._clock()
@@ -466,7 +466,7 @@ class FuturesCalendar:
                     self._reported.add(reported)
                     logged.append(message)
         for message in logged:
-            logger.error("%s: %s", self._label, message)
+            logger.warning("%s: %s", self._label, message)
         return out
 
     def _note_spreads(self, spreads: set[str]) -> None:
@@ -577,7 +577,9 @@ class FuturesCalendar:
                 with self._lock:
                     closed = self._closed
                 if not closed:
-                    logger.exception("%s: futures schedules: a lookup failed", self._label)
+                    logger.exception(
+                        "%s: futures schedules: a lookup failed. %s", self._label, LIBRARY_BUG
+                    )
                 self._failure(contracts | products, f"looking it up failed: {error!r}")
                 with self._lock:
                     unknown = {c: None for c in contracts if c not in self._products}
@@ -687,7 +689,7 @@ class FuturesCalendar:
                 self._failed[key] = why
                 self._waiting.pop(key, None)
         if not closed:
-            logger.error(
+            logger.warning(
                 "%s: futures schedules: %s (%s)", self._label, why, ", ".join(sorted(keys))
             )
 

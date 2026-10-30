@@ -73,7 +73,7 @@ from deephaven_massive._enums import (
     PollMode,
     _require_enum,
 )
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import ErrorCause, MassiveError, failure_text
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
@@ -226,13 +226,16 @@ def _read_symbol_table(
 
 
 def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
-    """Log a failed static call: the library's failures at ERROR, anything else at DEBUG.
+    """Log a failed static call: a defect at ERROR, anything else at DEBUG.
 
-    A `MassiveError` (a request, a row, a rate limit, a closed session) is the failure a user
-    must see, so it is logged at ERROR with its text, which names the status, the path, and
-    the `request_id`; its traceback stays with the exception the caller receives. Anything
-    else (a bad argument's `ValueError`, an interrupt) is the caller's to handle, so it is
-    logged at DEBUG with its traceback.
+    The caller receives the exception, so an expected failure (a refusal, a rate limit, a
+    network failure, a closed session) is logged only at DEBUG, with its text, which names
+    the status, the path, and the `request_id`. A `MassiveError` that is a defect (a row
+    Massive sent that the library cannot read, a symbol table of the user's that failed) is
+    logged at ERROR with whose defect it is, so that a broad `except` never hides it; its
+    traceback stays with the exception the caller receives. Anything else (a bad argument's
+    `ValueError`, an interrupt) is the caller's to handle, so it is logged at DEBUG with its
+    traceback.
 
     Args:
         call: The call's id.
@@ -240,7 +243,8 @@ def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
         error: What the call raised.
     """
     if isinstance(error, MassiveError):
-        logger.error("call %d failed after %.3f s: %s", call, elapsed, error)
+        level = logging.DEBUG if error.cause is ErrorCause.EXPECTED else logging.ERROR
+        logger.log(level, "call %d failed after %.3f s: %s", call, elapsed, failure_text(error))
     else:
         logger.debug(
             "call %d failed after %.3f s: %s: %s",
@@ -547,8 +551,9 @@ class Query(QueryBase):
         would merge unrelated rows; the error names the column and shows the row), or a
         parameter the path a reactive table's new symbol routes to does not take, fails the
         table (its `m.streams()` row shows `FAILED`) and ends the poller. Any other failure is
-        logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next
-        cycle runs.
+        shown in the row's `Error` and logged once per run of failures, at WARNING (ERROR for a
+        defect); the table keeps its rows and the next cycle runs. A cycle that ends after its
+        interval logs one WARNING per run of late cycles.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
         `MassiveError` once the session is closed.

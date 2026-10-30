@@ -22,6 +22,7 @@ from deephaven.update_graph import shared_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
@@ -548,13 +549,13 @@ def test_queue_worker_logs_a_fatal_exit_before_dying(
     def fatal(_batch: list[int]) -> None:
         raise _Fatal
 
-    with caplog.at_level(logging.CRITICAL, logger="deephaven_massive._tables.liveness"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.liveness"):
         worker: QueueWorker[int] = QueueWorker(dh_exec_ctx, "fatal-worker", handle=fatal)
         worker.put(1)
         worker.thread.join(TIMEOUT)
     assert not worker.thread.is_alive()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.CRITICAL, "fatal-worker died; its queue is no longer handled")
+        (logging.ERROR, f"fatal-worker died; its queue is no longer handled. {LIBRARY_BUG}")
     ]
     assert [args.exc_type for args in escaped] == [_Fatal]
 

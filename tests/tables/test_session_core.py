@@ -35,6 +35,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
@@ -929,18 +930,19 @@ def test_a_session_collected_unclosed_runs_its_closers(
     m._core.on_close(broken)
     m._core.on_close(lambda: ran.append("closed"))
     reaper = m._core._reaper.thread
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.session_core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)
     assert not reaper.is_alive()
     assert ran == ["closed"]
+    # Collection is how a script ends its session: INFO. A closer that raises is a defect.
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
-            logging.WARNING,
+            logging.INFO,
             f"{name} was garbage-collected without close(); closing its connections and pollers",
         ),
-        (logging.ERROR, f"{name}: a transport failed to close"),
+        (logging.ERROR, f"{name}: a transport failed to close. {LIBRARY_BUG}"),
     ]
 
 

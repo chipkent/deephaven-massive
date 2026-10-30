@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING, cast
 
@@ -160,7 +161,15 @@ def test_a_failing_watch_is_logged_and_refused(caplog: pytest.LogCaptureFixture)
     refused: list[str] = []
     counter = _SymbolCounter(ClassFromPrefix.ANY, lambda *_: None, refused.append)
     counter.on_error(RuntimeError("table broke"))
-    assert "a symbol table's watch failed and stops following it: table broke" in caplog.text
+    # The user's table failed: an ERROR that names what to fix, never a bug report.
+    [record] = caplog.records
+    assert (record.levelno, record.getMessage()) == (
+        logging.ERROR,
+        (
+            "a symbol table that a live table follows failed upstream, so the live table stops "
+            "following it and fails: table broke; fix that symbol table and call the method again"
+        ),
+    )
     assert refused == [
         (
             "the symbol table failed, so the result can no longer follow it: table broke. A table "

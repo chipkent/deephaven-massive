@@ -29,7 +29,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars, UnknownSymbols
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
@@ -320,6 +320,41 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     assert sink.rows_published == 1
 
 
+def test_one_failure_of_many_streams_is_logged_once_at_the_level_of_its_cause(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    first, _ = make_sink(core, ALL)
+    second, _ = make_sink(core, ALL)
+    refused = MassiveError("socket.test/stocks refused T.*")
+    with caplog.at_level(logging.DEBUG, logger=stream.__name__):
+        assert first.fail(refused)
+        assert second.fail(refused)
+    ours = [(r.levelno, r.getMessage()) for r in caplog.records if "failed:" in r.getMessage()]
+    # An expected failure: one WARNING for its cause, the other stream's at DEBUG.
+    assert ours == [
+        (logging.WARNING, "test.trades stream 1 failed: socket.test/stocks refused T.*"),
+        (logging.DEBUG, "test.trades stream 1 failed: socket.test/stocks refused T.*"),
+    ]
+
+
+def test_a_symbol_table_failure_is_the_user_s_defect_logged_at_error(
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sink, _ = make_sink(massive_session._core, ALL)
+    with caplog.at_level(logging.WARNING, logger=stream.__name__):
+        sink.fail_later("the symbol table failed upstream: boom; fix that table")
+        drain()
+    [record] = caplog.records
+    assert (record.levelno, record.getMessage()) == (
+        logging.ERROR,
+        "test.trades stream 1 failed: the symbol table failed upstream: boom; fix that table",
+    )
+    assert LIBRARY_BUG not in record.getMessage()  # the user's to fix, not a bug report
+
+
 def test_open_stream_tables_releases_its_scope_on_failure(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -543,11 +578,13 @@ def test_a_futures_second_bar_ends_at_the_later_end(
     )
     start = BEFORE_ROLL_MS
     rows = [futures_bar(start, start + 60_000), futures_bar(start, start + 1_000)]
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         batch = plan.convert(rows, {}, arrived=[ARRIVED] * 2).batch
     ends = batch.column("TimestampEnd").cast(pa.int64()).to_pylist()
     assert ends == [(start + 60_000) * 10**6, (start + 1_000) * 10**6]
-    assert caplog.text.count("is not its start plus one second") == 1
+    # The later end is already the safe choice: an INFO notice, nothing to act on.
+    [notice] = [r for r in caplog.records if "is not its start plus one second" in r.getMessage()]
+    assert notice.levelno == logging.INFO
 
 
 def test_every_row_takes_the_arrival_of_its_frame(
@@ -857,8 +894,18 @@ def test_a_dying_flush_thread_fails_its_streams(
         f.start()
         assert f.join(TIMEOUT)
     assert healthy.failed  # a stream that cannot be failed does not spare the others
-    assert "dying-flush died; its streams fail" in caplog.text
-    assert "dying-flush: could not fail a stream" in caplog.text
+    # A defect of the library: one ERROR with how to report it, not CRITICAL, and not one per
+    # stream it fails.
+    died = [r for r in caplog.records if "died" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in died] == [
+        (
+            logging.ERROR,
+            "the flush thread dying-flush died (_Fatal()); this table no longer updates. "
+            + LIBRARY_BUG,
+        )
+    ]
+    assert died[0].exc_info is not None
+    assert f"dying-flush: could not fail a stream. {LIBRARY_BUG}" in caplog.text
     assert [args.exc_type for args in escaped] == [_Fatal]
 
 

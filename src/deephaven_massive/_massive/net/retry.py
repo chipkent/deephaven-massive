@@ -173,7 +173,7 @@ def retry_after_seconds(value: str | None, now: float) -> float | None:
 
     Returns:
         The wait in seconds, never negative (a date in the past asks for no wait), or `None`
-        when `value` is `None` or is neither form. An unusable value is logged at WARNING,
+        when `value` is `None` or is neither form. An unusable value is logged at DEBUG,
         quoted, on this module's logger, so the caller's fallback wait is never silent. A date
         without a zone (`-0000`) is read as GMT, as HTTP dates always are.
     """
@@ -185,7 +185,7 @@ def retry_after_seconds(value: str | None, now: float) -> float | None:
     try:
         when = parsedate_to_datetime(text)
     except (TypeError, ValueError):
-        _log.warning("ignoring a Retry-After that is neither seconds nor an HTTP date: %r", value)
+        _log.debug("ignoring a Retry-After that is neither seconds nor an HTTP date: %r", value)
         return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)

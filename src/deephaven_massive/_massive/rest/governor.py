@@ -102,7 +102,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Self, cast
 
-from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK, rate_limit_wait
 
 if TYPE_CHECKING:
@@ -1248,4 +1248,4 @@ class RequestGovernor:
             try:
                 listener()
             except Exception:
-                logger.exception("a rate-limit listener failed")
+                logger.exception("a rate-limit listener failed. %s", LIBRARY_BUG_REPORT)

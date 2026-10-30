@@ -88,7 +88,8 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
 from deephaven_massive._enums import NotBars, UnknownSymbols
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
+from deephaven_massive._log_limits import log_failure, mark_failure_logged
 from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
@@ -653,7 +654,9 @@ class StreamSink:
         (`publish_failure`), so a verb that finds the table failed always finds the failure
         recorded too, and names it. When the session's close came first, the table fails with
         the close's error instead, so the table and its `CLOSED` row name the same cause, and
-        nothing is logged (the close logs its count). Any other failure is logged at ERROR.
+        nothing is logged (the close logs its count). Any other failure is logged once per
+        failure, however many streams it fails, at the level its cause gives (`log_failure`):
+        ERROR for a defect, naming whose it is, and WARNING otherwise.
         The stream counts as failed only once `publish_failure` has returned, so a failure
         that raises can be retried. Never call it on an update-graph thread or under
         `registry_lock`; the thread needs an execution context.
@@ -670,7 +673,9 @@ class StreamSink:
             core = self._core()
             closed = None if core is None else core.fail_stream(self.stream_id, str(error))
             if closed is None:
-                logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
+                log_failure(
+                    logger, error, "%s stream %d failed: %s", self.plan.dataset, self.stream_id
+                )
             self.publisher.publish_failure(
                 error if closed in (None, str(error)) else MassiveError(closed)
             )
@@ -689,7 +694,7 @@ class StreamSink:
         Args:
             message: Why the stream cannot follow its watchlist, naming the fix.
         """
-        failure = MassiveError(message)
+        failure = MassiveError(message, cause=ErrorCause.USER_DEFECT)  # the symbol table's
 
         def fail() -> None:
             self.fail(failure)
@@ -977,8 +982,8 @@ class Flusher:
 
         Args:
             stream_ids: The streams; one already failed is skipped.
-            error: The error their tables fail with, also logged at ERROR and shown in
-                `m.streams()`.
+            error: The error their tables fail with, also logged (`StreamSink.fail`) and shown
+                in `m.streams()`.
         """
         self._control.put(_Fail(tuple(stream_ids), error))
 
@@ -996,8 +1001,9 @@ class Flusher:
     def _run(self) -> None:
         """Flush every interval until `stop()`; a failing flush is logged and the next one runs.
 
-        Anything else that escapes a flush ends the thread: it is logged at CRITICAL, every
-        routed stream is failed with a `MassiveError` naming the thread, and it is re-raised.
+        Anything else that escapes a flush ends the thread: it is logged at ERROR as a defect
+        of the library, every routed stream is failed with a `MassiveError` naming the thread
+        (`ErrorCause.LIBRARY_DEFECT`, logged once), and it is re-raised.
         However the thread ends, it clears the routes last: nothing reads them any more, and a
         stream left there (one a verdict moved to another connection, which this thread kept
         routed for its final flush) would be held by a connection that is gone.
@@ -1008,17 +1014,22 @@ class Flusher:
             if self._final.is_set():
                 self._flush_logged()
         except BaseException as death:
-            logger.critical("%s died; its streams fail", self._thread.name, exc_info=True)
             error = MassiveError(
-                f"the flush thread {self._thread.name} died ({death!r}); this table no longer "
-                "updates"
+                library_bug(
+                    f"the flush thread {self._thread.name} died ({death!r}); this table no "
+                    "longer updates"
+                ),
+                cause=ErrorCause.LIBRARY_DEFECT,
             )
+            log_failure(logger, error, "%s", exc_info=death)
             with entered(self._exec_ctx):
                 for sink in self.routes.sinks():
                     try:
                         sink.fail(error)
                     except Exception:
-                        logger.exception("%s: could not fail a stream", self._thread.name)
+                        logger.exception(
+                            "%s: could not fail a stream. %s", self._thread.name, LIBRARY_BUG
+                        )
             raise
         finally:
             self.routes.clear()
@@ -1028,7 +1039,7 @@ class Flusher:
         try:
             self.flush()
         except Exception:
-            logger.exception("%s: a flush failed; continuing", self._thread.name)
+            logger.exception("%s: a flush failed; continuing. %s", self._thread.name, LIBRARY_BUG)
 
     def flush(self) -> None:
         """Apply the queued failures, publish every buffered row, then report the queued drift.
@@ -1101,10 +1112,15 @@ class Flusher:
             try:
                 self._publish_plan(plan, rows, readers=readers, arrived=arrived, updates=updates)
             except Exception as error:  # one dataset's failure never costs the others their rows
-                logger.exception("%s: could not publish a %s batch", plan.dataset, plan.channel)
                 failure = MassiveError(
-                    f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
+                    library_bug(
+                        f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
+                    ),
+                    cause=ErrorCause.LIBRARY_DEFECT,
                 )
+                # Logged here, with the trace; each stream's failure then logs at DEBUG only.
+                mark_failure_logged(failure)
+                logger.exception("%s", failure)
                 for sink in readers:
                     sink.fail(failure)
 

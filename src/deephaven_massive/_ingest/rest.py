@@ -63,9 +63,10 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses, or 90 s while the
   thread holds the update graph's lock), which becomes `MassiveError("rate limited: ...")`
-  with status 429 (the first 429 of each subscription has already logged its WARNING). A row that
-  breaks the schema (a missing required key, a value that does not convert, a timestamp out of
-  bounds) raises `RowDataError`. Static verbs log each error at ERROR and raise it.
+  with status 429 (the first 429 of each subscription has already logged its INFO notice). A row
+  that breaks the schema (a missing required key, a value that does not convert, a timestamp out
+  of bounds) raises `RowDataError`, a defect of the library. Static verbs raise each error, and
+  log it at DEBUG, or at ERROR for a defect.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/hosts.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
@@ -137,7 +138,16 @@ from deephaven_massive._enums import (
     UnknownSymbols,
     subscription_of,
 )
-from deephaven_massive._errors import MassiveError, PermanentError, from_wire
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    ErrorCause,
+    MassiveError,
+    PermanentError,
+    cause_of,
+    failure_text,
+    from_wire,
+    library_bug,
+)
 from deephaven_massive._ingest import hosts, poll
 from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
 from deephaven_massive._ingest.rate_limits import (
@@ -245,8 +255,9 @@ def _shared_failure(error: BaseException, context: str) -> BaseException:
         `_AbandonedError` when the maker stopped for its own reason: a `MassiveError` with
         status 429 (its patience ran out; the client never gives up on a 429 otherwise) or an
         interruption that is not an `Exception` (`KeyboardInterrupt`). Otherwise the
-        `MassiveError` itself, or for any other error a `MassiveError` naming it, which every
-        waiter raises a copy of (`_outcome`).
+        `MassiveError` itself, or for any other error a `MassiveError` naming it, a defect of
+        the library (`ErrorCause.LIBRARY_DEFECT`, with how to report it), which every waiter
+        raises a copy of (`_outcome`).
     """
     if isinstance(error, MassiveError):
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -254,7 +265,7 @@ def _shared_failure(error: BaseException, context: str) -> BaseException:
         return error
     if not isinstance(error, Exception):
         return _AbandonedError(repr(error))
-    return MassiveError(f"{context}: {error!r}")
+    return MassiveError(library_bug(f"{context}: {error!r}"), cause=ErrorCause.LIBRARY_DEFECT)
 
 
 def _outcome(future: Future[T]) -> T:
@@ -266,13 +277,15 @@ def _outcome(future: Future[T]) -> T:
     Returns:
         The result.
 
-    A failed lookup raises a copy of the maker's `MassiveError` (its type, text, status, and
-    request id), so that no exception object is raised on two threads at once.
+    A failed lookup raises a copy of the maker's `MassiveError` (its type, text, status,
+    request id, and cause), so that no exception object is raised on two threads at once.
     """
     try:
         return future.result()
     except MassiveError as error:
-        raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
+        raise type(error)(
+            str(error), status=error.status, request_id=error.request_id, cause=error.cause
+        ) from None
 
 
 def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
@@ -1256,6 +1269,7 @@ class RestReader:
                 f"{where}: reading Massive's crypto tickers failed: {public}",
                 status=public.status,
                 request_id=public.request_id,
+                cause=public.cause,
             ) from public
         entry = tickers.get(symbol)
         if entry is None:
@@ -1278,7 +1292,8 @@ class RestReader:
 
         A failed read raises its public `MassiveError` (`AuthenticationError`,
         `EntitlementError`), and every caller that waited on it a copy of it; an unexpected
-        error of the reader propagates to it, and its waiters get a `MassiveError` naming it.
+        error of the reader, a defect, is logged at ERROR with how to report it and propagates
+        to it, and its waiters get a `MassiveError` naming it.
         A waiting caller that gives up raises the error `wait_for_shared` describes.
         """
         known = self.state.known_crypto()
@@ -1307,6 +1322,10 @@ class RestReader:
             # The reader's own unexpected error propagates; its waiters get a MassiveError.
             self.state.forget_crypto()
             future.set_exception(_shared_failure(error, "the read failed"))
+            if cause_of(error) is ErrorCause.LIBRARY_DEFECT:
+                logger.exception(
+                    "%s: reading Massive's crypto tickers failed. %s", self.state.label, LIBRARY_BUG
+                )
             raise
         future.set_result(tickers)
         return tickers
@@ -1362,7 +1381,7 @@ class RestReader:
 
         Blocks the calling thread until the lookup ends or this caller gives up; holds no lock
         meanwhile, and leaves no listener behind. Logs the wait at DEBUG, a lookup abandoned by
-        its maker at INFO, and giving up at ERROR.
+        its maker at INFO, and giving up at DEBUG: the caller raises the error.
 
         Args:
             future: The lookup's future, which the caller making it completes.
@@ -1406,7 +1425,7 @@ class RestReader:
                 failure = governor.charge_pause(bucket, patience)
                 if failure is not None:
                     public = self._public(failure)
-                    logger.error(
+                    logger.debug(
                         "%s: stops waiting for %s, which goes on for the caller making it: %s",
                         self.state.label,
                         what,
@@ -2128,7 +2147,8 @@ class RestEndpoints:
 
         Errors: `EntitlementError` when the plan has no WebSocket access for the class,
         `AuthenticationError` for a rejected key, and `MassiveError` for an undocumented
-        timeframe or a failed request; each is logged at ERROR by the deciding caller. A
+        timeframe or a failed request; each is logged by the deciding caller, at DEBUG, or at
+        ERROR for a defect of the library. A
         waiting caller that gives up raises the error `RestReader.wait_for_shared` describes.
         """
         key = (asset_class, family)
@@ -2160,7 +2180,10 @@ class RestEndpoints:
                 error
                 if isinstance(error, MassiveError)
                 else MassiveError(
-                    f"deciding the {asset_class.value} WebSocket host failed: {error!r}"
+                    library_bug(
+                        f"deciding the {asset_class.value} WebSocket host failed: {error!r}"
+                    ),
+                    cause=ErrorCause.LIBRARY_DEFECT,
                 )
             )
             future.set_exception(
@@ -2240,7 +2263,7 @@ class RestEndpoints:
                 evidence `"server verdict: <message>"`.
         """
         self._state.replace_host((asset_class, family), decision)
-        logger.warning(
+        logger.info(
             "%s %s WebSocket host is now %s (%s)",
             asset_class.value,
             family.value,
@@ -2290,7 +2313,8 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Errors, which the verb's call logs at ERROR: `AuthenticationError` (HTTP 401),
+        Errors, which the verb's call logs at the level their cause gives (DEBUG for an
+        expected one, ERROR for a defect such as `RowDataError`): `AuthenticationError` (HTTP 401),
         `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row that breaks
         the schema, and `MassiveError` itself for any other failure (a rate limit as `"rate
         limited: ..."`, a closed session as `"... is closed"`).
@@ -2524,15 +2548,19 @@ def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) 
 
 
 def _report_host_failure(error: MassiveError) -> None:
-    """Log a failed host decision at ERROR with exactly the text its exception carries.
+    """Log a failed host decision with exactly the text its exception carries.
 
     No verb call owns a host decision (every caller waiting for it shares the failure), so the
     record holds the message alone, which names the asset class, the request, and its status.
+    The deciding caller raises the error, so an expected failure (a refusal, a network
+    failure) logs at DEBUG; a defect logs at ERROR, a defect of the library with how to report
+    it.
 
     Args:
         error: The failure.
     """
-    logger.error("%s", error)
+    level = logging.DEBUG if error.cause is ErrorCause.EXPECTED else logging.ERROR
+    logger.log(level, "%s", failure_text(error))
 
 
 def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict[str, object]:

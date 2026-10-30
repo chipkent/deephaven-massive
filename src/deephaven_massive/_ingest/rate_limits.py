@@ -28,8 +28,10 @@ decides which requests share one, how long each read waits, and what the user is
   Deephaven update graph's lock, as a console command does, since every table of the process
   stops updating meanwhile. A read that gives up fails alone; the bucket keeps pausing and
   probing for every other read.
-- **Warnings.** `RateLimitWarnings` is the REST client's refusal hook: the first 429 of each
-  subscription in a session logs one WARNING that says what happened and what to do.
+- **Refusal notices.** `RateLimitNotices` is the REST client's refusal hook: the first 429 of
+  each subscription in a session logs one INFO line that says what happened and what to do.
+  Requests pause and resume by themselves, so the refusal alone is nothing to act on; a read
+  it makes give up raises, and a `poll()` it makes late warns (`Poller`).
 - **Diagnostics.** `rate_limit_rows` turns the governor's snapshot into the rows of
   `m.rate_limits()`; the session's diagnostics writer pulls them whenever the governor
   changes.
@@ -79,7 +81,7 @@ __all__ = [
     "GovernorLease",
     "GovernorRegistry",
     "PaceCheck",
-    "RateLimitWarnings",
+    "RateLimitNotices",
     "announce",
     "bucket_of",
     "rate_limit_pull",
@@ -425,17 +427,17 @@ GOVERNORS: Final = GovernorRegistry()
 """The process's registry of governors, used by every session."""
 
 
-class RateLimitWarnings:
-    """One session's WARNING at the first HTTP 429 of each bucket: the REST client's hook.
+class RateLimitNotices:
+    """One session's INFO line at the first HTTP 429 of each bucket: the REST client's hook.
 
-    Thread-safe: a leaf lock guards the buckets already warned about, and the WARNING is
-    logged after it is released.
+    Thread-safe: a leaf lock guards the buckets already reported, and the line is logged after
+    it is released.
     """
 
     __slots__ = ("_basic", "_label", "_lock", "_warned")
 
     def __init__(self, label: str, basic: AbstractSet[Subscription]) -> None:
-        """Start with nothing warned.
+        """Start with nothing reported.
 
         Args:
             label: The session's label.
@@ -447,9 +449,9 @@ class RateLimitWarnings:
         self._warned: set[str] = set()
 
     def refused(self, bucket: str, error: WireError, *, basic: bool) -> None:
-        """Log the session's WARNING for a bucket's first 429; later ones log nothing here.
+        """Log the session's INFO line for a bucket's first 429; later ones log nothing here.
 
-        The WARNING says what the refusal means: a subscription the session declared Basic is
+        The line says what the refusal means: a subscription the session declared Basic is
         refused because other sessions, processes, or keys of the account share its limit; a
         refusal that names the per-minute maximum shows the Basic limit, which is paced from
         now on (a subscription could be declared; `OTHER` cannot); any other refusal pauses
@@ -493,7 +495,7 @@ class RateLimitWarnings:
                 "requests pause and resume; a paid subscription has no request limit, so if "
                 "this persists, send the request id to Massive's support"
             )
-        logger.warning(
+        logger.info(
             "%s: Massive refused %s with HTTP 429 (%s); %s", self._label, what, error, advice
         )
 

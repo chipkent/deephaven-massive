@@ -23,6 +23,11 @@ that whole chain, and `is_tls_failure` and `is_proxy_auth_failure` find the two 
 client retries in it: a certificate that did not verify, and a proxy that refused the
 credentials.
 
+`LIBRARY_BUG_REPORT` is the sentence that ends the wire clients' own ERROR records about a
+defect: the same text as `deephaven_massive._errors.LIBRARY_BUG`, which the rest of the library
+uses, repeated here because the wire package imports nothing else of the library (a test keeps
+the two equal). It stays inside the package: the rest of the library uses its own copy.
+
 This module imports only the standard library. It is part of `net`, the layer every client
 shares. Its functions are pure, so they are safe from any thread.
 """
@@ -30,12 +35,13 @@ shares. Its functions are pure, so they are safe from any thread.
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 __all__ = [
+    "LIBRARY_BUG_REPORT",
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
@@ -43,6 +49,17 @@ __all__ = [
     "is_tls_failure",
     "linked_errors",
 ]
+
+LIBRARY_BUG_REPORT: Final = (
+    "This is a bug in deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and "
+    "report it with the log and m.streams() at "
+    "https://github.com/chipkent/deephaven-massive/issues."
+)
+"""What ends each of the wire clients' ERROR records about a defect of the library.
+
+A defect is a broken internal invariant, an unexpected exception on a library thread, or data
+from Massive the library cannot convert or read: none is the user's to fix, so the text says
+how to report it."""
 
 
 class WireError(Exception):

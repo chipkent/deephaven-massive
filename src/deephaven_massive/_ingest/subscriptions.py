@@ -158,9 +158,10 @@ class Subscriptions:
 
     Each subscribed topic has a watchdog bound to its generation. After `ack_timeout` without
     an acknowledgement it re-sends the topic alone; after another it marks the topic `NO_ACK`,
-    logs at ERROR, and asks the client to reconnect if `first_no_ack(topic)` says this is the
-    topic's first `NO_ACK` (the session keeps that record, so it survives this connection). A
-    watchdog whose topic has left the wire or whose generation has ended does nothing more.
+    logs a WARNING (the topic's data is missing), and asks the client to reconnect if
+    `first_no_ack(topic)` says this is the topic's first `NO_ACK` (the session keeps that
+    record, so it survives this connection). A watchdog whose topic has left the wire or whose
+    generation has ended does nothing more.
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused,
@@ -440,7 +441,7 @@ class Subscriptions:
             self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
             return True
         if not self._pending:
-            logger.warning(
+            logger.info(
                 "a refusal named no topic and no subscription was in flight: %s", status.message
             )
             return True
@@ -554,7 +555,7 @@ class Subscriptions:
         self._pending.discard(topic)
         self._noack.add(topic)
         first = self._first_no_ack(topic)
-        logger.error(
+        logger.warning(
             "no acknowledgement for %s after a re-send; %s",
             topic,
             "reconnecting" if first else "it stays wanted (it already caused a reconnect)",

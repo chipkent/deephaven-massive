@@ -95,7 +95,7 @@ from deephaven.update_graph import shared_lock
 
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._enums import UnknownSymbols
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
@@ -247,21 +247,24 @@ def _collect_session(
 
 
 def _close_collected(label: str, closers: tuple[Callable[[], None], ...]) -> None:
-    """Reaper job of a session collected without `close()`: log a WARNING and run its closers.
+    """Reaper job of a session collected without `close()`: log it at INFO and run its closers.
+
+    Collection is how a script that never calls `close()` ends its session, so it is no
+    problem to act on: the closers release what the session held.
 
     Args:
         label: The session's label.
         closers: The closers, run in registration order; one that raises is logged at ERROR
             and the rest still run.
     """
-    logger.warning(
+    logger.info(
         "%s was garbage-collected without close(); closing its connections and pollers", label
     )
     for closer in closers:
         try:
             closer()
         except Exception:
-            logger.exception("%s: a transport failed to close", label)
+            logger.exception("%s: a transport failed to close. %s", label, LIBRARY_BUG)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1403,7 +1406,7 @@ class SessionCore:
             try:
                 fail(error)
             except Exception:
-                logger.exception("%s: could not fail a live table", self.label)
+                logger.exception("%s: could not fail a live table. %s", self.label, LIBRARY_BUG)
             else:
                 failed += 1
         return failed
@@ -1461,7 +1464,7 @@ class SessionCore:
             try:
                 closer()
             except Exception:
-                logger.exception("%s: a transport failed to close", self.label)
+                logger.exception("%s: a transport failed to close. %s", self.label, LIBRARY_BUG)
         # The writer's `InputTable.add` waits for an update cycle, which cannot run while this
         # thread holds the update graph's lock: waiting for the writer there would never end.
         self.diagnostics.release(wait=not locked)

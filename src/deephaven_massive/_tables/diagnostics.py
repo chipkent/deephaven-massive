@@ -65,7 +65,7 @@ from deephaven_massive._datasets.schema import (
     pascal_case,
 )
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_scope
@@ -970,7 +970,9 @@ class Diagnostics:
                 try:  # one table's failure never costs the others their rows
                     self._add(table, schema, rows())
                 except Exception:
-                    logger.exception("diagnostics: failed to update the %s table", schema.name)
+                    logger.exception(
+                        "diagnostics: failed to update the %s table. %s", schema.name, LIBRARY_BUG
+                    )
         finally:
             for barrier in barriers:
                 barrier.set()
@@ -1033,7 +1035,9 @@ class Diagnostics:
                 try:
                     batches.append(schema.to_arrow([one]))
                 except Exception:
-                    logger.exception("diagnostics: failed to write a %s row", schema.name)
+                    logger.exception(
+                        "diagnostics: failed to write a %s row. %s", schema.name, LIBRARY_BUG
+                    )
             if not batches:
                 return
             batch = pa.concat_tables(batches)

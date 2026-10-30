@@ -37,6 +37,7 @@ from deephaven_massive._datasets.symbols import (
     is_canonical,
 )
 from deephaven_massive._enums import ClassFromPrefix
+from deephaven_massive._errors import user_defect
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -304,12 +305,20 @@ class _SymbolCounter(TableListener):
 
         A table made by `canonicalize_symbols` under `OnError.RAISE` fails on a later row it
         cannot convert; following it no further would leave the stream on stale symbols, so the
-        failure reaches `on_invalid`, whose owner fails the stream. Logged at ERROR too.
+        failure reaches `on_invalid`, whose owner fails the stream. Logged at ERROR too, as a
+        defect of the user's table, naming what to fix rather than asking for a bug report.
 
         Args:
             e: What Deephaven reported.
         """
-        logger.error("a symbol table's watch failed and stops following it: %s", e)
+        logger.error(
+            "%s",
+            user_defect(
+                f"a symbol table that a live table follows failed upstream, so the live table "
+                f"stops following it and fails: {e}",
+                "fix that symbol table and call the method again",
+            ),
+        )
         self._on_invalid(_FAILED_TABLE.format(cause=e))
 
     def _count(self, columns: Mapping[str, Iterable[object]], step: int) -> None:

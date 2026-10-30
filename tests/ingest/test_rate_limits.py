@@ -22,7 +22,7 @@ from deephaven_massive._ingest.rate_limits import (
     READ_PATIENCE,
     GovernorRegistry,
     PaceCheck,
-    RateLimitWarnings,
+    RateLimitNotices,
     ReadShape,
     announce,
     bucket_of,
@@ -218,7 +218,7 @@ def test_the_registry_counts_the_leases_not_yet_released() -> None:
     assert registry.leases() == 0
 
 
-# --- Warnings ------------------------------------------------------------------------------------
+# --- Refusal notices -----------------------------------------------------------------------------
 
 
 def _error(message: str) -> _massive.WireError:
@@ -228,10 +228,12 @@ def _error(message: str) -> _massive.WireError:
 def test_a_learned_basic_subscription_is_explained_once_per_session(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitWarnings("MassiveSession #1", frozenset())
-    with caplog.at_level(logging.WARNING, LOGGER):
+    warnings = RateLimitNotices("MassiveSession #1", frozenset())
+    with caplog.at_level(logging.INFO, LOGGER):
         warnings.refused("currencies", _error(BASIC), basic=True)
         warnings.refused("currencies", _error(BASIC), basic=True)
+    # Requests pause and resume by themselves: an INFO notice, not a WARNING.
+    assert [r.levelno for r in caplog.records] == [logging.INFO]
     assert caplog.messages == [
         (
             "MassiveSession #1: Massive refused a currencies request with HTTP 429 (HTTP 429 "
@@ -246,8 +248,8 @@ def test_a_learned_basic_subscription_is_explained_once_per_session(
 def test_a_declared_subscription_refused_points_at_other_users_of_the_account(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitWarnings("MassiveSession #2", frozenset({Subscription.STOCKS}))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    warnings = RateLimitNotices("MassiveSession #2", frozenset({Subscription.STOCKS}))
+    with caplog.at_level(logging.INFO, LOGGER):
         warnings.refused("stocks", _error(BASIC), basic=True)
         warnings.refused("options", _error("busy"), basic=False)  # another bucket: its own
     assert caplog.messages[0].endswith(
@@ -265,8 +267,8 @@ def test_a_declared_subscription_refused_points_at_other_users_of_the_account(
 def test_a_refusal_outside_the_subscriptions_names_no_subscription(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitWarnings("MassiveSession #1", frozenset())
-    with caplog.at_level(logging.WARNING, LOGGER):
+    warnings = RateLimitNotices("MassiveSession #1", frozenset())
+    with caplog.at_level(logging.INFO, LOGGER):
         warnings.refused(OTHER, _error(BASIC), basic=True)
     assert caplog.messages[0].startswith(
         "MassiveSession #1: Massive refused a request outside Massive's subscriptions with "

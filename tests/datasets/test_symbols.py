@@ -31,6 +31,7 @@ from deephaven_massive._datasets.symbols import (
     ws_symbol,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, UnknownSymbols
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._log_limits import BoundedWarnings
 
 if TYPE_CHECKING:
@@ -691,7 +692,9 @@ def test_the_unknown_symbol_message_names_the_spellings_and_the_switch() -> None
 @pytest.fixture
 def fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger(symbols.__name__), limit=2)
+        symbols,
+        "_unknown_spellings",
+        BoundedWarnings(logging.getLogger(symbols.__name__), limit=2, level=logging.ERROR),
     )
 
 
@@ -704,7 +707,7 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
     cache: dict[str, str | None] = {}
     with caplog.at_level(logging.WARNING, logger=symbols.__name__):
         read = reader.read(raw, cache)
-        reader.read(raw, {})  # a fresh read warns no spelling twice
+        reader.read(raw, {})  # a fresh read reports no spelling twice
     assert read.symbols.to_pylist() == ["C:EURUSD", None, None, "C:EURUSD", None, None, None]
     assert read.raw.to_pylist() == [None, None, "??", None, "??", "!!", "##"]
     assert read.unknown == ("!!", "##", "??")
@@ -715,19 +718,34 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
         "!!": None,
         "##": None,
     }
-    # Two spellings are reported, then one record says the rest are not.
+    # Two spellings are reported, then one record says the rest are not. A spelling the
+    # library cannot read is a gap in its grammar: an ERROR asking for a bug report (the
+    # fixture's copy has the module's level, which the next test checks).
+    assert {r.levelno for r in caplog.records} == {logging.ERROR}
     messages = [r.getMessage() for r in caplog.records]
     assert messages == [
         (
             "forex.quotes: Massive sent the symbol '!!', a spelling the library cannot read; its "
-            "rows have a null Symbol and keep the text in RawSymbol"
+            f"rows have a null Symbol and keep the text in RawSymbol. {LIBRARY_BUG}"
         ),
         (
             "forex.quotes: Massive sent the symbol '##', a spelling the library cannot read; its "
-            "rows have a null Symbol and keep the text in RawSymbol"
+            f"rows have a null Symbol and keep the text in RawSymbol. {LIBRARY_BUG}"
         ),
         "2 values were reported; further ones are not logged",
     ]
+
+
+def test_an_unreadable_spelling_is_a_library_defect_logged_at_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The module's own reporter, not the fixture's: a spelling no other test sends.
+    reader = WireSymbols("forex.quotes", FX, UnknownSymbols.WARN)
+    with caplog.at_level(logging.WARNING, logger=symbols.__name__):
+        reader.read(pa.array(["%%only-here"]), {})
+    [record] = caplog.records
+    assert record.levelno == logging.ERROR
+    assert record.getMessage().endswith(LIBRARY_BUG)
 
 
 @pytest.mark.usefixtures("fresh_warnings")

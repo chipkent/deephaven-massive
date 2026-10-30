@@ -40,13 +40,13 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from websockets.client import process_exception
 from websockets.exceptions import InvalidStatus
 
 from deephaven_massive._massive.net import codec
-from deephaven_massive._massive.net.errors import WireError, is_tls_failure
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError, is_tls_failure
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
@@ -76,6 +76,9 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+DROPPED_ERROR_LIMIT: Final = 20
+"""How many dropped frames or elements one connection logs at ERROR; later ones log at DEBUG."""
 
 MAX_TOPICS_PER_FRAME = 1000
 """The most topics one subscribe or unsubscribe frame names.
@@ -421,6 +424,7 @@ class FrameDecoder:
         self._path = path
         self._channels: dict[str, _Channel] = {}
         self._unknown: set[str] = set()
+        self._dropped = 0  # frames and elements dropped, for `_drop_level`
         for source in sources:
             channel = source.key.partition("/")[2]
             if source.transport is not Transport.WS or not channel:
@@ -470,8 +474,9 @@ class FrameDecoder:
         Each status object becomes a `Status` where it appears. A channel's data objects become
         one `Data`, placed where the channel's first object appears. A frame that is not JSON,
         an element that is not an object with a text `ev`, and the objects of a channel with no
-        source are dropped and logged (ERROR, ERROR, and WARNING once per channel); none of
-        them stops the other events.
+        source are dropped and logged (the first two at ERROR, as data the library cannot read,
+        up to `DROPPED_ERROR_LIMIT` times per connection and at DEBUG after that; the third at
+        WARNING once per channel); none of them stops the other events.
 
         Args:
             data: The frame's payload.
@@ -482,22 +487,27 @@ class FrameDecoder:
         try:
             value = codec.loads(data)
         except ValueError:
-            logger.exception(
-                "dropped a frame from %s%s that is not JSON: %s",
+            logger.log(
+                self._drop_level(),
+                "dropped a frame from %s%s that is not JSON: %s. %s",
                 self._host,
                 self._path,
                 _quote(data),
+                LIBRARY_BUG_REPORT,
+                exc_info=True,
             )
             return []
         order: list[Status | str] = []
         frame: dict[str, _Accumulator] = {}
         for item in value if isinstance(value, list) else [value]:
             if not isinstance(item, dict) or not isinstance(ev := item.get("ev"), str):
-                logger.error(
-                    "dropped an element of a frame from %s%s with no text 'ev': %s",
+                logger.log(
+                    self._drop_level(),
+                    "dropped an element of a frame from %s%s with no text 'ev': %s. %s",
                     self._host,
                     self._path,
                     _quote(item),
+                    LIBRARY_BUG_REPORT,
                 )
             elif ev == "status":
                 order.append(self._status(item))
@@ -516,6 +526,25 @@ class FrameDecoder:
                     order.append(ev)
                 self._row(ev, item, frame[ev])
         return [event if isinstance(event, Status) else self._data(event, frame) for event in order]
+
+    def _drop_level(self) -> int:
+        """Count one dropped frame or element, and return the level to log it at.
+
+        Returns:
+            ERROR for the first `DROPPED_ERROR_LIMIT` of the connection, so a vendor change
+            that breaks every frame logs a bounded number of ERRORs, and DEBUG after that.
+        """
+        self._dropped += 1
+        if self._dropped <= DROPPED_ERROR_LIMIT:
+            return logging.ERROR
+        if self._dropped == DROPPED_ERROR_LIMIT + 1:
+            logger.error(
+                "%s%s: %d dropped frames or elements were logged; further ones are logged at DEBUG",
+                self._host,
+                self._path,
+                DROPPED_ERROR_LIMIT,
+            )
+        return logging.DEBUG
 
     def _status(self, item: dict[str, object]) -> Status:
         """Decode one status object.

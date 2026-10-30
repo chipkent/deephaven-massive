@@ -714,7 +714,8 @@ class TimeRule:
 
         Massive's documented futures one-second sample spans 60 seconds from `s` to `e`;
         whichever is right, the later end never attaches a bar before its window closed. A
-        disagreement is logged once per process.
+        disagreement is logged once per process, at INFO: the later end is already the safe
+        choice, so there is nothing for the user to do.
 
         Args:
             rows: The batch, whose `TimestampEnd` holds Massive's `e` where the source sends it.
@@ -734,7 +735,6 @@ class TimeRule:
                 "second; the later of the two is kept as TimestampEnd",
                 self.dataset,
                 first,
-                level=logging.WARNING,
             )
         later = pc.if_else(pc.greater(sent, computed), sent, computed)
         return pc.coalesce(later, computed)

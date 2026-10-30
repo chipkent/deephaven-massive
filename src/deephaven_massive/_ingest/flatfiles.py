@@ -153,6 +153,7 @@ from deephaven_massive._enums import AssetClass, FuturesVenue, UnknownSymbols
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
+    ErrorCause,
     MassiveError,
     from_wire,
 )
@@ -922,10 +923,14 @@ class FlatFileHistory:
                         where=file.location,
                     )
                 except pa.ArrowException as error:
-                    raise MassiveError(f"cannot read {file.location}: {error}") from error
+                    raise MassiveError(
+                        f"cannot read {file.location}: {error}", cause=ErrorCause.LIBRARY_DEFECT
+                    ) from error
                 except UnitMismatchError as error:
                     # The routine knows the field, not the file: name the file too.
-                    raise MassiveError(f"{error} (in {file.location})") from error
+                    raise MassiveError(
+                        f"{error} (in {file.location})", cause=error.cause
+                    ) from error
         except WireError as error:
             if file is not None and file.dropped:
                 # None of the tables gathered so far was handed on, so reading the file again

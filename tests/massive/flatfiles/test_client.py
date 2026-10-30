@@ -485,7 +485,7 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     status: int,
     code: str,
 ) -> None:
-    caplog.set_level(logging.INFO, logger=client_module.__name__)
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     fake_s3.refuse("us_", status=status, code=code, message="Try again")
     with pytest.raises(WireError) as info:
         client.open(KEY)
@@ -500,13 +500,15 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS
     logged = [
-        (r.levelno, r.getMessage()) for r in caplog.records if r.name == client_module.__name__
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
     ]
     assert logged == [
         (logging.INFO, f"{error}; retry 1 of 3 in 0.55 s"),
         (logging.INFO, f"{error}; retry 2 of 3 in 1.10 s"),
         (logging.INFO, f"{error}; retry 3 of 3 in 2.20 s"),
-        (logging.WARNING, f"{error}; giving up after 4 attempts"),
+        (logging.DEBUG, f"{error}; giving up after 4 attempts"),
     ]
 
 
@@ -759,7 +761,7 @@ def test_a_broken_file_is_not_a_dropped_read(*, client: FlatFileClient, fake_s3:
 def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     *, client: FlatFileClient, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.INFO, logger=client_module.__name__)
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     error = WireError("cannot read s3://flatfiles/k at here: dropped")
     cancel = threading.Event()
     assert [client.wait_to_reread(error, retry, cancel) for retry in range(4)] == [
@@ -770,13 +772,15 @@ def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     ]
     assert clock.waits == WAITS  # giving up does not wait
     logged = [
-        (r.levelno, r.getMessage()) for r in caplog.records if r.name == client_module.__name__
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
     ]
     assert logged == [
         (logging.INFO, f"{error}; reading it again from its start, reread 1 of 3 in 0.55 s"),
         (logging.INFO, f"{error}; reading it again from its start, reread 2 of 3 in 1.10 s"),
         (logging.INFO, f"{error}; reading it again from its start, reread 3 of 3 in 2.20 s"),
-        (logging.WARNING, f"{error}; giving up after 4 reads"),
+        (logging.DEBUG, f"{error}; giving up after 4 reads"),
     ]
 
 
@@ -1591,18 +1595,22 @@ def test_a_listing_page_is_retried_on_the_shared_schedule(
 def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
     *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.INFO, logger=client_module.__name__)
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     fake_s3.fail("", "unreachable")
     with pytest.raises(WireError, match=f"^cannot list {BUCKET}: ") as info:
         client.prefixes()
     assert (info.value.status, info.value.path) == (None, "")
     assert isinstance(info.value.__cause__, EndpointConnectionError)
     assert clock.waits == WAITS
-    assert [r.levelno for r in caplog.records if r.name == client_module.__name__] == [
+    assert [
+        r.levelno
+        for r in caplog.records
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
+    ] == [
         logging.INFO,
         logging.INFO,
         logging.INFO,
-        logging.WARNING,
+        logging.DEBUG,
     ]
 
 

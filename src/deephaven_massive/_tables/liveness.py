@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Final, Generic, TypeVar, cast
 
 from deephaven.liveness_scope import LivenessScope
 
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._tables.execution_context import entered
 
 if TYPE_CHECKING:
@@ -279,7 +280,7 @@ class QueueWorker(Generic[_T]):
 
         A batch's `Exception` is logged and the thread carries on (`_next_batch`). Anything
         else that escapes, such as a `KeyboardInterrupt` or `SystemExit` raised by `handle` or
-        an exception from `on_exit`, ends the thread: it is logged at CRITICAL first, because
+        an exception from `on_exit`, ends the thread: it is logged at ERROR first, because
         nothing would handle the queue again and the owner (the reaper or the diagnostics
         writer) would otherwise stop silently; then `on_death` runs, and the exception is
         re-raised.
@@ -291,14 +292,16 @@ class QueueWorker(Generic[_T]):
                 if self._on_exit is not None:
                     self._on_exit()
             except BaseException as death:
-                logger.critical(
-                    "%s died; its queue is no longer handled", self.thread.name, exc_info=True
+                logger.exception(
+                    "%s died; its queue is no longer handled. %s", self.thread.name, LIBRARY_BUG
                 )
                 if self._on_death is not None:
                     try:
                         self._on_death(death)
                     except Exception:
-                        logger.exception("%s: handling its death failed", self.thread.name)
+                        logger.exception(
+                            "%s: handling its death failed. %s", self.thread.name, LIBRARY_BUG
+                        )
                 raise
 
     def _next_batch(self) -> bool:
@@ -317,7 +320,9 @@ class QueueWorker(Generic[_T]):
             try:
                 cast("Callable[[], None]", self._on_timeout)()
             except Exception:
-                logger.exception("%s failed on a timed wake-up; continuing", self.thread.name)
+                logger.exception(
+                    "%s failed on a timed wake-up; continuing. %s", self.thread.name, LIBRARY_BUG
+                )
             return True
         while item is not None:
             batch.append(item)
@@ -329,7 +334,9 @@ class QueueWorker(Generic[_T]):
             try:
                 self._handle(batch)
             except Exception:
-                logger.exception("%s failed on a batch; continuing", self.thread.name)
+                logger.exception(
+                    "%s failed on a batch; continuing. %s", self.thread.name, LIBRARY_BUG
+                )
         return item is not None
 
 
@@ -394,7 +401,7 @@ def _run_jobs(jobs: list[Callable[[], None]]) -> None:
         try:
             job()
         except Exception:
-            logger.exception("massive reaper job failed; continuing")
+            logger.exception("massive reaper job failed; continuing. %s", LIBRARY_BUG)
 
 
 class ResultRegistry:

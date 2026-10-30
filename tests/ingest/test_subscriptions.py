@@ -314,9 +314,10 @@ def test_a_second_no_ack_of_a_topic_does_not_reconnect(caplog: pytest.LogCapture
         loop.subs.ended()
     calls = loop.sender.take()
     assert [c for c in calls if c[0] == "reconnect"] == [("reconnect", 0, ())]
+    # A topic Massive never acknowledges leaves its data missing: a WARNING, never an ERROR.
     assert [r.levelno for r in caplog.records if "no acknowledgement" in r.message] == [
-        logging.ERROR,
-        logging.ERROR,
+        logging.WARNING,
+        logging.WARNING,
     ]
 
 
@@ -398,10 +399,12 @@ def test_a_refusal_with_nothing_in_flight_is_only_logged(caplog: pytest.LogCaptu
     loop.subs.add(["T.AAPL"])
     loop.subs.opened(1)
     loop.subs.status(ack("T.AAPL"))
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.subscriptions"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.subscriptions"):
         loop.subs.status(refusal(message="huh"))
     assert loop.refused == []
-    assert "no subscription was in flight: huh" in caplog.text
+    [record] = caplog.records
+    assert record.levelno == logging.INFO  # nothing failed, so nothing to act on
+    assert "no subscription was in flight: huh" in record.getMessage()
 
 
 def test_other_statuses_change_nothing() -> None:
