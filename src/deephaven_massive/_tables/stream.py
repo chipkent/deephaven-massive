@@ -606,6 +606,12 @@ class StreamSink:
         them (the common single-stream case), and otherwise a `where_in` against its cached
         filter table, rebuilt only when its symbols changed.
 
+        The `where_in` and the publisher's `add` run under the publish lock, which `close()`
+        takes from a console command that holds the update graph's exclusive lock (through
+        `fail`). That cannot deadlock only because the batch and the filter table are both
+        static: an operation on static tables never waits for the update graph's lock. A
+        refreshing input here would let `close()` hang.
+
         Args:
             batch: The channel's static batch in the dataset's schema.
             converted: The batch's conversion, for its distinct symbols.
