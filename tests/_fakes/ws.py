@@ -13,17 +13,19 @@ subscribe frame with one error status that names no topic.
 The server logs through its own logger at WARNING, so its DEBUG frame log (which would show
 the client's authentication frame) never reaches a test that captures every logger.
 
-Tests script the next connections before they happen (`reject_next`, `greet_next`,
-`auth_replies`, each a status, a `(status, message)` pair, or a raw frame) and act on the live
-one (`send`, `close`) from the test thread. Everything the server observes is kept under one
-lock, and `wait_for` blocks on a condition until a predicate over it holds, so tests synchronize
-with the client's thread deterministically, never by sleeping. Built by the `fake_ws_server`
-fixture in `tests/conftest.py`.
+Tests script the next connections before they happen (`reject_next`, `greet_next`, and
+`auth_replies`, whose entries are a status, a `(status, message)` pair, a raw frame, or
+`NoReply.TO_KEY` for a server that never answers the key) and act on the live one (`send`,
+`close`) from the test thread. Everything the server observes is kept under one lock, and
+`wait_for` blocks on a condition until a predicate over it holds, so tests synchronize with the
+client's thread deterministically, never by sleeping. Built by the `fake_ws_server` fixture in
+`tests/conftest.py`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import logging
 import threading
@@ -54,6 +56,14 @@ _MESSAGES = {
         "limit for your account."
     ),
 }
+
+
+class NoReply(enum.Enum):
+    """A scripted reply that is no reply: the server reads the frame and never answers it."""
+
+    TO_KEY = "to_key"
+    """The server reads the authentication frame and stays silent until the client closes, so
+    only the client's handshake timeout ends the attempt."""
 
 
 def status_frame(status: str, message: str | None = None) -> str:
@@ -143,8 +153,9 @@ class FakeMassiveServer:
         self._lock = threading.Condition()
         self.connections: list[Connection] = []
         # Each reply is a status, sent with Massive's message for it; a (status, message) pair;
-        # or bytes, sent as they are in a binary frame, as a server that broke protocol would.
-        self.auth_replies: list[str | tuple[str, str] | bytes] = []
+        # bytes, sent as they are in a binary frame, as a server that broke protocol would; or
+        # NoReply.TO_KEY, for a server that never answers the key.
+        self.auth_replies: list[str | tuple[str, str] | bytes | NoReply] = []
         self.auto_ack = True
         self.combined_acks = False
         self.close_after_refusal = True
@@ -152,7 +163,7 @@ class FakeMassiveServer:
         self.silent: set[str] = set()
         self.step_refusals: list[str] = []
         self._rejects: list[tuple[int, dict[str, str]]] = []
-        self._greetings: list[str | None] = []
+        self._greetings: list[str] = []
         self._live: dict[int, ServerConnection] = {}
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -195,11 +206,11 @@ class FakeMassiveServer:
         with self._lock:
             self._rejects.append((status, headers or {}))
 
-    def greet_next(self, frame: str | None) -> None:
+    def greet_next(self, frame: str) -> None:
         """Replace the `connected` greeting of the next connection.
 
         Args:
-            frame: The frame to greet with instead, or `None` to send nothing at all.
+            frame: The frame to greet with instead.
         """
         with self._lock:
             self._greetings.append(frame)
@@ -326,15 +337,15 @@ class FakeMassiveServer:
             greeting = self._greetings.pop(0) if self._greetings else status_frame("connected")
             self._lock.notify_all()
         try:
-            if greeting is None:
-                await ws.wait_closed()
-                return
             await ws.send(greeting)
             auth = await ws.recv()
             with self._lock:
                 record.auth = str(auth)
                 reply = self.auth_replies.pop(0) if self.auth_replies else "auth_success"
                 self._lock.notify_all()
+            if reply is NoReply.TO_KEY:  # the client's handshake timeout must end it
+                await ws.wait_closed()
+                return
             frame, status = _auth_reply(reply)
             await ws.send(frame)
             if status != "auth_success":

@@ -25,7 +25,14 @@ from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, PollMode, Timespan
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    HistorySource,
+    NotBars,
+    PollMode,
+    Timespan,
+)
 from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
@@ -52,7 +59,7 @@ TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
     keys={
@@ -77,8 +84,8 @@ VALUES_SPEC = DatasetSpec(
     name="indices.values",
     summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
-    channels={None: "V"},
-    flat_file_prefixes={None: "us_indices/values_v1"},
+    channels={NotBars.ANY: "V"},
+    flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
     keys={(FF, "us_indices/values_v1"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
 )
 NEWS_SPEC = DatasetSpec(
@@ -98,7 +105,7 @@ FUTURES_SPEC = DatasetSpec(
     name="futures.trades",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FUTURES,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     history_path="/futures/v1/trades/{ticker}",
 )
 
@@ -771,10 +778,11 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
     def on_update(_update: object, _replay: bool) -> None:
         if seen.is_set():
             return
-        try:
-            queries[0].append_only()
-        except ValueError as e:
-            errors.append(e)
+        for call in (queries[0].append_only, queries[0].columns):
+            try:
+                call()
+            except ValueError as e:
+                errors.append(e)
         seen.set()
 
     scope = new_scope()
@@ -784,30 +792,36 @@ def test_verbs_raise_on_the_update_graph_thread(massive_session: dm.MassiveSessi
     assert seen.wait(TIMEOUT)
     handle.stop()
     scope.release()
-    assert len(errors) == 1
-    assert "update-graph thread" in str(errors[0])
+    assert len(errors) == 2
+    assert all("update-graph thread" in str(error) for error in errors)
     queries.clear()
     errors.clear()  # its traceback holds the session too
 
 
-def test_verbs_raise_while_holding_the_update_graph_lock(
-    massive_session: dm.MassiveSession,
+def test_verbs_work_while_holding_the_shared_lock(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
+    # A thread holding the update graph's shared lock is not an update-graph thread: as in a
+    # console command, which holds the exclusive lock, every call works.
     q = trades(massive_session)
-    update_graph = massive_session._core.exec_ctx.update_graph
-    with shared_lock(update_graph), pytest.raises(ValueError, match="update-graph lock"):
-        q.fetch()
+    with shared_lock(massive_session._core.exec_ctx.update_graph):
+        result = q.append_only()
+        columns = q.columns()
+    assert result.is_refreshing
+    assert columns.size == len(expected_columns(massive_session, TRADES_SPEC))
+    massive_session.release(result)
 
 
-def test_a_static_verb_on_the_update_graph_logs_nothing(
+def test_a_refused_static_verb_logs_nothing(
     massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The thread check comes first: a refused verb takes no call id and logs no call line.
+    # The verb's guard comes first: a refused verb (here, on a closed session) takes no call id
+    # and logs no call line.
     q = trades(massive_session)
-    update_graph = massive_session._core.exec_ctx.update_graph
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"), shared_lock(update_graph):
+    massive_session.close()
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
         for verb in (q.fetch, lambda: q.history("2025-03-03", source=HistorySource.REST)):
-            with pytest.raises(ValueError, match="update-graph lock"):
+            with pytest.raises(dm.MassiveError, match="is closed"):
                 verb()
     assert [r.getMessage() for r in caplog.records if r.levelno < logging.WARNING] == []
     assert rest.call_ids == []
@@ -950,13 +964,6 @@ def test_columns_works_on_a_closed_session(
     assert dh_to_pylist(q.columns()) == expected_columns(massive_session, TRADES_SPEC)
 
 
-def test_columns_raises_on_the_update_graph(massive_session: dm.MassiveSession) -> None:
-    q = trades(massive_session)
-    update_graph = massive_session._core.exec_ctx.update_graph
-    with shared_lock(update_graph), pytest.raises(ValueError, match="update-graph lock"):
-        q.columns()
-
-
 def test_columns_from_many_threads_at_once(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
@@ -993,7 +1000,7 @@ FOREX_SPEC = DatasetSpec(
     name="forex.quotes",
     summary="A dataset for the tests.",
     asset_class=AssetClass.FOREX,
-    channels={None: "C"},
+    channels={NotBars.ANY: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
 )
 

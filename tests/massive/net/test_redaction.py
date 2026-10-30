@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import traceback
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,7 @@ from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlement
 from deephaven_massive._massive.net.redaction import REDACTED, Redactor, redact
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
-from deephaven_massive._massive.rest.governor import RequestGovernor
+from deephaven_massive._massive.rest.governor import Patience, RequestGovernor
 from deephaven_massive._massive.spec.types import (
     DriftReport,
     Field,
@@ -102,6 +103,14 @@ def test_the_redactor_finds_a_secret_spelled_by_json_escapes(kind: type) -> None
     assert json.loads(cleaned) == {"error": "bad key ***", "key": ["***", 1]}
 
 
+def test_the_redactor_cleans_a_bytearray_and_leaves_a_clean_one_uncopied() -> None:
+    clean = bytearray(b'{"status":"OK"}')
+    assert Redactor(PLANTED_KEY).received(clean) is clean
+    for spelled in (PLANTED_KEY, ESCAPED_KEY):
+        data = bytearray(f'{{"error":"bad key {spelled}"}}'.encode())
+        assert json.loads(Redactor(PLANTED_KEY).received(data)) == {"error": "bad key ***"}
+
+
 def test_the_redactor_passes_on_escapes_that_spell_no_secret_character() -> None:
     # The escape spells `é`, a character of no secret: the body is not searched further.
     data = b'{"text":"caf\\u00e9","n":1}'
@@ -152,11 +161,33 @@ def test_a_secret_with_a_quote_is_found_in_its_json_escaped_form() -> None:
     assert json.loads(Redactor(odd_key).received(encoded)) == {"echo": REDACTED}
 
 
-def test_a_emoji_key_beyond_the_bmp_is_found_as_itself_in_text_and_bytes() -> None:
+def test_a_key_beyond_the_bmp_is_found_as_itself_in_text_and_bytes() -> None:
     emoji_key = "key-\U0001f600"
     redactor = Redactor(emoji_key)
     assert redactor.received(f"a {emoji_key} b") == f"a {REDACTED} b"
     assert redactor.received(f"a {emoji_key} b".encode()) == f"a {REDACTED} b".encode()
+
+
+@pytest.mark.parametrize("kind", [bytes, str])
+def test_a_key_of_backslashes_is_searched_in_linear_time(kind: type) -> None:
+    # Every spelling of a backslash starts with one, so a pattern that could backtrack into a
+    # character's spelling took close to a minute for this key against 2 KB of backslashes.
+    slashes_key = "\\" * 20 + "X"
+    raw = ("\\" * 44 + "Y") * 50
+    data = raw.encode() if kind is bytes else raw
+    started = time.perf_counter()
+    assert Redactor(slashes_key).received(data) is data
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_key_of_backslashes_is_found_as_itself_and_as_json() -> None:
+    slashes_key = "a\\\\b"
+    redactor = Redactor(slashes_key)
+    assert redactor.received(f"<p>{slashes_key}</p>".encode()) == b"<p>***</p>"  # not JSON
+    echoed = json.dumps({"echo": slashes_key}).encode()  # each backslash written as two
+    assert json.loads(redactor.received(echoed)) == {"echo": REDACTED}
+    spelled = b'{"echo":"a\\u005c\\\\b"}'  # one backslash as a u escape, one as a short one
+    assert json.loads(redactor.received(spelled)) == {"echo": REDACTED}
 
 
 # --- the planted-secret test --------------------------------------------------------------------
@@ -250,7 +281,8 @@ def test_the_rest_client_never_shows_the_api_key(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", reply)
     with pytest.raises(WireError) as info:
-        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks")
+        # A 429 fails once its pauses outlast the call's patience, quoting the refusal.
+        rest.get(_TRADES, {"stockTicker": "AAPL"}, {}, bucket="stocks", patience=Patience(600.0))
     # The server's words are kept, with the key replaced, so the failure still explains itself.
     assert REDACTED in info.value.message
     _assert_no_secret(every_logger_at_debug, info.value)
@@ -407,6 +439,21 @@ def test_the_flat_file_client_never_shows_the_s3_secret(
             client.open(_FILE)
     finally:
         client.close()
+    _assert_no_secret(every_logger_at_debug, info.value)
+
+
+def test_an_s3_error_code_echoing_the_secret_is_cleaned(
+    fake_s3: FakeS3, every_logger_at_debug: pytest.LogCaptureFixture
+) -> None:
+    # The code is the server's text too: the DEBUG line of the refused request cleans it.
+    fake_s3.refuse("us_", status=403, code=f"Denied{PLANTED_S3}", message="Rejected")
+    client = _flat_files()
+    try:
+        with pytest.raises(WireError) as info:
+            client.open(_FILE)
+    finally:
+        client.close()
+    assert any(f"-> 403 Denied{REDACTED} " in m for m in every_logger_at_debug.messages)
     _assert_no_secret(every_logger_at_debug, info.value)
 
 

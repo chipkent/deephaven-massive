@@ -6,16 +6,20 @@ import contextlib
 import functools
 import logging
 import threading
+from typing import TYPE_CHECKING
 
 import pytest
+from deephaven.update_graph import exclusive_lock
 
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.rate_limits import (
     BUCKETS,
+    CONSOLE_PATIENCE,
+    LEARN_ONLY,
     OTHER,
-    UNPACED,
+    READ_PATIENCE,
     GovernorRegistry,
     PaceCheck,
     RateLimitWarnings,
@@ -23,9 +27,13 @@ from deephaven_massive._ingest.rate_limits import (
     announce,
     bucket_of,
     rate_limit_rows,
+    read_patience,
 )
 from deephaven_massive._tables.diagnostics import LimitSource, RateLimitState
 from tests._fakes.clock import FakeClock
+
+if TYPE_CHECKING:
+    from deephaven.execution_context import ExecutionContext
 
 LOGGER = rate_limits.__name__
 URL = "https://api.massive.com"
@@ -34,7 +42,7 @@ BASIC = "You've exceeded the maximum requests per minute"
 
 def _registry(clock: FakeClock) -> GovernorRegistry:
     return GovernorRegistry(
-        functools.partial(_massive.RequestGovernor, BUCKETS, unpaced=UNPACED, clock=clock)
+        functools.partial(_massive.RequestGovernor, BUCKETS, learn_only=LEARN_ONLY, clock=clock)
     )
 
 
@@ -63,9 +71,9 @@ def _paced(governor: _massive.RequestGovernor) -> dict[str, int | None]:
 def _refuse(
     governor: _massive.RequestGovernor, bucket: str, message: str, *, retry_after: float
 ) -> None:
-    permit = governor.acquire(bucket, _massive.Cancel(), lane=object())
+    permit = governor.admission(bucket, lane=object()).acquire(_massive.Cancel())
     with contextlib.suppress(_massive.WireError):  # a pause past the patience gives up
-        governor.refused(permit, retry_after=retry_after, message=message, request_id="r1")
+        governor.refused(permit, retry_after=retry_after, message=message)
 
 
 # --- Buckets -------------------------------------------------------------------------------------
@@ -152,7 +160,9 @@ def test_an_idle_entry_outlives_its_last_lease_until_its_window_passes() -> None
     registry = _registry(clock)
     lease = _lease(registry, basic=frozenset({Subscription.STOCKS}))
     governor = lease.governor
-    governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+    governor.done(
+        governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+    )
     lease.release()
     # A new session soon after (a notebook cell run again) still sees the slot held.
     again = _lease(registry, basic=frozenset({Subscription.STOCKS}))
@@ -261,10 +271,12 @@ def test_a_refusal_outside_the_subscriptions_names_no_subscription(
     assert caplog.messages[0].startswith(
         "MassiveSession #1: Massive refused a request outside Massive's subscriptions with "
     )
-    # Data of no subscription belongs to no tier: the refusal pauses it but never paces it.
+    # Massive counts reference data on its own, at the Basic limit: it is paced, but no
+    # setting declares it, so the WARNING offers none.
     assert caplog.messages[0].endswith(
-        "requests outside Massive's subscriptions belong to no tier, so they pause and resume "
-        "and are not paced"
+        "that is Massive's limit of 5 requests per minute on reference and other data outside "
+        "the subscriptions, which it counts on their own, so these requests are paced at that "
+        "rate from now on"
     )
     assert "MassiveConfig" not in caplog.messages[0]
 
@@ -274,23 +286,23 @@ def test_a_refusal_outside_the_subscriptions_names_no_subscription(
 
 def test_rows_show_each_buckets_state() -> None:
     clock = FakeClock(manual=True, wall=1_800_000_000.0)
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=clock)
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+        governor.done(
+            governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
     waiting = threading.Thread(
-        target=governor.acquire,
-        args=("stocks", _massive.Cancel()),
-        kwargs={"lane": object()},
+        target=governor.admission("stocks", lane=object()).acquire,
+        args=(_massive.Cancel(),),
         daemon=True,
     )
     waiting.start()
     clock.wait_for_sleepers(1)
     _refuse(governor, "options", BASIC, retry_after=30.0)
-    _refuse(governor, "futures", "HTTP 429: busy", retry_after=700.0)
     rows = {row.bucket: row for row in rate_limit_rows(governor)}
     assert list(rows) == list(BUCKETS)
-    stocks, options, futures = rows["stocks"], rows["options"], rows["futures"]
+    stocks, options = rows["stocks"], rows["options"]
     assert (stocks.state, stocks.requests_per_minute, stocks.limit_source) == (
         RateLimitState.PACED,
         5,
@@ -300,7 +312,6 @@ def test_rows_show_each_buckets_state() -> None:
     assert (options.state, options.limit_source) == (RateLimitState.PAUSED, LimitSource.LEARNED)
     assert options.paused_until == 1_800_000_030 * 10**9
     assert (options.refusals, options.last_refusal) == (1, BASIC)
-    assert futures.state is RateLimitState.REFUSED
     assert (rows["indices"].state, rows["indices"].limit_source) == (RateLimitState.READY, None)
     assert rows["indices"].paused_until is None
     # Stamped on the governor's clock, the one `PausedUntil` is read on.
@@ -314,7 +325,7 @@ def test_rows_show_each_buckets_state() -> None:
 
 
 def test_a_paced_read_announces_its_least_duration(caplog: pytest.LogCaptureFixture) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     governor.declare({"stocks"})
     buckets = ["stocks"] * 250 + ["options"] * 3 + ["other"] * 40
     with caplog.at_level(logging.INFO, LOGGER):
@@ -328,10 +339,33 @@ def test_a_paced_read_announces_its_least_duration(caplog: pytest.LogCaptureFixt
     ]
 
 
+def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_worker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # In a console command, which holds the update graph's lock, a paced read holds every live
+    # table of the worker still while it runs: the least duration becomes a WARNING.
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
+    governor.declare({"stocks"})
+    with caplog.at_level(logging.INFO, LOGGER):
+        announce(governor, "stocks.bars history", ["stocks"] * 250, pauses_live_tables=True)
+        quick = ["stocks"] * 5  # every request starts at once: quiet
+        announce(governor, "stocks.bars history", quick, pauses_live_tables=True)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "stocks.bars history: 250 requests; paced at 5 requests a minute (stocks); this "
+                "command will pause every live table in the worker for at least 49 min: run "
+                "long downloads from a thread of your own, outside a console command"
+            ),
+        )
+    ]
+
+
 def test_a_daily_download_of_an_unpaced_subscription_names_the_basic_cost(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
         announce(governor, "stocks.bars history", ["stocks"] * 5, shape=ReadShape.PER_DAY)
@@ -346,7 +380,7 @@ def test_a_daily_download_of_an_unpaced_subscription_names_the_basic_cost(
 
 
 def test_a_paced_daily_download_states_its_pace(caplog: pytest.LogCaptureFixture) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
@@ -361,7 +395,7 @@ def test_a_paced_daily_download_states_its_pace(caplog: pytest.LogCaptureFixture
 def test_a_poll_whose_cycles_outlast_their_interval_warns_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     check = PaceCheck("stocks.snapshots poll()", 30.0)
     with caplog.at_level(logging.WARNING, LOGGER):
         check.check(governor, {"stocks": 4, "other": 50})  # unpaced: fine
@@ -380,10 +414,12 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns_once(
 
 def test_a_paced_bucket_with_every_slot_held_shows_paced() -> None:
     clock = FakeClock()
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=clock)
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=clock)
     governor.declare({"stocks"})
     for _ in range(5):
-        governor.done(governor.acquire("stocks", _massive.Cancel(), lane=object()), answered=True)
+        governor.done(
+            governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
     rows, change = rate_limits.rate_limit_pull(governor)
     stocks = next(row for row in rows if row.bucket == "stocks")
     # Nobody waits, but the next request would: it is not READY.
@@ -391,35 +427,53 @@ def test_a_paced_bucket_with_every_slot_held_shows_paced() -> None:
     assert change == 61.0  # the rows change when the first slot frees
 
 
-def test_a_learned_basic_outlives_its_pruned_governor() -> None:
+def test_a_learned_basic_goes_with_its_governor() -> None:
+    # Once the last session of the key has gone and its governor is idle, what it learned is
+    # forgotten: a new governor starts unpaced and relearns from its first refusal.
     clock = FakeClock()
     registry = _registry(clock)
     lease = _lease(registry)
     governor = lease.governor
     _refuse(governor, "stocks", BASIC, retry_after=5.0)
+    assert _paced(governor)["stocks"] == 5
     lease.release()
     clock.advance(61.0)
     _lease(registry, api_key="key-2").release()  # prunes the idle first governor
     again = _lease(registry)
     assert again.governor is not governor
-    assert _paced(again.governor)["stocks"] == 5
-    assert [s.bucket for s in again.governor.snapshot() if s.learned] == ["stocks"]
-    assert _paced(_lease(registry, api_key="key-3").governor)["stocks"] is None  # per key
+    assert _paced(again.governor)["stocks"] is None
+    assert [s.bucket for s in again.governor.snapshot() if s.learned] == []
 
 
 def test_the_default_registry_names_the_other_buckets_requests() -> None:
     lease = _lease(GovernorRegistry())
     governor = lease.governor
-    permit = governor.acquire(OTHER, _massive.Cancel(), lane=object())
-    with pytest.raises(_massive.WireError, match="refused requests outside Massive's"):
-        governor.refused(permit, retry_after=700.0, message="busy", request_id=None)
+    permit = governor.admission(OTHER, lane=object()).acquire(_massive.Cancel())
+    governor.refused(permit, retry_after=700.0, message="busy")
+    with pytest.raises(_massive.WireError, match="refusing requests outside Massive's"):
+        governor.admission(OTHER, lane=object(), patience=_massive.Patience(0.0)).acquire(
+            _massive.Cancel()
+        )
+    # The other bucket cannot be declared, but a Basic-worded refusal paces it.
+    with pytest.raises(ValueError, match=r"\['other'\] cannot be declared Basic"):
+        governor.declare({OTHER})
     lease.release()
+
+
+def test_a_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    assert read_patience(dh_exec_ctx).seconds == READ_PATIENCE == 600.0
+    # A console command holds the update graph's exclusive lock: the read gives up sooner.
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        assert read_patience(dh_exec_ctx).seconds == CONSOLE_PATIENCE == 90.0
+    assert read_patience(dh_exec_ctx) is not read_patience(dh_exec_ctx)  # one per read
 
 
 def test_the_pace_warning_counts_each_slot_for_61_seconds(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    governor = _massive.RequestGovernor(BUCKETS, unpaced=UNPACED, clock=FakeClock())
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.WARNING, LOGGER):
         PaceCheck("fits", 61.0).check(governor, {"stocks": 5})  # 5 per 61 s: just fits

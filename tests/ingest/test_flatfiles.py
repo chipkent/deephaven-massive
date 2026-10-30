@@ -26,7 +26,6 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
-from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -37,7 +36,7 @@ from deephaven_massive._datasets.history_source import HistoryWindow, history_wi
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
-from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit
 from deephaven_massive._namespaces.base import build_query
@@ -100,7 +99,7 @@ STOCK_TRADES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
-    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
         (R, "/v3/trades/{stockTicker}"): keys(from_request("stockTicker"), "SipTimestamp"),
         (FF, "us_stocks_sip/trades_v1"): keys("Ticker", "SipTimestamp"),
@@ -111,7 +110,7 @@ STOCK_QUOTES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/quotes/{stockTicker}",
-    flat_file_prefixes={None: "us_stocks_sip/quotes_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/quotes_v1"},
     keys={
         (R, "/v3/quotes/{stockTicker}"): keys(from_request("stockTicker"), "SipTimestamp"),
         (FF, "us_stocks_sip/quotes_v1"): keys("Ticker", "SipTimestamp"),
@@ -137,7 +136,7 @@ INDEX_VALUES_SPEC = DatasetSpec(
     name="indices.values",
     summary="A dataset for the tests.",
     asset_class=AssetClass.INDICES,
-    flat_file_prefixes={None: "us_indices/values_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
     keys={(FF, "us_indices/values_v1"): keys("Ticker", "Timestamp")},
 )
 FUTURES_TRADES = DatasetSpec(
@@ -146,7 +145,7 @@ FUTURES_TRADES = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     row_times=RowTimes.TICK,
     history_path="/futures/v1/trades/{ticker}",
-    flat_file_prefixes={None: "us_futures_{venue}/trades_v1"},
+    flat_file_prefixes={NotBars.ANY: "us_futures_{venue}/trades_v1"},
     keys={
         (R, "/futures/v1/trades/{ticker}"): keys(from_request("ticker"), "Timestamp", session=True),
         (FF, "us_futures_{venue}/trades_v1"): keys("Ticker", "Timestamp", session=True),
@@ -157,7 +156,7 @@ CRYPTO_TRADES = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.CRYPTO,
     history_path="/v3/trades/{cryptoTicker}",
-    flat_file_prefixes={None: "global_crypto/trades_v1"},
+    flat_file_prefixes={NotBars.ANY: "global_crypto/trades_v1"},
     keys={
         (R, "/v3/trades/{cryptoTicker}"): keys(
             from_request("cryptoTicker"), "ParticipantTimestamp"
@@ -374,16 +373,6 @@ def pool(monkeypatch: pytest.MonkeyPatch) -> type[ShutdownSignal]:
 # --- The verb ----------------------------------------------------------------------------------
 
 
-def test_history_is_guarded_like_every_verb(*, session: dm.MassiveSession, fake_s3: FakeS3) -> None:
-    q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with (
-        shared_lock(session._core.exec_ctx.update_graph),
-        pytest.raises(ValueError, match="update-graph lock"),
-    ):
-        q.history("2025-03-03", "2025-03-03")
-    assert fake_s3.requests == []
-
-
 def test_history_after_close_is_a_closed_session_error(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None]
 ) -> None:
@@ -453,7 +442,7 @@ SYNTHETIC = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     history_path="/v3/trades/{stockTicker}",
-    flat_file_prefixes={None: SYNTHETIC_FILES},
+    flat_file_prefixes={NotBars.ANY: SYNTHETIC_FILES},
     keys={(FF, SYNTHETIC_FILES): keys("Ticker", "SipTimestamp")},
 )
 
@@ -1642,7 +1631,7 @@ def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
     assert sorted(fake_s3.keys()) == [TRADES_0303] + [TRADES_0304] * 4
     assert len(retry_clock.waits) == 3
     assert [r.levelno for r in caplog.records if "giving up after 4 reads" in r.getMessage()] == [
-        logging.ERROR
+        logging.WARNING
     ]
 
 

@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params
 
@@ -75,8 +75,8 @@ VALUES: Final = DatasetSpec(
     asset_class=AssetClass.INDICES,
     kind="values",
     fetch_path=_SNAPSHOT,
-    channels={None: "V"},
-    flat_file_prefixes={None: _VALUE_FILES},
+    channels={NotBars.ANY: "V"},
+    flat_file_prefixes={NotBars.ANY: _VALUE_FILES},
     keys={
         # The snapshot joins the values kind through a projection that keeps `ticker`,
         # `value`, and `last_updated`, the last under the name `Timestamp`.

@@ -169,7 +169,7 @@ _BODY_EXCERPT = 2000
 """How many characters of a failed response's body the client's DEBUG line quotes."""
 
 
-def body_excerpt(data: bytes) -> str:
+def body_excerpt(data: bytes | bytearray) -> str:
     """Return the start of a failed response's body as text, for the client's DEBUG line.
 
     Longer than an error's excerpt, so the line shows Massive's whole error envelope or the
@@ -182,10 +182,12 @@ def body_excerpt(data: bytes) -> str:
     Returns:
         The first 2,000 characters, with undecodable bytes replaced; empty for an empty body.
     """
-    return data.decode("utf-8", "replace")[:_BODY_EXCERPT]
+    # A UTF-8 character is at most 4 bytes, so this many bytes hold the excerpt: a large body
+    # is never decoded whole only to be cut.
+    return bytes(data[: _BODY_EXCERPT * 4]).decode("utf-8", "replace")[:_BODY_EXCERPT]
 
 
-def _excerpt(data: bytes) -> str:
+def _excerpt(data: bytes | bytearray) -> str:
     """Return the start of a body as text, for an error message.
 
     Args:
@@ -194,10 +196,11 @@ def _excerpt(data: bytes) -> str:
     Returns:
         The first 200 characters, with undecodable bytes replaced, or `"an empty body"`.
     """
-    return data.decode("utf-8", "replace")[:_EXCERPT] or "an empty body"
+    # A character is at most four UTF-8 bytes, so only the excerpt's bytes are decoded.
+    return data[: _EXCERPT * 4].decode("utf-8", "replace")[:_EXCERPT] or "an empty body"
 
 
-def http_error(status: int, data: bytes, request: Request) -> WireError:
+def http_error(status: int, data: bytes | bytearray, request: Request) -> WireError:
     """Return the error for a response whose HTTP status is not 200.
 
     Args:
@@ -331,7 +334,7 @@ def _result(body: dict[str, object], result_key: str) -> object:
     return value
 
 
-def decode_page(data: bytes, rest_path: RestPath, request: Request) -> Page:
+def decode_page(data: bytes | bytearray, rest_path: RestPath, request: Request) -> Page:
     """Decode the body of a 200 response into a `Page`.
 
     Besides the errors below, a body with an `ERROR` status raises `WireError` and one with a
@@ -355,7 +358,9 @@ def decode_page(data: bytes, rest_path: RestPath, request: Request) -> Page:
     except ValueError as error:
         raise WireError(
             **request.context(
-                "HTTP 200", f"the body is not JSON ({error}): {data[:_EXCERPT]!r}", status=200
+                "HTTP 200",
+                f"the body is not JSON ({error}): {bytes(data[:_EXCERPT])!r}",
+                status=200,
             )
         ) from error
     if isinstance(body, list) and rest_path.result_key is None:

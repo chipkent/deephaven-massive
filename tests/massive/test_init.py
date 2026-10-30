@@ -28,6 +28,7 @@ EXPECTED_INTERFACE = [
     "FlatFileClient",
     "Page",
     "ParamKind",
+    "Patience",
     "Provenance",
     "RATE_WINDOW",
     "ReadColumn",

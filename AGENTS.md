@@ -33,9 +33,9 @@ uv build                                 # sdist and wheel
    or otherwise): only the owner merges.
 2. **Never bypass a hook**: no `--no-verify`, no `core.hooksPath` tricks, no skipped failing
    check. When a hook fails, fix the cause.
-3. **Naming.** Branches are `<type>/<topic>`, cut from `origin/main` after `git fetch`. Commits
-   and PR titles follow Conventional Commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`,
-   `ci:`, `chore:`.
+3. **Branches and commits.** Branches are `<type>/<topic>`, cut from `origin/main` after
+   `git fetch`. Commits and PR titles follow Conventional Commits: `feat:`, `fix:`, `docs:`,
+   `test:`, `refactor:`, `ci:`, `chore:`.
 4. **Check, review, push.** Before opening a PR and before every push to one, get
    `./scripts/check.sh` (full) green, run the `pre-push-review` skill, and fix its findings. Every
    CI job must pass, the required free-threaded 3.14t job too: locking must work without the GIL.
@@ -54,7 +54,11 @@ uv build                                 # sdist and wheel
 9. **`DESIGN.md` first.** A change to a public signature, default, or table semantics updates
    `DESIGN.md` first: an owner decision.
 10. **Tests mirror the package**, one leading underscore dropped per path component:
-    `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`.
+    `_massive/rest/client.py` is tested by `tests/massive/rest/test_client.py`. Two helper
+    packages sit outside the rule: `tests/_fakes/`, the fake servers, and `tests/_live/`, the
+    logic behind the live tests' fixtures. Each `tests/_live/` module has a unit test at the
+    same mirrored path (`tests/_live/plans.py` is tested by `tests/live/test_plans.py`); the
+    fakes have none. A new helper package, or tests for another one, needs owner approval.
 11. **Coverage is 100%** of statements and branches. Delete a dead defensive branch instead of
     covering it. `# pragma: no cover` needs a reason on its line and owner approval in the PR.
 12. **Every suppression has a reason**: each ruff ignore entry, `# noqa`, and
@@ -79,8 +83,10 @@ uv build                                 # sdist and wheel
     `exclusions.py`, each entry with a reason; `vendor/massive/` only through `refresh --fetch`;
     `docs/datasets/` only through `render_reference.py`, committed in the same PR as its cause.
     The procedure, including wrong vendor descriptions, is in `docs/dev/spec-refresh.md`.
-18. **Placement.** A module holds one subject, named in the first line of its docstring.
-    `DESIGN.md` § 4.1 says where new code goes; read it before adding a module or a helper.
+18. **Placement and names.** A module holds one subject, named in the first line of its
+    docstring; `DESIGN.md` § 4.1 says where new code goes and lists the pattern words no module
+    name uses. Every name (function, argument, column, environment variable, pytest marker) says
+    what the thing is or does, in words a newcomer knows: no abbreviation you coined.
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.
 20. **Dates are ISO strings.** Every calendar-date column, vendor dates included, stores
     `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read: one type joins with every
@@ -126,6 +132,10 @@ These prevent deadlocks and leaks.
   so never run one under `registry_lock`.
 - **Never block in a table listener.** It runs on a UG thread holding the UG lock: compute the
   diff, hand it to a worker, return. No table operations, I/O, or waits on library threads.
+- **The console holds the UG lock.** Deephaven runs every console command under the exclusive
+  UG lock, so every call must work there: only UG threads are refused, and a call holding the
+  lock never waits for an update cycle or on a thread that may need the lock (the diagnostics
+  writer, a poller, another caller's stream open).
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
   on the caller thread; a refreshing table made outside an explicit scope lives as long as the
   console session.

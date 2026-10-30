@@ -20,7 +20,9 @@ search, and is passed on uncopied.
 
 An empty secret is skipped, since replacing the empty string would insert the marker between
 every character. The match errs toward hiding: text that spells a secret with escapes is
-replaced even where those escapes are themselves quoted text rather than JSON.
+replaced even where those escapes are themselves quoted text rather than JSON, and a
+replacement that cuts an escape in two can leave a body that no longer decodes, which then
+fails as a decoding error rather than show the secret.
 
 This module imports only the standard library. It is part of `net`, the layer every client
 shares.
@@ -108,32 +110,42 @@ class Redactor:
     def received(self, data: str) -> str: ...
 
     @overload
-    def received(self, data: str | bytes) -> str | bytes: ...
+    def received(self, data: bytearray) -> bytes | bytearray: ...
 
-    def received(self, data: str | bytes) -> str | bytes:
+    @overload
+    def received(self, data: str | bytes | bytearray) -> str | bytes | bytearray: ...
+
+    def received(self, data: str | bytes | bytearray) -> str | bytes | bytearray:
         """Return a received body or frame with each secret replaced, however JSON spells it.
 
         Args:
-            data: The body or frame as received: `bytes`, or `str` for a WebSocket text frame.
-                It is usually JSON, but need not be: a body cut short or a proxy's HTML page is
-                cleaned the same way.
+            data: The body or frame as received: `bytes` or a `bytearray` (a streamed REST
+                body, never copied to `bytes` here: it can be hundreds of megabytes), or `str`
+                for a WebSocket text frame. It is usually JSON, but need not be: a body cut
+                short or a proxy's HTML page is cleaned the same way.
 
         Returns:
             `data` with every spelling of each secret (as it is, with any of its characters
             spelled by a JSON escape, or both) replaced by `REDACTED`; `data` itself, uncopied,
-            when nothing was replaced.
+            when nothing was replaced. A cleaned `bytearray` comes back as `bytes` or a
+            `bytearray`; both decode the same.
         """
-        if isinstance(data, bytes):
-            plain = any(needle.encode() in data for needle in self._needles)
-            if not plain and self._bytes_escapes.search(data) is None:
-                return data
-            cleaned, count = self._bytes_secrets.subn(REDACTED.encode(), data)
-            return cleaned if count else data
-        plain = any(needle in data for needle in self._needles)
-        if not plain and self._text_escapes.search(data) is None:
-            return data
-        text, count = self._text_secrets.subn(REDACTED, data)
-        return text if count else data
+        if isinstance(data, (bytes, bytearray)):
+            cleaned: bytes | bytearray = data
+            for needle in self._needles:  # the secret as it is, first: see `_spelled`
+                raw = needle.encode()
+                if raw in cleaned:
+                    cleaned = cleaned.replace(raw, REDACTED.encode())
+            if self._bytes_escapes.search(cleaned) is not None:
+                cleaned = self._bytes_secrets.sub(REDACTED.encode(), cleaned)
+            return data if cleaned == data else cleaned
+        text = data
+        for needle in self._needles:
+            if needle in text:
+                text = text.replace(needle, REDACTED)
+        if self._text_escapes.search(text) is not None:
+            text = self._text_secrets.sub(REDACTED, text)
+        return data if text == data else text
 
 
 # The last code point a single four-digit escape spells, and the first high and low surrogates.
@@ -196,12 +208,21 @@ def _spelled(secret: str) -> str:
     Args:
         secret: A non-empty secret.
 
+    Each character's group is atomic, its longest spelling tried first: a backslash's three
+    spellings all start with a backslash, so a group that could give back what it matched would
+    let a secret of backslashes, against a run of them, backtrack exponentially. Atomic, the
+    search is linear, at the cost of missing a secret written partly as itself where a character
+    of it could also start a longer escape; `Redactor.received` therefore first replaces the
+    secret as it is, which the pattern then never needs to find.
+
     Returns:
-        The pattern: for each character, itself or any of its escapes.
+        The pattern: for each character, itself or any of its escapes, longest first.
     """
-    return "".join(
-        "(?:" + "|".join([re.escape(c), *map(_hex_insensitive, _escapes(c))]) + ")" for c in secret
+    alternatives = (
+        sorted([re.escape(c), *map(_hex_insensitive, _escapes(c))], key=len, reverse=True)
+        for c in secret
     )
+    return "".join("(?>" + "|".join(group) + ")" for group in alternatives)
 
 
 def _spelled_bytes(secret: str) -> bytes:
@@ -213,9 +234,12 @@ def _spelled_bytes(secret: str) -> bytes:
     Returns:
         The pattern, as bytes.
     """
-    return b"".join(
-        b"(?:"
-        + b"|".join([re.escape(c.encode()), *(_hex_insensitive(e).encode() for e in _escapes(c))])
-        + b")"
+    alternatives = (
+        sorted(
+            [re.escape(c.encode()), *(_hex_insensitive(e).encode() for e in _escapes(c))],
+            key=len,
+            reverse=True,
+        )
         for c in secret
     )
+    return b"".join(b"(?>" + b"|".join(group) + b")" for group in alternatives)

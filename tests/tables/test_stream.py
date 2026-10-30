@@ -27,7 +27,7 @@ from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass, UnknownSymbols
+from deephaven_massive._enums import AssetClass, NotBars, UnknownSymbols
 from deephaven_massive._errors import BoundedWarnings, MassiveError
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
@@ -63,14 +63,14 @@ TRADES = DatasetSpec(
     name="test.trades",
     summary="A test dataset.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(W, "stocks/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 FOREX = DatasetSpec(
     name="test.forex",
     summary="A test dataset.",
     asset_class=AssetClass.FOREX,
-    channels={None: "C"},
+    channels={NotBars.ANY: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
 )
 
@@ -132,6 +132,7 @@ def test_a_plan_reads_the_channel_for_the_dataset(massive_session: dm.MassiveSes
     assert plan.wire_schema.field("SipTimestamp").type == pa.int64()
     assert [c[1] for c in plan.columns][:2] == ["Symbol", "Timestamp"]
     assert plan.columns[1][2:] == ("SipTimestamp", plan.columns[1][3])
+    assert plan.times.timespan is None  # a channel that is not bars serves no timespan
 
 
 def test_a_plan_needs_a_symbol_key(massive_session: dm.MassiveSession) -> None:
@@ -139,7 +140,7 @@ def test_a_plan_needs_a_symbol_key(massive_session: dm.MassiveSession) -> None:
         name="test.keyless",
         summary="A test dataset.",
         asset_class=AssetClass.STOCKS,
-        channels={None: "T"},
+        channels={NotBars.ANY: "T"},
     )
     with pytest.raises(ValueError, match="stocks/T declares no symbol key"):
         ChannelPlan.build(

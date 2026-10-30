@@ -40,10 +40,6 @@ def test_a_rate_limit_pauses_what_retry_after_asks() -> None:
     assert retry.rate_limit_wait(1, 3600.0) == 3600.0
 
 
-def test_refusals_pause_and_resume_for_ten_minutes() -> None:
-    assert retry.RATE_LIMIT_PATIENCE == 600.0
-
-
 @pytest.mark.parametrize(
     ("header", "seconds"),
     [("30", 30.0), (" 5 ", 5.0), ("0", 0.0), ("120", 120.0)],
@@ -99,10 +95,20 @@ def test_the_system_clock_wait_ends_when_its_event_is_set() -> None:
     assert retry.SYSTEM_CLOCK.wait(event, 60.0) is True
 
 
-def test_the_system_clock_waits_without_a_deadline_until_its_event_is_set() -> None:
-    # `threading.Event.wait` refuses an infinite timeout; the clock waits for the event alone.
+def test_the_system_clock_waits_without_a_deadline_until_its_event_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `threading.Event.wait` refuses an infinite timeout; the clock waits for the event alone,
+    # in short chunks. The event is set only once the waiter has been blocked for a while.
+    monkeypatch.setattr(retry, "UNTIMED_CHUNK", 0.01)
     event = threading.Event()
-    setter = threading.Thread(target=event.set, daemon=True)
-    setter.start()
-    assert retry.SYSTEM_CLOCK.wait(event, math.inf) is True
-    setter.join(10)
+    results: list[bool] = []
+    waiter = threading.Thread(
+        target=lambda: results.append(retry.SYSTEM_CLOCK.wait(event, math.inf)), daemon=True
+    )
+    waiter.start()
+    waiter.join(0.2)
+    assert waiter.is_alive()  # still waiting, across several chunks
+    event.set()
+    waiter.join(10)
+    assert results == [True]

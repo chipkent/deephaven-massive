@@ -33,6 +33,7 @@ from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
     Direction,
+    NotBars,
     Order,
     PollMode,
     Timeframe,
@@ -116,8 +117,8 @@ TRADES: Final = DatasetSpec(
     kind="trades",
     fetch_path=_LAST_TRADE,
     history_path=_TRADES,
-    channels={None: "T"},
-    flat_file_prefixes={None: "us_stocks_sip/trades_v1"},
+    channels={NotBars.ANY: "T"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
         (_R, _LAST_TRADE): _ticker_keys("SipTimestamp"),
         (_R, _TRADES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
@@ -134,8 +135,8 @@ QUOTES: Final = DatasetSpec(
     kind="quotes",
     fetch_path=_LAST_QUOTE,
     history_path=_QUOTES,
-    channels={None: "Q"},
-    flat_file_prefixes={None: "us_stocks_sip/quotes_v1"},
+    channels={NotBars.ANY: "Q"},
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/quotes_v1"},
     keys={
         (_R, _LAST_QUOTE): _ticker_keys("SipTimestamp"),
         (_R, _QUOTES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
@@ -173,7 +174,7 @@ LULD: Final = DatasetSpec(
     summary="Limit up-limit down price bands of US-listed stocks, as they change.",
     asset_class=_STOCKS,
     kind="luld",
-    channels={None: "LULD"},
+    channels={NotBars.ANY: "LULD"},
     keys={(_W, "stocks/LULD"): _ticker_keys("UnixTimestamp")},
 )
 IMBALANCES: Final = DatasetSpec(
@@ -181,7 +182,7 @@ IMBALANCES: Final = DatasetSpec(
     summary="Net order imbalances of US-listed stocks ahead of opening and closing auctions.",
     asset_class=_STOCKS,
     kind="imbalances",
-    channels={None: "NOI"},
+    channels={NotBars.ANY: "NOI"},
     keys={(_W, "stocks/NOI"): _ticker_keys("UnixTimestamp")},
 )
 FMV: Final = DatasetSpec(
@@ -189,7 +190,7 @@ FMV: Final = DatasetSpec(
     summary="Massive's fair market value estimate of US-listed stocks, as it updates.",
     asset_class=_STOCKS,
     kind="fmv",
-    channels={None: "FMV"},
+    channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
     keys={(_W, "stocks/FMV"): _ticker_keys("FmvLastUpdated")},
 )
@@ -343,7 +344,9 @@ def _statement(dataset: str, path: str, *, summary: str) -> DatasetSpec:
         time_axis=("period_end.gte", "period_end.lte"),
         symbol_param="tickers.any_of",
         poll_keys=_STATEMENT_KEYS,
-        page_size=50_000,
+        # Below the documented 50,000: a statement row holds some fifty line items, over a
+        # kilobyte of JSON, so a full page would pass 60 MB; 10,000 keeps it near 15 MB.
+        page_size=10_000,
     )
 
 
@@ -428,7 +431,8 @@ def _filing(
         nullable_poll_keys: The poll keys the vendor leaves empty on some rows, each with
             its reason; a null there is a value, not a data failure. None for no such key.
         keys: The source's keys; by default the optional `Ticker` of `_OPTIONAL_TICKER`.
-        page_size: The largest `limit` the path documents.
+        page_size: The largest `limit` the path documents, or less for rows that carry long
+            text.
 
     Returns:
         The spec.
@@ -499,7 +503,9 @@ RISK_FACTORS: Final = _filing(
     _RISK_FACTORS,
     symbol_param="ticker.any_of",
     poll_keys=("Cik", "FilingDate", *_CATEGORIES, "SupportingText"),
-    page_size=50_000,
+    # Below the documented 50,000: each row quotes the filing's text for its risk factor, so a
+    # page of 5,000 stays at a few megabytes.
+    page_size=5_000,
     summary="Risk factors disclosed in company filings, classified by category, one row each.",
 )
 _13F_AMOUNTS: Final = (

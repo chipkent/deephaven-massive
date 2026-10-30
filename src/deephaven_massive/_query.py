@@ -19,7 +19,8 @@ their types, and what each one means, as a static table built without any networ
 Verbs validate their parameters synchronously on the calling thread: a wrong type raises
 `TypeError` and an invalid value raises `ValueError`. Every verb also raises `ValueError` on a
 Deephaven update-graph thread (for example inside a table listener), because verbs create tables and
-take the session's registry lock.
+take the session's registry lock. A thread that only holds the update graph's lock is not one: the
+Deephaven console runs every command holding it, and every verb works there.
 
 The verbs delegate the transport work to three interfaces, one per transport, defined in
 `_tables/core.py` and provided by the session core's factory hooks: `RestTransport` (`fetch`,
@@ -40,17 +41,19 @@ construct them.
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 
 from deephaven import arrow as dh_arrow
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 
 from deephaven_massive._config import require_positive_int, require_positive_number
+from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.history_source import (
     choose_source,
@@ -66,8 +69,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import column_table, describe
-from deephaven_massive._tables.core import ON_UPDATE_GRAPH, on_update_graph
-from deephaven_massive._tables.liveness import entered
+from deephaven_massive._tables.liveness import entered, refuse_update_graph_thread
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import ALL, override
 
@@ -95,6 +97,33 @@ logger = logging.getLogger(__name__)
 
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
+
+_Q = TypeVar("_Q", bound="QueryBase")
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _verb(method: Callable[Concatenate[_Q, _P], _R]) -> Callable[Concatenate[_Q, _P], _R]:
+    """Make a query method a verb, run through `SessionCore.run_verb`.
+
+    So every verb raises `ValueError` on an update-graph thread and `MassiveError` on a closed
+    session before it checks a single argument, and one that runs long on a thread that holds
+    the update graph's lock (a Deephaven console command) is reported once, as
+    `"<dataset> <verb>()"`.
+
+    Args:
+        method: The verb's body.
+
+    Returns:
+        The verb, with the body's name, docstring, and signature.
+    """
+
+    @functools.wraps(method)
+    def verb(self: _Q, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        call = f"{self._spec.name} {method.__name__}()"
+        return self._core.run_verb(call, functools.partial(method, self, *args, **kwargs))
+
+    return verb
 
 
 def _interval(value: object) -> timedelta:
@@ -236,8 +265,8 @@ class QueryBase:
             by WebSocket, and `history()` by REST or flat files); empty for a column that only
             other datasets of the same kind supply, which this dataset always leaves null.
 
-        Raises:
-            ValueError: If called on an update-graph thread, for example from a table listener.
+        Like every verb, it raises `ValueError` on a Deephaven update-graph thread, for example
+        from a table listener.
 
         Example:
             ::
@@ -245,8 +274,7 @@ class QueryBase:
                 cols = m.stocks.trades(["AAPL"]).columns()
                 stream_only = cols.where("SuppliedBy = `WebSocket`")
         """
-        if on_update_graph(self._core.exec_ctx):
-            raise ValueError(ON_UPDATE_GRAPH)
+        refuse_update_graph_thread(self._core.exec_ctx)
         schema = self._core.dataset_schema(self._spec)
         with entered(self._core.exec_ctx):
             return column_table(schema)
@@ -290,11 +318,10 @@ class QueryBase:
         Returns:
             What `run` returns.
 
-        Whatever `run` raises propagates after a `call <id> failed` line (`_log_failure`). A
-        call on an update-graph thread raises `ValueError` before it takes an id, so it logs
-        nothing.
+        Whatever `run` raises propagates after a `call <id> failed` line (`_log_failure`). The
+        verb's guard (`_verb`) runs before this, so a call on an update-graph thread raises
+        `ValueError` before it takes an id, and logs nothing.
         """
-        self._core.require_verb_thread()
         call = self._core.next_stream_id()
         logger.debug("call %d start: %r.%s", call, self, verb)
         started = time.monotonic()
@@ -352,6 +379,7 @@ class Query(QueryBase):
 
     __slots__ = ()
 
+    @_verb
     def fetch(self) -> Table:
         """Return every row the dataset's endpoint returns, fully paginated, as a static table.
 
@@ -393,6 +421,7 @@ class Query(QueryBase):
             self._core.rest_transport().fetch(self._spec, self._static_request(), call=call)
         )
 
+    @_verb
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
         """Return a live table that re-runs `fetch()` every `interval`.
 
@@ -449,7 +478,6 @@ class Query(QueryBase):
             with neither unique poll keys nor an update time (one keyed by the default
             `Symbol`), `APPEND` adds one row per symbol.
         """
-        self._core.require_verb_thread()
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
         if isinstance(self._request.symbols, SymbolTable):
@@ -503,7 +531,7 @@ class StreamQuery(QueryBase):
         A stream query exists only for a timespan with a channel (`bar_query_class`), so the
         lookup always finds one.
         """
-        return self._spec.channels[self._request.timespan]
+        return self._spec.channels[timespan_key(self._request.timespan)]
 
     def _stream_request(self) -> Request:
         """Return the request the stream is opened for, with a static symbol table read once.
@@ -557,6 +585,7 @@ class StreamQuery(QueryBase):
             build=lambda blink: describe(shape(blink), spec, schema),
         )
 
+    @_verb
     def blink(self) -> Table:
         """Return the stream as a blink table: each update cycle holds only that cycle's rows.
 
@@ -572,9 +601,9 @@ class StreamQuery(QueryBase):
         Returns:
             A live blink table in the dataset's schema.
         """
-        self._core.require_verb_thread()
         return self._stream(lambda blink: blink, self._stream_request())
 
+    @_verb
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
 
@@ -589,9 +618,9 @@ class StreamQuery(QueryBase):
         Returns:
             A live append-only table in the dataset's schema.
         """
-        self._core.require_verb_thread()
         return self._stream(blink_to_append_only, self._stream_request())
 
+    @_verb
     def ring(self, capacity: int) -> Table:
         """Return the most recent `capacity` rows received.
 
@@ -610,10 +639,10 @@ class StreamQuery(QueryBase):
         Returns:
             A live ring table in the dataset's schema.
         """
-        self._core.require_verb_thread()
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(lambda blink: ring_table(blink, rows), self._stream_request())
 
+    @_verb
     def last_by(self, by: str | Sequence[str] | None = None) -> Table:
         """Return the latest row per key, by default one row per `Symbol`.
 
@@ -644,7 +673,6 @@ class StreamQuery(QueryBase):
         Returns:
             A live table with one row per key, in the dataset's schema.
         """
-        self._core.require_verb_thread()
         keys = self._last_by_keys(by)
         request = self._stream_request()
         symbols = request.symbols
@@ -713,6 +741,7 @@ class HistoryQuery(QueryBase):
 
     __slots__ = ()
 
+    @_verb
     def history(
         self,
         start: DateLike,
@@ -961,6 +990,7 @@ class StreamHistoryLatestQuery(StreamHistoryQuery):
 
     __slots__ = ()
 
+    @_verb
     def fetch(self) -> Table:
         """Return exactly one row per symbol, the latest, from the dataset's "last" endpoint.
 
@@ -999,6 +1029,7 @@ class HistoryLatestQuery(HistoryQuery):
 
     __slots__ = ()
 
+    @_verb
     def fetch(self) -> Table:
         """Return one row per symbol: the bar of the previous completed session.
 

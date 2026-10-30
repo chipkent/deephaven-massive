@@ -135,14 +135,12 @@ class RateLimitState(StrEnum):
 
     `READY`: it starts at once. `PACED`: it waits behind the requests already queued for a slot
     of the bucket's per-minute limit. `PAUSED`: it waits for the pause Massive's latest 429
-    asked for. `REFUSED`: Massive has refused the bucket for longer than the library waits, so
-    it fails at once with status 429 until `PausedUntil`.
+    asked for, unless its read will not wait until `PausedUntil` and fails with status 429.
     """
 
     READY = "READY"
     PACED = "PACED"
     PAUSED = "PAUSED"
-    REFUSED = "REFUSED"
 
 
 class LimitSource(StrEnum):
@@ -425,8 +423,8 @@ class RateLimitRow:
     rows, since Massive counts the requests of all of them together.
 
     Attributes:
-        bucket: The bucket: a `dm.Subscription` value, or `other` for the datasets Massive
-            assigns to no subscription, which are never paced.
+        bucket: The bucket: a `dm.Subscription` value, or `other` for reference data and the
+            other datasets Massive assigns to no subscription, which it counts on their own.
         state: What a new request meets now.
         requests_per_minute: The pace, 5 for a Basic subscription; null while unpaced.
         limit_source: Why it is paced; null while unpaced.
@@ -703,9 +701,10 @@ class Diagnostics:
     thread, never blocking) asks the writer to pull them again, at most once per batch.
 
     `release()` lets the writer apply the rows already queued, release the scope, and exit, and
-    waits for it; `stop()` does the same without waiting and without taking any lock, for use
-    from a finalizer. A writer that dies on something it cannot carry on after calls `on_death`
-    first (the session fails its live tables there).
+    waits for it unless told not to (a caller that holds the update graph's lock must not: the
+    writer's adds cannot finish until it lets go); `stop()` does the same without waiting and
+    without taking any lock, for use from a finalizer. A writer that dies on something it
+    cannot carry on after calls `on_death` first (the session fails its live tables there).
     """
 
     __slots__ = (
@@ -840,9 +839,10 @@ class Diagnostics:
         """Return an event that is set once every row queued before this call is applied.
 
         Only for a live session's diagnostics, whose writer is running (tests use it to wait
-        for rows). After `release()` the event comes back already set. After `stop()` (the
-        finalizer of a collected session) the writer may already have exited, so the event
-        might never be set: do not call it then.
+        for rows). After `release()` the event comes back already set, even when a release
+        that did not wait still has rows to apply: join `thread` to wait for those. After
+        `stop()` (the finalizer of a collected session) the writer may already have exited, so
+        the event might never be set: do not call it then.
 
         Returns:
             The event; already set when the writer has been released.
@@ -864,15 +864,24 @@ class Diagnostics:
         self._released = True  # one attribute store; `write` and the rest read it under a lock
         self._writer.stop()
 
-    def release(self) -> None:
+    def release(self, *, wait: bool = True) -> None:
         """Apply the queued rows, release the tables' scope, and end the writer. Idempotent.
 
-        Blocks until the writer has finished, so it must not run on an update-graph thread.
+        No row is queued after it. The writer applies the rows queued before it, then releases
+        the scope and exits.
+
+        Args:
+            wait: True to block until the writer has finished, so the rows are in the tables
+                when it returns; it must then not run on an update-graph thread, nor on a
+                thread that holds the update graph's lock, where the writer's adds could never
+                finish. False to return at once, as a caller holding that lock must: the
+                writer finishes once the lock is released.
         """
         with self._release_lock:
             self._released = True
         self._writer.stop()
-        self._writer.thread.join()
+        if wait:
+            self._writer.thread.join()
 
     def _apply(self, items: list[_Item]) -> None:
         """Apply one batch: the latest row per key, one `add` per table, then the barriers.

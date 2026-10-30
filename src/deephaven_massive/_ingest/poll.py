@@ -586,8 +586,9 @@ class Poller:
         elif self._mode is PollMode.APPEND:
             table, identities = self._fresh(table)
             published = table.num_rows
-        # Converted before the publish lock, which is a leaf: the conversion may take the
-        # update-graph lock.
+        # Converted before the publish lock, so the lock is held only for the add: converting a
+        # large cycle takes a while, and a close failing the table would wait for it. The
+        # conversion builds static tables and takes no update-graph lock.
         rows = dataset_table(table, self._schema.date_columns) if table.num_rows else None
         with self._publish_lock:
             if self._failed:  # the session closed after the stop check: publish nothing

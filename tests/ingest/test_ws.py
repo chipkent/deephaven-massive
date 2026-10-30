@@ -31,10 +31,10 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import HostDecision, Request
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, hosts, poll, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
-from deephaven_massive._tables.diagnostics import Diagnostics, StreamUpdate
+from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -73,28 +73,28 @@ TRADES = DatasetSpec(
     name="test.trades",
     summary="A test dataset.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(W, "stocks/T"): STOCK_KEYS},
 )
 QUOTES = DatasetSpec(
     name="test.quotes",
     summary="A test dataset.",
     asset_class=AssetClass.STOCKS,
-    channels={None: "Q"},
+    channels={NotBars.ANY: "Q"},
     keys={(W, "stocks/Q"): STOCK_KEYS},
 )
 FOREX = DatasetSpec(
     name="test.forex",
     summary="A test dataset.",
     asset_class=AssetClass.FOREX,
-    channels={None: "C"},
+    channels={NotBars.ANY: "C"},
     keys={(W, "forex/C"): SourceKeys(KeySpec("Ticker"), KeySpec("ParticipantTimestamp"))},
 )
 FOREX_FMV = DatasetSpec(
     name="test.forex_fmv",
     summary="A test dataset.",
     asset_class=AssetClass.FOREX,
-    channels={None: "FMV"},
+    channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
     keys={(W, "forex/FMV"): SourceKeys(KeySpec("Ticker"))},
 )
@@ -102,28 +102,28 @@ CRYPTO = DatasetSpec(
     name="test.crypto",
     summary="A test dataset.",
     asset_class=AssetClass.CRYPTO,
-    channels={None: "XT"},
+    channels={NotBars.ANY: "XT"},
     keys={(W, "crypto/XT"): SourceKeys(KeySpec("Pair"), KeySpec("ParticipantTimestamp"))},
 )
 OPTIONS = DatasetSpec(
     name="test.options",
     summary="A test dataset.",
     asset_class=AssetClass.OPTIONS,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(W, "options/T"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 OPTION_QUOTES = DatasetSpec(
     name="test.option_quotes",
     summary="A test dataset.",
     asset_class=AssetClass.OPTIONS,
-    channels={None: "Q"},
+    channels={NotBars.ANY: "Q"},
     keys={(W, "options/Q"): SourceKeys(KeySpec("Ticker"), KeySpec("SipTimestamp"))},
 )
 FUTURES = DatasetSpec(
     name="test.futures",
     summary="A test dataset.",
     asset_class=AssetClass.FUTURES,
-    channels={None: "T"},
+    channels={NotBars.ANY: "T"},
     keys={(W, "futures/T"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
 )
 
@@ -131,7 +131,7 @@ QUOTES_FUTURES = DatasetSpec(
     name="test.futures_quotes",
     summary="A test dataset.",
     asset_class=AssetClass.FUTURES,
-    channels={None: "Q"},
+    channels={NotBars.ANY: "Q"},
     keys={(W, "futures/Q"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
 )
 
@@ -1362,6 +1362,105 @@ def test_a_connection_that_does_not_end_is_reported(
     del result
 
 
+def test_a_close_holding_the_update_graph_lock_joins_nothing(
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    # In a console command no live table updates while close() waits, so it joins neither the
+    # connections nor the futures schedule worker there; those daemons end on their own. A
+    # close without the lock still joins both, each for a bounded time.
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    connection = ws_session.connection()
+    joined: list[float] = []
+    detached: list[bool] = []
+    join, detach = connection.join, ws_session.connections.group.detach
+
+    def joining(timeout: float) -> bool:
+        joined.append(timeout)
+        return join(timeout)
+
+    def detaching(owner: ws.WsConnections, *, wait: bool = True) -> None:
+        detached.append(wait)
+        detach(owner, wait=wait)
+
+    monkeypatch.setattr(connection, "join", joining)
+    monkeypatch.setattr(ws_session.connections.group, "detach", detaching)
+    console_command(ws_session.connections.close)
+    assert (joined, detached) == ([], [False])
+    assert join(TIMEOUT)  # the connection's threads end on their own
+    ws_session.session.release(result)
+
+
+@pytest.mark.parametrize("last", ["CONNECTED", "FAILED"])
+def test_a_console_close_shows_its_connections_closed(
+    *,
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
+    rows_when: RowsWhen,
+    last: str,
+) -> None:
+    # Joining no connection, close() under the lock cannot count on the client's own last row,
+    # CLOSED, reaching the session before its diagnostics are released: it writes that row
+    # itself, from the last row the client wrote (a FAILED one keeps its state), for each
+    # family whose row the session shows, and the session leaves the connection's users. Here
+    # the client never even closes (a server that never answers), yet a held m.connections()
+    # view shows the final state once the command is over.
+    m = ws_session.session
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    view = m.connections()
+
+    def states(rows: list[dict[str, Any]]) -> list[tuple[str, str, int, int]]:
+        return [
+            (r["Family"], r["State"], r["Topics"], r["BufferedRows"])
+            for r in rows
+            if r["Transport"] == "WS"
+        ]
+
+    rows_when(view, lambda rows: states(rows) == [("TICK", "CONNECTED", 1, 0)])
+    with connection._lock:
+        (row,) = connection._rows.values()
+        connection._rows[ChannelFamily.TICK] = dataclasses.replace(
+            row, state=ConnectionState(last), buffered_rows=7
+        )
+        # A family the session does not show a row of: show_closed writes nothing for it.
+        connection._rows[ChannelFamily.FMV] = dataclasses.replace(row, family=ChannelFamily.FMV)
+    client = connection._client
+    stop = client.close
+    monkeypatch.setattr(client, "close", lambda: None)
+    try:
+        console_command(m.close)
+        # A FAILED row is shown as the client last wrote it; a CLOSED one holds nothing.
+        final = ("TICK", "FAILED", 1, 7) if last == "FAILED" else ("TICK", "CLOSED", 0, 0)
+        rows_when(view, lambda rows: states(rows) == [final])
+        assert ws_session.connections not in connection.users
+    finally:  # even when a check fails, the client must not outlive the test
+        stop()
+        assert client.join(TIMEOUT)
+    del result, view
+
+
+def test_a_close_without_the_lock_joins_its_connections(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    connection = ws_session.connection()
+    joined: list[float] = []
+    join = connection.join
+
+    def joining(timeout: float) -> bool:
+        joined.append(timeout)
+        return join(timeout)
+
+    monkeypatch.setattr(connection, "join", joining)
+    ws_session.connections.close()
+    assert joined == [ws.JOIN_TIMEOUT]
+    ws_session.session.release(result)
+
+
 def test_the_default_factory_builds_real_clients(ws_session: WsSession) -> None:
     factory = ws._WsClientFactory(
         "test-key", backoff=15.0, max_backoff=30.0, thread_prefix="massive #7"
@@ -1675,6 +1774,41 @@ def test_a_move_awaits_its_streams_until_the_hand_over(
     wait_for(lambda: not successor.awaiting)  # adopted
     custom_session.subscribed("T.ESZ5")
     custom_session.session.release(result)
+
+
+def test_a_close_during_a_move_leaves_the_old_connection_to_its_hand_over(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    # Between the move and the hand-over the old connection is out of the registry and holds
+    # no lease, so the session's close neither closes nor joins it. The close takes the stream
+    # off the successor and closes that; the hand-over then finds no stream to move and closes
+    # the old connection, which ends by itself.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        held.set()
+        assert release.wait(TIMEOUT)
+
+    assert old.post(hold)  # the old loop is busy: the hand-over waits behind it
+    try:
+        assert held.wait(TIMEOUT)
+        decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
+        custom_session.connections.group._move(old, decision)
+        successor = custom_session.connection("wss://delayed.test/futures")
+        custom_session.close()
+        assert successor.join(0)  # the close closed and joined the successor
+        assert not old.closing  # and left the old connection to its hand-over
+    finally:  # a failed check must not leave the old loop held
+        release.set()
+    assert old.join(TIMEOUT)
+    with custom_session.connections.group.lock:
+        assert not successor.awaiting
+    del result
 
 
 def test_a_failed_connection_is_not_moved(make_ws_session: Callable[..., WsSession]) -> None:
@@ -2207,10 +2341,29 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
 
 
 def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
-    ws_session: WsSession,
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A connection out of the registry (a fatal failure retired it) still carries the session's
-    # stream until the stream shuts down; the session's close closes it too.
+    # stream until the stream shuts down; the session's close closes it too, reaching it through
+    # the stream's lease. The close fails the stream's table first, and the next update cycle
+    # shuts the blink table down, whose callback returns that lease: on a slow machine before
+    # the close takes the session's leases. The callback is held here until the close is done,
+    # so the close always finds the lease. (Had the callback come first, nothing would close the
+    # connection but its idle close; in the library only a fatal failure retires a connection
+    # that still carries a lease, and the failure ends the connection by itself.)
+    shut_down = ws_session.connections._shut_down
+    lock = threading.Lock()
+    held: list[int] = []
+    holding = True
+
+    def hold(stream_id: int) -> None:
+        with lock:
+            if holding:
+                held.append(stream_id)
+                return
+        shut_down(stream_id)
+
+    monkeypatch.setattr(ws_session.connections, "_shut_down", hold)
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
@@ -2218,7 +2371,12 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
         connection, lambda: ws_session.connections.group.retire(connection, idle=False)
     )
     ws_session.close()
-    assert connection.join(TIMEOUT)
+    assert connection.join(0)  # the close joined it
+    with lock:  # a callback held so far is passed on now, and a later one goes straight through
+        holding = False
+        late = list(held)
+    for stream_id in late:
+        shut_down(stream_id)
     del result
 
 
