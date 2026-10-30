@@ -39,11 +39,12 @@ from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import StreamQuery
+from deephaven_massive._query import QueryCall, StreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import transports as _transports
 from deephaven_massive._tables.columns import describe
 from deephaven_massive._tables.diagnostics import (
+    QUERY_SHOWN,
     ConnectionRow,
     Diagnostics,
     StreamRow,
@@ -1712,6 +1713,25 @@ def test_the_stream_lifecycle_is_logged(
         "stream 1: a hold released, 1 left",
         "stream 1: a hold released, 0 left; its stream scope is released",
     ]
+
+
+def test_a_stream_log_line_cuts_a_long_query(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A query's text can grow with its arguments; the open and reuse lines cut it as the
+    # `Query` column does, so one line never carries thousands of characters.
+    q = dataclasses.replace(stream_query(massive_session), _call=QueryCall("m." + "x" * 500))
+    with caplog.at_level(logging.DEBUG, logger=_core.__name__):
+        first = q.blink()
+        second = q.append_only()
+        massive_session.release(first)
+        massive_session.release(second)
+    cut = "m." + "x" * (QUERY_SHOWN - 3) + "…"
+    lines = [m for m in caplog.messages if "stream 1 opened" in m or "stream 1 reused" in m]
+    assert [cut in line for line in lines] == [True, True]
+    assert all(len(line) < QUERY_SHOWN + 200 for line in lines)
 
 
 @pytest.mark.parametrize(

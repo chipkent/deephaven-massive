@@ -1765,6 +1765,28 @@ def test_the_connection_logs_drift_rejects_and_a_summary(
     del result
 
 
+def test_a_stream_adopted_after_a_verdict_counts_its_rows_from_the_adoption(
+    make_ws_session: Callable[..., WsSession], caplog: pytest.LogCaptureFixture
+) -> None:
+    # The stream published rows through the old connection before the verdict moved it; the
+    # new connection's first summary must not count them as rows of its last minute.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    sink = cast("Any", custom_session.on_loop(old, lambda: old._streams[1].sink))
+    sink.rows_published = 5  # its rows before the move
+    custom_session.connections.group._move(old, DELAYED)
+    successor = custom_session.connection("wss://delayed.test/futures")
+    wait_for(lambda: bool(custom_session.on_loop(successor, lambda: 1 in successor._streams)))
+    with caplog.at_level(logging.DEBUG):
+        custom_session.on_loop(successor, successor._summarize)
+    [summary] = [m for m in caplog.messages if m.startswith("wss://delayed.test/futures: last")]
+    assert "rows per stream 0 [], streams with no rows 1 [1]; " in summary
+    custom_session.session.release(result)
+
+
 def test_a_lost_connection_warns_once_per_outage_and_its_reconnect_is_info(
     ws_session: WsSession, fake_ws_server: FakeMassiveServer, caplog: pytest.LogCaptureFixture
 ) -> None:

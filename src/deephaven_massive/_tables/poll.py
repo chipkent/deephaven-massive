@@ -1209,7 +1209,7 @@ def open_poll(
         "%s: poll() stream %d started: %s every %.3f s, mode %s, symbols %s",
         core.label,
         stream_id,
-        query,
+        shown_query(query),
         interval.total_seconds(),
         mode.name,
         "none"

@@ -816,7 +816,8 @@ class SessionCore:
             query: The `repr` of the asking query, for a new stream's `Query` column.
             verb: The asking verb, such as `"last"`.
 
-        Logs at DEBUG, with the session's label, the stream id, the query and verb, and the
+        Logs at DEBUG, with the session's label, the stream id, the query (cut to
+        `QUERY_SHOWN` characters, as `shown_query` cuts it) and verb, and the
         channel, that the stream opened, with its host and path, why that host
         (`HostDecision.evidence`), and its symbols (the count and the first twenty); or that it
         was reused.
@@ -847,7 +848,7 @@ class SessionCore:
                         "%s: stream %d opened: %s.%s -> channel %s on %s%s (%s); symbols %s",
                         self.label,
                         claim.stream_id,
-                        query,
+                        shown_query(query),
                         verb,
                         channel,
                         claim.host,
@@ -860,7 +861,7 @@ class SessionCore:
                         "%s: stream %d reused: %s.%s -> channel %s",
                         self.label,
                         claim.stream_id,
-                        query,
+                        shown_query(query),
                         verb,
                         channel,
                     )

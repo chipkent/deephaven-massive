@@ -92,6 +92,7 @@ from deephaven_massive._errors import (
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import column_table, describe
+from deephaven_massive._tables.diagnostics import shown_query
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.time_text import deephaven_time_text
@@ -915,8 +916,8 @@ class Query(QueryBase):
                 self._core, self._spec, self._request.symbols, query=repr(self), live=True
             )
         logger.debug(
-            "%r poll(): every %.3f s, mode %s -> %s",
-            self,
+            "%s poll(): every %.3f s, mode %s -> %s",
+            shown_query(repr(self)),
             period.total_seconds(),
             asked.name,
             chosen.name,
