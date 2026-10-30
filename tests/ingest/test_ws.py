@@ -30,13 +30,14 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.request import HostDecision, Request
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, hosts, poll, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
+from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._tables.watchlist import SymbolWatch
 
 # Imported, not taken from a fixture: no shared fixture provides the manual clock that
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from deephaven.table import Table
 
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
 

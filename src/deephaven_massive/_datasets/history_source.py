@@ -8,8 +8,8 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   days or sessions, or exact instants; `dates.bounds`), the rows to keep (on `Timestamp`, or a
   bar's `TimestampStart`, and for futures named by date on their session, `Date`), and the
   instants a REST request covers. Bars are kept only when their whole window lies inside the
-  range and has ended: a request selects them by their start (`dates.bar_starts`,
-  `dates.bar_sessions`), and a bar whose `TimestampEnd` lies after the range's end or after
+  range and has ended: a request selects them by their start (`bar_periods.bar_starts`,
+  `bar_periods.bar_sessions`), and a bar whose `TimestampEnd` lies after the range's end or after
   now, or whose `TimestampStart` lies before the range's start, is dropped once its time
   columns are filled (`HistoryWindow.bars`).
 - `partition_dates` turns a window into the dates of the flat files it needs, in the asset
@@ -24,12 +24,12 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   published. When both sources can, many symbols (`MassiveConfig.flat_file_symbol_threshold`
   or more, or `dm.ALL`) read flat files and fewer use REST. One call never mixes sources, and
   so never mixes adjusted and unadjusted prices: adjusted bars come only from REST. Bars of a
-  day or longer are stamped alike by every source (`stamp_rule`), and a stamp of a form
+  day or longer are stamped alike by every source (`row_times.stamp_rule`), and a stamp of a form
   Massive is not known to use fails loudly, so the choice never changes which day a bar is
   labelled with.
 
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
-after the next day starts in the class's day zone (`dates.publish_time`); futures use their
+after the next day starts in the class's day zone (`publish_time`); futures use their
 Chicago session date. Massive says files land "by approximately 11:00 AM ET the following day".
 """
 
@@ -38,41 +38,41 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
+from deephaven_massive._datasets.bar_periods import (
+    bar_sessions,
+    bar_starts,
+    futures_bar_request,
+    intraday,
+)
 from deephaven_massive._datasets.catalog import filter_key, param_family, timespan_key
 from deephaven_massive._datasets.dates import (
-    CHICAGO,
     DAY_ZONES,
     NEW_YORK,
     DaySpan,
     TimeRange,
-    bar_sessions,
-    bar_starts,
     bounds,
     day_class,
     day_end,
     day_zone,
-    flat_file_published,
-    futures_bar_request,
+    midnight,
+)
+from deephaven_massive._datasets.futures_sessions import (
+    CHICAGO,
     futures_session,
     futures_session_before,
     futures_session_end,
     futures_session_open,
-    intraday,
-    publish_time,
-    trades_at_weekends,
 )
-from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
-from deephaven_massive._datasets.timestamps import day_starts
+from deephaven_massive._datasets.row_times import BarBounds, StartRule
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, Timespan
+from deephaven_massive._massive import ParamKind, Transport, source
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
     from datetime import tzinfo
-
-    import pyarrow as pa
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -84,14 +84,15 @@ __all__ = [
     "PUBLICATION_GRACE",
     "HistoryWindow",
     "SourceChoice",
-    "StampRule",
     "choose_source",
     "flat_file_prefix",
+    "flat_file_published",
     "history_window",
     "partition_dates",
+    "publish_time",
     "published",
     "rest_history_problem",
-    "stamp_rule",
+    "session_date_param",
     "within_publication_grace",
 ]
 
@@ -104,8 +105,6 @@ PUBLICATION_GRACE: Final = timedelta(days=1)
 """How long after its publication time a missing file may still just be late."""
 
 _ONE_DAY: Final = timedelta(days=1)
-_SESSION_DATE: Final = "session_end_date"
-"""The futures parameter that names a session; `history()` sets it for sessions named by date."""
 
 _PARTITION_ZONES: Final[Mapping[AssetClass | ClassFromPrefix, tzinfo]] = dict(
     [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (ClassFromPrefix.ANY, NEW_YORK)]
@@ -123,6 +122,26 @@ def _now() -> datetime:
         An aware UTC `datetime`.
     """
     return datetime.now(UTC)
+
+
+def session_date_param(spec: DatasetSpec) -> str:
+    """Return the REST parameter that names one futures session on a dataset's history path.
+
+    Futures trades and quotes named by date are requested one session at a time, by the one
+    date parameter of their history path (`session_end_date`), and `history()` refuses a filter
+    on it. The name is read from the path's generated parameters, so only the spec refresh
+    writes it. A history path that takes no date parameter, or more than one, raises
+    `ValueError`.
+
+    Args:
+        spec: A futures dataset of trades or quotes, with a REST history path.
+
+    Returns:
+        The parameter's wire name.
+    """
+    rest_path = source(Transport.REST, cast("str", spec.history_path))
+    [name] = [param.name for param in rest_path.params if param.kind is ParamKind.DATE]
+    return name
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,13 +196,13 @@ def history_window(
     The bounds follow `dates.bounds`: two dates are whole days (for futures, sessions), two
     datetimes a half-open range of instants, and an `end` of None reads through now. Ticks are
     kept inside the range. A bar is kept only when its whole window lies inside the range and
-    has ended by now: its start must fit (`dates.bar_starts`; for futures named by date, a bar
+    has ended by now: its start must fit (`bar_periods.bar_starts`; for futures named by date, a bar
     of a session or longer by its session label, `Date`, under both readings of the label of
-    a bar of several units, `dates.bar_sessions`, and an intraday bar by its session), and its
+    a bar of several units, `bar_periods.bar_sessions`, and an intraday bar by its session), and its
     `TimestampEnd` must be no later than `HistoryWindow.bars.latest`. The end is conservative, so
     a bar whose window might reach past the range is left out: an index day bar ends at 01:00
     New York time, and a bar of several trading days allows for holidays
-    (`dates.last_trading_day`).
+    (`bar_periods.last_trading_day`).
 
     Args:
         spec: The dataset.
@@ -234,7 +253,7 @@ def _futures_sessions(
 
     Returns:
         Trades and quotes: every row of the sessions, requested one session at a time. Bars:
-        the bars requested from `dates.futures_bar_request`, kept by the session rules of
+        the bars requested from `bar_periods.futures_bar_request`, kept by the session rules of
         `history_window`.
 
     Raises:
@@ -244,7 +263,7 @@ def _futures_sessions(
     """
     timespan = request.timespan
     if not spec.is_bars or timespan is None:
-        reserved = {filter_key(name) for name in param_family(_SESSION_DATE)}
+        reserved = {filter_key(name) for name in param_family(session_date_param(spec))}
         if any(key in reserved for key, _ in request.filters):
             raise ValueError(
                 f"{spec.name}: history() dates set session_end_date themselves; drop the "
@@ -273,7 +292,7 @@ def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...
     For futures named by date they are the sessions kept (`HistoryWindow.sessions`). For
     futures named by instants they are the sessions of the first and last kept instant and
     every one between; a session opens at 17:00 Chicago time on the day before its
-    `session_end_date` (`dates.futures_session`). A holiday's trading lies in the next
+    `session_end_date` (`futures_sessions.futures_session`). A holiday's trading lies in the next
     session's file, which the flat-file transport reads when the last sessions' files are
     missing. For every other class they are the dates of the kept range's first and last
     instant in the class's day zone (New York for stocks, options, and indices, UTC for forex
@@ -298,7 +317,7 @@ def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...
 
 
 def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | None = None) -> bool:
-    """Tell whether a day's flat file of a dataset counts as published (`dates.publish_time`).
+    """Tell whether a day's flat file of a dataset counts as published (`publish_time`).
 
     Args:
         spec: The dataset; its asset class picks the day zone (Chicago sessions for futures).
@@ -312,187 +331,6 @@ def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | Non
     moment = _now() if now is None else now
     zone = _PARTITION_ZONES[spec.asset_class]
     return flat_file_published(day, now=moment, zone=zone, cutoff=cutoff)
-
-
-@dataclass(frozen=True, slots=True)
-class StampRule:
-    """How the transports stamp the bars of a request of a day or longer (`stamp_rule`).
-
-    Made per request on the calling thread and only read afterwards, so reader threads may
-    share it. A transport sets `remedy` for its own verb (`dataclasses.replace`) before
-    stamping.
-
-    Attributes:
-        zone: The class day zone; every bar is stamped at 00:00 there of the day it starts on.
-        known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
-            the class's bars of this length on some source; each moves to 00:00 of its day.
-        what: The kind of row, for messages: `"1-day bar"`, `"bar"`, or `"indicator value"`.
-        weekdays: For week bars, the weekdays (Monday is 0) a bar may be stamped on in `zone`;
-            empty for every other timespan.
-        months: For month, quarter, and year bars, the months whose 1st a bar may be stamped
-            on in `zone`; empty for every other timespan.
-        remedy: What the caller can do instead when a stamp is refused, for the message.
-    """
-
-    zone: tzinfo
-    known: frozenset[time]
-    what: str
-    weekdays: frozenset[int] = frozenset()
-    months: frozenset[int] = frozenset()
-    remedy: str = ""
-
-    def stamp(self, label: str, values: pa.Array, *, source: str) -> pa.Array:
-        """Stamp a column of bars at 00:00 of their days (`timestamps.day_starts`).
-
-        Args:
-            label: The dataset, for the message.
-            values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
-            source: Where the bars came from, for the message: a REST path template or a
-                flat-file prefix.
-
-        Returns:
-            The stamps at the start of their days, in the same type; nulls stay null.
-
-        A stamp at another time of day than 00:00 or one of `known`, or on a day `weekdays`
-        or `months` rules out, raises the `MassiveError` of `timestamps.day_starts`, which
-        ends with `remedy`.
-        """
-        return day_starts(
-            label,
-            values,
-            zone=self.zone,
-            known=self.known,
-            weekdays=self.weekdays,
-            months=self.months,
-            source=source,
-            what=self.what,
-            remedy=self.remedy,
-        )
-
-
-_SESSION_CLOSE: Final = time(16)
-"""The 16:00 New York session close: grouped daily, `/prev`, and the stock day files stamp a
-stock, option, or index 1-day bar there."""
-
-_EARLY_CLOSE: Final = time(13)
-"""The 13:00 New York close of a short trading day (the day after Thanksgiving, Christmas Eve,
-July 3), presumed to be where a source that stamps a 1-day bar at its close stamps such a
-day. It lies inside its own New York day, so accepting it on any date never changes which day
-a bar is labelled with."""
-
-_INDEX_OPTION_CLOSES: Final = frozenset({time(13, 15), time(16, 15)})
-"""The closes of index options such as SPX and SPXW, 15 minutes after the stock market's on
-full and short days, presumed to be where `/prev` may stamp such a contract's 1-day bar."""
-
-_CHICAGO_MIDNIGHT: Final = time(1)
-"""Midnight in Chicago, as New York time (the two zones change clocks together): the indices
-range and day files stamp their 1-day bars there."""
-
-_LAST_MILLISECOND: Final = time(23, 59, 59, 999_000)
-"""The last millisecond of a UTC day: forex grouped daily and `/prev` and the forex and crypto
-day files stamp their 1-day bars there."""
-
-_ONE_DAY_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
-    AssetClass.STOCKS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE}),
-    AssetClass.OPTIONS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE, *_INDEX_OPTION_CLOSES}),
-    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT, _EARLY_CLOSE, _SESSION_CLOSE}),
-    AssetClass.FOREX: frozenset({_LAST_MILLISECOND}),
-    AssetClass.CRYPTO: frozenset({_LAST_MILLISECOND}),
-}
-"""Per class with a day zone (`dates.DAY_ZONES`), the times of day besides 00:00 at which some
-source stamps a 1-day bar: those of Massive's documented samples, and the closes of a short
-trading day and of index options, each of which lies inside its own New York day."""
-
-_LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
-    AssetClass.STOCKS: frozenset(),
-    AssetClass.OPTIONS: frozenset(),
-    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT}),
-    AssetClass.FOREX: frozenset(),
-    AssetClass.CRYPTO: frozenset(),
-}
-"""Per class with a day zone, the times of day besides 00:00 at which the aggregates range
-stamps its bars: accepted for a bar of several days, a week, or longer, which only the range
-serves, and for an indicator value of a day or longer, which is computed over the range's
-bars. The indices range's midnight in Chicago is that of its 1-day bars and of the index
-indicator samples' underlying aggregates."""
-
-_WEEK_STAMP_DAYS: Final = frozenset({5, 6, 0})
-"""The days a week bar of a class that does not trade at weekends may be stamped on: the
-Saturday or Sunday before its Monday-to-Friday week, which belong to it, or that Monday."""
-
-_MONDAY: Final = frozenset({0})
-"""The day a forex or crypto week bar must be stamped on: the Monday its calendar week starts."""
-
-_PERIOD_MONTHS: Final[Mapping[Timespan, frozenset[int]]] = {
-    Timespan.MONTH: frozenset(range(1, 13)),
-    Timespan.QUARTER: frozenset({1, 4, 7, 10}),
-    Timespan.YEAR: frozenset({1}),
-}
-"""The months whose 1st a month, quarter, or year bar may be stamped on."""
-
-_DAYS_OR_LONGER: Final = frozenset(
-    {Timespan.DAY, Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR}
-)
-
-
-def stamp_rule(
-    spec: DatasetSpec,
-    request: Request,
-    *,
-    asset_class: AssetClass | ClassFromPrefix = ClassFromPrefix.ANY,
-) -> StampRule | None:
-    """Return how the transports stamp a request's bars, or None to keep the stamps as sent.
-
-    One `history()` call returns the same rows whichever source answers it, so every bar of a
-    day or longer of a class with a day zone (`dates.DAY_ZONES`: every class but futures) is
-    stamped at 00:00 of the day it starts on in that zone (New York for stocks, options, and
-    indices; UTC for forex and crypto). Massive stamps a 1-day bar at the day's start on the
-    aggregates range but at the session close (stocks, options, indices) or the day's last
-    millisecond (forex, crypto) on other sources, and the indices range and day files at
-    midnight in Chicago; those stamps move to the day's start, and any other stamp fails,
-    since such a bar may cover other days than its label (the documented crypto REST samples
-    sit at midnight New York time, another day cut). A week, month, quarter, or year bar must
-    also be stamped on the day its period starts, or the whole-window rule would place it in
-    another period.
-
-    The indicators' values are computed over the aggregates range's bars and carry those
-    bars' stamps (Massive's samples show the underlying aggregates at 00:00 New York time for
-    stocks and 01:00 for indices), so an indicator value of a day or longer is checked by the
-    range's rule for its symbols' class: 00:00 of its day, or the indices' midnight in
-    Chicago, on its period's first day. A value stamped otherwise fails like a bar.
-
-    Args:
-        spec: The dataset.
-        request: The normalized arguments.
-        asset_class: For a dataset of every class whose rows are bars (the indicators), the
-            class of the request's symbols (`dates.day_class`); ignored for every other
-            dataset.
-
-    Returns:
-        The rule, with no `remedy` yet, for bars and indicator values of a day or longer of
-        stocks, options, indices, forex, and crypto; None for intraday bars, futures bars,
-        and every dataset whose rows are not bars.
-    """
-    indicator = not spec.is_bars and spec.times is RowTimes.BAR
-    cls = asset_class if indicator else spec.asset_class
-    if (
-        not (spec.is_bars or indicator)
-        or request.timespan not in _DAYS_OR_LONGER
-        or not isinstance(cls, AssetClass)
-        or cls not in DAY_ZONES
-    ):
-        return None
-    zone = DAY_ZONES[cls]
-    timespan = request.timespan
-    single = timespan is Timespan.DAY and request.multiplier == 1
-    if single and not indicator:
-        return StampRule(zone, _ONE_DAY_STAMPS[cls], "1-day bar")
-    known = _LONGER_STAMPS[cls]
-    what = "indicator value" if indicator else "bar"
-    if timespan is Timespan.WEEK:
-        weekdays = _MONDAY if trades_at_weekends(cls) else _WEEK_STAMP_DAYS
-        return StampRule(zone, known, what, weekdays=weekdays)
-    return StampRule(zone, known, what, months=_PERIOD_MONTHS.get(timespan, frozenset()))
 
 
 def within_publication_grace(
@@ -694,3 +532,48 @@ def choose_source(
     return SourceChoice(
         HistorySource.REST, f"{count} symbols < flat_file_symbol_threshold {threshold}"
     )
+
+
+def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
+    """Return the instant a day's flat file counts as published.
+
+    That is the first `cutoff` in New York strictly after the start of the next day,
+    `partition + 1 day`, in the class's day zone. For a New York class it is the cutoff on the
+    following day; for a UTC class it is the first cutoff after the following UTC midnight.
+
+    Args:
+        partition: The file's partition date.
+        zone: The asset class's day zone.
+        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
+
+    Returns:
+        The publication instant, aware.
+    """
+    # Comparisons are made in UTC: Python compares two datetimes that share a tzinfo by their
+    # wall clocks, which is wrong across the repeated hour of a daylight-saving change.
+    start = midnight(partition + _ONE_DAY, zone)
+    local = start.astimezone(NEW_YORK)
+    candidate = datetime.combine(local.date(), cutoff, tzinfo=NEW_YORK)
+    if candidate.astimezone(UTC) <= start:
+        candidate = datetime.combine(local.date() + _ONE_DAY, cutoff, tzinfo=NEW_YORK)
+    return candidate
+
+
+def flat_file_published(partition: date, *, now: datetime, zone: tzinfo, cutoff: time) -> bool:
+    """Tell whether a day's flat file should exist yet.
+
+    Files land "by approximately 11:00 AM ET the following day", so a partition counts as
+    published once `now` reaches `publish_time(partition)`. Full instants are compared, which
+    keeps the rule correct in every day zone.
+
+    Args:
+        partition: The file's partition date.
+        now: The current instant, aware.
+        zone: The asset class's day zone.
+        cutoff: `MassiveConfig.flat_file_publish_cutoff`, a New York wall-clock time.
+
+    Returns:
+        True if the file can be expected to exist.
+    """
+    published = publish_time(partition, zone=zone, cutoff=cutoff)
+    return now.astimezone(UTC) >= published.astimezone(UTC)

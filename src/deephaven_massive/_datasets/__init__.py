@@ -10,10 +10,16 @@ Deephaven:
 - `request`: the `Request` record a verb hands to a transport, and the other plain records of a
   request;
 - `timestamps`: the declared unit of every timestamp field and its conversion to nanoseconds;
+- `row_times`: the library's time columns of every row, and the stamps of bars of a day or
+  longer they are filled from;
 - `dates`: date parsing and the day rules of `history()` and the time-axis filters;
+- `futures_sessions`: the 17:00 Chicago rule of the futures trading session, for one instant
+  and for a column;
+- `bar_periods`: which bars of a timespan lie wholly inside a range, and the days a bar covers;
 - `symbols`: Massive's canonical ticker grammar, the public converters, the check of the
   symbols a query takes, and the reading of the spellings each transport sends;
-- `history_source`: the partition dates of a window and the choice between flat files and REST.
+- `history_source`: the window of a `history()` call, its partition dates, when a flat file
+  is published, and the choice between flat files and REST.
 
 Layer: datasets, above the wire (`_massive`) and the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_log_limits`, `_types`), which it may import; it imports nothing from the tables

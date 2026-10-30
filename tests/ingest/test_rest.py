@@ -26,9 +26,10 @@ import deephaven_massive as dm
 from deephaven_massive import _massive, _session
 from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
+from deephaven_massive._datasets.dates import DaySpan, TimeRange
+from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import HistoryWindow
-from deephaven_massive._datasets.request import HostDecision, Request
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
@@ -52,8 +53,9 @@ from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces import stocks as stocks_ns
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
-from deephaven_massive._tables.core import SessionCore
 from deephaven_massive._tables.diagnostics import Diagnostics
+from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 

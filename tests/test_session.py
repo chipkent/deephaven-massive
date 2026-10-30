@@ -43,11 +43,8 @@ from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._query import Query, StreamQuery
-from deephaven_massive._tables import core as _core
-from deephaven_massive._tables.liveness import (
-    StreamHandle,
-    new_scope,
-)
+from deephaven_massive._tables import session_core as _core
+from deephaven_massive._tables.liveness import new_scope
 from tests._fakes.rest import Reply
 from tests._fakes.stream import transport_of
 
@@ -59,8 +56,9 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.update_graph import UpdateGraph
 
-    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.diagnostics import Diagnostics
+    from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._tables.transports import StreamHandle
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
@@ -412,7 +410,7 @@ def test_close_marks_streams_closed_and_warns_once(
     assert [r["State"] for r in stream_rows()] == ["RUNNING", "RELEASED"]
     assert fake_streams.shutdown[2].wait(TIMEOUT)  # the released stream left the registry
     streams = massive_session.streams()  # a view keeps the final rows after close()
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
         massive_session.close()
     assert caplog.messages == [f"{massive_session._core.label} closed; 1 live tables failed"]
@@ -491,7 +489,7 @@ def test_close_fails_derived_tables_and_marks_their_stream_closed(
 def test_close_with_no_live_tables_logs_info(
     massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.INFO, f"{massive_session._core.label} closed; 0 live tables failed")

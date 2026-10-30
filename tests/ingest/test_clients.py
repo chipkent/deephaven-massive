@@ -10,11 +10,11 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import ChannelFamily, Recency
 from deephaven_massive._ingest import clients, flatfiles, rate_limits, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
-from deephaven_massive._tables.core import SessionCore
+from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.s3 import FakeS3
 
 

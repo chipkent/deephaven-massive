@@ -106,7 +106,8 @@ class WireType(StrEnum):
 
     The refresh assigns each field one of these. Two sources that share a column within a
     dataset kind may differ only by a widening (`LONG` with `DOUBLE` gives `DOUBLE`, `LONG`
-    with `INT_ARRAY` gives `INT_ARRAY`); any other pair is a conflict the refresh rejects.
+    with `INT_ARRAY` gives `INT_ARRAY`, by `common_type`); any other pair is a conflict the
+    refresh rejects.
     """
 
     LONG = "long"
@@ -131,6 +132,34 @@ class WireType(StrEnum):
     """A list of integers, each within the signed 32-bit range (condition codes)."""
     JSON_TEXT = "json-text"
     """A nested object, a list of strings or objects, or a choice of shapes, kept as JSON text."""
+
+    def common_type(self, other: WireType) -> WireType | None:
+        """Return the narrowest wire type that holds values of both types, or None if none does.
+
+        Two sources that share a column within a dataset kind must agree on its type, and this
+        is the one rule for that agreement: the refresh's `type-agreement` gate and the
+        run-time schema merge both call it, so a kind the refresh accepts always merges.
+        Equal types give themselves (two `EPOCH`s each keep their own unit, so they agree
+        too); `LONG` with `DOUBLE` gives `DOUBLE`, and `LONG` with `INT_ARRAY` gives
+        `INT_ARRAY` (a scalar becomes a one-element list). Any other pair is a type conflict.
+
+        Args:
+            other: The other contribution's type.
+
+        Returns:
+            The common type, or None when the two conflict.
+        """
+        if self is other:
+            return self
+        return _COMMON_TYPES.get(frozenset({self, other}))
+
+
+_COMMON_TYPES: Mapping[frozenset[WireType], WireType] = {
+    frozenset({WireType.LONG, WireType.DOUBLE}): WireType.DOUBLE,
+    frozenset({WireType.LONG, WireType.INT_ARRAY}): WireType.INT_ARRAY,
+}
+"""The common type of each pair of different wire types that has one; every other pair is a
+type conflict."""
 
 
 class WireUnit(StrEnum):
