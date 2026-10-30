@@ -34,6 +34,12 @@ than about a minute on a free plan; a check that would need longer needs a paid 
 skipped without one. A console command that waits more than a few minutes is worth
 reporting.
 
+**Bars with an unexpected time.** Massive attaches a time to each price bar. If a bar's time is
+not one the library expects, such as a daily bar at 14:30, the library still returns the bar,
+dates it by the day its time falls on, and writes one `WARNING` to the debug log that names
+the time and asks for a report. The rows are not an error, but the warning is worth
+reporting: send it with a bug report (part 4).
+
 **Report anything that goes wrong**: a step that fails, hangs, or shows something other
 than this guide says; an error message you cannot understand or act on; a step whose
 instructions were unclear. "The instructions were unclear" is a finding, not a failure on
