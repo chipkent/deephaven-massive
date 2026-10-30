@@ -76,6 +76,10 @@ _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})
 
 _TIME_KINDS: Final = frozenset({ParamKind.DATE, ParamKind.TIMESTAMP})
 """The parameter kinds whose text value must be an ISO-8601 date or an instant with an offset."""
+_NUMBER_KINDS: Final = frozenset({ParamKind.INTEGER, ParamKind.NUMBER})
+"""The parameter kinds whose `.any_of` list takes `int` or `float` items."""
+_SORT_SUFFIXES: Final = frozenset({"asc", "desc"})
+"""The direction suffixes a part of a comma-separated `sort` may carry."""
 
 _FILTER_SUFFIXES: Final = ("gt", "gte", "lt", "lte", "any_of", "all_of")
 """The suffixes the specification adds to a parameter's base name (`timestamp.gte`)."""
@@ -808,39 +812,58 @@ def takes_instants(rest_path: RestPath, name: str, kind: ParamKind) -> bool:
     return any(f.wire_key == base and f.wire_type in _INSTANT_TYPES for f in rest_path.fields)
 
 
-def _list_items(spec: DatasetSpec, key: str, value: ParamValue, *, dates: bool) -> ParamValue:
+def _list_items(
+    spec: DatasetSpec, key: str, value: ParamValue, *, rest_path: RestPath, name: str
+) -> ParamValue:
     """Return a list filter's values one text item each, so every spelling gives one key.
 
     The wire joins a list with commas, so a comma can never be part of one value: `"a,b"`,
     `("a,b",)`, and `("a", "b")` all send `a,b`. Splitting every item on commas, and
     stripping the spaces around each part, makes them one value, so equal filters give equal
-    queries. On a list of dates (`date.any_of`), a `date` item is its ISO-8601 day.
+    queries. On a list of dates (`date.any_of`), a `date` item is its ISO-8601 day; on a list
+    of numbers (`strike_price.any_of`), an `int` or `float` item is written as the base
+    parameter writes one number (`encode_value`), so `(150, 152.5)` sends `150,152.5`. A
+    `bool` is never a number.
 
     Args:
         spec: The dataset, for messages.
         key: The filter's key, for messages.
-        value: A `str`, or a tuple of `str` and, when `dates`, `date` items; anything else is
-            returned unchanged for the encoder to refuse.
-        dates: True when the list's base parameter is a date parameter.
+        value: A `str`, or a tuple of `str` and the items the base parameter takes; anything
+            else is returned unchanged for the encoder to refuse.
+        rest_path: The path the list parameter belongs to.
+        name: The list parameter's wire name, such as `strike_price.any_of`. Its base
+            parameter on the same path (`strike_price`) decides by its kind which items
+            besides text the list takes; a list without a base parameter takes text only.
 
     Returns:
         The tuple of text items.
 
     Raises:
         ValueError: If an item is empty (`"a,,b"`, `""`, or `" "`), which Massive would read
-            as a value of its own, or a `date` item is given to a list that does not take
-            dates.
+            as a value of its own, or an item is of a kind the base parameter does not take:
+            a `date` for a list that is not of dates, a number for a list that is not of
+            numbers, or a `float` for a list of integers.
     """
     if isinstance(value, str):
         value = (value,)
     if not isinstance(value, tuple):
         return value
+    stem = name.rpartition(".")[0]
+    base = next((p for p in rest_path.params if p.name == stem), None)
+    kind = None if base is None else base.kind
     texts: list[str] = []
     for item in value:
         if isinstance(item, date) and not isinstance(item, datetime):
-            if not dates:
-                raise ValueError(f"{spec.name} filter {key!r} takes text items, not {item!r}")
+            if kind is not ParamKind.DATE:
+                raise ValueError(f"{spec.name} filter {key!r} takes no dates, not {item!r}")
             texts.append(item.isoformat())
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            if base is None or kind not in _NUMBER_KINDS:
+                raise ValueError(f"{spec.name} filter {key!r} takes no numbers, not {item!r}")
+            try:
+                texts.append(encode_value(base, item, label=f"{spec.name} filter {key!r}"))
+            except TypeError as error:
+                raise ValueError(str(error)) from None
         elif isinstance(item, str):
             texts.extend(part.strip() for part in item.split(","))
         else:
@@ -923,9 +946,7 @@ def _sent_value(
     `_check_day_filter`.
     """
     if kind is ParamKind.LIST:
-        base = name.rpartition(".")[0]
-        dates = any(p.name == base and p.kind is ParamKind.DATE for p in rest_path.params)
-        return _list_items(spec, key, value, dates=dates)
+        return _list_items(spec, key, value, rest_path=rest_path, name=name)
     if isinstance(value, str) and kind in _TIME_KINDS:
         value = parse_date_like(value, key)
     if (
@@ -1056,7 +1077,7 @@ class Catalog:
             ranked.append((ranks[str(spec.group)], min(positions, default=0), index, spec))
         return tuple(spec for *_, spec in sorted(ranked, key=lambda r: r[:3]))
 
-    def dataset_schema(self, spec: DatasetSpec, *, raw_symbol: bool = False) -> Schema:
+    def dataset_schema(self, spec: DatasetSpec, *, raw_symbol: bool = True) -> Schema:
         """Return a dataset's merged schema, computed once per shape and cached on the catalog.
 
         The merge of `schema.dataset_schema` over the members of the dataset's kind, or over
@@ -1067,9 +1088,10 @@ class Catalog:
 
         Args:
             spec: The dataset; a dataset in a kind must be in this catalog.
-            raw_symbol: True for a session whose `unknown_symbols` is `WARN`: a dataset that
-                reads its symbol from rows then has a `RawSymbol` column
-                (`schema.dataset_schema`).
+            raw_symbol: True, the default, for a session whose `unreadable_symbols` keeps an
+                unreadable row (`LOG`, its default, or `IGNORE`): a dataset that reads its
+                symbol from rows then has a `RawSymbol` column (`schema.dataset_schema`).
+                False for a session whose `unreadable_symbols` is `RAISE`, which has none.
 
         Returns:
             The schema: `Symbol` and `Timestamp` first where the dataset
@@ -1229,6 +1251,62 @@ class Catalog:
                 )
             checked.append((key, first))
         return tuple(checked)
+
+    def check_sort(self, spec: DatasetSpec, sort: str, *, ordered: bool) -> None:
+        """Check a `sort` argument against every REST path of the dataset that takes `sort`.
+
+        Runs synchronously when the query is built, as `check_filters` does, so a misspelled
+        field fails at the call rather than as an HTTP 400 at the verb. Massive documents
+        `sort` in two forms. Where a path lists its sort fields (an enum `sort`, such as
+        `ex_dividend_date` and `pay_date` on the dividends), `sort` must be one of them.
+        Where it documents `sort` as a comma-separated list of columns, each with an optional
+        `.asc` or `.desc` suffix (a text `sort`, such as `period_end.desc` on the financial
+        statements), each part must name a field of the path's rows (`Field.wire_key`), as
+        every default Massive documents for such a `sort` does. A path without `sort` is left
+        alone: whether its dataset may send one is `build_query`'s concern.
+
+        Args:
+            spec: The dataset.
+            sort: The `sort` argument, a `str`.
+            ordered: True when `order` is set too, whose direction a suffixed part would
+                contradict.
+
+        Raises:
+            ValueError: If `sort` is not one of an enum `sort`'s fields; or, on a text `sort`,
+                if a part is empty, names no field of the path's rows, or carries its own
+                `.asc` or `.desc` suffix while `order` is set. The message lists the fields
+                the path takes.
+
+        An unknown REST path raises the `KeyError` of `source`.
+        """
+        for path in spec.rest_paths:
+            rest_path = self._rest(path)
+            param = next((p for p in rest_path.params if p.name == "sort"), None)
+            if param is None:
+                continue
+            if param.kind is ParamKind.ENUM:
+                if sort not in param.values:
+                    raise ValueError(
+                        f"{spec.name}: sort {sort!r} is not a sort field of {path}; it takes "
+                        f"{list(param.values)}"
+                    )
+                continue
+            fields = sorted({field.wire_key for field in rest_path.fields})
+            for part in (part.strip() for part in sort.split(",")):
+                name, dot, suffix = part.rpartition(".")
+                if not (dot and suffix in _SORT_SUFFIXES):
+                    name, suffix = part, ""
+                if name not in fields:
+                    raise ValueError(
+                        f"{spec.name}: sort part {part!r} names no field of {path}; sort takes "
+                        f"comma-separated fields, each with an optional .asc or .desc, of "
+                        f"{fields}"
+                    )
+                if suffix and ordered:
+                    raise ValueError(
+                        f"{spec.name}: sort part {part!r} has its own direction, so it cannot "
+                        "be combined with order; drop the suffix or the order"
+                    )
 
     def takes_param(self, spec: DatasetSpec, name: str) -> bool:
         """Tell whether any of the dataset's REST paths takes a parameter.

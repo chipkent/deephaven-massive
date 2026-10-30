@@ -78,18 +78,17 @@ documented header the file lacks becomes a column of nulls; each logs one WARNIN
 or time header (or, for futures, the session header), a value that does not parse as its type,
 and a timestamp out of bounds fail the call with `MassiveError`.
 
-Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix
-holds the placeholder `{venue}`, `venue=None` reads all four venues, and HTTP 403 on any venue
-raises `EntitlementError` naming the venue and the `venue=` parameter; a 403 that rejects the S3
-credentials themselves raises `AuthenticationError` for every class. Futures files are assumed
-to be keyed by trading session (`session_end_date`), which Massive's documentation does not
-state outright, so every block of every futures file is checked against its key's date, and a
-mismatch (or a missing session date) raises `MassiveError` rather than return rows of the wrong
-session. Every error of the wire package becomes its public counterpart, with its status and
-request id: a rejected credential or a refusal gains the remedy (the settings to check, the plan,
-the `venue=` parameter), and any other wire error goes through `_errors.from_wire`. An Arrow
-error while converting or gathering a file's rows (out of memory, say) is a failed read of that
-file.
+Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
+the placeholder `{venue}`, `venues` (all four by default) picks the venues read, and HTTP 403 on any
+venue raises `EntitlementError` naming the venue and the `venues=` parameter; a 403 that rejects the
+S3 credentials themselves raises `AuthenticationError` for every class. Futures files are assumed to
+be keyed by trading session (`session_end_date`), which Massive's documentation does not state
+outright, so every block of every futures file is checked against its key's date, and a mismatch (or
+a missing session date) raises `MassiveError` rather than return rows of the wrong session. Every
+error of the wire package becomes its public counterpart, with its status and request id: a rejected
+credential or a refusal gains the remedy (the settings to check, the plan, the `venues=` parameter),
+and any other wire error goes through `_errors.from_wire`. An Arrow error while converting or
+gathering a file's rows (out of memory, say) is a failed read of that file.
 
 A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of the call at its
 next block, and reads not yet started are cancelled. After a close, no request starts once a
@@ -141,7 +140,7 @@ from deephaven_massive._datasets.schema import (
 from deephaven_massive._datasets.symbols import (
     WireSymbols,
     option_roots,
-    unknown_symbol_message,
+    unreadable_symbol_message,
     wire_spellings,
 )
 from deephaven_massive._datasets.timestamps import (
@@ -149,7 +148,7 @@ from deephaven_massive._datasets.timestamps import (
     instants,
     to_epoch_ns_array,
 )
-from deephaven_massive._enums import AssetClass, FuturesVenue, UnknownSymbols
+from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -252,25 +251,25 @@ def _ends_at_an_instant(spec: DatasetSpec, window: HistoryWindow) -> bool:
     return isinstance(window.span, TimeRange)
 
 
-def _keys(prefix: str, venue: FuturesVenue | None, dates: Sequence[date]) -> tuple[_Key, ...]:
+def _keys(
+    prefix: str, venues: tuple[FuturesVenue, ...] | None, dates: Sequence[date]
+) -> tuple[_Key, ...]:
     """Return the S3 objects a request reads, by date and then by venue.
 
     Args:
         prefix: The dataset's prefix for the request; a futures prefix holds `{venue}`.
-        venue: The futures venue to read, or None for every venue.
+        venues: The futures venues to read, in `FuturesVenue` order (`Request.venues`), for
+            a futures prefix; None for any other dataset, whose prefix holds no `{venue}`.
         dates: The partition dates.
 
     Returns:
-        One `_Key` per date, or per date and venue (in `FuturesVenue` order) for a futures
+        One `_Key` per date, or per date and venue (in the order of `venues`) for a futures
         prefix.
     """
-    if "{venue}" not in prefix:
-        venues: tuple[FuturesVenue | None, ...] = (None,)
-    else:
-        venues = tuple(FuturesVenue) if venue is None else (venue,)
+    read: tuple[FuturesVenue | None, ...] = (None,) if venues is None else venues
     keys = []
     for day in dates:
-        for each in venues:
+        for each in read:
             name = None if each is None else each.value
             keys.append(_Key(object_key(prefix, day, name), day, each))
     return tuple(keys)
@@ -346,7 +345,7 @@ class _Transform:
         prefix: str,
         request: Request,
         window: HistoryWindow,
-        unknown_symbols: UnknownSymbols,
+        unreadable_symbols: OnError,
         stamps: StampRule | None = None,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
@@ -368,15 +367,15 @@ class _Transform:
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
                 every time of their files, which hold exactly the requested sessions.
-            unknown_symbols: The session's rule for a ticker spelling the library cannot
-                read; `WARN` also adds the `RawSymbol` column to the schema.
+            unreadable_symbols: The session's setting for a ticker spelling the library cannot
+                read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
             stamps: How the bars' stamps are treated (`row_times.stamp_rule`), or None
                 to keep them; the files hold only 1-day bars of the classes that have one.
 
         Returns:
             The transform.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
         # with flat files.
         file_class = cast("AssetClass", spec.asset_class)
@@ -432,7 +431,7 @@ class _Transform:
             times=time_rule(spec, request, asset_class=file_class),
             time_name=time_name,
             symbols=WireSymbols(
-                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
             ),
             stamps=stamps,
             bars=window.bars,
@@ -476,7 +475,7 @@ class _Transform:
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
-                session's `unknown_symbols` is `FAIL` (`symbols.unknown_symbol_message`);
+                session's `unreadable_symbols` is `RAISE` (`symbols.unreadable_symbol_message`);
                 under `WARN` the row keeps a null `Symbol` and the text in `RawSymbol`.
         """
         arrays: dict[str, pa.Array] = {}
@@ -489,8 +488,8 @@ class _Transform:
                 values = raw
             elif name == "Symbol":
                 read = self.symbols.read(batch["Symbol"], {})
-                if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
-                    raise MassiveError(unknown_symbol_message(self.dataset, read.unknown))
+                if read.unreadable and not self.symbols.keeps:
+                    raise MassiveError(unreadable_symbol_message(self.dataset, read.unreadable))
                 values, raw = read.symbols, read.raw
             else:
                 values = self._column(batch, column)
@@ -624,7 +623,7 @@ class FlatFileHistory:
 
         Errors, all raised on the calling thread: `AuthenticationError` when S3 rejects the S3
         credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
-        the venue and the `venue=` parameter for futures; `MassiveError` when the file for the
+        the venue and the `venues=` parameter for futures; `MassiveError` when the file for the
         last requested date is missing on a trading day within a day after its publication time
         (`"... is not yet published (flat files land ~11:00 ET next day), or was a market
         holiday"`), when the S3 client cannot be created, the bucket is unreachable, answers
@@ -647,10 +646,10 @@ class FlatFileHistory:
             prefix=prefix,
             request=request,
             window=window,
-            unknown_symbols=self._core.config.unknown_symbols,
+            unreadable_symbols=self._core.config.unreadable_symbols,
             stamps=_flat_file_stamps(spec, request),
         )
-        keys = _keys(prefix, request.venue, dates)
+        keys = _keys(prefix, request.venues, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
         threads = f"{self._core.thread_prefix} call-{call} files"
         return self._read(
@@ -1103,7 +1102,7 @@ def _public(error: WireError, key: _Key) -> MassiveError:
     """Return the public error for a wire error of one file, with the user's remedy.
 
     A rejected credential names the settings to check; a refusal names the plan and, for a
-    futures file, the venue and the `venue=` parameter; a 404 (a missing bucket, since a
+    futures file, the venue and the `venues=` parameter; a 404 (a missing bucket, since a
     missing file is no error) names the bucket and endpoint settings. Every other wire error
     becomes its public counterpart through `_errors.from_wire`. Each keeps the wire error's
     status and request id.
@@ -1131,7 +1130,7 @@ def _public(error: WireError, key: _Key) -> MassiveError:
             )
         return EntitlementError(
             f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
-            "pass venue=dm.FuturesVenue.<VENUE> for a venue the plan includes",
+            "pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan includes",
             status=error.status,
             request_id=error.request_id,
         )

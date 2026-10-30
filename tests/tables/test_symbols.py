@@ -65,7 +65,7 @@ def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: object) -> None:
     assert "'BRK-B' is not a Massive stock ticker" in message
     assert "'b4'" in message  # the first five in sorted order
     assert "'b5'" not in message
-    assert message.endswith("Pass on_error=dm.OnError.NULL to null them instead")
+    assert message.endswith("Pass on_error=dm.OnError.LOG to null them instead")
 
 
 def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
@@ -75,7 +75,7 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
     # Out of order in the table: the values are logged sorted, before the formula runs.
     table = new_table([string_col("Symbol", ["EUR/USD", *reversed(bad), "b00"])])
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
-        result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.NULL)
+        result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.LOG)
     assert values(result) == ["C:EURUSD", *[None] * 26]
     messages = [r.getMessage() for r in caplog.records]
     assert len(messages) == 21  # twenty values, then one record that says the rest are not
@@ -115,7 +115,7 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
     source = input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
-        result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.NULL)
+        result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.LOG)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
         source.add(new_table([string_col("Symbol", ["BTC-USD", "no pe!", None, "no pe!"])]))
         wait_for(lambda: result.size == 4)
@@ -138,10 +138,8 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None
         )
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
         dm.canonicalize_symbols(table, AssetClass.FOREX, convention=cast("SymbolConvention", None))
-    with pytest.raises(
-        TypeError, match=r"^on_error must be dm\.OnError, e\.g\. dm\.OnError\.NULL$"
-    ):
-        dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=cast("OnError", "null"))
+    with pytest.raises(TypeError, match=r"^on_error must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"):
+        dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=cast("OnError", "log"))
     with pytest.raises(
         ValueError, match=r"^the YAHOO convention applies to stocks only, not forex$"
     ):
@@ -170,7 +168,7 @@ def test_the_row_converter_raises_or_nulls() -> None:
     assert strict("EUR/USD") == "C:EURUSD"
     with pytest.raises(ValueError, match="cannot read 'no pe!'"):
         strict("no pe!")
-    lenient = _row_converter(convert, refuse, OnError.NULL)
+    lenient = _row_converter(convert, refuse, OnError.LOG)
     assert lenient("no pe!") is None
     assert lenient("GBP-USD") == "C:GBPUSD"
     assert [value for value, _ in refused] == ["no pe!"]

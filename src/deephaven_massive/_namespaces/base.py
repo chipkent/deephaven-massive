@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
@@ -548,6 +549,37 @@ def _check_axis(
         check_order(start, end)
 
 
+def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
+    """Check the `venues` argument of a futures dataset and order it for the request.
+
+    Args:
+        venues: The argument as passed: a set of `dm.FuturesVenue` members, such as
+            `{dm.FuturesVenue.CME}` or the default `frozenset(dm.FuturesVenue)`.
+
+    Returns:
+        The venues in `FuturesVenue` order, whatever the set's order, so equal sets give equal
+        queries and the flat files are read in one order.
+
+    Raises:
+        TypeError: If `venues` is not a set (a single member, a list, or text included), or a
+            member is not a `dm.FuturesVenue`; the message names the set to pass.
+        ValueError: If the set is empty, which would read no flat file.
+    """
+    if not isinstance(venues, AbstractSet):
+        raise TypeError(
+            f"venues must be a set of dm.FuturesVenue, such as {{dm.FuturesVenue.CME}}, not "
+            f"{type(venues).__name__}"
+        )
+    for venue in venues:
+        if not isinstance(venue, FuturesVenue):
+            raise TypeError(
+                f"venues must hold only dm.FuturesVenue members, not {type(venue).__name__}"
+            )
+    if not venues:
+        raise ValueError("venues is empty; leave it out to read every venue")
+    return tuple(venue for venue in FuturesVenue if venue in venues)
+
+
 def build_query(
     core: SessionCore,
     spec: DatasetSpec,
@@ -556,7 +588,7 @@ def build_query(
     all_alternative: str | None = None,
     timespan: Timespan | None = None,
     multiplier: int = 1,
-    venue: FuturesVenue | None = None,
+    venues: AbstractSet[FuturesVenue] | None = None,
     adjusted: bool | None = None,
     start: DateLike | None = None,
     end: DateLike | None = None,
@@ -586,7 +618,8 @@ def build_query(
         timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it also selects
             the query class through `bar_query_class`.
         multiplier: The bar multiplier.
-        venue: The futures venue, or None for every venue.
+        venues: The futures venues whose flat files `history()` reads (`futures_venues`), or
+            None for a dataset without venues.
         adjusted: Whether bars are adjusted for splits, for a dataset with an `adjusted`
             parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None for an open start: a date
@@ -623,11 +656,11 @@ def build_query(
             on a chosen path that has neither.
         TypeError: If `adjusted` is neither None nor a `bool`.
 
-    Invalid symbols, enum arguments, time bounds, parameters, or filters raise the `TypeError`
-    or `ValueError` of the helper that checks them (`normalize` in `_datasets/symbols.py`,
-    `_require_enum`, `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed,
-    reversed, or calendar-date bounds, `bar_query_class`,
-    `require_positive_int` for `limit`).
+    Invalid symbols, enum arguments, venues, time bounds, a `sort`, parameters, or filters
+    raise the `TypeError` or `ValueError` of the helper that checks them (`normalize` in
+    `_datasets/symbols.py`, `_require_enum`, `futures_venues`, `Catalog.check_sort`,
+    `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed, reversed, or
+    calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`).
     """
     normalized: NormalizedSymbols | None = None
     if isinstance(symbols, Table):
@@ -638,8 +671,6 @@ def build_query(
         normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)
     if isinstance(normalized, _All) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; use {all_alternative}")
-    if venue is not None:
-        _require_enum(venue, FuturesVenue, "venue")
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:
@@ -651,6 +682,9 @@ def build_query(
             f"{spec.name}: order needs sort, since its paths take the direction as a suffix "
             "of the sort field"
         )
+    sort = typed.get("sort")
+    if isinstance(sort, str):  # `list_params` refused any other type
+        core.catalog.check_sort(spec, sort, ordered="order" in typed)
     cls = query_class(spec)
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
@@ -668,7 +702,7 @@ def build_query(
         symbols=normalized,
         timespan=timespan,
         multiplier=multiplier,
-        venue=venue,
+        venues=None if venues is None else futures_venues(venues),
         adjusted=adjusted,
         start=first,
         end=last,
