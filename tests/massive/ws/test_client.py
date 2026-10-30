@@ -299,6 +299,26 @@ def test_max_connections_waits_for_a_slot_then_retries(
     assert len(fake_ws_server.connections) == 2
 
 
+def test_max_connections_logs_at_debug_on_every_attempt(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every attempt of an outage gets this answer, so it never warns; the library's
+    # connection warns once per outage instead.
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
+    fake_ws_server.auth_replies.extend(["max_connections", "max_connections"])
+    h = make_client()
+    h.recorder.wait_open(1)
+    refusals = [r for r in caplog.records if "no free connection" in r.getMessage()]
+    assert [r.levelno for r in refusals] == [logging.DEBUG, logging.DEBUG]
+    assert refusals[0].getMessage() == (
+        f"{fake_ws_server.url()} refused the connection: the account has no free connection "
+        "(max_connections)"
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 def test_max_connections_without_a_close_ends_at_the_handshake_timeout(
     make_client: Callable[..., Harness],
     fake_ws_server: FakeMassiveServer,
@@ -471,13 +491,26 @@ def test_a_capped_retry_after_is_logged(
 
 
 def test_a_refused_connection_is_retried(
-    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     port = fake_ws_server.port
     fake_ws_server.stop()  # nothing listens on the port any more
-    h = make_client(url=f"wss://127.0.0.1:{port}/stocks", free_waits=1)
+    url = f"wss://127.0.0.1:{port}/stocks"
+    h = make_client(url=url, free_waits=1)
     assert h.sleeper.wait_for_count(2) == [1.0, 1.0]
     assert WsState.FAILED not in h.recorder.states()
+    # Each attempt repeats these lines while the outage lasts, so they stay at DEBUG.
+    attempts = [
+        r
+        for r in caplog.records
+        if r.getMessage() == f"connecting to {url}"
+        or r.getMessage().startswith(f"could not connect to {url}: ")
+    ]
+    assert len(attempts) >= 4
+    assert {r.levelno for r in attempts} == {logging.DEBUG}
 
 
 def test_a_url_must_be_a_websocket_url() -> None:
@@ -516,6 +549,26 @@ def test_a_clean_server_close_reconnects_and_drops_old_frames(
     h.on_loop(lambda: h.client.subscribe(2, ["T.NEW"]))
     fake_ws_server.wait_for(lambda s: len(s.connections[1].frames) == 1)
     assert fake_ws_server.frames() == ['{"action":"subscribe","params":"T.NEW"}']
+
+
+def test_a_close_is_logged_with_its_code_reason_and_uptime(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=client_module.__name__)
+    h = make_client()
+    h.recorder.wait_open(1)
+    h.clock.advance(12.5)
+    fake_ws_server.close(1001, f"going away; key {KEY}")
+    h.recorder.wait_open(2)
+    [record] = [r for r in caplog.records if " closed (code " in r.getMessage()]
+    assert record.levelno == logging.INFO
+    # The reason is the server's text, so a key it echoes is replaced.
+    assert record.getMessage() == (
+        f"the connection to {fake_ws_server.url()} closed (code 1001, reason "
+        "'going away; key ***') after 12.5 s up"
+    )
 
 
 def test_an_abnormal_server_close_reconnects(
