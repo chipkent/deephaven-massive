@@ -18,19 +18,22 @@ snapshot request, and never by opening a connection to try:
 
 `decide` is pure apart from logging: the REST request itself is made by the caller's `fetch`
 callable, which the REST transport (`_ingest/rest.py`) supplies, so every HTTP error has
-already become its public exception there. The REST transport also owns the per-session,
-single-flight cache of decisions and the `m.connections()` rows that record them. Nothing here
-takes a lock, starts a thread, or calls Deephaven.
+already become its public exception there. `HostDecisionCache` holds a session's decisions,
+single-flight, behind a leaf lock of its own; the REST transport fills it and writes the
+`m.connections()` rows that record them. Nothing here starts a thread or calls Deephaven.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeVar
 
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, ErrorCause, MassiveError
+from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._log_limits import log_once
 from deephaven_massive._tables.transports import HostDecision
 
@@ -43,9 +46,10 @@ __all__ = [
     "REALTIME_HOST",
     "SNAPSHOT_PROBES",
     "TIMEFRAME_FIELDS",
+    "HostDecisionCache",
     "SnapshotProbe",
     "decide",
-    "is_error_row",
+    "succeeded_result",
 ]
 
 logger = logging.getLogger(__name__)
@@ -104,22 +108,6 @@ TIMEFRAME_FIELDS: Final[Mapping[AssetClass, tuple[str, ...]]] = {
 """The dotted row fields, in reading order, whose `DELAYED` or `REAL-TIME` value states the
 recency of a class's data. `underlying_asset.timeframe` is never read: the option-chain sample
 shows the underlying delayed beside a real-time contract."""
-
-
-def is_error_row(row: Mapping[str, object]) -> bool:
-    """Tell whether a snapshot row reports a ticker the plan does not include.
-
-    Massive answers such a ticker with a row that carries an `error` (`NOT_ENTITLED`) and a
-    `message` in place of its data. The host decision counts the row as absent, and the REST
-    transport keeps or drops it apart from the data rows; both use this one test.
-
-    Args:
-        row: One decoded row.
-
-    Returns:
-        True when the row's `error` is set.
-    """
-    return row.get("error") is not None
 
 
 def _value(row: Mapping[str, object], dotted: str) -> object:
@@ -319,3 +307,107 @@ def decide(
     entitled = [row for row in rows if not is_error_row(row)]
     decision = _classify(asset_class, entitled)
     return decision if decision is not None else _without_timeframe(asset_class, entitled)
+
+
+class HostDecisionCache:
+    """The WebSocket host decisions of one session, by (asset class, channel family).
+
+    `RestState` holds one per session, and `RestEndpoints.resolve_host` reads and fills it,
+    single-flight: the first caller of a (class, family) claims the decision and makes it,
+    every concurrent caller waits on the decision's future, and a failed decision is forgotten
+    so that the next caller tries again. Thread-safe: the decisions sit behind one leaf lock,
+    held only to read or change them; every caller waits on a future outside it.
+    """
+
+    __slots__ = ("_hosts", "_lock")
+
+    def __init__(self) -> None:
+        """Start with no decision; nothing is requested."""
+        self._lock = threading.Lock()
+        self._hosts: dict[tuple[AssetClass, ChannelFamily], Future[HostDecision]] = {}
+
+    def host_future(
+        self, key: tuple[AssetClass, ChannelFamily]
+    ) -> tuple[Future[HostDecision], bool]:
+        """Return the decision of a (class, family), or claim it for the caller to make.
+
+        Args:
+            key: The asset class and channel family.
+
+        Returns:
+            The decision's future and whether the caller created it: the creator makes the
+            decision and completes the future; everyone else waits on it, outside every lock.
+        """
+        with self._lock:
+            future = self._hosts.get(key)
+            if future is not None:
+                return future, False
+            future = self._hosts[key] = Future()
+            return future, True
+
+    def known_host(self, key: tuple[AssetClass, ChannelFamily]) -> HostDecision | None:
+        """Return the decision of a (class, family) if one is made, without claiming it.
+
+        A failed decision is removed before its future fails, but this check reads the future
+        under the lock and looks at it after: its maker may forget and fail it in between. So
+        only a decision counts; a failed future gives None, and the caller then claims or
+        waits as usual (`RestEndpoints.resolve_host`), where a failure reaches it as a copy
+        and an abandoned decision as a retry.
+
+        Args:
+            key: The asset class and channel family.
+
+        Returns:
+            The decision, or None while none is made, one is being made, or the one being made
+            has just failed.
+        """
+        with self._lock:
+            future = self._hosts.get(key)
+        return succeeded_result(future)
+
+    def replace_host(self, key: tuple[AssetClass, ChannelFamily], decision: HostDecision) -> None:
+        """Cache a decision for a (class, family) in place of any earlier one.
+
+        A caller already waiting on an earlier decision still gets that one; every later
+        caller gets this one.
+
+        Args:
+            key: The asset class and channel family.
+            decision: The new decision.
+        """
+        future: Future[HostDecision] = Future()
+        future.set_result(decision)
+        with self._lock:
+            self._hosts[key] = future
+
+    def forget_host(
+        self, key: tuple[AssetClass, ChannelFamily], future: Future[HostDecision]
+    ) -> None:
+        """Remove a failed decision, so that the next caller tries again.
+
+        Args:
+            key: The asset class and channel family.
+            future: The failed decision's future; another one under the key is kept.
+        """
+        with self._lock:
+            if self._hosts.get(key) is future:
+                del self._hosts[key]
+
+
+T = TypeVar("T")
+"""The result type of a shared lookup's future."""
+
+
+def succeeded_result(future: Future[T] | None) -> T | None:
+    """Return a shared lookup's result once it has succeeded, and None in every other state.
+
+    Args:
+        future: The lookup's future, or None when no lookup is claimed.
+
+    Returns:
+        The result; None when the lookup is not claimed, still running, or failed (its
+        future then holds the error, which only the claim-or-wait path may act on).
+    """
+    if future is None or not future.done() or future.exception() is not None:
+        return None
+    return future.result()

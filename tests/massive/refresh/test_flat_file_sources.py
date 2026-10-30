@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import exclusions, flatfiles, overrides
-from deephaven_massive._massive.refresh.flatfiles import (
+from deephaven_massive._massive.refresh import exclusions, flat_file_sources, overrides
+from deephaven_massive._massive.refresh.flat_file_sources import (
     FlatFileCoverage,
     generate_flat_files,
     venue_template,
@@ -73,7 +73,7 @@ def test_the_four_venue_pages_of_each_futures_dataset_are_identical(
     for template, names in templates.items():
         by_venue = {PurePosixPath(name).stem: name for name in names}
         assert set(by_venue) == set(overrides.VENUES)
-        found = flatfiles._check_venues(
+        found = flat_file_sources._check_venues(
             template, by_venue, snapshot=snapshot, venues=list(overrides.VENUES)
         )
         assert found == [], template

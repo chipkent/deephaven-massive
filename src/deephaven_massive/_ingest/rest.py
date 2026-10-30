@@ -22,13 +22,13 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   symbols overlap (`DatasetSpec.symbols_overlap`, the news of a watchlist) it caps each
   request's rows instead, and a row several requests return is kept once (`_first_copies`).
 - **History.** `history()` requests the instants its window covers
-  (`HistoryWindow.requested`) and keeps the rows the window keeps (`_keep`). Futures trades
+  (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
   (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
   (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
   are stamped at 00:00 of their day in the class day zone, and every bar is served: a stamp
   Massive is not known to use logs one WARNING per dataset and timespan per session
-  (`row_times.stamp_rule`, `_stamped`).
+  (`row_times.stamp_rule`, `stamped`).
 - **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`):
   `Date`, a bar's `TimestampStart` and `TimestampEnd`, and `TimestampInsert`, the instant the
   page arrived. The day zone of each call follows its own symbols' class (`dates.day_class`),
@@ -54,8 +54,8 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   paced requests cannot all start within a minute logs its least duration at INFO, and a
   `poll()` whose cycles need more paced requests than its interval allows logs one WARNING.
 - **Rows.** Each page's rows go through `_massive.to_batch` (strict decoding against the path's
-  generated fields), then `schema.rename`'s column mapping for the dataset, the timestamp
-  routine of `_datasets/timestamps.py`, and the lattice widening of `schema.widen`, into one
+  generated fields), then `source_columns.rename`'s column mapping for the dataset, the timestamp
+  routine of `_datasets/timestamps.py`, and the lattice widening of `source_columns.widen`, into one
   Arrow batch of the dataset's merged schema. Only one page of decoded rows is held at a time.
   A row that carries an `error` (a ticker the plan does not include) keeps its `Error` and
   `Message` columns and is logged once.
@@ -71,7 +71,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   of bounds) raises `RowDataError`, a defect of the library. Static verbs raise each error, and
   log it at DEBUG, or at ERROR for a defect.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
-  (`_ingest/hosts.py`), single-flight: the first caller of a (class, family) makes the one
+  (`_ingest/host_decision.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
 - **Shared lookups.** The host decisions and the session's crypto ticker list are each made by
   one caller while the others wait (`RestReader.wait_for_shared`). A waiting caller charges the
@@ -81,7 +81,14 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 `RestState` is the part a session shares (the client, the host decisions, the live pollers,
 the once-per-session warnings); `SessionClients` creates it on first use and registers its
 close with the session. `RestEndpoints`, the session core's `RestTransport`, is a lightweight
-view of the core and that state, made for each call. `poll()` itself is `_ingest/poll.py`.
+view of the core and that state, made for each call. `poll()` itself is `_tables/poll.py`.
+The requests of a call are planned by `rest_requests.py`, and its pages become batches in
+`rest_rows.py`; this module runs the plan, page by page, and turns its failures into the
+public errors.
+
+The module is one subject although it runs past 1,000 lines: it is one transport, and the
+reads, the fan-out, the crypto ticker list, the host decisions, and the failures all act on
+the same session state (`RestState`) and the same read (`RestReader`).
 """
 
 from __future__ import annotations
@@ -95,7 +102,6 @@ import time
 from collections import Counter
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, TypeAlias, TypeVar, cast
 from urllib.parse import urlsplit
@@ -103,55 +109,24 @@ from urllib.parse import urlsplit
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._datasets.catalog import filter_key, takes_instants
-from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
+from deephaven_massive._datasets.dates import day_class, is_trading_day
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
-from deephaven_massive._datasets.row_times import (
-    DATE,
-    StampRule,
-    stamp_rule,
-    time_column,
-    time_rule,
-    within,
-)
-from deephaven_massive._datasets.schema import (
-    OPTION_ROOT,
-    RAW_SYMBOL,
-    rename,
-    required_fields,
-    widen,
-)
-from deephaven_massive._datasets.symbols import (
-    SymbolTable,
-    WireSymbols,
-    forex_codes,
-    option_roots,
-    symbol_class,
-    unreadable_symbol_message,
-)
-from deephaven_massive._datasets.timestamps import (
-    UnitMismatchError,
-    instants,
-)
-from deephaven_massive._enums import (
-    AssetClass,
-    ClassFromPrefix,
-    OnError,
-    Timespan,
-    subscription_of,
-)
+from deephaven_massive._datasets.row_times import stamp_rule, time_rule
+from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
+from deephaven_massive._enums import AssetClass, OnError, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorCause,
     MassiveError,
     PermanentError,
+    UnsupportedParameterError,
     cause_of,
     failure_text,
     from_wire,
     library_bug,
 )
-from deephaven_massive._ingest import hosts, poll
-from deephaven_massive._ingest.poll import Pollers, RowDataError, UnsupportedParameterError
+from deephaven_massive._ingest import host_decision
+from deephaven_massive._ingest.host_decision import HostDecisionCache, succeeded_result
 from deephaven_massive._ingest.rate_limits import (
     OTHER,
     PaceCheck,
@@ -160,65 +135,57 @@ from deephaven_massive._ingest.rate_limits import (
     bucket_of,
     read_patience,
 )
-from deephaven_massive._massive import (
-    Cancel,
-    DriftReport,
-    ParamKind,
-    Transport,
-    WireError,
-    to_batch,
+from deephaven_massive._ingest.rest_requests import (
+    Call,
+    CryptoSplit,
+    axis_query,
+    fetch_paths,
+    history_calls,
+    own_symbols,
+    plan_calls,
+    shared_params,
 )
+from deephaven_massive._ingest.rest_rows import (
+    RowConverter,
+    keep_window,
+    stamped,
+    whole_bars,
+)
+from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
+from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
+from deephaven_massive._tables.poll import Pollers
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from datetime import timedelta
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-    from deephaven_massive._datasets.dates import DaySpan, TimeRange
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._massive import DriftSample, Patience, RestClient, RestPath
+    from deephaven_massive._massive import Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import HostDecision
 
 __all__ = [
-    "Call",
     "RestEndpoints",
     "RestReader",
     "RestState",
     "call_bucket",
-    "fetch_paths",
-    "plan_calls",
 ]
 
 logger = logging.getLogger(__name__)
 
-_FUTURES_UNITS: Final[Mapping[Timespan, str]] = {
-    Timespan.SECOND: "sec",
-    Timespan.MINUTE: "min",
-    Timespan.HOUR: "hour",
-    Timespan.SESSION: "session",
-    Timespan.WEEK: "week",
-    Timespan.MONTH: "month",
-    Timespan.QUARTER: "quarter",
-    Timespan.YEAR: "year",
-}
-"""The unit of the futures aggregates' `resolution` parameter (`"5min"`) for each timespan; the
-endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built."""
-
-_ONE_DAY: Final = timedelta(days=1)
-_ONE_MICROSECOND: Final = timedelta(microseconds=1)
 _ROW_NUMBER: Final = "__row_number"
 """The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
 
@@ -227,9 +194,6 @@ _TICKERS_PATH: Final = "/v3/reference/tickers"
 """The reference path that lists crypto tickers with their base and quote currencies."""
 _TICKERS_PAGE: Final = 1000
 """The rows per page of the crypto ticker list: the endpoint's largest page."""
-
-CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str]]"
-"""Splits a crypto ticker into its base and quote currencies (`RestReader.crypto_pair`)."""
 
 CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 """Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
@@ -293,22 +257,6 @@ def _outcome(future: Future[T]) -> T:
         ) from None
 
 
-def _decided(future: Future[T] | None) -> T | None:
-    """Return a shared lookup's result once it has succeeded, and None in every other state.
-
-    Args:
-        future: The lookup's future, or None when no lookup is claimed.
-
-    Returns:
-        The result; None when the lookup is not claimed, still running, or failed (its
-        future holds a `MassiveError` or `_AbandonedError`, which only the claim-or-wait path
-        may act on).
-    """
-    if future is None or not future.done() or future.exception() is not None:
-        return None
-    return future.result()
-
-
 def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
     """Read one row of Massive's crypto ticker list.
 
@@ -339,643 +287,6 @@ class UnlistedPairError(PermanentError):
     """
 
 
-@dataclass(frozen=True, slots=True)
-class Call:
-    """One planned request of a REST path, which may span several pages.
-
-    Attributes:
-        path_params: A value for each placeholder of the path template.
-        query: The query parameters of the first page, by wire name.
-        symbol: The one symbol of a per-symbol request: it fills the keys the dataset takes
-            from the request (`KeySpec.from_request`), and HTTP 404 for it drops the symbol.
-            None for a request that is not per symbol.
-    """
-
-    path_params: Mapping[str, object]
-    query: Mapping[str, object]
-    symbol: str | None = None
-
-
-def _date_bound(name: str, value: date, *, upper: bool) -> date:
-    """Return the day a date parameter of a calendar-date time axis is sent.
-
-    A bound is a whole day: the day itself, the day after for an exclusive upper `.lt`, the
-    day before for an exclusive lower `.gt`. A datetime never reaches here: a calendar-date
-    axis refuses one when the query is built.
-
-    Args:
-        name: The parameter's wire name, such as `"ex_dividend_date.gte"`.
-        value: The bound.
-        upper: True for the upper bound.
-
-    Returns:
-        The day to send.
-    """
-    suffix = name.rpartition(".")[2]
-    if upper and suffix == "lt":
-        return value + _ONE_DAY
-    if not upper and suffix == "gt":
-        return value - _ONE_DAY
-    return value
-
-
-def _axis_query(
-    spec: DatasetSpec,
-    rest_path: RestPath,
-    *,
-    dates: tuple[date | None, date | None],
-    asset_class: AssetClass | ClassFromPrefix,
-) -> dict[str, object]:
-    """Return the time-axis parameters of a request, by wire name.
-
-    An instant parameter (`catalog.takes_instants`: a timestamp, or a date parameter whose
-    row field is an instant, such as `published_utc`) gets an instant
-    (`dates.instant_bound`): a date bound becomes the start of its day in the request's day
-    zone, an upper one the start of the next day, so a date never leaves the day boundary to
-    Massive. A date parameter of a calendar-date field gets a whole day (`_date_bound`), and
-    a parameter of any other kind the bound's ISO-8601 text.
-
-    Args:
-        spec: The dataset, whose `time_axis` names the lower and upper parameters.
-        rest_path: The path; a name it does not take is left out.
-        dates: The bounds: as the caller gave them (a `date` or an aware `datetime`, or None
-            for an open end), or the exact instants a `history()` window requests. A
-            calendar-date axis only ever receives dates (`build_query` refuses datetimes
-            there).
-        asset_class: The class whose day rules apply to this request (`dates.day_class`), or
-            `ClassFromPrefix.ANY` for New York days.
-
-    Returns:
-        The parameters to send; empty when the dataset has no time axis.
-
-    Raises:
-        ValueError: If a `.gt` or `.lte` bound of an instant axis counts nanoseconds or takes
-            ISO-8601 text, which no `datetime` step ends exactly (`dates.instant_bound`); the
-            message names the dataset.
-    """
-    if spec.time_axis is None:
-        return {}
-    params = {p.name: p for p in rest_path.params}
-    query: dict[str, object] = {}
-    for index, name in enumerate(spec.time_axis):
-        upper = index == 1
-        param = params.get(name)
-        value = dates[index]
-        if param is None or value is None:
-            continue
-        if takes_instants(rest_path, name, param.kind):
-            try:
-                query[name] = instant_bound(asset_class, name, value, unit=param.unit, upper=upper)
-            except ValueError as error:
-                raise ValueError(f"{spec.name}: {error}") from None
-        elif param.kind is ParamKind.DATE:
-            query[name] = _date_bound(name, value, upper=upper)
-        else:
-            query[name] = value.isoformat()
-    return query
-
-
-def _filter_days(
-    rest_path: RestPath, query: Mapping[str, object], asset_class: AssetClass | ClassFromPrefix
-) -> dict[str, object]:
-    """Return the query with each date on an instant range filter as its day's bound.
-
-    `Catalog.check_filters` keeps a date given to a range filter of a parameter that compares
-    instants (`catalog.takes_instants`, such as `last_updated.gte`), because its day zone
-    depends on the request's symbols. Here it becomes the instant that keeps the filter's
-    calendar meaning (`dates.instant_bound`): `.gte` a day is from its start, `.lt` a day
-    before its start, `.gt` a day after its end, and `.lte` a day up to its end. The check
-    has refused the `.gt` and `.lte` forms whose unit cannot end a day exactly. Every other
-    value is kept.
-
-    Args:
-        rest_path: The path, whose parameters and fields are read.
-        query: The query parameters, by wire name.
-        asset_class: The class whose day rules apply (`dates.day_class`), or
-            `ClassFromPrefix.ANY` for New York days.
-
-    Returns:
-        A new mapping.
-    """
-    params = {p.name: p for p in rest_path.params}
-    sent = dict(query)
-    for name, value in query.items():
-        param = params.get(name)
-        suffix = name.rpartition(".")[2]
-        if (
-            param is None
-            or suffix not in ("gt", "gte", "lt", "lte")
-            or not isinstance(value, date)
-            or isinstance(value, datetime)
-            or not takes_instants(rest_path, name, param.kind)
-        ):
-            continue
-        sent[name] = instant_bound(
-            asset_class, name, value, unit=param.unit, upper=suffix in ("gt", "lte")
-        )
-    return sent
-
-
-def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]:
-    """Split a forex or crypto symbol into the two currencies a `{from}/{to}` path takes.
-
-    Args:
-        spec: The dataset, whose asset class is forex or crypto.
-        symbol: The canonical symbol, such as `C:EURUSD` or `X:BTCUSD`.
-        split: Splits a crypto symbol by Massive's crypto ticker list
-            (`RestReader.crypto_pair`); a forex pair never needs it, since its two codes have
-            three letters each.
-
-    Returns:
-        The base and quote currencies, such as `("EUR", "USD")`.
-
-    Raises:
-        ValueError: If the dataset's class has no currency pairs.
-
-    A crypto symbol `split` cannot split raises its `MassiveError`; no split is ever guessed.
-    """
-    asset_class = spec.asset_class
-    if asset_class is not AssetClass.FOREX and asset_class is not AssetClass.CRYPTO:
-        raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
-    if asset_class is AssetClass.CRYPTO:
-        return split(symbol)
-    return forex_codes(symbol)
-
-
-def _own_symbols(
-    spec: DatasetSpec, symbol: str | None, own_query: Mapping[str, object]
-) -> tuple[str, ...]:
-    """Return the symbols one planned request carries.
-
-    Args:
-        spec: The dataset, whose `symbol_param` holds a chunk of symbols.
-        symbol: The one symbol of a per-symbol request, or None.
-        own_query: The request's own query parameters (`_symbol_parts`).
-
-    Returns:
-        The symbol of a per-symbol request, the chunk in the symbol parameter of a listed
-        request, or nothing for a request without symbols.
-    """
-    if symbol is not None:
-        return (symbol,)
-    chunk = own_query.get(spec.symbol_param) if spec.symbol_param is not None else None
-    return chunk if isinstance(chunk, tuple) else ()
-
-
-def _symbol_targets(keys: list[str], *, slot: str | None, pair: bool) -> list[str]:
-    """Return where each per-symbol request puts its symbol.
-
-    Args:
-        keys: The parameters of the keys the dataset fills from the request.
-        slot: The path's one placeholder nothing else fills, or None.
-        pair: True when an otherwise unfilled `{from}/{to}` pair takes the symbol.
-
-    Returns:
-        The parameter names, `"from"` standing for the whole pair.
-    """
-    targets = list(keys)
-    if slot is not None:
-        targets.append(slot)
-    if pair:
-        targets.append("from")
-    return targets
-
-
-def _symbol_parts(
-    spec: DatasetSpec,
-    rest_path: RestPath,
-    symbols: NormalizedSymbols | None,
-    *,
-    slot: str | None,
-    pair: bool = False,
-    split: CryptoSplit,
-) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
-    """Return how a request's symbols spread over requests of one path.
-
-    A path that takes the symbol itself (a key the dataset fills from the request, such as
-    `{stocksTicker}`, or a currency pair's `{from}/{to}`), a path whose one placeholder nothing
-    else fills (`slot`: a per-symbol detail path whose rows also carry the ticker), a path
-    whose `{from}/{to}` pair nothing else fills (`pair`: crypto's daily open-close, whose rows
-    carry their own symbol), a `per_symbol` dataset, and a symbol parameter that takes one
-    value (`ticker`) get one request per symbol. A list parameter
-    (`ticker.any_of`, `tickers`) gets up to `DatasetSpec.symbols_per_request` symbols a
-    request (all of them when the dataset sets no limit). `dm.ALL`, no
-    symbols, and a path that takes neither get one request without symbols.
-
-    Args:
-        spec: The dataset.
-        rest_path: The path.
-        symbols: The static symbols: a sorted tuple, `ALL`, or None.
-        slot: The path's one placeholder that no parameter, key, or window fills, or None.
-        pair: True when the path's `{from}` and `{to}` placeholders are filled by nothing
-            else, so each symbol's currency pair (`_pair`) fills them.
-        split: Splits a crypto symbol into its two currencies (`_pair`).
-
-    Returns:
-        `(symbol, path parameters, query parameters)` per request: `symbol` is set for a
-        per-symbol request. Empty for an empty symbol tuple (a reactive table with no valid
-        row).
-
-    Raises:
-        ValueError: If the path needs a symbol per request and the symbols are `dm.ALL` or
-            missing; the dataset's factory normally rejects that first.
-    """
-    params = {p.name: p for p in rest_path.params}
-    keys = spec.keys_for(Transport.REST, rest_path.template)
-    from_request = [key for _, key in keys.declared() if key.from_request]
-    param = spec.symbol_param if spec.symbol_param in params else None
-    listed = param is not None and params[param].kind is ParamKind.LIST
-    takes_one = bool(from_request) or slot is not None or pair or spec.per_symbol
-    per_symbol = takes_one or (param is not None and not listed)
-    if symbols is None or isinstance(symbols, _All):
-        if takes_one:
-            raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
-        return [(None, {}, {})]
-    explicit = cast("tuple[str, ...]", symbols)
-    if not explicit:
-        return []
-    if not per_symbol:
-        if param is None:
-            return [(None, {}, {})]
-        size = spec.symbols_per_request or len(explicit)
-        return [(None, {}, {param: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
-    targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
-    parts: list[tuple[str | None, dict[str, object], dict[str, object]]] = []
-    for symbol in explicit:
-        path: dict[str, object] = {}
-        query: dict[str, object] = {}
-        for name in targets:
-            if name == "from" and "to" in params:
-                path["from"], path["to"] = _pair(spec, symbol, split)
-            elif params[name].in_path:
-                path[name] = symbol
-            else:
-                query[name] = symbol
-        if param is not None:
-            query[param] = (symbol,) if listed else symbol
-        parts.append((symbol, path, query))
-    return parts
-
-
-def _caller_params(
-    spec: DatasetSpec, rest_path: RestPath, request: Request
-) -> tuple[dict[str, object], dict[str, object]]:
-    """Return the path and query parameters the caller set: typed parameters and filters.
-
-    Typed parameters go wherever the path takes them: a path segment (`{date}`,
-    `{direction}`) or a query parameter. `order` on a path without an `order` parameter folds
-    into `sort` as its `.asc` or `.desc` suffix (`sort=date.desc`); on a path with one it is
-    sent as is. A filter goes out under the wire name whose `filters` key it is.
-
-    Args:
-        spec: The dataset, for messages.
-        rest_path: The path.
-        request: The normalized arguments.
-
-    Returns:
-        `(path parameters, query parameters)`.
-
-    Raises:
-        ValueError: If a typed parameter or a filter the caller set is not a parameter of the
-            path (for example a filter of a dataset's list path on its per-symbol path), or
-            `order` is set where the path has neither `order` nor `sort`.
-    """
-    params = {p.name: p for p in rest_path.params}
-    wire_names = {filter_key(name): name for name in params}
-    path: dict[str, object] = {}
-    query: dict[str, object] = {}
-    typed = dict(request.params)
-    folded = "order" in typed and "order" not in params
-    unknown = [name for name in typed if name not in params and not (folded and name == "order")]
-    for name, value in typed.items():
-        if name in params:
-            (path if params[name].in_path else query)[name] = value
-    if folded and "sort" in query:
-        query["sort"] = f"{typed['sort']}.{typed['order']}"
-    elif folded:
-        unknown.append("order")
-    for key, value in request.filters:
-        wire = wire_names.get(key)
-        if wire is None:
-            unknown.append(key)
-        else:
-            query[wire] = value
-    if unknown:
-        raise ValueError(f"{spec.name}: {rest_path.template} does not take {sorted(set(unknown))}")
-    return path, query
-
-
-def _base(
-    spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
-) -> tuple[dict[str, object], dict[str, object]]:
-    """Return the path and query parameters every request of a path shares.
-
-    Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
-    in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
-    segment, the indicators' query parameter); `Request.adjusted` when it is set and the path
-    takes it (a path without it, the crypto indicators', serves prices no split changes, so
-    `True` is left out there); and the
-    futures `resolution` and the page size when the path takes them. The page size is
-    `DatasetSpec.page_size`, or `Request.limit` when that is smaller.
-
-    Args:
-        spec: The dataset.
-        rest_path: The path.
-        request: The normalized arguments.
-        fixed: Path parameters the caller sets, such as a `history()` window's `{from}` and
-            `{to}` dates; they take precedence.
-
-    Returns:
-        `(path parameters, query parameters)`.
-
-    Raises:
-        ValueError: If `Request.adjusted` is False and the path has no `adjusted` parameter
-            (the crypto indicators): unadjusted prices are never dropped silently.
-
-    Any other parameter the caller set that the path does not take raises the `ValueError` of
-    `_caller_params`.
-    """
-    params = {p.name: p for p in rest_path.params}
-    path, query = _caller_params(spec, rest_path, request)
-    if "multiplier" in params and params["multiplier"].in_path:
-        path["multiplier"] = request.multiplier
-    if request.timespan is not None and "timespan" in params:
-        (path if params["timespan"].in_path else query)["timespan"] = request.timespan
-    if "adjusted" in params and request.adjusted is not None:
-        query["adjusted"] = request.adjusted
-    elif request.adjusted is False:
-        raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
-    if request.timespan is not None and "resolution" in params:
-        query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
-    if spec.page_size is not None and "limit" in params:
-        # A page size, as the list paths read `limit`. The aggregates' range path reads its
-        # `limit` as the number of base aggregates queried instead (at most 50,000); its
-        # datasets set that maximum, and bars take no `limit` argument, so no cap shrinks it.
-        cap = request.limit
-        query["limit"] = spec.page_size if cap is None else min(cap, spec.page_size)
-    path.update(fixed)
-    return path, query
-
-
-def fetch_paths(
-    spec: DatasetSpec, symbols: NormalizedSymbols | None
-) -> list[tuple[str, NormalizedSymbols | None]]:
-    """Return the REST paths a `fetch()` or `poll()` cycle reads, each with its symbols.
-
-    A dataset with a per-symbol detail path (`DatasetSpec.detail_path`, such as one option
-    contract's reference data) reads it once per symbol when the call names symbols, and its
-    list path (`fetch_path`) otherwise. A dataset that serves some asset classes on paths of
-    their own (`DatasetSpec.fetch_paths_by_class`) sends each symbol to its class's path
-    (`symbol_class`), and every other symbol to `fetch_path`.
-
-    Args:
-        spec: The dataset, with a fetch path.
-        symbols: The call's static symbols.
-
-    Returns:
-        `(path template, symbols)` pairs, in the order of each path's first symbol.
-    """
-    default = cast("str", spec.fetch_path)
-    if not isinstance(symbols, tuple) or not symbols:
-        return [(default, symbols)]
-    if spec.detail_path is not None:
-        return [(spec.detail_path, symbols)]
-    if not spec.fetch_paths_by_class:
-        return [(default, symbols)]
-    groups: dict[str, list[str]] = {}
-    for symbol in symbols:
-        path = spec.fetch_paths_by_class.get(symbol_class(symbol), default)
-        groups.setdefault(path, []).append(symbol)
-    return [(path, tuple(group)) for path, group in groups.items()]
-
-
-def plan_calls(
-    spec: DatasetSpec,
-    rest_path: RestPath,
-    request: Request,
-    *,
-    symbols: NormalizedSymbols | None,
-    fixed: Mapping[str, object] | None = None,
-    dates: tuple[date | None, date | None] = (None, None),
-    extra: Mapping[str, object] | None = None,
-    split: CryptoSplit,
-) -> list[Call]:
-    """Plan the requests that serve a dataset call on one REST path.
-
-    Makes no request itself; only `split` may, the first time a crypto pair is split. The
-    REST client checks the parameters against the path again before it sends anything.
-
-    Args:
-        spec: The dataset.
-        rest_path: The path to request.
-        request: The normalized arguments.
-        symbols: The static symbols to request, in place of `request.symbols` (a reactive
-            table has been read into a tuple by now).
-        fixed: Path parameters the caller sets.
-        dates: The time-axis bounds (`_axis_query`); open by default.
-        extra: For `history()`, query parameters added to every call after the time axis:
-            the ascending direction (`_ascending`) and, for one futures session, its
-            `session_end_date`; None adds none.
-        split: Splits a crypto symbol a `{from}/{to}` path takes as two currencies, by
-            Massive's crypto ticker list (`RestReader.crypto_pair`); called only for such a
-            path.
-
-    Returns:
-        The calls, in result order: per symbol, or per chunk of symbols, or one. Each call's
-        dates (its time axis and its date filters on instant parameters) follow the day rules
-        `dates.day_class` picks: the dataset's class, or for a dataset with a path per symbol
-        class (the indicators) the class of the call's own symbols, so a crypto indicator gets
-        UTC days and a stock indicator New York days. Every other dataset without a class
-        gets New York days.
-
-    A path that needs a symbol per request, called without explicit symbols, raises the
-    `ValueError` of `_symbol_parts`; an inexact axis bound the `ValueError` of `_axis_query`.
-    """
-    path, query = _base(spec, rest_path, request, fixed=fixed or {})
-    keys = spec.keys_for(Transport.REST, rest_path.template).declared()
-    filled = set(path) | {key.column for _, key in keys if key.from_request}
-    if "from" in filled:
-        filled.add("to")  # a currency pair fills both
-    placeholders = {p.name for p in rest_path.params if p.in_path}
-    # A `{from}/{to}` pair nothing else fills takes each symbol's currency pair, wherever the
-    # rows' symbol key comes from.
-    pair = {"from", "to"} <= placeholders - filled
-    if pair:
-        filled |= {"from", "to"}
-    empty = [p.name for p in rest_path.params if p.in_path and p.name not in filled]
-    slot = empty[0] if len(empty) == 1 else None
-    calls = []
-    parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair, split=split)
-    for symbol, own_path, own_query in parts:
-        zone_class = day_class(spec, map(symbol_class, _own_symbols(spec, symbol, own_query)))
-        axis = _axis_query(spec, rest_path, dates=dates, asset_class=zone_class)
-        sent = _filter_days(rest_path, {**query, **axis}, zone_class)
-        calls.append(Call({**path, **own_path}, {**sent, **(extra or {}), **own_query}, symbol))
-    return calls
-
-
-@dataclass(frozen=True, eq=False, slots=True)
-class _Converter:
-    """How one dataset turns the rows of one REST path into batches of its schema.
-
-    Built per read and shared, read-only, by the read's worker threads.
-
-    Attributes:
-        dataset: The dataset name, for messages.
-        rest_path: The path.
-        columns: Per schema column, in order: its type, its name, and the source column that
-            fills it, or None for a column the path does not carry (null).
-        arrow_schema: The dataset's Arrow schema.
-        required: The long-form columns every row must carry: the dataset's keys for the path
-            that are not filled from the request.
-        required_on_error: The required columns of an error row (`hosts.is_error_row`): only
-            its symbol key, so a ticker the plan does not include keeps its row.
-        symbols: How a symbol read from the rows becomes canonical (`WireSymbols`), and
-            what a spelling the library cannot read does.
-        symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
-            from the request.
-        time_name: The dataset's time column (`row_times.time_column`), whose epoch `0` is
-            kept, and so fails the timestamp bound, rather than read as absent.
-    """
-
-    dataset: str
-    rest_path: RestPath
-    columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
-    arrow_schema: pa.Schema
-    required: frozenset[str]
-    required_on_error: frozenset[str]
-    symbols: WireSymbols
-    symbol_key: str | None
-    time_name: str
-
-    @classmethod
-    def build(
-        cls,
-        catalog: Catalog,
-        spec: DatasetSpec,
-        rest_path: RestPath,
-        *,
-        unreadable_symbols: OnError,
-    ) -> _Converter:
-        """Prepare the conversion from the path's generated fields and the dataset's schema.
-
-        Args:
-            catalog: The catalog, for the dataset's merged schema.
-            spec: The dataset.
-            rest_path: The path.
-            unreadable_symbols: The session's setting for a symbol spelling the library
-                cannot read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
-
-        Returns:
-            The converter.
-        """
-        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
-        renamed = {c.column: c for c in rename(spec, rest_path)}
-        symbol = renamed.get("Symbol")
-        # The rows' own symbol field, unless the key is filled from the request.
-        symbol_field = None if symbol is None else symbol.field
-        return cls(
-            dataset=spec.name,
-            rest_path=rest_path,
-            columns=tuple((c.type, c.name, renamed.get(c.name)) for c in schema.columns),
-            arrow_schema=schema.arrow_schema(),
-            required=frozenset(f.column for f in required_fields(spec, rest_path)),
-            required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
-            symbols=WireSymbols(
-                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
-            ),
-            symbol_key=None if symbol_field is None else symbol_field.wire_key,
-            time_name=time_column(spec.times),
-        )
-
-    def convert(
-        self, rows: Sequence[Mapping[str, object]], symbol: str | None
-    ) -> tuple[list[pa.RecordBatch], DriftReport, list[Mapping[str, object]]]:
-        """Convert one page's rows into batches of the dataset's schema.
-
-        Error rows (`hosts.is_error_row`: a ticker the plan does not include) are decoded
-        apart, with only their symbol required, and come after the page's other rows.
-
-        Args:
-            rows: The page's rows.
-            symbol: The request's one symbol, which fills the keys taken from the request.
-
-        Returns:
-            The batches (none for an empty page), the page's drift, and the error rows.
-
-        Raises:
-            RowDataError: If a row lacks a required key or holds a value that does not convert
-                (`to_batch`), or a timestamp overflows or lies outside 1990 to 2100.
-        """
-        flagged = [row for row in rows if hosts.is_error_row(row)]
-        good = [row for row in rows if not hosts.is_error_row(row)] if flagged else rows
-        batches: list[pa.RecordBatch] = []
-        extra: set[str] = set()
-        missing: set[str] = set()
-        samples: dict[str, DriftSample] = {}
-        for part, required in ((good, self.required), (flagged, self.required_on_error)):
-            if not part:
-                continue
-            try:
-                batch, drift = to_batch(part, self.rest_path, required=required)
-                batches.append(self._apply(batch, symbol))
-            except WireError as error:
-                raise RowDataError(f"{self.dataset}: {error.message}") from error
-            except UnitMismatchError as error:
-                raise RowDataError(str(error)) from error
-            extra |= drift.extra
-            missing |= drift.missing
-            samples = {**drift.samples, **samples}  # the first part's sample of a key wins
-        drift = DriftReport(extra=frozenset(extra), missing=frozenset(missing), samples=samples)
-        return batches, drift, flagged
-
-    def _apply(self, batch: pa.RecordBatch, symbol: str | None) -> pa.RecordBatch:
-        """Turn one decoded batch into a batch of the dataset's schema.
-
-        Args:
-            batch: The path's fields, by long-form column (`to_batch`).
-            symbol: The value of the keys taken from the request.
-
-        Returns:
-            The batch in the dataset's schema, with the derived columns (`OptionRoot`,
-            `RawSymbol`) computed from the symbols.
-
-        Raises:
-            RowDataError: If a row's symbol is a spelling the library cannot read and the
-                session's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a
-                row keeps a null `Symbol` and the text in `RawSymbol`.
-
-        A timestamp out of range raises the `UnitMismatchError` of `timestamps.instants`.
-        """
-        rows = batch.num_rows
-        arrays: dict[str, pa.Array] = {}
-        raw = pa.nulls(rows, pa.string())
-        for column_type, name, source in self.columns:
-            target = column_type.arrow_type
-            if name == OPTION_ROOT:
-                values = option_roots(arrays["Symbol"])
-            elif name == RAW_SYMBOL:
-                values = raw
-            elif source is None:
-                values = pa.nulls(rows, target)
-            elif source.field is None:
-                values = pa.array([symbol] * rows, target)
-            else:
-                values = batch.column(source.field.column)
-                if name == "Symbol":
-                    read = self.symbols.read(values, {})
-                    if read.unreadable and not self.symbols.keeps:
-                        raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
-                    values, raw = read.symbols, read.raw
-                if source.unit is not None:
-                    label = f"{self.dataset}.{name}"
-                    values = instants(
-                        label, source.unit, values, time_column=name == self.time_name
-                    )
-            arrays[name] = widen(values, target)
-        return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-
-
 def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
     """Drop the repeats of a row that several symbols' requests returned, keeping its first.
 
@@ -998,57 +309,6 @@ def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
     return rows.take(kept.sort())
 
 
-def _whole(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
-    """Keep the bars of a `history()` window whose filled window lies in it (`row_times.within`).
-
-    Args:
-        rows: Rows with their time columns filled.
-        window: The `history()` window, or None for `fetch()` and `poll()`.
-
-    Returns:
-        The rows kept; every row where the window bounds no bar (ticks, `fetch()`, `poll()`).
-    """
-    if window is None or window.bars is None:
-        return rows
-    return within(rows, window.bars)
-
-
-def _keep(batch: pa.RecordBatch, window: HistoryWindow | None, *, time: str) -> pa.RecordBatch:
-    """Keep the rows of a `history()` window: on their time, and for sessions on `Date`.
-
-    A request can return rows outside the window: the aggregates' `{from}/{to}` reach whole
-    periods, a bar may not lie wholly inside the range, and futures bars named by date are
-    requested over a window widened for holidays. A row is kept when its time column lies in
-    `HistoryWindow.times` and its session date, `Date` (Massive's `session_end_date`, as ISO
-    text, which orders as dates do), in `HistoryWindow.sessions`, where the window sets them.
-    Without the column a bound is about, that bound keeps every row. It runs before the time
-    columns are filled, so a bar of several sessions still carries its label here.
-
-    Args:
-        batch: Rows in the dataset's schema.
-        window: The `history()` window, or None for `fetch()` and `poll()`.
-        time: The dataset's time column: `Timestamp`, or a bar's `TimestampStart`.
-
-    Returns:
-        The rows inside the window.
-    """
-    if window is None:
-        return batch
-    names = batch.schema.names
-    masks = []
-    if window.sessions is not None and DATE in names:
-        sessions = batch.column(DATE)
-        masks.append(pc.greater_equal(sessions, pa.scalar(window.sessions.first.isoformat())))
-        masks.append(pc.less_equal(sessions, pa.scalar(window.sessions.last.isoformat())))
-    if window.times is not None and time in names:
-        times = batch.column(time)
-        masks.append(pc.greater_equal(times, pa.scalar(window.times.start_ns, times.type)))
-        masks.append(pc.less(times, pa.scalar(window.times.end_ns, times.type)))
-    if not masks:
-        return batch
-    return batch.filter(functools.reduce(pc.and_, masks))
-
-
 @dataclass(frozen=True, slots=True)
 class _Outcome:
     """What one call returned.
@@ -1068,14 +328,15 @@ class RestState:
     `SessionClients.rest()` creates one per session on first use and registers `close` with the
     session, so the client closes, and every poller stops, when the session closes or is
     collected unclosed. It holds no reference to the session core, so that closer never keeps
-    the core alive. Thread-safe: the host decisions and the once-only flags sit behind one leaf
-    lock, held only to read or change them; the client and the pollers are thread-safe. It
+    the core alive. Thread-safe: the once-only flags sit behind one leaf lock, held only to read
+    or change them; the host decisions (`hosts`, a `HostDecisionCache`), the client, and the
+    pollers are thread-safe. It
     also holds, for the session, Massive's list of crypto tickers with their two currencies
     (`RestReader.crypto_pair`): read once, on first need, by the first caller, while every
     other caller waits on its future outside the lock.
     """
 
-    __slots__ = ("_client", "_crypto", "_hosts", "_lock", "_once", "label", "pollers")
+    __slots__ = ("_client", "_crypto", "_lock", "_once", "hosts", "label", "pollers")
 
     def __init__(self, client: RestClient, label: str) -> None:
         """Hold the session's client; no request is made.
@@ -1088,7 +349,7 @@ class RestState:
         self.label: Final = label
         self.pollers: Final = Pollers(label)
         self._lock = threading.Lock()
-        self._hosts: dict[tuple[AssetClass, ChannelFamily], Future[HostDecision]] = {}
+        self.hosts: Final = HostDecisionCache()
         self._once: set[tuple[str, ...]] = set()
         self._crypto: Future[CryptoTickers] | None = None
 
@@ -1110,73 +371,6 @@ class RestState:
         """
         self.pollers.close()
         self._client.close()
-
-    def host_future(
-        self, key: tuple[AssetClass, ChannelFamily]
-    ) -> tuple[Future[HostDecision], bool]:
-        """Return the decision of a (class, family), or claim it for the caller to make.
-
-        Args:
-            key: The asset class and channel family.
-
-        Returns:
-            The decision's future and whether the caller created it: the creator makes the
-            decision and completes the future; everyone else waits on it, outside every lock.
-        """
-        with self._lock:
-            future = self._hosts.get(key)
-            if future is not None:
-                return future, False
-            future = self._hosts[key] = Future()
-            return future, True
-
-    def known_host(self, key: tuple[AssetClass, ChannelFamily]) -> HostDecision | None:
-        """Return the decision of a (class, family) if one is made, without claiming it.
-
-        A failed decision is removed before its future fails, but this check reads the future
-        under the lock and looks at it after: its maker may forget and fail it in between. So
-        only a decision counts; a failed future gives None, and the caller then claims or
-        waits as usual (`RestEndpoints.resolve_host`), where a failure reaches it as a copy
-        and an abandoned decision as a retry.
-
-        Args:
-            key: The asset class and channel family.
-
-        Returns:
-            The decision, or None while none is made, one is being made, or the one being made
-            has just failed.
-        """
-        with self._lock:
-            future = self._hosts.get(key)
-        return _decided(future)
-
-    def replace_host(self, key: tuple[AssetClass, ChannelFamily], decision: HostDecision) -> None:
-        """Cache a decision for a (class, family) in place of any earlier one.
-
-        A caller already waiting on an earlier decision still gets that one; every later
-        caller gets this one.
-
-        Args:
-            key: The asset class and channel family.
-            decision: The new decision.
-        """
-        future: Future[HostDecision] = Future()
-        future.set_result(decision)
-        with self._lock:
-            self._hosts[key] = future
-
-    def forget_host(
-        self, key: tuple[AssetClass, ChannelFamily], future: Future[HostDecision]
-    ) -> None:
-        """Remove a failed decision, so that the next caller tries again.
-
-        Args:
-            key: The asset class and channel family.
-            future: The failed decision's future; another one under the key is kept.
-        """
-        with self._lock:
-            if self._hosts.get(key) is future:
-                del self._hosts[key]
 
     def crypto_future(self) -> tuple[Future[CryptoTickers], bool]:
         """Return the session's crypto ticker list, or claim it for the caller to read.
@@ -1205,7 +399,7 @@ class RestState:
         """
         with self._lock:
             future = self._crypto
-        return _decided(future)
+        return succeeded_result(future)
 
     def forget_crypto(self) -> None:
         """Remove a failed read of the crypto ticker list, so that the next caller tries again.
@@ -1284,7 +478,7 @@ class RestReader:
         Returns:
             The path.
         """
-        return cast("RestPath", self.catalog.source(Transport.REST, template))
+        return self.catalog.rest_path(template)
 
     def crypto_pair(self, symbol: str) -> tuple[str, str]:
         """Return a crypto ticker's base and quote currencies, with no guess.
@@ -1548,7 +742,7 @@ class RestReader:
         adjustment basis or a symbol whose data was cut short. A closed
         session raises `MassiveError("... is closed")`.
         """
-        converter = _Converter.build(
+        converter = RowConverter.build(
             self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
         )
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
@@ -1616,7 +810,7 @@ class RestReader:
 
     def _call(
         self,
-        converter: _Converter,
+        converter: RowConverter,
         call: Call,
         *,
         spec: DatasetSpec,
@@ -1630,10 +824,9 @@ class RestReader:
         """Request one call's pages and convert their rows.
 
         Each page is checked against the requested adjustment basis (`_check_adjusted`), its
-        bars of a day or longer are stamped (`_stamped`; a stamp Massive is not known to use
-        is served and logs one WARNING per dataset and timespan per session), its rows outside
-        the `history()`
-        window dropped (`_keep`), and its rows given the library's time columns
+        bars of a day or longer are stamped (`stamped`; a stamp Massive is not known to use is
+        served and logs one WARNING per dataset and timespan per session), its rows outside the
+        `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`).
 
@@ -1661,13 +854,13 @@ class RestReader:
         A failed request otherwise raises the public error of its `WireError` (`_public`), and
         once the session is closed every failed request does, a 404 included: the call raises
         `MassiveError("... is closed")` rather than dropping its symbol. A row that breaks the
-        schema raises the `RowDataError` of `_Converter.convert`, and a page on another
-        adjustment basis the `MassiveError` of `_check_adjusted`.
+        schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, and a page on
+        another adjustment basis the `MassiveError` of `_check_adjusted`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
         template = converter.rest_path.template
-        own = _own_symbols(spec, call.symbol, call.query)
+        own = own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
         stamps = stamp_rule(spec, request, warnings=self.warnings, asset_class=zone_class)
         times = time_rule(spec, request, asset_class=zone_class)
@@ -1693,15 +886,17 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
-                # Stamp before keeping: `_keep` judges a bar by its day's start, and an
+                # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
-                    batches = [_stamped(spec, template, batch, rule=stamps) for batch in batches]
+                    batches = [stamped(spec, template, batch, rule=stamps) for batch in batches]
                 filled = (
-                    times.fill(_keep(batch, window, time=converter.time_name), received=received)
+                    times.fill(
+                        keep_window(batch, window, time=converter.time_name), received=received
+                    )
                     for batch in batches
                 )
-                kept.extend(_whole(rows, window) for rows in filled)
+                kept.extend(whole_bars(rows, window) for rows in filled)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
                 # A 404 that arrives after the session closed is no answer about the symbol,
@@ -1787,7 +982,7 @@ class RestReader:
             )
 
     def _warn_error_rows(
-        self, converter: _Converter, flagged: Sequence[Mapping[str, object]], symbol: str | None
+        self, converter: RowConverter, flagged: Sequence[Mapping[str, object]], symbol: str | None
     ) -> None:
         """Log each ticker of an error row once per session, naming Massive's message.
 
@@ -1874,7 +1069,7 @@ class RestReader:
             raise self._public(error) from error
 
     def probe(
-        self, probe: hosts.SnapshotProbe, *, asset_class: AssetClass, patience: Patience
+        self, probe: host_decision.SnapshotProbe, *, asset_class: AssetClass, patience: Patience
     ) -> list[dict[str, object]]:
         """Make a host-decision request and return its raw JSON rows.
 
@@ -1960,8 +1155,8 @@ class RestReader:
             spec: The dataset, with a fetch path.
             request: The normalized arguments.
 
-        When every fetch path refuses a parameter, the first path's `ValueError` (from `_base`
-        or `_axis_query`) is raised.
+        When every fetch path refuses a parameter, the first path's `ValueError` (from
+        `shared_params` or `axis_query`) is raised.
         """
         candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
         errors: list[ValueError] = []
@@ -1970,8 +1165,8 @@ class RestReader:
             for template in templates:
                 rest_path = self.rest_path(template)
                 try:
-                    _base(spec, rest_path, request, fixed={})
-                    _axis_query(
+                    shared_params(spec, rest_path, request, fixed={})
+                    axis_query(
                         spec,
                         rest_path,
                         dates=(request.start, request.end),
@@ -2011,7 +1206,7 @@ class RestReader:
             Each path the cycle reads (`fetch_paths`) with its calls; none for an empty symbol
             tuple (a reactive table with no valid row), which reads nothing.
 
-        A parameter a path does not take raises the `ValueError` of `_base`; a crypto pair
+        A parameter a path does not take raises the `ValueError` of `shared_params`; a crypto pair
         that cannot be split raises the `MassiveError` of `crypto_pair`.
         """
         if symbols == ():
@@ -2065,7 +1260,7 @@ class RestReader:
             count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
-        `ValueError` of `_base`.
+        `ValueError` of `shared_params`.
         """
         planned = self.plan_fetch(spec, request, symbols)
         announce(
@@ -2212,7 +1407,7 @@ class RestEndpoints:
     def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
         """Decide the WebSocket host of a (class, family), once per session, single-flight.
 
-        The first caller for a pair decides (`hosts.decide`, at most one REST request) and
+        The first caller for a pair decides (`host_decision.decide`, at most one REST request) and
         records the decision in the pair's `Transport=REST` row of `m.connections()`; callers
         that arrive meanwhile wait for that decision, outside every lock, each within its own
         patience (`RestReader.wait_for_shared`), and later callers get it at once. A failed
@@ -2235,7 +1430,7 @@ class RestEndpoints:
         waiting caller that gives up raises the error `RestReader.wait_for_shared` describes.
         """
         key = (asset_class, family)
-        known = self._state.known_host(key)
+        known = self._state.hosts.known_host(key)
         if known is not None:
             return known  # a decision already made needs no patience (a Java call)
         reader = self._reader("hosts")
@@ -2243,14 +1438,14 @@ class RestEndpoints:
         # decides.
         patience = reader.patience()
         bucket = bucket_of(subscription_of(asset_class))
-        future, owner = self._state.host_future(key)
+        future, owner = self._state.hosts.host_future(key)
         while not owner:
             what = f"the {asset_class.value} WebSocket host decision"
             if reader.wait_for_shared(future, bucket=bucket, patience=patience, what=what):
                 return _outcome(future)
-            future, owner = self._state.host_future(key)
+            future, owner = self._state.hosts.host_future(key)
         try:
-            decision = hosts.decide(
+            decision = host_decision.decide(
                 asset_class,
                 family,
                 ws_hosts=self._core.config.ws_hosts,
@@ -2258,7 +1453,7 @@ class RestEndpoints:
             )
         except BaseException as error:
             # Forgotten before its future fails, so a waiter that tries again never finds it.
-            self._state.forget_host(key, future)
+            self._state.hosts.forget_host(key, future)
             failure = (
                 error
                 if isinstance(error, MassiveError)
@@ -2345,7 +1540,7 @@ class RestEndpoints:
             decision: The new decision, such as the delayed host with `Recency.DELAYED` and
                 evidence `"server verdict: <message>"`.
         """
-        self._state.replace_host((asset_class, family), decision)
+        self._state.hosts.replace_host((asset_class, family), decision)
         logger.info(
             "%s %s WebSocket host is now %s (%s)",
             asset_class.value,
@@ -2408,8 +1603,8 @@ class RestEndpoints:
         the schema, and `MassiveError` itself for any other failure (a rate limit as `"rate
         limited: ..."`, a closed session as `"... is closed"`).
 
-        A parameter a path does not take raises the `ValueError` of `_base` before any request:
-        every path is planned before the first one is read.
+        A parameter a path does not take raises the `ValueError` of `shared_params` before any
+        request: every path is planned before the first one is read.
         """
         reader = self._reader(f"call-{call}")
         table, _ = reader.read_fetch(
@@ -2432,7 +1627,7 @@ class RestEndpoints:
             spec: The dataset, with a fetch path.
             request: The normalized arguments, with static symbols.
 
-        A parameter a path does not take raises the `ValueError` of `_base`.
+        A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
         self._reader("check").plan_fetch(spec, request, request.symbols, split=_unsplit)
 
@@ -2455,10 +1650,10 @@ class RestEndpoints:
         other request covers the window's instants (`HistoryWindow.requested`): on the
         dataset's time axis, or as the aggregates' `{from}/{to}` millisecond epochs, one
         request series per symbol where the path takes one. Rows outside the window are
-        dropped (`_keep`), bars of a day or longer are stamped at 00:00 of their day in the
-        class day zone (`_stamped`, `row_times.day_starts`; a stamp Massive is not known to
-        use is served and logs one WARNING per dataset and timespan per session), and every
-        row gets the library's
+        dropped (`keep_window`), bars of a day or longer are stamped at 00:00 of their day in the
+        class day zone (`stamped`, `row_times.day_starts`; a stamp Massive is not known to use
+        is served and logs one WARNING per dataset and timespan per session), and every row gets
+        the library's
         time columns. A symbol with no data adds no rows. Before the first request, one INFO
         line announces a long download (`rate_limits.announce`): a grouped-daily or
         per-session download of more than five requests, and any read whose paced requests
@@ -2513,7 +1708,7 @@ class RestEndpoints:
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window.
 
-        A parameter the path does not take raises the `ValueError` of `_base`.
+        A parameter the path does not take raises the `ValueError` of `shared_params`.
         """
         _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
 
@@ -2528,7 +1723,7 @@ class RestEndpoints:
     ) -> Table:
         """Return a live table that re-reads the dataset's fetch path every `interval`.
 
-        See `_ingest/poll.py`: the table is created here, on the caller thread, and one poller
+        See `_tables/poll.py`: the table is created here, on the caller thread, and one poller
         thread of its own runs the cycles until the table is released or the session closes.
 
         Args:
@@ -2564,16 +1759,21 @@ class RestEndpoints:
             interval=interval,
             mode=mode,
             query=query,
-            read=functools.partial(
-                reader.read_cycle,
-                spec,
-                request,
-                pace=PaceCheck(f"{spec.name} poll()", interval.total_seconds()),
+            # The poller hands each cycle the `Cancel` passed as `stop` below.
+            read=cast(
+                "poll.CycleReader",
+                functools.partial(
+                    reader.read_cycle,
+                    spec,
+                    request,
+                    pace=PaceCheck(f"{spec.name} poll()", interval.total_seconds()),
+                ),
             ),
             pollers=self._state.pollers,
             host=host,
             path=paths,
             clock=poll.CLOCK,
+            stop=Cancel(),
         )
 
 
@@ -2622,7 +1822,7 @@ def _request_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
         "%s %s (symbols: %s) is charged to the %s bucket: %s",
         spec.name,
         template,
-        ", ".join(_own_symbols(spec, call.symbol, call.query)) or "none",
+        ", ".join(own_symbols(spec, call.symbol, call.query)) or "none",
         bucket,
         reason,
     )
@@ -2643,7 +1843,7 @@ def _charge(spec: DatasetSpec, template: str, call: Call) -> tuple[str, str]:
     """
     if _REFERENCE_PATH.match(template):
         return OTHER, "a reference endpoint"
-    classes = map(symbol_class, _own_symbols(spec, call.symbol, call.query))
+    classes = map(symbol_class, own_symbols(spec, call.symbol, call.query))
     return bucket_of(subscription_of(day_class(spec, classes))), "its data's class"
 
 
@@ -2676,70 +1876,6 @@ def _report_host_failure(error: MassiveError) -> None:
     logger.log(level, "%s", failure_text(error))
 
 
-def _ascending(spec: DatasetSpec, rest_path: RestPath, request: Request) -> dict[str, object]:
-    """Return the parameters that make a history path return each request's rows oldest first.
-
-    Several REST history paths default to the newest first (the futures trades and bars, the
-    stocks `/v3/trades`), so `history()` asks every path that takes a direction for ascending
-    order, unless the caller set one. The order holds within each request, so within each
-    symbol: the rows of several requests follow one another in request order. The field sorted
-    on is the time axis's field wherever the path lists it. A path with an `order` parameter
-    gets `order=asc`, with `sort` set to the axis field when `sort` lists it, or else to the
-    one value `sort` takes. A path with only `sort` gets the axis field's `.asc` value when it
-    is listed, otherwise the first value that sorts ascending (`asc` on the aggregates,
-    `window_start.asc`), or, where `sort` lists no values, the axis field with `.asc`
-    (`timestamp.asc`).
-
-    Args:
-        spec: The dataset, whose time axis names the field to sort on.
-        rest_path: The history path.
-        request: The normalized arguments; a `sort` or `order` already set is kept.
-
-    Returns:
-        The parameters to add, by wire name; empty for a path that takes no direction.
-    """
-    params = {p.name: p for p in rest_path.params if not p.in_path}
-    if {"sort", "order"} & dict(request.params).keys():
-        return {}
-    sort = params.get("sort")
-    axis = None if spec.time_axis is None else spec.time_axis[0].partition(".")[0]
-    if "order" in params:
-        fields = sort.values if sort is not None else ()
-        field = axis if axis in fields else fields[0] if len(fields) == 1 else None
-        return {"order": "asc", **({"sort": field} if field is not None else {})}
-    if sort is None:
-        return {}
-    values = [v for v in sort.values if v == "asc" or v.endswith(".asc")]
-    if f"{axis}.asc" in values:
-        chosen = f"{axis}.asc"
-    elif values:
-        chosen = values[0]
-    elif axis is not None and not sort.values:
-        chosen = f"{axis}.asc"
-    else:
-        return {}
-    return {"sort": chosen}
-
-
-def _range_segments(requested: TimeRange) -> dict[str, object]:
-    """Return an aggregates path's `{from}` and `{to}` segments for a `history()` window.
-
-    The segments are millisecond epochs, both inclusive: the first instant requested (the
-    start of the first bar that fits the window, `HistoryWindow.requested`, so a request never
-    starts part way through a period) and the last whole millisecond before the end. Rows
-    outside the window are dropped afterwards (`_keep`).
-
-    Args:
-        requested: The instants to request.
-
-    Returns:
-        `{"from": ..., "to": ...}`, as instants the client counts in milliseconds.
-    """
-    first = requested.start.replace(microsecond=requested.start.microsecond // 1000 * 1000)
-    last = requested.end - _ONE_MICROSECOND
-    return {"from": first, "to": last.replace(microsecond=last.microsecond // 1000 * 1000)}
-
-
 def _history_plan(
     reader: RestReader,
     spec: DatasetSpec,
@@ -2751,7 +1887,7 @@ def _history_plan(
     """Plan a REST `history()`'s requests: the path, its calls, and how they are counted.
 
     `dm.ALL` reads the grouped-daily path, one request per trading day of the window; any other
-    request reads the history path (`_history_calls`). Makes no request unless `split` does.
+    request reads the history path (`history_calls`). Makes no request unless `split` does.
 
     Args:
         reader: The reader whose paths the plan names.
@@ -2764,18 +1900,18 @@ def _history_plan(
     Returns:
         The path, the planned calls in result order, and the read's `ReadShape`.
 
-    A parameter the path does not take raises the `ValueError` of `_base`.
+    A parameter the path does not take raises the `ValueError` of `shared_params`.
     """
     if isinstance(request.symbols, _All):
         rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
-        path, query = _base(spec, rest_path, request, fixed={})
+        path, query = shared_params(spec, rest_path, request, fixed={})
         # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
         days = [
             day for day in partition_dates(spec, window) if is_trading_day(spec.asset_class, day)
         ]
         return rest_path, [Call({**path, "date": day}, query) for day in days], ReadShape.PER_DAY
     rest_path = reader.rest_path(cast("str", spec.history_path))
-    calls = _history_calls(spec, rest_path, request, window=window, split=split)
+    calls = history_calls(spec, rest_path, request, window=window, split=split)
     shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
     return rest_path, calls, shape
 
@@ -2809,87 +1945,3 @@ def _token(stop: threading.Event | None) -> Cancel | None:
         The same object, typed as a `Cancel`.
     """
     return cast("Cancel | None", stop)
-
-
-def _history_calls(
-    spec: DatasetSpec,
-    rest_path: RestPath,
-    request: Request,
-    *,
-    window: HistoryWindow,
-    split: CryptoSplit,
-) -> list[Call]:
-    """Plan the requests of a `history()` call with explicit symbols on the history path.
-
-    Every call asks for ascending rows (`_ascending`). A window that requests instants
-    (`HistoryWindow.requested`) sends them on the time axis, or as the aggregates' `{from}` and
-    `{to}` (`_range_segments`). A window without them (futures trades and quotes named by
-    session dates) sends one call per weekday session and symbol with
-    `session_end_date=<date>`: a session is exact by its date even when a holiday opened it
-    days early, and no session ends on a Saturday or Sunday.
-
-    Args:
-        spec: The dataset.
-        rest_path: The history path.
-        request: The normalized arguments, with static symbols.
-        window: The call's window.
-        split: Splits a crypto symbol into its two currencies (`plan_calls`).
-
-    Returns:
-        The calls, in result order: for sessions, by date and then by symbol.
-    """
-    order = _ascending(spec, rest_path, request)
-    requested = window.requested
-    if requested is None:
-        sessions = cast("DaySpan", window.sessions)
-        session = session_date_param(spec)
-        return [
-            call
-            for day in sessions.days()
-            if is_trading_day(spec.asset_class, day)
-            for call in plan_calls(
-                spec,
-                rest_path,
-                request,
-                symbols=request.symbols,
-                extra={**order, session: day},
-                split=split,
-            )
-        ]
-    # The aggregates take their range as `{from}/{to}` timestamp segments.
-    kinds = {p.name: p.kind for p in rest_path.params if p.in_path}
-    ranged = kinds.get("from") is ParamKind.TIMESTAMP
-    return plan_calls(
-        spec,
-        rest_path,
-        request,
-        symbols=request.symbols,
-        fixed=_range_segments(requested) if ranged else {},
-        dates=(requested.start, requested.end),
-        extra=order,
-        split=split,
-    )
-
-
-def _stamped(
-    spec: DatasetSpec, source: str, batch: pa.RecordBatch, *, rule: StampRule
-) -> pa.RecordBatch:
-    """Apply a stamp rule to a batch of bars (`row_times.stamp_rule`), keeping every bar.
-
-    Args:
-        spec: The dataset, for the WARNING.
-        source: The REST path template the bars came from, for the WARNING.
-        batch: Rows in the dataset's schema.
-        rule: The day zone, the stamps Massive is known to use besides 00:00, and the
-            session's warnings.
-
-    Returns:
-        The batch, with its `TimestampStart` at 00:00 of each bar's day in the class day zone.
-
-    A stamp at another time or on another day is moved the same way and logs the WARNING of
-    `row_times.StampRule.stamp`, once per dataset and timespan per session.
-    """
-    name = time_column(spec.times)
-    index = batch.schema.get_field_index(name)
-    moved = rule.stamp(spec.name, batch.column(index), source=source)
-    return batch.set_column(index, name, moved)

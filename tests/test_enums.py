@@ -215,9 +215,11 @@ def _resolution_namespace() -> dict[str, object]:
         "_datasets.timestamps",
         "_tables.diagnostics",
         "_tables.watchlist",
-        "_namespaces.base",
+        "_namespaces.query_building",
         "_namespaces.partners",
         "_namespaces.stocks",
+        "_namespaces.stock_financials",
+        "_namespaces.stock_filings",
     ):
         namespace.update(vars(importlib.import_module(f"deephaven_massive.{module_name}")))
     namespace.update({"Table": Table, "InputTable": InputTable})
@@ -400,6 +402,7 @@ ENUM_PARAMETERS = {
 
 # The `m.stocks` factories' enum parameters, each rejected in `tests/namespaces/test_stocks.py`.
 _STOCKS = "namespaces/test_stocks.py::"
+_STOCK_FINANCIALS = "namespaces/test_stock_financials.py::"
 _STOCK_LIST_DATASETS = (
     *(f"_Stocks.{name}" for name in ("dividends", "splits", "ipos", "short_interest")),
     *(f"_Stocks.{name}" for name in ("short_volume", "share_float")),
@@ -420,7 +423,7 @@ ENUM_PARAMETERS |= {
         for name in _STOCK_LIST_DATASETS
     },
     **{
-        f"_StockFinancials.{name}.timeframe": f"{_STOCKS}test_statements_take_a_timeframe"
+        f"_StockFinancials.{name}.timeframe": f"{_STOCK_FINANCIALS}test_statements_take_a_timeframe"
         for name in ("balance_sheets", "income_statements", "cash_flow_statements")
     },
 }

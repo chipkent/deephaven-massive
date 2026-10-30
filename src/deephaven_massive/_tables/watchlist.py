@@ -25,6 +25,9 @@ Two pieces apply that rule:
   fails; under `LOG` and `IGNORE` each change of the set of skipped values goes to
   `on_skipped`.
 
+A third piece, `watched_rows`, keeps the rows of a live table whose symbol a watchlist holds,
+as `last_by()` does to drop the rows of a symbol the watchlist no longer holds.
+
 A table in other spellings is converted by `canonicalize_symbols` in `_tables/symbols.py`, the
 table form of the symbol converters.
 
@@ -68,6 +71,7 @@ __all__ = [
     "invalid_row_message",
     "read_symbols",
     "skipped_rows_text",
+    "watched_rows",
 ]
 
 logger = logging.getLogger(__name__)
@@ -75,6 +79,9 @@ logger = logging.getLogger(__name__)
 _SYMBOL: Final = "Symbol"
 _SHOWN: Final = 5
 """The most bad values one message lists."""
+_WATCHED: Final = "__MassiveWatched"
+"""The hidden column `watched_rows` joins on and drops. Dataset columns are PascalCase wire names,
+so none can take this name."""
 _SKIPPED_LIMIT: Final = 100
 """The most skipped values logged per process under each of `LOG` and `IGNORE`."""
 _logged_rows: Final = BoundedLog(logger, limit=_SKIPPED_LIMIT, level=logging.WARNING)
@@ -508,3 +515,33 @@ class _SymbolCounter(TableListener):
                 counts[symbol] = count
             else:
                 del counts[symbol]
+
+
+def watched_rows(table: Table, watchlist: Table) -> Table:
+    """Keep the rows of a table whose `Symbol` the watchlist holds, following its changes.
+
+    The result is what `table.where_in(watchlist, "Symbol")` returns: a row is kept while its
+    symbol is in the watchlist, and leaves when the symbol does. A blink table stays a blink
+    table. Duplicate watchlist rows count once.
+
+    It is built from a join instead of `where_in`, because Deephaven 42.7's `where_in` delivers
+    a failure of each of its two tables to its result: when the watchlist fails and the table
+    fails after it, or both in one update cycle, the second failure trips an assertion that
+    ends the process. A watchlist that fails fails its stream too, so a `where_in` here would
+    end the process every time a watchlist failed. A join forwards the first failure of its
+    two tables and ignores the second.
+
+    Call it where a result is built (the `build` of `SessionCore.stream_result`), inside the
+    result's liveness scope, which then manages the tables it creates.
+
+    Args:
+        table: A live table with a `Symbol` column, such as a stream's blink table or its
+            `last_by`.
+        watchlist: The user's symbol table; only its `Symbol` column is read.
+
+    Returns:
+        The table's rows whose symbol the watchlist holds, with the table's columns.
+    """
+    marks = watchlist.select_distinct(_SYMBOL).update_view(f"{_WATCHED} = true")
+    joined = table.natural_join(marks, on=_SYMBOL, joins=_WATCHED)
+    return joined.where(f"{_WATCHED} = true").drop_columns(_WATCHED)

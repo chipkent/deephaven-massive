@@ -1,6 +1,6 @@
 """Tests for OpenAPI resolution: references, `allOf` merges, one-branch choices, and accessors.
 
-Each resolution failure is a `shape` problem, never a guess; `test_rest.py` shows the
+Each resolution failure is a `shape` problem, never a guess; `test_rest_sources.py` shows the
 generator reporting them per path.
 """
 

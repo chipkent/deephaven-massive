@@ -19,8 +19,8 @@ from deephaven.column import InputColumn, string_col
 from deephaven.jcompat import j_hashmap
 from deephaven.table import Table
 
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.column_reference import call_path, section_url
-from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._query import verbs
 from deephaven_massive._session import CATALOG
 

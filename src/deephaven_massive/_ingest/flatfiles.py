@@ -24,14 +24,13 @@ to keep.
   block's rows then get the library's time columns (`row_times.TimeRule`), with
   `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields
-  (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
-  columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
-  do not carry is null and a column a kind widens (an integer size in a `double` column) is
-  widened (`schema.widen`). A file's surviving rows become one static Deephaven table per
-  `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at
-  the end. No block is ever
-  converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on its own
-  I/O threads, so a reader holds about 32 blocks of decompressed text plus at most
+  (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`source_columns.rename`), and
+  the columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files do
+  not carry is null and a column a kind widens (an integer size in a `double` column) is widened
+  (`source_columns.widen`). A file's surviving rows become one static Deephaven table per
+  `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at the end.
+  No block is ever converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on
+  its own I/O threads, so a reader holds about 32 blocks of decompressed text plus at most
   `_TABLE_BLOCKS` blocks of surviving rows, whatever the file's length.
 
 Rows come in partition-date order, then (for futures) venue order (CME, CBOT, NYMEX, COMEX),
@@ -96,6 +95,10 @@ A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of t
 next block, and reads not yet started are cancelled. After a close, no request starts once a
 reader has seen it; a request already in flight is discarded, and the call raises
 `MassiveError("MassiveSession #1 is closed")`.
+
+The module is one subject although it runs past 1,000 lines: it is one transport, from the
+read plan of a call to its table, and every step shares the plan's columns and its failure
+rules.
 """
 
 from __future__ import annotations
@@ -116,6 +119,7 @@ import pyarrow as pa
 from deephaven import merge
 
 from deephaven_massive._datasets.catalog import timespan_key
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.dates import TimeRange, is_trading_day
 from deephaven_massive._datasets.history_source import (
     NOT_PUBLISHED,
@@ -132,23 +136,17 @@ from deephaven_massive._datasets.row_times import (
     time_rule,
     within,
 )
-from deephaven_massive._datasets.schema import (
-    OPTION_ROOT,
-    RAW_SYMBOL,
-    rename,
-    required_fields,
-    widen,
-)
-from deephaven_massive._datasets.symbols import (
-    WireSymbols,
-    option_roots,
-    unreadable_symbol_message,
-    wire_spellings,
-)
+from deephaven_massive._datasets.source_columns import rename, required_fields, widen
+from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
     to_epoch_ns_array,
+)
+from deephaven_massive._datasets.wire_symbols import (
+    WireSymbols,
+    unreadable_symbol_message,
+    wire_spellings,
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
 from deephaven_massive._errors import (
@@ -182,7 +180,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._datasets.schema import ColumnType, SourceColumn
+    from deephaven_massive._datasets.schema import ColumnType
+    from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
@@ -353,7 +352,7 @@ class _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
         The headers to read are the generated fields of `source(FLAT_FILES, prefix)`, renamed
-        for the dataset (`schema.rename`), and the schema is the dataset's merged schema.
+        for the dataset (`source_columns.rename`), and the schema is the dataset's merged schema.
         `DatasetSpec` guarantees, when it is created, that every prefix declares its `symbol`
         and `time` keys from its own columns, and its `session` key for futures.
 
@@ -364,7 +363,7 @@ class _Transform:
             request: The normalized arguments: the canonical symbols to keep, as a tuple
                 (anything else, `dm.ALL` or None for a dataset without instruments, keeps every
                 row), and the bars' timespan and multiplier. The files are filtered on every
-                spelling `symbols.canonical_from_wire` reads as one of the symbols
+                spelling `wire_symbols.canonical_from_wire` reads as one of the symbols
                 (`wire_spellings`: a forex quotes file may write `X:EUR-USD`).
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures sessions named by date keep
@@ -477,8 +476,9 @@ class _Transform:
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
-                session's `unreadable_symbols` is `RAISE` (`symbols.unreadable_symbol_message`);
-                under `WARN` the row keeps a null `Symbol` and the text in `RawSymbol`.
+                session's `unreadable_symbols` is `RAISE`
+                (`wire_symbols.unreadable_symbol_message`); under `WARN` the row keeps a null
+                `Symbol` and the text in `RawSymbol`.
         """
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(batch.num_rows, pa.string())

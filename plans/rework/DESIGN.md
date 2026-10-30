@@ -352,7 +352,7 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
                          symbol_class() (section 10)
   wire_symbols.py        a symbol's transport spellings, both ways: canonical_from_wire(),
                          wire_spellings(), ws_symbol(), WireSymbols, ReadSymbols,
-                         unknown_symbol_message() (section 10)
+                         unreadable_symbol_message() (section 10)
   dates.py               DateLike parsing, [start, end) ranges and bounds, day zones, the
                          trading-day test
   futures_sessions.py    the 17:00 Chicago futures session rule, scalar and Arrow; the weekday
@@ -1182,7 +1182,7 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery): ...
 **The query class of a dataset** is derived from its `DatasetSpec`, never declared on it, so
 the dataset layer never names the query classes. With S meaning the spec has channels, H that it
 has a history source (a history path, a grouped-daily path, or a flat-file prefix), and F that
-it has a fetch path, `query_class(spec)` in `_namespaces/base.py` gives:
+it has a fetch path, `query_class(spec)` in `_namespaces/query_building.py` gives:
 
 | S | H | F | Class (not `bars`) |
 |---|---|---|---|
@@ -1200,7 +1200,7 @@ trade, the last quote, the previous day's bar) is a one-row dataset of its own, 
 endpoint ([section 7.5](#75-one-row-datasets)). A
 `bars` spec must have H and no F; `query_class` gives it `HistoryQuery`, the class of its general
 overload, and `bar_query_class(spec, timespan, multiplier)` picks the class of each call
-([section 7.1](#71-bars-overloads)). A test in `tests/namespaces/test_base.py` checks that every
+([section 7.1](#71-bars-overloads)). A test in `tests/namespaces/test_query_building.py` checks that every
 factory's return annotation is `query_class(spec)` for its catalog spec, that each `bars`
 overload returns `bar_query_class` on a timespan of its `Literal` set and the implementation
 returns `HistoryQuery`, and that every public factory method maps to exactly one spec.
@@ -1346,14 +1346,25 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
 `Table` as symbols and `Symbol` among the keys, the result is
-`blink.last_by(keys).where_in(symbol_table, "Symbol")`, so rows of removed symbols are evicted
-from the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
+`watched_rows(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted from
+the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
 removed and re-added shows its stale row until its next tick. With keys that span symbols (for
-example `by="Exchange"`) the filter comes first, `blink.where_in(symbol_table,
-"Symbol").last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
+example `by="Exchange"`) the filter comes first, `watched_rows(blink,
+symbol_table).last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
 watched when the row arrived, and keeps it after that symbol is removed until a watched symbol
 ticks in the group.
+`watched_rows` (`_tables/watchlist.py`) keeps what `where_in(symbol_table, "Symbol")` keeps, but
+builds it from a join: `natural_join` of the table with the symbol table's distinct symbols,
+marked in a hidden column, then a match filter on the mark. Deephaven 42.7's `where_in` delivers
+a failure of each of its two tables to its result, and a second failure trips an assertion
+whose fatal-error handler calls `System.exit`: verified for both tables failing in one update
+cycle, and for the symbol table failing before the filtered one. A failed symbol table fails
+its stream (below), and the stream's failure always follows the symbol table's, so a
+`where_in` here ended the process every time a reactive `last_by()`'s symbol table failed, or
+the session closed while one ran over another of its live tables. A join forwards the first
+failure of its two tables and ignores the second; so do `merge` and `aj` (verified the same
+way). A blink table stays a blink table through the join and the filter.
 `last_by()` never seeds from REST. The last-trade and last-quote endpoints (the one-row
 datasets of [section 7.5](#75-one-row-datasets)) are absent from Starter and base Business
 plans, so a seed would behave differently per tier; `snapshots(symbols).poll(n)` is the
@@ -1491,7 +1502,7 @@ Each dataset column has one description, chosen by the rule of
 [section 19.4](#194-generated-schemas) from the field descriptions in `spec/descriptions.json`
 (the vendor's, corrected where they are clearly wrong). It reaches users through three outlets,
 all generated from the same dataset schema, so they can never disagree. All three spell the
-transports one way, `REST`, `flat files`, and `WebSocket` (`schema.TRANSPORT_LABELS`): the
+transports one way, `REST`, `flat files`, and `WebSocket` (`column_descriptions.TRANSPORT_LABELS`): the
 key-column descriptions of [section 19.4](#194-generated-schemas) rule 3, `columns()`'s
 `SuppliedBy`, and the column reference's **Supplied by**, so a filter copied from a page
 (``cols.where("SuppliedBy = `WebSocket`")``) works on `columns()`. The `Transport` enum values
@@ -1525,7 +1536,7 @@ table that read a source appends `Read from <source>: <why>.` (`describe(..., no
 a required field of every spec; `DatasetSpec.__post_init__` raises `ValueError`, naming the
 dataset, unless it is one line of text that ends in a period, with no leading or trailing
 whitespace. The dataset method's docstring starts with the same sentence, which the summary
-rule in `tests/namespaces/test_base.py` checks for every factory of the catalog; the library
+rule in `tests/namespaces/test_query_building.py` checks for every factory of the catalog; the library
 never reads `__doc__` at run time, so `python -OO` changes nothing.
 
 - **Every verb describes the exact table it returns, after the shape is derived.** Deephaven
@@ -1535,7 +1546,7 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
   Nothing in `BlinkTableTools` or `RingTableTools` copies attributes, so an append-only or
   ring table derived from a described blink table would lose them. The verb therefore calls
   `describe()` last: on the blink copy for `blink()`, on the append-only or ring table, on the
-  `last_by` table after any `where_in`, on the `poll()` table (the shape derived from its
+  `last_by` table after any symbol-table filter, on the `poll()` table (the shape derived from its
   publisher's blink table), and on the static table of `fetch()` and `history()`.
 - **Threading and liveness.** `describe()` makes a new table, so it runs where every result
   table is made: on the caller thread, inside the result's `LivenessScope`
@@ -2075,15 +2086,15 @@ emit a second client method for one URL (the per-asset-class templates of `/v3/t
 documentation page, with its own documented fields, so it is generated like any other path.
 Likewise `x-polygon-experimental` excludes nothing: the one path that carries it
 (`/vX/reference/tickers/{id}/events`) is documented, and documented endpoints are generated.
-The generator knows every vendor extension it accepts, each with the reason in `refresh/rest.py`;
-an unknown one stops the refresh (`shape`).
+The generator knows every vendor extension it accepts, each with the reason in
+`refresh/rest_sources.py`; an unknown one stops the refresh (`shape`).
 
 **Coverage.** Everything documented is generated or excluded, and everything generated is
 used or deferred:
 
 - **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft)**, tested against the
   pinned snapshot in `tests/massive/refresh/test_generate.py` (WebSocket channels and flat-file
-  prefixes) and `tests/massive/refresh/test_rest.py` (REST paths, and every path a
+  prefixes) and `tests/massive/refresh/test_rest_sources.py` (REST paths, and every path a
   documentation page names is in the OpenAPI spec);
 - **generated = used ⊎ deferred**, tested in `tests/datasets/test_catalog.py`: every generated
   item is read by a declared dataset or deferred (the coverage test, with a negative test that
@@ -2388,8 +2399,8 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   A stream also refuses a row whose topic cannot be built. A symbol table that **fails** (a
   `canonicalize_symbols` table under `RAISE` that met a bad row) fails the result too: the
   watch's error callback queues the stream's failure on the reaper, and `read_symbols` refuses a failed table, so a
-  `poll()` table fails on its next cycle. `last_by()` filters with `where_in` against the table
-  itself.
+  `poll()` table fails on its next cycle. `last_by()` filters against the table itself, with
+  `watched_rows`.
 - **Datasets kept as written.** A dataset whose symbols are a third party's global tickers
   rather than Massive's US-market ones declares `DatasetSpec.symbols_as_written`: its
   `symbols`, the rows of its symbol table, and its rows' symbols are taken exactly as Massive
@@ -3148,7 +3159,7 @@ stream verb for that class instead of being guessed at.
 to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
 either refuses the topic (an explicit `error` that fails that stream and names
 `ws_hosts[AssetClass.STOCKS]`) or serves what the plan includes. A live integration test
-(`tests/ingest/test_hosts_integration.py`, skipped without a key) verifies the host.
+(`tests/ingest/test_host_decision_integration.py`, skipped without a key) verifies the host.
 
 **Indices `V`.** The Value page lists only `wss://business.massive.com/indices`, while its plan
 table says Starter delayed and Advanced real-time, and the indices `A`/`AM` pages list
@@ -3162,12 +3173,13 @@ replies; the live integration test must retire this note before 1.0.
 Each connection is one `_massive.WsClient` ([section 19.2](#192-the-websocket-client)) bound to
 one `wss://host/path`. The client runs on its own daemon thread with its own asyncio loop, and
 owns everything about the wire: the socket, authentication, frame encoding and decoding,
-reconnecting with backoff, and closing. `_ingest/ws.py` owns everything the library decides: the
+reconnecting with backoff, and closing. `_ingest/ws_connection.py` owns everything the library
+decides: the
 desired topics, the acknowledgements, the watchdogs, the routing, and the connection's
 diagnostics. Both run on the client's loop thread; other threads reach a connection only through
 `loop.call_soon_threadsafe` with plain data, and through `WsClient.close()`.
 
-The client reports to `_ingest/ws.py` through four callbacks, each called on the loop thread, in order:
+The client reports to `_ingest/ws_connection.py` through four callbacks, each called on the loop thread, in order:
 
 - `on_open(generation)`: Massive accepted the key (`auth_success`) on a new socket. A
   **generation** is one authenticated socket; the number increases by one per `on_open`.
@@ -3188,16 +3200,16 @@ The client reports to `_ingest/ws.py` through four callbacks, each called on the
   `CLOSED` are terminal, and exactly one of them is reported. The client is the only owner of
   `WAITING_SLOT`; the library displays what it reports.
 
-`_ingest/ws.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
+`_ingest/ws_connection.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
 the client's loop-thread method `set_required(channel, keys, *, symbol=None)`: `keys` is a
-`frozenset` of long-form key columns, built by `_ingest/ws.py` from the `KeySpec`s that the channel's
+`frozenset` of long-form key columns, built by `_ingest/ws_connection.py` from the `KeySpec`s that the channel's
 dataset declares for that channel's source, excluding `from_request` keys, and `symbol` is the
 long-form column of the channel's `symbol` key (`None` when it declares none). The client keeps
 both across generations and hands them to the decoder, so a row missing one of those keys is a
 `Reject` carrying the row's raw symbol, while any other absent field becomes null. A channel
 with no entry has no required keys and no symbol. Wire symbols are never rewritten in
-`_massive`: the flush thread reads the rows' symbols with `WireSymbols` and `_ingest/ws.py`
-reads a reject's with `canonical_from_wire` (both in `_datasets/symbols.py`) when they route
+`_massive`: the flush thread reads the rows' symbols with `WireSymbols` and `_ingest/ws_connection.py`
+reads a reject's with `canonical_from_wire` (both in `_datasets/wire_symbols.py`) when they route
 them, and topics use the wire's own form, as the subscribe frames do. It
 then calls the loop-thread methods `subscribe(generation, topics)` and
 `unsubscribe(generation, topics)`. Each sends at once, in
@@ -3239,7 +3251,7 @@ Responsibilities:
 | Reconnect after every close or failure that `close()` did not request and that is not fatal, after the backoff of [section 19.2](#192-the-websocket-client) | client |
 | Classify a failed upgrade as fatal or retryable (section 19.2) | client; a fatal one is reported as `FAILED` with `WireError(status=<http>)`, which the library turns into a `MassiveError` naming the HTTP status and the host |
 | Decode frames against `ws.json`; report rows, rejects, and drift | client |
-| Read raw wire symbols as canonical symbols (`canonical_from_wire`, `WireSymbols` in `_datasets/symbols.py`) when routing rows and rejects; fail or keep an unreadable one (`unreadable_symbols`) | library |
+| Read raw wire symbols as canonical symbols (`canonical_from_wire`, `WireSymbols` in `_datasets/wire_symbols.py`) when routing rows and rejects; fail or keep an unreadable one (`unreadable_symbols`) | library |
 | Desired topic set, reference counts, single in-flight step, wildcard transitions | library |
 | Sending a step's subscribe and unsubscribe frames, and the one single-topic re-send | library decides; the client sends at once |
 | Per-topic acknowledgement bookkeeping, watchdogs, the explicit-verdict rule | library, from `Status` events |
@@ -3608,7 +3620,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
   there, and one Massive is not known to use for the class logs one WARNING per dataset and
   timespan per session naming the path and the stamp
   ([section 12](#12-timestamp-units-and-day-boundaries), decision 70). Bars are stamped before
-  `_keep` drops the rows outside the window, so an unknown stamp outside it still warns.
+  `keep_window` drops the rows outside the window, so an unknown stamp outside it still warns.
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
   (250 on the unified snapshot, the indices snapshot, and the stocks, forex, and crypto
@@ -3667,7 +3679,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
   ([section 7.4](#74-column-descriptions)).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
   row buffer once. The rows arrive keyed by long-form column; the flush renames them
-  (`rename` in `_datasets/schema.py`), converts them (`_datasets/timestamps.py`), builds one
+  (`rename` in `_datasets/source_columns.py`), converts them (`_datasets/timestamps.py`), builds one
   Arrow batch in the dataset schema, and fills its time columns (`row_times.TimeRule`), each
   row's `TimestampInsert` the instant its frame arrived (each frame is buffered with that
   instant) and a futures row's `Date` corrected by the connection group's schedule calendar
@@ -3904,7 +3916,7 @@ to nanoseconds (for bars, the starts of the bars whose whole window fits; not ap
 futures trades, quotes, and session bars named by date, whose files hold exactly the requested
 sessions), and, on the surviving rows only, the rename to long-form names and
 parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
-`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine, and moves each
+`rename` in `_datasets/source_columns.py` and the `_datasets/timestamps.py` routine, and moves each
 1-day bar's stamp to 00:00 of its day in the class day zone, warning on a stamp it does not know
 (`row_times.day_starts`). No block is converted
 to Python objects. A
@@ -4872,7 +4884,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
 
 ### 19.2 The WebSocket client
 
-`_massive.WsClient` is one object per connection (one `wss://host/path`), created by `_ingest/ws.py`
+`_massive.WsClient` is one object per connection (one `wss://host/path`), created by `_ingest/ws_connection.py`
 and run on its own daemon thread under `asyncio.run`. Its interface and callbacks are those of
 [section 13.3](#133-connection-and-subscription-protocol). **Apart from `start()` (called once by
 its creator, before the loop thread exists), `close()`, and `join(timeout)`, every method must be
@@ -5619,7 +5631,7 @@ carry no description gets `""`, and nothing fails. A column of nested values kep
 (`json-text`) ends its description with "The column holds Massive's nested value as JSON text."
 The sentences of rule 2 and the notes
 are the library's statements about its own columns, not hand input about Massive,
-so they live in `_datasets/schema.py`, not in `refresh/`.
+so they live in `_datasets/column_descriptions.py`, not in `refresh/`.
 
 **Derived columns.** Two columns no source carries are computed by every transport from the
 symbols it reads, and follow the leading key columns with the library's own description and
@@ -5689,7 +5701,7 @@ known to the WebSocket decoder only, and an extra key's value, so a WARNING can 
 outside equality and the `repr`). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
 session's `DriftRegistry` in `_tables/diagnostics.py` (a leaf lock, WARNINGs logged after release) and the
-routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
+routing in `_ingest/rest.py`, `_tables/poll.py`, `_ingest/ws_connection.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
 
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
@@ -5699,7 +5711,7 @@ routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/strea
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text) | `WireError` naming the field, the expected type, and the value (first 200 characters), the whole row logged at DEBUG (first 2,000 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
-| **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
+| **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/host_decision.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 | **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `unreadable_symbols=LOG`, the default, the row is kept with a null `Symbol` and the text in `RawSymbol`, ERROR once per spelling with the library-bug text (at most 100); under `IGNORE` the same at DEBUG; under `RAISE`, a loud failure whose message names the setting and the bug report. |
 
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
@@ -5844,7 +5856,7 @@ The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact 
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
 - **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
   exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
-  dataset method's docstring names its own section; `tests/namespaces/test_base.py` passes:
+  dataset method's docstring names its own section; `tests/namespaces/test_query_building.py` passes:
   every dataset method's docstring starts with its `DatasetSpec.summary`
   ([section 7.4](#74-column-descriptions)).
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.
@@ -6189,7 +6201,7 @@ document already reflects them.
     and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
-    columns its sources carry, and `rename` in `_datasets/schema.py` maps them to `Symbol`, `Timestamp`, and
+    columns its sources carry, and `rename` in `_datasets/source_columns.py` maps them to `Symbol`, `Timestamp`, and
     `Underlying`. Names are never derived from descriptions, and the refresh gates and the catalog
     gates fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The
     final names: `av` → `AccumulatedVolume`, `op` → `OfficialOpen` (2026-10-27: a neutral name
@@ -6779,9 +6791,9 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
-| 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_hosts.py`: both replies | `tests/ingest/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
-| 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
-| 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_hosts.py`: with and without the fields | `tests/ingest/test_hosts_integration.py`: record which fields the live payload carries |
+| 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_host_decision.py`: both replies | `tests/ingest/test_host_decision_integration.py`: subscribe `V.I:SPX` on the resolved host |
+| 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_host_decision.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_host_decision_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
+| 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_host_decision.py`: with and without the fields | `tests/ingest/test_host_decision_integration.py`: record which fields the live payload carries |
 | 8 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
 | 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |
 | 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/massive/ws/test_client_integration.py`: a 1,000-topic frame is acknowledged |
@@ -6818,7 +6830,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 41 | Whether Massive keeps an IPO's `issuer_name` unchanged while the offering moves through its statuses (rumor or pending, new, history, postponed, withdrawn); the vendor documents it only as "Name of issuer" | `stocks.ipos` upserts by `Symbol` and `IssuerName`, so two issuers of one ticker stay apart; were Massive to revise a name, the row under the old name would stay beside the new one, since `UPSERT` never deletes | `tests/namespaces/test_stocks.py`: two issuers of one ticker poll as two rows | `tests/namespaces/test_stocks_integration.py`: a year of IPOs; record every ticker whose rows carry more than one `issuer_name` |
 | 42 | Whether `IssuerCik` and `TransactionDate` identify one row of the insider activity, and `IssuerCik` and `OwnerCik` one row of the insider holdings; the vendor documents one row per issuer and transaction date, and one per reporting owner per issuer, but marks none of the four fields required | Both datasets replace their `poll()` table keyed by those columns; a null key fails the table, and two rows sharing a key would keep only one | `tests/namespaces/test_stocks.py`: each key column is needed to tell the fixture's rows apart | `tests/namespaces/test_stocks_integration.py`: a year of NVDA's activity and NVDA's holdings; record and refuse any key shared by two rows |
 | 43 | Massive's spelling of every US stock ticker: the documentation shows `BRK.A` and `KIMpL` only; warrants, units, rights, when-issued, and test issues are undocumented, and Benzinga and ETF Global rows may spell tickers otherwise (the TMX calendar is global and keeps its tickers as written) | The canonical grammar is an upper-case root and the CQS suffixes `.X`, `pX`, `r`, and `w`; the conventions convert plain tickers, classes, and preferreds only; a row spelled otherwise follows `unreadable_symbols` (kept in `RawSymbol` and logged by default) | `tests/datasets/test_symbols.py`: the grammar, each convention's table and refusals, and the unreadable spellings | `tests/namespaces/test_reference_integration.py`: `tickers(ticker_type=...)` for `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and one page of each partner dataset; record every spelling outside the grammar |
-| 44 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
+| 44 | Which endpoints of the indices class send an index without its `I:` prefix | Every dataset of the indices class reads a bare ticker as `I:` and the ticker; datasets of other classes and cross-class datasets never add it | `tests/datasets/test_wire_symbols.py`: `canonical_from_wire` adds the prefix only for the indices class, and no conversion depends on the name | `tests/namespaces/test_indices_integration.py`: one request of each indices dataset, the unified snapshot, and an indicator for `I:SPX`; record the spelling of each row's ticker |
 | 45 | `Underlying` of the options datasets for `BRK.B`, `SPX`/`SPXW`, `NDX`/`NDXP`, `VIX`/`VIXW`, and an adjusted contract (`AAPL1`, `DELL1`), and whether the chain takes `I:SPX` as its underlying | `Underlying` is Massive's field as sent; `underlying=` is sent as given; nothing maps a root to an underlying | `tests/namespaces/test_options.py`: the chain's `Underlying` is the fixture's, `underlying=` keeps case and refuses other classes | `tests/namespaces/test_options_integration.py`: one chain and one contracts request for each; record `Underlying` and `OptionRoot` |
 | 46 | The deliverable fields of `/v3/reference/options/contracts`: what `correction` means, whether a contract without further deliverables omits `additional_underlyings` or sends an empty list, and what index options report as `shares_per_contract` | The raw fields only (`SharesPerContract`, `AdditionalUnderlyings` as JSON text, `Cfi`, `Correction`), no derived flag; the chain's docstring recipe treats null and `[]` alike | `tests/namespaces/test_options.py`: the contracts schema carries the four fields with their descriptions and no `StandardDeliverable` | `tests/namespaces/test_options_integration.py`: the contracts of DELL1 (2021-11), FF1 (2024-04), an all-cash merger, and SPX; record the four fields, then decide on a derived flag |
 | 47 | The shapes of single futures contract tickers: two-digit years (`0NGH39`; the documentation's `ESZ24`) | Upper-case letters and digits; a year is never rewritten, and `ESZ25` is not `ESZ5`; spreads are item 48 | `tests/datasets/test_symbols.py`: `ESZ5`, `6CH5`, `0NGH39`, and `ESZ25` are canonical, `esz5` and `ES-Z5` are not | `tests/namespaces/test_futures_integration.py`: `contracts(type='single')` for one product over several years; record every ticker shape |

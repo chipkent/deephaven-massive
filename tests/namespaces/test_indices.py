@@ -30,12 +30,8 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._enums import NotBars
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import indices
-from deephaven_massive._namespaces.base import Namespace, query_class
-from deephaven_massive._query import (
-    HistoryQuery,
-    Query,
-    StreamHistoryQuery,
-)
+from deephaven_massive._namespaces.query_building import Namespace
+from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery, query_class
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import stream
 

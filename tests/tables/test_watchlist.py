@@ -6,13 +6,15 @@ import threading
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from deephaven import dtypes, input_table, new_table, time_table
+from deephaven import dtypes, input_table, new_table, time_table, update_graph
 from deephaven.column import int_col, string_col
+from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._namespaces import crypto, forex, partners
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.liveness import new_scope, release_scope
+from deephaven_massive._tables.publisher import blink_publisher
 from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
     SymbolRows,
@@ -21,17 +23,21 @@ from deephaven_massive._tables.watchlist import (
     invalid_row_message,
     read_symbols,
     skipped_rows_text,
+    watched_rows,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from deephaven.execution_context import ExecutionContext
+    from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
     from deephaven.table_listener import TableUpdate
 
     from deephaven_massive._datasets.catalog import DatasetSpec
 
 Change = tuple[frozenset[str], frozenset[str]]
+PRICES = {"Symbol": dtypes.string, "Price": dtypes.int32}
 
 
 def values(table: Table, column: str = "Symbol") -> list[object]:
@@ -360,3 +366,86 @@ def test_the_counter_reports_skipped_values_of_updates() -> None:
     ]
     assert skipped == [("b",), (), ("x:btc",)]  # only when the set of skipped values changes
     assert refused == []
+
+
+# --- watched_rows ----------------------------------------------------------------------------
+
+
+def test_watched_rows_keeps_the_watched_symbols_and_follows_the_watchlist(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    scope = new_scope()
+    with scope.open():
+        prices = input_table({"Symbol": dtypes.string, "Price": dtypes.int32}, key_cols=["Symbol"])
+        prices.add(new_table([string_col("Symbol", ["A", "B", "C"]), int_col("Price", [1, 2, 3])]))
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+        watchlist.add(new_table([string_col("Symbol", ["A", "B"])]))
+        kept = watched_rows(prices, watchlist)
+    wait_for(lambda: sorted(cast("list[str]", values(kept))) == ["A", "B"])
+    assert kept.column_names == ["Symbol", "Price"]  # the hidden mark is dropped
+    watchlist.delete(new_table([string_col("Symbol", ["B"])]))
+    wait_for(lambda: values(kept) == ["A"])
+    watchlist.add(new_table([string_col("Symbol", ["C"])]))
+    wait_for(lambda: sorted(cast("list[str]", values(kept))) == ["A", "C"])
+    release_scope(dh_exec_ctx, scope)
+
+
+def test_watched_rows_keeps_a_blink_table_blink_and_counts_a_repeated_symbol_once(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    pins: list[LivenessScope] = []
+    scope = new_scope()
+    with scope.open():
+        blink, publisher = blink_publisher(
+            "watched", PRICES, on_shutdown=lambda: None, release_later=pins.append
+        )
+        kept = watched_rows(blink, new_table([string_col("Symbol", ["A", "A"])]))
+        latest = kept.last_by("Symbol")
+    assert kept.is_blink  # so `last_by` keeps each symbol's row after its cycle
+    publisher.add(new_table([string_col("Symbol", ["A", "B"]), int_col("Price", [1, 2])]))
+    wait_for(lambda: [tuple(r) for r in latest.iter_tuple()] == [("A", 1)])
+    publisher.add(new_table([string_col("Symbol", ["A"]), int_col("Price", [5])]))
+    wait_for(lambda: [tuple(r) for r in latest.iter_tuple()] == [("A", 5)])
+    release_scope(dh_exec_ctx, scope)
+
+
+@pytest.mark.parametrize(
+    "order", ["in one cycle", "watchlist first", "table first"], ids=lambda order: order
+)
+def test_watched_rows_takes_one_failure_when_both_of_its_tables_fail(
+    dh_exec_ctx: ExecutionContext, order: str
+) -> None:
+    # `where_in` would end the process in the first two orders: Deephaven 42.7 delivers a
+    # failure of each of its tables to its result, and asserts on the second. Failing both
+    # under the update graph's exclusive lock lands them in one cycle, which does not help it.
+    pins: list[LivenessScope] = []
+    scope = new_scope()
+    with scope.open():
+        blink, table_publisher = blink_publisher(
+            "prices", PRICES, on_shutdown=lambda: None, release_later=pins.append
+        )
+        watch_blink, watch_publisher = blink_publisher(
+            "watch", {"Symbol": dtypes.string}, on_shutdown=lambda: None, release_later=pins.append
+        )
+        kept = watched_rows(blink.last_by("Symbol"), blink_to_append_only(watch_blink))
+        downstream = kept.update_view("Twice = Price * 2")
+    if order == "in one cycle":
+        with update_graph.exclusive_lock(dh_exec_ctx.update_graph):
+            watch_publisher.publish_failure(RuntimeError("the watchlist failed"))
+            table_publisher.publish_failure(RuntimeError("the table failed"))
+    else:
+        first, second = (
+            (watch_publisher, table_publisher)
+            if order == "watchlist first"
+            else (table_publisher, watch_publisher)
+        )
+        first.publish_failure(RuntimeError("the first failure"))
+        wait_for(lambda: bool(kept.j_table.isFailed()))
+        second.publish_failure(RuntimeError("the second failure"))
+    wait_for(lambda: bool(blink.j_table.isFailed() and watch_blink.j_table.isFailed()))
+    with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        pass  # the cycle that delivered the last failure has ended, and the process lives
+    assert downstream.j_table.isFailed()
+    for pin in pins:
+        release_scope(dh_exec_ctx, pin)
+    release_scope(dh_exec_ctx, scope)

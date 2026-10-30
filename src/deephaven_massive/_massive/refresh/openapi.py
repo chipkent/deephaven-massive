@@ -6,7 +6,7 @@ branch), checking the shape it expects at every step and reporting a `shape` pro
 guessing; a cyclic document stops after a fixed depth. The small functions below read one
 attribute of a resolved schema without trusting its type.
 
-The REST generator (`rest`) is the first reader; the WebSocket specification uses the same
+The REST generator (`rest_sources`) is the first reader; the WebSocket specification uses the same
 schema language, so its generator reads it through this module too. It imports the standard
 library and `gates` only.
 """
