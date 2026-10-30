@@ -30,7 +30,7 @@ from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.dates import NEW_YORK
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import ChannelFamily
@@ -43,7 +43,7 @@ from deephaven_massive._massive import (
     source,
     to_batch,
 )
-from deephaven_massive._namespaces import stocks
+from deephaven_massive._namespaces import stock_filings, stock_financials, stocks
 from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import (
     HistoryQuery,
@@ -72,7 +72,10 @@ SNAPSHOTS_PATH = "/v2/snapshot/locale/us/markets/stocks/tickers"
 Fixture = Callable[[str, str], bytes]
 
 # The datasets of the namespace, by name below `stocks`.
-ALL_NAMES = [spec.name.removeprefix("stocks.") for spec in stocks.DATASETS]
+TREE_DATASETS = (*stocks.DATASETS, *stock_financials.DATASETS, *stock_filings.DATASETS)
+"""Every dataset of the `m.stocks` tree, in catalog order."""
+
+ALL_NAMES = [spec.name.removeprefix("stocks.") for spec in TREE_DATASETS]
 
 # The REST list datasets: optional `symbols`, `dm.ALL` refused, the `…F` block.
 LIST_WITH_SYMBOLS = [
@@ -217,8 +220,8 @@ def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSessio
     namespace = massive_session.stocks
     assert type(namespace) is stocks._Stocks
     assert isinstance(namespace, Namespace)
-    assert type(namespace.financials) is stocks._StockFinancials
-    assert type(namespace.filings) is stocks._StockFilings
+    assert type(namespace.financials) is stock_financials._StockFinancials
+    assert type(namespace.filings) is stock_filings._StockFilings
     assert namespace.financials is namespace.financials
     label = massive_session._core.label
     assert repr(namespace.financials) == f"<{label} stocks.financials>"
@@ -226,7 +229,7 @@ def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSessio
 
 
 def test_every_dataset_is_in_the_process_catalog() -> None:
-    assert all(CATALOG.by_name[spec.name] is spec for spec in stocks.DATASETS)
+    assert all(CATALOG.by_name[spec.name] is spec for spec in TREE_DATASETS)
     assert sorted(ALL_NAMES) == sorted(
         [
             *STREAMED,
@@ -241,7 +244,7 @@ def test_every_dataset_is_in_the_process_catalog() -> None:
 
 
 def test_the_namespace_alone_passes_every_catalog_gate() -> None:
-    assert Catalog(stocks.DATASETS).problems() == ()
+    assert Catalog(TREE_DATASETS).problems() == ()
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
@@ -311,14 +314,6 @@ def test_rows_that_list_several_tickers_keep_tickers_and_have_no_symbol(name: st
     assert "Symbol" not in found
     assert found["Tickers"] is ColumnType.STRING_ARRAY
     assert not CATALOG.takes_symbols(spec_of(name))
-
-
-def test_institutional_holdings_keep_the_filer_cik() -> None:
-    found = columns("filings.institutional_holdings")
-    assert "Symbol" not in found
-    assert found["FilerCik"] is ColumnType.STRING
-    declared = stocks.INSTITUTIONAL_HOLDINGS.keys_for(R, "/stocks/filings/vX/13-F")
-    assert declared == SourceKeys(fanout=KeySpec("FilerCik", instrument=False))
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
@@ -609,125 +604,11 @@ def test_filters_reach_the_request(massive_session: dm.MassiveSession) -> None:
         massive_session.stocks.dividends(filters={"distribution_type": "monthly"})
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "financials.balance_sheets",
-        "financials.income_statements",
-        "financials.cash_flow_statements",
-    ],
-)
-def test_statements_take_a_timeframe(massive_session: dm.MassiveSession, name: str) -> None:
-    make = factory(massive_session, name)
-    query = make("AAPL", timeframe=dm.Timeframe.QUARTERLY)
-    assert dict(query._request.params) == {"timeframe": dm.Timeframe.QUARTERLY}
-    assert make()._request.params == ()
-    with pytest.raises(TypeError, match=r"timeframe must be dm\.Timeframe"):
-        make(timeframe="annual")
-
-
-@pytest.mark.parametrize(
-    "name", ["financials.income_statements", "financials.cash_flow_statements"]
-)
-def test_flow_statements_offer_the_trailing_twelve_months(
-    massive_session: dm.MassiveSession, name: str
-) -> None:
-    trailing = factory(massive_session, name)(timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS)
-    assert dict(trailing._request.params) == {"timeframe": dm.Timeframe.TRAILING_TWELVE_MONTHS}
-
-
-def test_balance_sheets_refuse_the_trailing_twelve_months(
-    massive_session: dm.MassiveSession,
-) -> None:
-    with pytest.raises(ValueError, match="balance sheets have no trailing twelve months"):
-        massive_session.stocks.financials.balance_sheets(
-            timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS
-        )
-
-
-def test_filings_index_takes_a_form_type(massive_session: dm.MassiveSession) -> None:
-    query = massive_session.stocks.filings.index(form_type="10-K")
-    assert dict(query._request.params) == {"form_type": "10-K"}
-    with pytest.raises(TypeError, match="form_type must be a str"):
-        massive_session.stocks.filings.index(form_type=cast("Any", 10))
-
-
-def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession) -> None:
-    filings = massive_session.stocks.filings
-    query = filings.institutional_holdings(filer_cik="0001067983")
-    assert dict(query._request.params) == {"filer_cik": "0001067983"}
-    assert query._request.symbols is None
-    with pytest.raises(TypeError, match="filer_cik must be a str"):
-        filings.institutional_holdings(filer_cik=cast("Any", 1067983))
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "filings.initial_insider_ownership",
-        "filings.insider_transactions",
-        "filings.insider_holdings",
-    ],
-)
-def test_insider_datasets_take_issuer_and_owner(
-    massive_session: dm.MassiveSession, name: str
-) -> None:
-    make = factory(massive_session, name)
-    query = make("AAPL", issuer_cik="0000320193", owner_cik="0001214156")
-    assert dict(query._request.params) == {"issuer_cik": "0000320193", "owner_cik": "0001214156"}
-    # A sequence of CIKs is sent as the `.any_of` form, which the paths also document.
-    query = make(issuer_cik=["0000320193", "0001045810"], owner_cik=("0001214156",))
-    assert dict(query._request.params) == {
-        "issuer_cik.any_of": ("0000320193", "0001045810"),
-        "owner_cik.any_of": ("0001214156",),
-    }
-    with pytest.raises(TypeError, match="issuer_cik must be a str, a sequence of str, or None"):
-        make(issuer_cik=320193)
-    with pytest.raises(TypeError, match="owner_cik must be a str, a sequence of str, or None"):
-        make(owner_cik=1214156)
-    with pytest.raises(ValueError, match=r"issuer_cik is empty; pass None for every issuer$"):
-        make(issuer_cik=[])
-    with pytest.raises(ValueError, match=r"owner_cik is empty; pass None for every owner$"):
-        make(owner_cik=())
-    with pytest.raises(TypeError):
-        make(issuer_cik=[320193])
-    # The list forms belong to the arguments, and the refusal names the argument to use.
-    with pytest.raises(ValueError, match="its own argument, owner_cik="):
-        make(filters={"owner_cik_any_of": ["0001214156"]})
-
-
-def test_insider_activity_takes_issuers_and_no_owner(massive_session: dm.MassiveSession) -> None:
-    # The totals sum every insider of the issuer, so the path documents no owner filter.
-    activity = massive_session.stocks.filings.insider_activity
-    query = activity("NVDA", issuer_cik="0001045810")
-    assert dict(query._request.params) == {"issuer_cik": "0001045810"}
-    query = activity(issuer_cik=["0001045810", "0000320193"])
-    assert dict(query._request.params) == {"issuer_cik.any_of": ("0001045810", "0000320193")}
-    assert "owner_cik" not in inspect.signature(activity).parameters
-    with pytest.raises(TypeError, match="issuer_cik must be a str"):
-        activity(issuer_cik=cast("Any", 1045810))
-    with pytest.raises(ValueError, match="issuer_cik is empty"):
-        activity(issuer_cik=[])
-    with pytest.raises(ValueError, match="its own argument, issuer_cik="):
-        activity(filters={"issuer_cik_any_of": ["0001045810"]})
-
-
-@pytest.mark.parametrize("name", ["filings.insider_activity", "filings.insider_holdings"])
-def test_insider_aggregates_leave_no_parameter_to_filters(
-    massive_session: dm.MassiveSession, name: str
-) -> None:
-    # The arguments reserve every form of the tickers (`tickers.all_of` included), the CIKs,
-    # and the date (the exclusive bounds included), as the docstrings say, which leaves no
-    # filter; a parameter Massive adds later shows up here.
-    with pytest.raises(ValueError, match=r"valid filters: \[\]"):
-        factory(massive_session, name)(filters={"anything": "x"})
-
-
 # --- Fixtures ------------------------------------------------------------------------------------
 
 
 def test_every_rest_source_has_a_fixture() -> None:
-    used = {key for spec in stocks.DATASETS for t, key in spec.sources if t is R}
+    used = {key for spec in TREE_DATASETS for t, key in spec.sources if t is R}
     assert used == set(SOURCES)
 
 
@@ -748,7 +629,7 @@ def test_fixtures_decode_with_their_declared_keys_and_no_drift(
         page = client.get(rest_path, placeholders, {}, bucket="stocks")
     finally:
         client.close()
-    spec = next(s for s in stocks.DATASETS if (R, path) in s.sources)
+    spec = next(s for s in TREE_DATASETS if (R, path) in s.sources)
     required = [key.column for _, key in spec.keys_for(R, path).declared() if not key.from_request]
     batch, drift = to_batch(page.rows, rest_path, required=required)
     assert batch.num_rows >= 1
@@ -1369,65 +1250,6 @@ def test_limit_caps_the_rows_and_never_raises_the_page_size(
     assert [r["Symbol"] for r in out] == ["AAPL"]
 
 
-# The vendor's documented sample row of each insider dataset, as the table holds it: one
-# column per documented field in the vendor's order, dates as `LocalDate`, and each list of
-# tickers or roles as JSON text.
-INSIDER_ROWS = {
-    "filings.insider_activity": {
-        "IssuerCik": "0001045810",
-        "IssuerName": "NVIDIA CORP",
-        "LastFilingDate": "2026-09-18",
-        "NetShares": -34918.0,
-        "NetValue": -7648632.45,
-        "PlannedPurchaseValue": 0.0,
-        "PlannedSaleValue": 7648632.45,
-        "PurchaseCount": 0,
-        "PurchaseShares": 0.0,
-        "PurchaseValue": 0.0,
-        "PurchaserCount": 0,
-        "SaleCount": 3,
-        "SaleShares": 34918.0,
-        "SaleValue": 7648632.45,
-        "SellerCount": 1,
-        "Tickers": ["NVDA"],
-        "TransactionDate": "2026-09-17",
-    },
-    "filings.insider_holdings": {
-        "FilingCount": 94,
-        "FirstFilingDate": "2013-10-09",
-        "IssuerCik": "0001045810",
-        "IssuerName": "NVIDIA CORP",
-        "LastFilingDate": "2026-09-18",
-        "OfficerTitle": "EVP & Chief Financial Officer",
-        "OldestPositionDate": "2021-09-15",
-        "OwnerCik": "0001588670",
-        "OwnerName": "Kress Colette",
-        "OwnershipPct": 0.0198,
-        "PositionCount": 11,
-        "Roles": ["officer"],
-        "SharesOwned": 4776533.0,
-        "SharesOwnedDirect": 765103.0,
-        "SharesOwnedIndirect": 4011430.0,
-        "Tickers": ["NVDA"],
-    },
-}
-
-
-@pytest.mark.parametrize("name", list(INSIDER_ROWS))
-def test_insider_datasets_normalize_every_documented_field(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture, name: str
-) -> None:
-    path = cast("str", spec_of(name).fetch_path)
-    fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
-    table = cast("Query", factory(rest_session, name)()).fetch()
-    assert sent(fake_rest) == [(path, {"limit": "10000"})]
-    (row,) = table_rows(table)
-    # Every row carries the instant its page arrived, last.
-    assert list(row)[-1] == "TimestampInsert"
-    assert row.pop("TimestampInsert") is not None
-    assert row == INSIDER_ROWS[name]
-
-
 def test_ipos_fan_out_one_request_per_ticker(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
@@ -1819,7 +1641,7 @@ FLAT_CASES: list[tuple[str, Callable[[Any], HistoryQuery], str, str, list[tuple[
 def test_every_flat_file_prefix_has_a_round_trip() -> None:
     prefixes = {
         prefix.removeprefix("us_stocks_sip/")
-        for spec in stocks.DATASETS
+        for spec in TREE_DATASETS
         for prefix in spec.flat_file_prefixes.values()
     }
     assert prefixes == {name for name, *_ in FLAT_CASES}
@@ -1843,17 +1665,6 @@ def test_a_flat_file_block_round_trips(
     assert [(r["Symbol"], r[time], r[column]) for r in out] == expected
     assert {r["Date"] for r in out} == {"2023-03-28"}
     assert fake_s3.requests == [("flatfiles", key)]
-
-
-def test_a_13f_row_without_its_filer_fails_the_request(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
-) -> None:
-    path = "/stocks/filings/vX/13-F"
-    body = json.loads(load_fixture(FIXTURES, "filings_institutional_holdings.json"))
-    del body["results"][1]["filer_cik"]
-    fake_rest.reply(path, Reply(body=body))
-    with pytest.raises(dm.MassiveError, match="FilerCik"):
-        rest_session.stocks.filings.institutional_holdings().fetch()
 
 
 # --- Poll keys identify rows -------------------------------------------------------------------
@@ -1965,54 +1776,7 @@ def test_only_the_ownership_filings_have_nullable_poll_keys(name: str) -> None:
     assert all(nullable.values())  # each with its reason
 
 
-@pytest.mark.parametrize("mode", list(dm.PollMode))
-@pytest.mark.parametrize("name", list(NULLABLE_KEYS))
-def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Fixture,
-    name: str,
-    mode: dm.PollMode,
-) -> None:
-    # The real fixtures leave nullable key columns empty: a null there is a value, so the
-    # first cycle publishes every row instead of failing the table.
-    template = cast("str", spec_of(name).fetch_path)
-    body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
-    fake_rest.reply(template, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60, mode=mode)
-    rows = _rows_when(table, len(body["results"]))
-    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
-    assert not failed
-    assert any(row[column] is None for row in rows for column in NULLABLE_KEYS[name])
-    rest_session.release(table)
-
-
 # --- Rows that share a ticker or an accession number -----------------------------------------
-
-
-@pytest.mark.parametrize("name", ["filings.index", "filings.text_8k"])
-def test_a_filing_under_two_filers_polls_as_two_rows(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Fixture,
-    name: str,
-) -> None:
-    # EDGAR lists one accession under each filer: an issuer and the reporting owner, who has
-    # no ticker. Both rows must survive the poll, not only the first.
-    path = cast("str", spec_of(name).fetch_path)
-    body = json.loads(load_fixture(FIXTURES, SOURCES[path][0]))
-    first = body["results"][0]
-    owner = {k: v for k, v in first.items() if k != "ticker"} | {"cik": "0001214128"}
-    body["results"] = [first, owner]
-    fake_rest.reply(path, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60)
-    rows = _rows_when(table, 2)
-    assert sorted((row["Cik"], row["AccessionNumber"]) for row in rows) == sorted(
-        [(first["cik"], first["accession_number"]), ("0001214128", first["accession_number"])]
-    )
-    rest_session.release(table)
 
 
 def test_two_issuers_of_one_ticker_poll_as_two_offerings(
@@ -2034,78 +1798,6 @@ def test_two_issuers_of_one_ticker_poll_as_two_offerings(
     rest_session.release(table)
 
 
-# Lines of one filing that agree on every other key and differ in one column: a 13-F lists one
-# security on several lines split by amount or voting authority, and a Form 4 reports option
-# tranches that differ only in when they become exercisable, two sales that differ only in the
-# shares owned afterwards, or one acquisition and one disposal.
-DISTINGUISHING_LINES = [
-    ("filings.institutional_holdings", "shares_or_principal_amount"),
-    ("filings.institutional_holdings", "shares_or_principal_type"),
-    ("filings.institutional_holdings", "voting_authority_sole"),
-    ("filings.institutional_holdings", "voting_authority_shared"),
-    ("filings.institutional_holdings", "voting_authority_none"),
-    ("filings.insider_transactions", "exercise_date"),
-    ("filings.insider_transactions", "shares_owned_following_transaction"),
-    ("filings.insider_transactions", "transaction_acquired_disposed"),
-]
-
-
-def _poll_lines(
-    session: dm.MassiveSession, server: FakeRestServer, *, name: str, lines: list[dict[str, Any]]
-) -> tuple[Table, list[dict[str, Any]]]:
-    # Serve `lines` as one response and poll the dataset with its default mode until every
-    # line is published.
-    path = cast("str", spec_of(name).fetch_path)
-    server.reply(path, Reply(body={"status": "OK", "request_id": "r", "results": lines}))
-    table = cast("Query", factory(session, name)(start="2025-01-02")).poll(60)
-    return table, _rows_when(table, len(lines))
-
-
-@pytest.mark.parametrize(("name", "wire_key"), DISTINGUISHING_LINES)
-def test_ownership_filing_lines_that_differ_in_one_column_poll_as_two_rows(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Fixture,
-    name: str,
-    wire_key: str,
-) -> None:
-    template = cast("str", spec_of(name).fetch_path)
-    field = next(f for f in cast("RestPath", source(R, template)).fields if f.wire_key == wire_key)
-    first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
-    other = first | {wire_key: _other(first.get(wire_key), field.wire_type)}
-    table, rows = _poll_lines(rest_session, fake_rest, name=name, lines=[first, other])
-    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
-    assert not failed
-    assert len({row[field.column] for row in rows}) == 2
-    rest_session.release(table)
-
-
-@pytest.mark.parametrize(
-    ("name", "wire_key"),
-    [
-        ("filings.institutional_holdings", "voting_authority_shared"),
-        ("filings.insider_transactions", "shares_owned_following_transaction"),
-    ],
-)
-def test_an_ownership_filing_line_with_an_empty_optional_key_still_polls(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Fixture,
-    name: str,
-    wire_key: str,
-) -> None:
-    # Massive marks the field optional (or the form lets the filer leave it out): one line
-    # without it is a value, not a data failure that would stop the live table.
-    template = cast("str", spec_of(name).fetch_path)
-    first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
-    table, _ = _poll_lines(rest_session, fake_rest, name=name, lines=[first | {wire_key: None}])
-    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
-    assert not failed
-    rest_session.release(table)
-
-
 # --- Filings without a ticker --------------------------------------------------------------------
 
 OPTIONAL_TICKER = [
@@ -2114,27 +1806,6 @@ OPTIONAL_TICKER = [
     "filings.text_8k",
     "filings.risk_factors",
 ]
-
-
-@pytest.mark.parametrize("name", OPTIONAL_TICKER)
-def test_a_filing_without_a_ticker_keeps_a_null_symbol(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Fixture,
-    name: str,
-) -> None:
-    # No filings schema marks `ticker` required, and the index documents it "if available".
-    path = cast("str", spec_of(name).fetch_path)
-    body = json.loads(load_fixture(FIXTURES, SOURCES[path][0]))
-    first = body["results"][0]
-    body["results"] = [first, {k: v for k, v in first.items() if k != "ticker"}]
-    fake_rest.reply(path, Reply(body=body))
-    out = table_rows(cast("Query", factory(rest_session, name)()).fetch())
-    assert [row["Symbol"] for row in out] == [first["ticker"], None]
-    key = spec_of(name).keys_for(R, path).symbol
-    assert key is not None
-    assert not key.required
 
 
 @pytest.mark.parametrize(
