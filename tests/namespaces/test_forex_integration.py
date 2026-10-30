@@ -144,11 +144,12 @@ def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict
 
 @pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("37")
-@pytest.mark.requests(6)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -161,7 +162,8 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     together with the hour-bar rebuild: a source that stamps the bar of day D before 00:00 UTC
     of D (such as 21:00 or 22:00 UTC of D-1, the 17:00 New York open of D's trading day) is
     labelled D-1 by the library, a bug to fix by mapping that source's stamp to the day it
-    closes.
+    closes. With Currencies on Basic, which allows 5 requests a minute, it leaves out the
+    library's `previous_day_bar`, which reads the same `/prev` as the raw request.
     """
     prevs = rest_rows(_PREV, {"forexTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -190,8 +192,11 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
         f"grouped equal to /prev: {[_same(_ohlcv(b), _ohlcv(prev)) for b in grouped]}"
     )
     bars = live_session.forex.bars(_PAIR, dm.Timespan.DAY)
-    prev_bar = live_session.forex.previous_day_bar(_PAIR)
-    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
+    if "currencies" in classes_on_basic:
+        evidence("Currencies on Basic: the library's previous_day_bar is not read")
+    else:
+        prev_bar = live_session.forex.previous_day_bar(_PAIR)
+        evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
     evidence(
         "library history(REST): "
         f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"

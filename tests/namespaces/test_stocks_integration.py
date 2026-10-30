@@ -85,6 +85,10 @@ _STREAM_WAIT = 60.0
 _FILINGS_LIMIT = 5_000
 """The most rows read of each filings dataset; a result of exactly this many is cut short."""
 
+_FILINGS_PAGE = 100
+"""The largest page of the 10-K sections and 8-K text, the most of each read with Stocks on
+Basic: one request each, where 5,000 rows would take up to 50."""
+
 
 def _bars(
     rest_rows: RestRows, span: str, *, multiplier: int, bounds: tuple[object, object]
@@ -180,27 +184,31 @@ def test_luld_frames_convert_to_a_current_instant(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("25")
-@pytest.mark.requests(8)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_filings_rows_without_a_ticker(
     live_session: dm.MassiveSession,
     *,
     recent_month: DaySpan,
+    classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """How many rows of the four filings datasets lack `ticker`.
 
     Reads the most recent whole month of each (up to 5,000 rows, flagged when cut short) and
-    records how many rows have no `Symbol`. Reading it: any count is the answer; the library
-    keeps such rows with a null `Symbol` either way.
+    records how many rows have no `Symbol`. With Stocks on Basic, the 10-K sections and 8-K
+    text, served 100 rows a page, are read one page each, so the test sends 4 requests.
+    Reading it: any count is the answer; the library keeps such rows with a null `Symbol`
+    either way.
     """
     filings = live_session.stocks.filings
     start, end = recent_month
+    paged = _FILINGS_PAGE if "stocks" in classes_on_basic else _FILINGS_LIMIT
     queries = {
         "filings.index": filings.index(start=start, end=end, limit=_FILINGS_LIMIT),
-        "filings.sections_10k": filings.sections_10k(start=start, end=end, limit=_FILINGS_LIMIT),
-        "filings.text_8k": filings.text_8k(start=start, end=end, limit=_FILINGS_LIMIT),
+        "filings.sections_10k": filings.sections_10k(start=start, end=end, limit=paged),
+        "filings.text_8k": filings.text_8k(start=start, end=end, limit=paged),
         "filings.risk_factors": filings.risk_factors(start=start, end=end, limit=_FILINGS_LIMIT),
     }
     counts = {}
@@ -208,7 +216,7 @@ def test_filings_rows_without_a_ticker(
         rows = table_rows(query.fetch())
         lacking = [row for row in rows if row["Symbol"] is None]
         counts[name] = len(rows)
-        cut = " (cut short at the limit)" if len(rows) == _FILINGS_LIMIT else ""
+        cut = " (cut short at the limit)" if len(rows) in {_FILINGS_LIMIT, paged} else ""
         evidence(f"{name} {start}..{end}: {len(rows)} rows{cut}, {len(lacking)} without a ticker")
         for row in lacking[:3]:
             evidence(f"    e.g. {row}")
@@ -452,11 +460,12 @@ def _record_library_stock_stamps(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("50")
-@pytest.mark.requests(18)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_stock_day_and_longer_bar_stamps_from_rest(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     stamp_days: StampDays,
     rest_rows: RestRows,
     stamped_bar: ToStampedBar,
@@ -478,31 +487,37 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     trading day after a half day), beside the range bars of that day; the week bars of the
     half day's week and the week before, and the month bars of the two whole months before
     the current one; and the library's `TimestampStart`, `TimestampEnd`, and `Date` for the
-    same requests. Reading it: 1-day stamps at 00:00, 13:00, or 16:00 New York time, longer
-    bars at 00:00 New York time on their period's first day (or the weekend before a week's
-    Monday), and matching values confirm the library's day label; minute bars ending at 12:59
-    on the half day confirm a whole day cut short; a `MassiveError` in the library lines
-    shows a stamp it refuses.
+    same requests. With Stocks on Basic, which allows 5 requests a minute, it reads the range
+    bars of both days, the grouped-daily row and minute bars of the half day only, and the week
+    and month bars, and leaves out `/prev` and the library's lines. Reading it: 1-day stamps
+    at 00:00, 13:00, or 16:00 New York time, longer bars at 00:00 New York time on their
+    period's first day (or the weekend before a week's Monday), and matching values confirm
+    the library's day label; minute bars ending at 12:59 on the half day confirm a whole day
+    cut short; a `MassiveError` in the library lines shows a stamp it refuses.
     """
     days = stamp_days["day"]
+    basic = "stocks" in classes_on_basic
+    read = days[-1:] if basic else days  # the half day is the last
     grouped = {
         day: [
             stamped_bar(r) for r in rest_rows(_GROUPED, {"date": day}, {}) if r.get("T") == _SYMBOL
         ]
-        for day in days
+        for day in read
     }
     missing = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
-    minutes = [minute_span_report(_SYMBOL, day) for day in days]
-    prevs = prev_bar_report(_SYMBOL)
+    minutes = [minute_span_report(_SYMBOL, day) for day in read]
     spans = {span: stamp_days[span] for span in ("week", "month")}
     periods = period_bar_report(_SYMBOL, spans, {"week": (2, 2), "month": (2, 2)})
-    _record_library_stock_stamps(
-        live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
-    )
+    if basic:
+        evidence("Stocks on Basic: /prev and the library's lines are not read")
+    else:
+        assert prev_bar_report(_SYMBOL), "/prev returned no bar"
+        _record_library_stock_stamps(
+            live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
+        )
     assert not missing, f"no range bar on {missing}"
-    assert all(minutes), f"a stamp day has no minute bars: {dict(zip(days, minutes, strict=True))}"
+    assert all(minutes), f"a stamp day has no minute bars: {dict(zip(read, minutes, strict=True))}"
     assert all(grouped.values()), f"a stamp day has no grouped-daily row: {grouped}"
-    assert prevs, "/prev returned no bar"
     assert periods, "the range did not return one bar for each of two weeks and two months"
 
 
@@ -608,7 +623,7 @@ def test_every_page_echoes_its_adjustment(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("55")
-@pytest.mark.requests(12)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_cash_dividends_are_never_adjusted(
     live_session: dm.MassiveSession,
@@ -624,8 +639,9 @@ def test_cash_dividends_are_never_adjusted(
     date to two days after, with `adjusted=true` and `adjusted=false`. Passes when the ratio
     of the adjusted to the as-traded close takes no step across the ex-dividend date: the same
     ratio on every day, so `adjusted` concerns splits only, as the library documents, and an
-    adjustment for the dividend would show as a step on the ex-date. Skips when the year had
-    no such dividend with bars.
+    adjustment for the dividend would show as a step on the ex-date. With Stocks on Basic
+    only the newest such dividend is tried (`special_dividends` keeps one), so the test sends
+    at most 4 stock requests. Skips when the year had no such dividend with bars.
     """
     dividends = special_dividends(live_session)
     spans = {
@@ -867,7 +883,7 @@ def _with_bars(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("53")
-@pytest.mark.requests(12)
+@pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_split_basis_before_and_on_the_split(
     live_session: dm.MassiveSession,
@@ -884,7 +900,9 @@ def test_split_basis_before_and_on_the_split(
     when, before the split, the as-traded close is the adjusted close times the ratio and the
     adjusted volume the as-traded volume times the ratio (within 1%), and both bases agree on the
     execution date: `adjusted` restates prices before a split by its ratio, as the library
-    documents. Skips when the year had no such split with bars.
+    documents. With Stocks on Basic only the newest such split is tried (`recent_splits` keeps
+    one), so the test sends at most 3 stock requests. Skips when the year had no such split
+    with bars.
     """
     splits = recent_splits(live_session)
     found = _with_bars(

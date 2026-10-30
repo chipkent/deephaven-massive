@@ -8,6 +8,8 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
   windows, and the verdict on a request refused for its timeframe;
 - `probe`: the probe that asks Massive which plans a key holds, and its day-long cache;
 - `classes`: which asset class, and so which rate-limit bucket, a REST request reads;
+- `pacing`: the Basic plan's limit of 5 requests per class and test, the skip of a test over
+  it, and the terminal line printed while a request waits for its pace;
 - `calendar`: the US exchanges' holidays and half days, and the recent days the tests read;
 - `contracts`: the front futures contract of a day, by each product's roll rule;
 - `events`: the choice of recent splits and special dividends to check;

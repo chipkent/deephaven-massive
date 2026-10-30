@@ -48,6 +48,9 @@ _STOCK_TICKER = re.compile(r"[A-Z]+(?:\.[A-Z]|p[A-Z]?|r|w)?")
 _TYPES = ("WARRANT", "UNIT", "RIGHT", "PFD")
 _LIMIT = 10_000
 """The most rows read of a listing; a result of exactly this many is cut short."""
+
+_BASIC_LIMIT = 5_000
+"""The most rows read of a listing with Stocks on Basic: five pages of 1,000, five requests."""
 _PARTNER_PAGES = ("/benzinga/v1/ratings", "/etf-global/v1/constituents", "/tmx/v1/corporate-events")
 
 
@@ -87,23 +90,30 @@ def test_key_of_the_ticker_event_type(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("30")
+@pytest.mark.requests(5)
 @pytest.mark.timeout(110)
 def test_inactive_tickers_on_several_rows(
-    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+    live_session: dm.MassiveSession,
+    *,
+    classes_on_basic: frozenset[str],
+    table_rows: TableRows,
+    evidence: Evidence,
 ) -> None:
     """Whether a delisted ticker can appear on several rows of the inactive tickers listing.
 
     `reference.tickers` polls keyed by `Symbol`. Records inactive tickers from `A` to `AC`
-    that occur on more than one row. Reading it: none confirms the key; any means a polled
-    table keeps one of them, and the key needs an owner decision.
+    (up to 10,000 rows, or 5,000 with Stocks on Basic, five requests) that occur on more than
+    one row. Reading it: none confirms the key; any means a polled table keeps one of them,
+    and the key needs an owner decision.
     """
+    limit = _BASIC_LIMIT if "stocks" in classes_on_basic else _LIMIT
     rows = table_rows(
         live_session.reference.tickers(
-            active=False, filters={"ticker_gte": "A", "ticker_lt": "AC"}, limit=_LIMIT
+            active=False, filters={"ticker_gte": "A", "ticker_lt": "AC"}, limit=limit
         ).fetch()
     )
     repeated = _repeated((row["Symbol"],) for row in rows)
-    cut = " (cut short at the limit)" if len(rows) == _LIMIT else ""
+    cut = " (cut short at the limit)" if len(rows) == limit else ""
     evidence(
         f"tickers(active=False) A..AC: {len(rows)} rows{cut}, {len(repeated)} repeated tickers"
     )
@@ -114,6 +124,7 @@ def test_inactive_tickers_on_several_rows(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("31")
+@pytest.mark.requests(1)
 def test_exchanges_are_keyed_by_asset_class_and_id(
     live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
@@ -130,26 +141,34 @@ def test_exchanges_are_keyed_by_asset_class_and_id(
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("32")
+@pytest.mark.requests(5)
 def test_conditions_are_keyed_by_asset_class_type_and_id(
-    live_session: dm.MassiveSession, *, table_rows: TableRows, evidence: Evidence
+    live_session: dm.MassiveSession,
+    *,
+    classes_on_basic: frozenset[str],
+    table_rows: TableRows,
+    evidence: Evidence,
 ) -> None:
     """Whether `(AssetClass, Type, Id)` identifies one condition, the key it polls by.
 
-    Records every repeated key. Reading it: none confirms the key; any means it needs another
+    Reads up to 10,000 conditions, or 5,000 with Stocks on Basic (five requests at most), and
+    records every repeated key. Reading it: none confirms the key; any means it needs another
     column.
     """
-    rows = table_rows(live_session.reference.conditions(limit=_LIMIT).fetch())
+    limit = _BASIC_LIMIT if "stocks" in classes_on_basic else _LIMIT
+    rows = table_rows(live_session.reference.conditions(limit=limit).fetch())
     repeated = _repeated((row["AssetClass"], row["Type"], row["Id"]) for row in rows)
-    cut = " (cut short at the limit)" if len(rows) == _LIMIT else ""
+    cut = " (cut short at the limit)" if len(rows) == limit else ""
     evidence(f"conditions: {len(rows)} rows{cut}; repeated (AssetClass, Type, Id): {repeated}")
     assert rows
 
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("stock ticker spellings")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(110)
 def test_stock_ticker_spellings_outside_the_documented_forms(
-    live_rest: RestClient, *, evidence: Evidence
+    live_rest: RestClient, *, classes_on_basic: frozenset[str], evidence: Evidence
 ) -> None:
     """Which stock ticker spellings fall outside an upper-case root and one documented suffix.
 
@@ -157,7 +176,8 @@ def test_stock_ticker_spellings_outside_the_documented_forms(
     one page of three partner datasets, and records every ticker outside the root-and-suffix
     forms (`.X`, `pX`, `r`, `w`). Reading it: none confirms the symbol grammar; each other
     spelling must join the grammar or be left to the handling of unknown symbols. A refused
-    partner page (no entitlement) is recorded and skipped.
+    partner page (no entitlement) is recorded and skipped. With Stocks on Basic, which allows
+    5 requests a minute, the partner pages are left out, so the test sends 4 requests.
     """
     seen = 0
     for ticker_type in _TYPES:
@@ -172,7 +192,9 @@ def test_stock_ticker_spellings_outside_the_documented_forms(
         odd = [ticker for ticker in tickers if not _STOCK_TICKER.fullmatch(ticker)]
         evidence(f"{ticker_type}: {len(tickers)} tickers, e.g. {tickers[:10]}")
         evidence(f"    outside the root-and-suffix forms: {odd}")
-    for path in _PARTNER_PAGES:
+    if "stocks" in classes_on_basic:
+        evidence("Stocks on Basic: the partner pages are not read")
+    for path in () if "stocks" in classes_on_basic else _PARTNER_PAGES:
         try:
             rows = live_rest.get(
                 source(Transport.REST, path), {}, {"limit": 100}, bucket="other"

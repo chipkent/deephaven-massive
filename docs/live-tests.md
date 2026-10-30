@@ -78,11 +78,27 @@ consequences:
   The library paces these itself: the classes on Basic become the live sessions'
   `MassiveConfig.rest_basic_subscriptions`, and every live test shares one rate governor per
   key for the whole run, on the real clock, so a REST request to a Basic class (the library's
-  own and the tests' raw ones) waits for its class's place within 5 a minute. A test that may
-  read a class on Basic gets a timeout that grows with its declared request count
-  (`@pytest.mark.requests(n)`), so a run on a free key is slow but never refused for its own
-  pace. A live run also lifts the 120 s limit after which faulthandler would end the process;
-  each test's own timeout bounds it.
+  own and the tests' raw ones) waits for its class's place within 5 a minute. No test waits
+  more than about a minute: a test that may read a class on Basic sends that class at most 5
+  requests when it is on Basic, and declares that count with `@pytest.mark.requests(n)`. To
+  stay within it, a test reads less on Basic than on a paid plan: fewer underlyings,
+  symbols, or pages, or none of a part that repeats what another request shows (the
+  underlying spellings read only the contracts of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`; the
+  split and dividend checks try only the newest event). Each such test's docstring says what
+  it leaves out, and its evidence has a line saying so. A unit test fails when a live test
+  that may read a class on Basic declares more than 5, and a live run skips such a test while
+  its class is on Basic, with the reason "needs a paid <class> plan: N requests would take
+  about M minutes on Basic". Each time a request waits, the run prints one line, such as
+  `live pacing: options: waiting 47 s for a request slot (paced at 5 requests a minute); 3 of
+  this test's 5 requests left`, so a paced run never looks hung. A test's timeout also grows
+  with its count. A live run lifts the 120 s limit after which faulthandler would end the
+  process; each test's own timeout bounds it.
+- **How long a free key takes.** With every class on Basic, `-m integration` runs the tests of
+  the "Every class on Basic" row below. Together they declare about 66 requests to stocks
+  (reference data included), 27 to currencies, 21 to futures, 8 to options, and 7 to indices,
+  so the stock requests alone take at least 13 minutes at 5 a minute, and the run takes
+  roughly a quarter of an hour. On paid plans nothing waits, and the tests read their full
+  sets.
 - **Indices.** Indices Basic excludes SPX, DJI, RUT, and VIX ([S6]): with Indices on Basic,
   the index tests use `I:NDX` instead of `I:SPX`.
 
