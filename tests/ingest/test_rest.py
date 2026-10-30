@@ -51,7 +51,7 @@ from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._namespaces import options as options_ns
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces import stocks as stocks_ns
-from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import Diagnostics

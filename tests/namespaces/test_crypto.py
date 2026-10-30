@@ -41,13 +41,14 @@ from deephaven_massive._massive import (
     to_batch,
 )
 from deephaven_massive._namespaces import crypto
-from deephaven_massive._namespaces.base import Namespace, query_class
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import (
     HistoryQuery,
     Query,
     QueryBase,
     StreamHistoryQuery,
     StreamQuery,
+    query_class,
 )
 from deephaven_massive._tables.liveness import new_scope
 

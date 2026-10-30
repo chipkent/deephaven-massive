@@ -41,25 +41,21 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import (
+from deephaven_massive._namespaces.query_building import (
     Namespace,
     adjustment_notes,
     build_query,
-    list_params,
+    list_query,
     one_or_any_of,
     optional_text,
     require_bool,
+    ticker_key,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from deephaven_massive._query import (
-        HistoryQuery,
-        Query,
-        StreamHistoryQuery,
-        StreamQuery,
-    )
+    from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery, StreamQuery
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
 
@@ -84,11 +80,6 @@ def _row(column: str) -> KeySpec:
 def _request(parameter: str) -> KeySpec:
     """Return a key filled from the request parameter `parameter`."""
     return KeySpec(parameter, from_request=True)
-
-
-def _ticker_keys(time: str | None = None) -> SourceKeys:
-    """Return the keys of a source whose rows name their stock in `Ticker`."""
-    return SourceKeys(symbol=_row("Ticker"), time=None if time is None else _row(time))
 
 
 def _stream_bar_keys() -> SourceKeys:
@@ -118,8 +109,8 @@ TRADES: Final = DatasetSpec(
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
         (_R, _TRADES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
-        (_W, "stocks/T"): _ticker_keys("SipTimestamp"),
-        (_F, "us_stocks_sip/trades_v1"): _ticker_keys("SipTimestamp"),
+        (_W, "stocks/T"): ticker_key("SipTimestamp"),
+        (_F, "us_stocks_sip/trades_v1"): ticker_key("SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
     page_size=50_000,
@@ -132,7 +123,7 @@ LAST_TRADE: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="trades",
     fetch_path=_LAST_TRADE,
-    keys={(_R, _LAST_TRADE): _ticker_keys("SipTimestamp")},
+    keys={(_R, _LAST_TRADE): ticker_key("SipTimestamp")},
     per_symbol=True,
     revision_keys=("Timestamp",),
 )
@@ -146,8 +137,8 @@ QUOTES: Final = DatasetSpec(
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/quotes_v1"},
     keys={
         (_R, _QUOTES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
-        (_W, "stocks/Q"): _ticker_keys("SipTimestamp"),
-        (_F, "us_stocks_sip/quotes_v1"): _ticker_keys("SipTimestamp"),
+        (_W, "stocks/Q"): ticker_key("SipTimestamp"),
+        (_F, "us_stocks_sip/quotes_v1"): ticker_key("SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
     page_size=50_000,
@@ -158,7 +149,7 @@ LAST_QUOTE: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="quotes",
     fetch_path=_LAST_QUOTE,
-    keys={(_R, _LAST_QUOTE): _ticker_keys("SipTimestamp")},
+    keys={(_R, _LAST_QUOTE): ticker_key("SipTimestamp")},
     per_symbol=True,
     revision_keys=("Timestamp",),
 )
@@ -177,11 +168,11 @@ BARS: Final = DatasetSpec(
     flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
     keys={
         (_R, _RANGE): SourceKeys(symbol=_request("stocksTicker"), time=_row("WindowStart")),
-        (_R, _GROUPED): _ticker_keys("WindowStart"),
+        (_R, _GROUPED): ticker_key("WindowStart"),
         (_W, "stocks/A"): _stream_bar_keys(),
         (_W, "stocks/AM"): _stream_bar_keys(),
-        (_F, _MINUTE_FILES): _ticker_keys("WindowStart"),
-        (_F, _DAY_FILES): _ticker_keys("WindowStart"),
+        (_F, _MINUTE_FILES): ticker_key("WindowStart"),
+        (_F, _DAY_FILES): ticker_key("WindowStart"),
     },
     page_size=50_000,
     column_notes=_BAR_NOTES,
@@ -192,7 +183,7 @@ PREVIOUS_DAY_BAR: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="bars",
     fetch_path=_PREV,
-    keys={(_R, _PREV): _ticker_keys("WindowStart")},
+    keys={(_R, _PREV): ticker_key("WindowStart")},
     per_symbol=True,
     revision_keys=("TimestampStart",),
     column_notes=_BAR_NOTES,
@@ -203,7 +194,7 @@ LULD: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="luld",
     channels={NotBars.ANY: "LULD"},
-    keys={(_W, "stocks/LULD"): _ticker_keys("UnixTimestamp")},
+    keys={(_W, "stocks/LULD"): ticker_key("UnixTimestamp")},
 )
 IMBALANCES: Final = DatasetSpec(
     name="stocks.imbalances",
@@ -211,7 +202,7 @@ IMBALANCES: Final = DatasetSpec(
     asset_class=_STOCKS,
     kind="imbalances",
     channels={NotBars.ANY: "NOI"},
-    keys={(_W, "stocks/NOI"): _ticker_keys("UnixTimestamp")},
+    keys={(_W, "stocks/NOI"): ticker_key("UnixTimestamp")},
 )
 FMV: Final = DatasetSpec(
     name="stocks.fmv",
@@ -220,7 +211,7 @@ FMV: Final = DatasetSpec(
     kind="fmv",
     channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
-    keys={(_W, "stocks/FMV"): _ticker_keys("FmvLastUpdated")},
+    keys={(_W, "stocks/FMV"): ticker_key("FmvLastUpdated")},
 )
 
 # --- Snapshots and daily summaries -------------------------------------------------------------
@@ -239,7 +230,7 @@ SNAPSHOTS: Final = DatasetSpec(
     summary="Current market snapshots of US-listed stocks, one row per ticker.",
     asset_class=_STOCKS,
     fetch_path=_SNAPSHOTS,
-    keys={(_R, _SNAPSHOTS): _ticker_keys()},
+    keys={(_R, _SNAPSHOTS): ticker_key()},
     symbol_param="tickers",
     symbols_per_request=250,
     revision_keys=("Updated",),
@@ -249,7 +240,7 @@ MOVERS: Final = DatasetSpec(
     summary="The twenty US stocks with the largest percentage move today, up or down.",
     asset_class=_STOCKS,
     fetch_path=_MOVERS,
-    keys={(_R, _MOVERS): _ticker_keys()},
+    keys={(_R, _MOVERS): ticker_key()},
     revision_keys=("Updated",),
 )
 DAILY_OPEN_CLOSE: Final = DatasetSpec(
@@ -279,7 +270,7 @@ DIVIDENDS: Final = DatasetSpec(
     summary="Cash dividends of US-listed stocks, one row per distribution.",
     asset_class=_STOCKS,
     fetch_path=_DIVIDENDS,
-    keys={(_R, _DIVIDENDS): _ticker_keys()},
+    keys={(_R, _DIVIDENDS): ticker_key()},
     time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Id",),
@@ -290,7 +281,7 @@ SPLITS: Final = DatasetSpec(
     summary="Stock splits, reverse splits, and stock dividends of US-listed stocks.",
     asset_class=_STOCKS,
     fetch_path=_SPLITS,
-    keys={(_R, _SPLITS): _ticker_keys()},
+    keys={(_R, _SPLITS): ticker_key()},
     time_axis=("execution_date.gte", "execution_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Id",),
@@ -302,7 +293,7 @@ IPOS: Final = DatasetSpec(
     summary="Initial public offerings on US exchanges, upcoming and past, one row per offering.",
     asset_class=_STOCKS,
     fetch_path=_IPOS,
-    keys={(_R, _IPOS): _ticker_keys()},
+    keys={(_R, _IPOS): ticker_key()},
     time_axis=("listing_date.gte", "listing_date.lte"),
     symbol_param="ticker",
     poll_mode=PollMode.UPSERT,
@@ -320,7 +311,7 @@ SHORT_INTEREST: Final = DatasetSpec(
     summary="Short interest of US-listed stocks, one row per ticker and FINRA settlement date.",
     asset_class=_STOCKS,
     fetch_path=_SHORT_INTEREST,
-    keys={(_R, _SHORT_INTEREST): _ticker_keys()},
+    keys={(_R, _SHORT_INTEREST): ticker_key()},
     time_axis=("settlement_date.gte", "settlement_date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "SettlementDate"),
@@ -331,7 +322,7 @@ SHORT_VOLUME: Final = DatasetSpec(
     summary="Daily short sale volume of US-listed stocks, one row per ticker and trading day.",
     asset_class=_STOCKS,
     fetch_path=_SHORT_VOLUME,
-    keys={(_R, _SHORT_VOLUME): _ticker_keys()},
+    keys={(_R, _SHORT_VOLUME): ticker_key()},
     time_axis=("date.gte", "date.lte"),
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "Date"),
@@ -342,7 +333,7 @@ SHARE_FLOAT: Final = DatasetSpec(
     summary="The free float of US-listed stocks: the latest count of shares the public can trade.",
     asset_class=_STOCKS,
     fetch_path=_FLOAT,
-    keys={(_R, _FLOAT): _ticker_keys()},
+    keys={(_R, _FLOAT): ticker_key()},
     symbol_param="ticker.any_of",
     page_size=5_000,
 )
@@ -399,7 +390,7 @@ RATIOS: Final = DatasetSpec(
     summary="Daily valuation, profitability, liquidity, and leverage ratios of US stocks.",
     asset_class=_STOCKS,
     fetch_path=_RATIOS,
-    keys={(_R, _RATIOS): _ticker_keys()},
+    keys={(_R, _RATIOS): ticker_key()},
     symbol_param="ticker.any_of",
     poll_keys=("Symbol", "Date"),
     page_size=50_000,
@@ -701,57 +692,6 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.stocks`, one `DatasetSpec` each (for example `stocks.trades`)."""
 
 
-def _list_query(
-    core: SessionCore,
-    spec: DatasetSpec,
-    *,
-    symbols: Symbols | None = None,
-    start: DateLike | None = None,
-    end: DateLike | None = None,
-    params: Mapping[str, object] | None = None,
-    arguments: Mapping[str, str] | None = None,
-    sort: str | None,
-    order: Order | None,
-    limit: int | None,
-    filters: Mapping[str, FilterValue] | None,
-) -> Query:
-    """Build the query of a REST list dataset, which refuses `dm.ALL` for `symbols=None`.
-
-    Args:
-        core: The session core.
-        spec: The dataset.
-        symbols: The tickers that filter the request, or None for every ticker.
-        start: The first day of the dataset's axis, or None.
-        end: The last day of the dataset's axis, or None.
-        params: The dataset's other typed parameters by wire name; None values are dropped.
-        arguments: The factory's argument name of each key of `params` it names differently,
-            such as `{"issuer_cik.any_of": "issuer_cik"}`, for the message that refuses that
-            key in `filters`; None when every argument has its wire name.
-        sort: The field to sort by, or None.
-        order: The sort direction, or None.
-        limit: The cap on the total number of rows, or None.
-        filters: The `filters` mapping, or None.
-
-    Returns:
-        The `Query`.
-
-    Every `TypeError` and `ValueError` of `list_params` and `build_query` propagates.
-    """
-    query = build_query(
-        core,
-        spec,
-        symbols=symbols,
-        all_alternative=_EVERY_TICKER,
-        start=start,
-        end=end,
-        params={**list_params(sort=sort, order=order), **(params or {})},
-        arguments=arguments,
-        filters=filters,
-        limit=limit,
-    )
-    return cast("Query", query)
-
-
 # --- Namespaces ---------------------------------------------------------------------------------
 
 
@@ -1038,9 +978,10 @@ class _StockFinancials(Namespace):
 
                 cheap = m.stocks.financials.ratios(filters={"price_to_earnings_lt": 10}).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             RATIOS,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             sort=sort,
             order=order,
@@ -1080,12 +1021,13 @@ def _statement_query(
         The `Query`.
 
     A `timeframe` that is not a `dm.Timeframe` raises the `TypeError` of `_require_enum`; the
-    errors of `_list_query` propagate.
+    errors of `list_query` propagate.
     """
     frame = None if timeframe is None else _require_enum(timeframe, Timeframe, "timeframe")
-    return _list_query(
+    return list_query(
         core,
         spec,
+        all_alternative=_EVERY_TICKER,
         symbols=symbols,
         start=start,
         end=end,
@@ -1173,9 +1115,10 @@ class _StockFilings(Namespace):
 
                 annual = m.stocks.filings.index("AAPL", form_type="10-K").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             FILINGS_INDEX,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1238,9 +1181,10 @@ class _StockFilings(Namespace):
 
                 t = m.stocks.filings.sections_10k("AAPL", filters={"section": "business"}).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             SECTIONS_10K,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1303,9 +1247,10 @@ class _StockFilings(Namespace):
 
                 t = m.stocks.filings.text_8k("TSLA", start="2025-01-01").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             TEXT_8K,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1368,9 +1313,10 @@ class _StockFilings(Namespace):
 
                 t = m.stocks.filings.disclosures_8k(["AAPL", "MSFT"], start="2025-01-01").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             DISCLOSURES_8K,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1432,9 +1378,10 @@ class _StockFilings(Namespace):
 
                 t = m.stocks.filings.risk_factors("AAPL").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             RISK_FACTORS,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1498,9 +1445,10 @@ class _StockFilings(Namespace):
                     filer_cik="0001067983", start="2025-01-01"
                 ).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             INSTITUTIONAL_HOLDINGS,
+            all_alternative=_EVERY_TICKER,
             start=start,
             end=end,
             params={"filer_cik": optional_text("filer_cik", filer_cik)},
@@ -1733,9 +1681,10 @@ class _StockFilings(Namespace):
 
                 t = m.stocks.filings.insider_activity("NVDA", start="2026-01-01").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             INSIDER_ACTIVITY,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -1883,9 +1832,10 @@ class _StockFilings(Namespace):
 
                 t = m.stocks.filings.risk_factor_taxonomy().fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             RISK_FACTOR_TAXONOMY,
+            all_alternative=_EVERY_TICKER,
             sort=sort,
             order=order,
             limit=limit,
@@ -1933,9 +1883,10 @@ class _StockFilings(Namespace):
 
                 t = m.stocks.filings.disclosure_taxonomy().fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             DISCLOSURE_TAXONOMY,
+            all_alternative=_EVERY_TICKER,
             sort=sort,
             order=order,
             limit=limit,
@@ -2003,11 +1954,12 @@ def _insider_query(
     Returns:
         The `Query`.
 
-    The errors of `_ciks` and `_list_query` propagate.
+    The errors of `_ciks` and `list_query` propagate.
     """
-    return _list_query(
+    return list_query(
         core,
         spec,
+        all_alternative=_EVERY_TICKER,
         symbols=symbols,
         start=start,
         end=end,
@@ -2667,9 +2619,10 @@ class _Stocks(Namespace):
 
                 t = m.stocks.dividends(["AAPL", "MSFT"], start="2024-01-01").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             DIVIDENDS,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -2752,9 +2705,10 @@ class _Stocks(Namespace):
                     ["F = isNull(F) ? 1.0 : F", "AdjClose = Close * F", "AdjVolume = Volume / F"]
                 )
         """
-        return _list_query(
+        return list_query(
             self._core,
             SPLITS,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -2821,9 +2775,10 @@ class _Stocks(Namespace):
 
                 upcoming = m.stocks.ipos(filters={"ipo_status": "pending"}).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             IPOS,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -2884,9 +2839,10 @@ class _Stocks(Namespace):
 
                 t = m.stocks.short_interest("GME", start="2024-01-01").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             SHORT_INTEREST,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -2946,9 +2902,10 @@ class _Stocks(Namespace):
 
                 t = m.stocks.short_volume(["AAPL", "TSLA"], start="2025-06-01").fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             SHORT_VOLUME,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             start=start,
             end=end,
@@ -3003,9 +2960,10 @@ class _Stocks(Namespace):
 
                 t = m.stocks.share_float(["AAPL", "MSFT"]).fetch()
         """
-        return _list_query(
+        return list_query(
             self._core,
             SHARE_FLOAT,
+            all_alternative=_EVERY_TICKER,
             symbols=symbols,
             sort=sort,
             order=order,

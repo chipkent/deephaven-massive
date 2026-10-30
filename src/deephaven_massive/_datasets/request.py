@@ -46,8 +46,8 @@ table never reaches a key: it is read first, and its symbols become the tuple.""
 class Request:
     """The normalized arguments of a dataset call, shared by every verb of its query.
 
-    Built by `_namespaces/base.py` when the query is created; immutable and hashable, so equal
-    calls give equal queries and share streams.
+    Built by `_namespaces/query_building.py` when the query is created; immutable and hashable, so
+    equal calls give equal queries and share streams.
 
     Attributes:
         symbols: The normalized symbols, or None for datasets without instruments.

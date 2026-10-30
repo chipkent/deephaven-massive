@@ -1,4 +1,4 @@
-"""The shared dataset factory behind every namespace method.
+"""Query building: the shared dataset factory behind every namespace method.
 
 Each namespace class (`_Stocks`, `_Options`, ...) is a thin set of typed factory methods; this
 module does the work they share when a dataset method is called:
@@ -11,16 +11,15 @@ module does the work they share when a dataset method is called:
   `dm.ALL` where the dataset cannot serve it (naming the alternative), parses the time-axis
   bounds, and normalizes the typed parameters and the `filters` mapping into a hashable
   `Request`.
-- `query_class` derives a dataset's query class from the transports its spec declares, so no
-  spec names a class and the dataset layer never refers to the query classes.
-- `bar_query_class` is the run-time half of the `bars()` overloads: it picks the most specific query
-  class for the actual timespan and multiplier and rejects the timespans the asset class's endpoint
-  does not accept.
+- The query class `build_query` returns is the one `_query.py` chooses for the dataset
+  (`query_class`, and `bar_query_class` for a `bars()` call).
 - `list_params` validates the `sort` and `order` parameters of the `…F` block shared by the
   REST list datasets; its `limit` goes to `build_query(limit=...)` (`Request.limit`), because
-  it is a total-row cap, not the endpoint's page-size parameter.
+  it is a total-row cap, not the endpoint's page-size parameter. `list_query` builds the query
+  of a REST list dataset with them.
 - `require_bool` and `optional_text` check the plain `bool` and optional `str` arguments of
   dataset methods.
+- `ticker_key` declares the keys of a source whose rows name their instrument in `Ticker`.
 
 Filter keys and value kinds are checked against the generated parameters of the dataset's REST
 paths (`check_filters` in `_datasets/filters.py`) synchronously at construction, so a
@@ -39,6 +38,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
+from deephaven_massive._datasets.catalog import KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.filters import (
     check_filters,
@@ -49,15 +49,9 @@ from deephaven_massive._datasets.filters import (
 )
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
-from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
+from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._massive import ParamKind, Transport
-from deephaven_massive._query import (
-    HistoryQuery,
-    Query,
-    QueryBase,
-    StreamHistoryQuery,
-    StreamQuery,
-)
+from deephaven_massive._query import Query, QueryBase, bar_query_class, query_class
 from deephaven_massive._types import _All, override
 
 if TYPE_CHECKING:
@@ -73,13 +67,13 @@ __all__ = [
     "ADJUSTED_VOLUME",
     "Namespace",
     "adjustment_notes",
-    "bar_query_class",
     "build_query",
     "list_params",
+    "list_query",
     "one_or_any_of",
     "optional_text",
-    "query_class",
     "require_bool",
+    "ticker_key",
 ]
 
 logger = logging.getLogger(__name__)
@@ -153,73 +147,6 @@ class Namespace:
             For example `<MassiveSession #1 stocks>` or `<MassiveSession #1 partners.tmx>`.
         """
         return f"<{self._core.label} {self._path}>"
-
-
-def query_class(spec: DatasetSpec) -> type[QueryBase]:
-    """Return the query class of a dataset, derived from the transports its spec declares.
-
-    A dataset's verbs are exactly what its transports can serve, so the class follows from the
-    spec: channels give the stream verbs, a history source (a REST history or grouped-daily
-    path, or flat-file prefixes) gives `history()`, and a fetch path gives `fetch()`. Each
-    namespace factory's return annotation is this class, which the namespace tests check.
-
-    | Channels | History | Fetch | Class                |
-    |----------|---------|-------|----------------------|
-    | no       | no      | yes   | `Query`              |
-    | yes      | no      | no    | `StreamQuery`        |
-    | no       | yes     | no    | `HistoryQuery`       |
-    | yes      | yes     | no    | `StreamHistoryQuery` |
-
-    `DatasetSpec` rejects every other combination when it is created: a fetch path is a
-    dataset of its own, such as `stocks.last_trade` beside `stocks.trades`. A `bars` dataset gives
-    `HistoryQuery`, the class of its most general overload: `bar_query_class` picks the class
-    of each call from its timespan and multiplier.
-
-    Args:
-        spec: The dataset.
-
-    Returns:
-        The query class its factory returns.
-    """
-    if spec.is_bars:
-        return HistoryQuery
-    if not spec.has_channels:
-        return Query if spec.has_fetch else HistoryQuery
-    return StreamHistoryQuery if spec.has_history else StreamQuery
-
-
-def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:
-    """Pick the query class of a `bars()` call from its actual timespan and multiplier.
-
-    With `multiplier=1`, a timespan that has a WebSocket channel (`SECOND`, `MINUTE`) gives a
-    `StreamHistoryQuery`. Every other combination is history only (`HistoryQuery`); the
-    previous session's bar is the `previous_day_bar` dataset, not a verb of `bars()`. A
-    `timespan` that is not a `dm.Timespan` raises `TypeError` (`_require_enum`), and a
-    `multiplier` that is not a positive `int` raises `TypeError` or `ValueError`
-    (`require_positive_int`).
-
-    Args:
-        spec: The bars dataset.
-        timespan: The `timespan` argument as passed.
-        multiplier: The `multiplier` argument as passed.
-
-    Returns:
-        The query class to instantiate.
-
-    Raises:
-        ValueError: If `Timespan.DAY` is used for futures (the futures endpoint has no day
-            unit; use `Timespan.SESSION`), or `Timespan.SESSION` is used outside futures.
-    """
-    span = _require_enum(timespan, Timespan, "timespan")
-    count = require_positive_int("multiplier", multiplier)
-    futures = spec.asset_class is AssetClass.FUTURES
-    if futures and span is Timespan.DAY:
-        raise ValueError("futures bars have no DAY timespan; use dm.Timespan.SESSION")
-    if not futures and span is Timespan.SESSION:
-        raise ValueError("Timespan.SESSION exists only for futures bars")
-    if count == 1 and span in spec.channels:
-        return StreamHistoryQuery
-    return HistoryQuery
 
 
 def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
@@ -654,3 +581,77 @@ def build_query(
         limit=None if limit is None else require_positive_int("limit", limit),
     )
     return cls(core, spec, request)
+
+
+def list_query(
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    all_alternative: str,
+    symbols: Symbols | None = None,
+    start: DateLike | None = None,
+    end: DateLike | None = None,
+    params: Mapping[str, object] | None = None,
+    arguments: Mapping[str, str] | None = None,
+    sort: str | None = None,
+    order: Order | None = None,
+    limit: int | None = None,
+    filters: Mapping[str, FilterValue] | None = None,
+) -> Query:
+    """Build the query of a REST list dataset from its factory's arguments.
+
+    A list dataset takes the `sort`, `order`, and `limit` block (`list_params`) beside its own
+    typed parameters, and has only a fetch path, so `build_query` builds a `Query`.
+
+    Args:
+        core: The session core.
+        spec: The dataset.
+        all_alternative: What the `ValueError` for `dm.ALL` tells the caller to pass instead,
+            such as "symbols=None, which returns every ticker".
+        symbols: The tickers that filter the request, or None for none.
+        start: The lower bound of the dataset's time axis, or None.
+        end: The upper bound of the dataset's time axis, or None.
+        params: The dataset's other typed parameters by wire name; None values are dropped.
+        arguments: The factory's argument name of each key of `params` it names differently,
+            such as `{"issuer_cik.any_of": "issuer_cik"}`, for the message that refuses that
+            key in `filters`; None when every argument has its wire name.
+        sort: The field to sort by, or None for the endpoint's default.
+        order: The sort direction, or None for the endpoint's default.
+        limit: The cap on the total number of rows, or None for every row.
+        filters: The `filters` mapping, or None.
+
+    Returns:
+        The query.
+
+    Every `TypeError` and `ValueError` of `list_params` and `build_query` propagates.
+    """
+    query = build_query(
+        core,
+        spec,
+        symbols=symbols,
+        all_alternative=all_alternative,
+        start=start,
+        end=end,
+        params={**list_params(sort=sort, order=order), **(params or {})},
+        arguments=arguments,
+        filters=filters,
+        limit=limit,
+    )
+    # A list dataset has only a fetch path, so `build_query` builds its `Query`.
+    return cast("Query", query)
+
+
+def ticker_key(time: str | None = None) -> SourceKeys:
+    """Return the keys of a source whose rows name their instrument in `Ticker`.
+
+    Most market-data sources carry the symbol in a `Ticker` column and their primary time in a
+    column of their own, so a namespace module declares them with this one call.
+
+    Args:
+        time: The source's column that holds the row's primary time, such as
+            `"SipTimestamp"`, or None for a source without one.
+
+    Returns:
+        The source's keys: its `symbol` key `Ticker`, and its `time` key when given.
+    """
+    return SourceKeys(symbol=KeySpec("Ticker"), time=None if time is None else KeySpec(time))

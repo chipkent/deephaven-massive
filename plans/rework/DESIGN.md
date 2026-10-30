@@ -1090,7 +1090,7 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery): ...
 **The query class of a dataset** is derived from its `DatasetSpec`, never declared on it, so
 the dataset layer never names the query classes. With S meaning the spec has channels, H that it
 has a history source (a history path, a grouped-daily path, or a flat-file prefix), and F that
-it has a fetch path, `query_class(spec)` in `_namespaces/base.py` gives:
+it has a fetch path, `query_class(spec)` in `_namespaces/query_building.py` gives:
 
 | S | H | F | Class (not `bars`) |
 |---|---|---|---|
@@ -1108,7 +1108,7 @@ trade, the last quote, the previous day's bar) is a one-row dataset of its own, 
 endpoint ([section 7.5](#75-one-row-datasets)). A
 `bars` spec must have H and no F; `query_class` gives it `HistoryQuery`, the class of its general
 overload, and `bar_query_class(spec, timespan, multiplier)` picks the class of each call
-([section 7.1](#71-bars-overloads)). A test in `tests/namespaces/test_base.py` checks that every
+([section 7.1](#71-bars-overloads)). A test in `tests/namespaces/test_query_building.py` checks that every
 factory's return annotation is `query_class(spec)` for its catalog spec, that each `bars`
 overload returns `bar_query_class` on a timespan of its `Literal` set and the implementation
 returns `HistoryQuery`, and that every public factory method maps to exactly one spec.
@@ -1392,7 +1392,7 @@ table that read a source appends `Read from <source>: <why>.` (`describe(..., no
 a required field of every spec; `DatasetSpec.__post_init__` raises `ValueError`, naming the
 dataset, unless it is one line of text that ends in a period, with no leading or trailing
 whitespace. The dataset method's docstring starts with the same sentence, which the summary
-rule in `tests/namespaces/test_base.py` checks for every factory of the catalog; the library
+rule in `tests/namespaces/test_query_building.py` checks for every factory of the catalog; the library
 never reads `__doc__` at run time, so `python -OO` changes nothing.
 
 - **Every verb describes the exact table it returns, after the shape is derived.** Deephaven
@@ -5512,7 +5512,7 @@ The gates, in brief ([section 20.1](#201-tooling-configuration) gives the exact 
   19.4](#194-generated-schemas)). They read only vendored files, never the network.
 - **Column reference:** `tests/datasets/test_column_reference.py` passes: `docs/datasets/` holds
   exactly the rendered pages, byte for byte, with no stale, missing, or extra file, and every
-  dataset method's docstring names its own section; `tests/namespaces/test_base.py` passes:
+  dataset method's docstring names its own section; `tests/namespaces/test_query_building.py` passes:
   every dataset method's docstring starts with its `DatasetSpec.summary`
   ([section 7.4](#74-column-descriptions)).
 - **Negative tests:** every gate has a negative test that fails when the gate is deleted.

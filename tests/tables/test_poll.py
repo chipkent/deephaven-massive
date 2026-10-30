@@ -29,7 +29,7 @@ from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode
 from deephaven_massive._errors import PermanentError, RowDataError
 from deephaven_massive._massive import Cancel, DriftReport, Transport
-from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import Query
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.execution_context import entered

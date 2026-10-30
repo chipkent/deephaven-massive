@@ -17,7 +17,7 @@ every rule about them:
 The rules read the catalog's generated REST paths (`Catalog.rest_path`) and the dataset's
 declaration; they make no I/O, start no thread, and keep no state, so every function is safe on
 any thread. The REST transport sends the checked values (`_ingest/rest.py`), and the dataset
-factories reserve the typed parameters (`_namespaces/base.py`).
+factories reserve the typed parameters (`_namespaces/query_building.py`).
 """
 
 from __future__ import annotations

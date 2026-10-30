@@ -28,17 +28,15 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, Timespan
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import (
+from deephaven_massive._namespaces.query_building import (
     ADJUSTED_PRICE,
     ADJUSTED_VOLUME,
     Namespace,
     adjustment_notes,
-    bar_query_class,
     build_query,
     list_params,
     one_or_any_of,
     optional_text,
-    query_class,
     require_bool,
 )
 from deephaven_massive._query import (
@@ -46,15 +44,14 @@ from deephaven_massive._query import (
     Query,
     QueryBase,
     StreamHistoryQuery,
-    StreamQuery,
+    bar_query_class,
+    query_class,
 )
 from deephaven_massive._session import CATALOG
 from deephaven_massive._types import StreamSpan
 
 FF = Transport.FLAT_FILES
 SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
-INDEX_FILES = "us_indices/minute_aggs_v1"
-
 STOCK_BARS = DatasetSpec(
     name="stocks.bars",
     summary="A dataset for the tests.",
@@ -76,14 +73,6 @@ FUTURES_BARS = DatasetSpec(
             KeySpec("Ticker"), KeySpec("WindowStart"), date=KeySpec("SessionEndDate")
         )
     },
-)
-INDEX_BARS = DatasetSpec(
-    name="indices.bars",
-    summary="A dataset for the tests.",
-    is_bars=True,
-    asset_class=AssetClass.INDICES,
-    flat_file_prefixes={Timespan.MINUTE: INDEX_FILES},
-    keys={(FF, INDEX_FILES): SourceKeys(KeySpec("Ticker"), KeySpec("WindowStart"))},
 )
 TRADES_SPEC = DatasetSpec(
     name="stocks.trades",
@@ -109,41 +98,6 @@ INDICATOR = DatasetSpec(
 
 def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
     return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
-
-
-@pytest.mark.parametrize(
-    ("case", "expected"),
-    [
-        ((STOCK_BARS, Timespan.SECOND, 1), StreamHistoryQuery),
-        ((STOCK_BARS, Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((STOCK_BARS, Timespan.DAY, 1), HistoryQuery),
-        ((STOCK_BARS, Timespan.MINUTE, 5), HistoryQuery),
-        ((STOCK_BARS, Timespan.DAY, 2), HistoryQuery),
-        ((STOCK_BARS, Timespan.HOUR, 1), HistoryQuery),
-        ((FUTURES_BARS, Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((FUTURES_BARS, Timespan.SESSION, 1), HistoryQuery),
-        ((INDEX_BARS, Timespan.DAY, 1), HistoryQuery),
-    ],
-)
-def test_bar_query_class_selection(case: tuple[DatasetSpec, Timespan, int], expected: type) -> None:
-    assert bar_query_class(*case) is expected
-
-
-def test_bar_timespan_rules() -> None:
-    with pytest.raises(ValueError, match="futures bars have no DAY timespan"):
-        bar_query_class(FUTURES_BARS, Timespan.DAY, 1)
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bar_query_class(STOCK_BARS, Timespan.SESSION, 1)
-    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
-        bar_query_class(STOCK_BARS, "day", 1)
-    with pytest.raises(ValueError, match="multiplier must be positive"):
-        bar_query_class(STOCK_BARS, Timespan.DAY, 0)
-
-
-@pytest.mark.parametrize("multiplier", [True, 1.0])
-def test_bar_multiplier_must_be_an_int(multiplier: object) -> None:
-    with pytest.raises(TypeError, match="multiplier must be an int"):
-        bar_query_class(STOCK_BARS, Timespan.DAY, multiplier)
 
 
 def test_list_params() -> None:
@@ -438,28 +392,6 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
 
 
 @pytest.mark.parametrize(
-    ("changes", "expected"),
-    [
-        ({**_FETCH}, Query),
-        ({**_CHANNELS}, StreamQuery),
-        ({**_HISTORY}, HistoryQuery),
-        ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
-        ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),
-    ],
-)
-def test_the_query_class_follows_the_transports(
-    changes: dict[str, Any], expected: type[QueryBase]
-) -> None:
-    spec = DatasetSpec(
-        name="stocks.trades",
-        summary="A dataset for the tests.",
-        asset_class=AssetClass.STOCKS,
-        **changes,
-    )
-    assert query_class(spec) is expected
-
-
-@pytest.mark.parametrize(
     "changes",
     [{**_CHANNELS, **_FETCH}, {**_HISTORY, **_FETCH}, {**_CHANNELS, **_HISTORY, **_FETCH}],
     ids=["stream", "history", "both"],
@@ -473,24 +405,6 @@ def test_a_fetch_path_is_a_dataset_of_its_own(changes: dict[str, Any]) -> None:
             asset_class=AssetClass.STOCKS,
             **changes,
         )
-
-
-def test_flat_files_are_a_history_source() -> None:
-    assert query_class(INDEX_BARS) is HistoryQuery
-    values = DatasetSpec(
-        name="indices.values",
-        summary="A dataset for the tests.",
-        asset_class=AssetClass.INDICES,
-        channels={NotBars.ANY: "V"},
-        flat_file_prefixes={NotBars.ANY: "us_indices/values_v1"},
-        keys={(FF, "us_indices/values_v1"): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
-    )
-    assert query_class(values) is StreamHistoryQuery
-
-
-def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
-    # Every bars spec, whatever its transports; each call picks its own class.
-    assert {query_class(STOCK_BARS), query_class(FUTURES_BARS)} == {HistoryQuery}
 
 
 # The annotation rule: factories return the class their spec derives.

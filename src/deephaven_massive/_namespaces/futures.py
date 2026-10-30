@@ -5,11 +5,11 @@ REST and flat-file history), `snapshots` (the current state of contracts), and t
 datasets `contracts`, `products`, `exchanges`, `market_status`, and `schedules`.
 
 Each dataset is one factory method on `_Futures` that validates its arguments through
-`build_query` (`_namespaces/base.py`) and returns a query; nothing touches the network until a
-verb is called on the query. This module owns the namespace's `DatasetSpec`s, exported as
+`build_query` (`_namespaces/query_building.py`) and returns a query; nothing touches the network
+until a verb is called on the query. This module owns the namespace's `DatasetSpec`s, exported as
 `DATASETS` and composed into the dataset catalog (`CATALOG` in `_session.py`). A spec names the
-generated sources of its dataset and the key columns of each source; the columns, their types,
-and their units come from the generated schemas.
+generated sources of its dataset and the key columns of each source; the columns, their types, and
+their units come from the generated schemas.
 
 Futures differ from the other asset classes in three ways that show here:
 
@@ -37,7 +37,12 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params, one_or_any_of
+from deephaven_massive._namespaces.query_building import (
+    Namespace,
+    build_query,
+    list_params,
+    one_or_any_of,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
