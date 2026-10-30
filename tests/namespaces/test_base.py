@@ -495,8 +495,9 @@ def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
 
 # The annotation rule: factories return the class their spec derives.
 
-# Datasets served by a method of the session itself rather than of a namespace.
-_SESSION_FACTORIES = {"reference.snapshots": "snapshots"}
+# Datasets served by a method of the session itself rather than of a namespace; each dataset is
+# named after its method.
+_SESSION_FACTORIES = ("snapshots",)
 
 
 def _hints(function: Callable[..., object]) -> dict[str, Any]:
@@ -597,9 +598,9 @@ def _factory_map(session: type) -> dict[str, Callable[..., object]]:
         The namespace factories (`_factories`) and the session's own dataset methods.
     """
     factories = dict(_factories(session, ""))
-    for dataset, method in _SESSION_FACTORIES.items():
+    for method in _SESSION_FACTORIES:
         if hasattr(session, method):
-            factories[dataset] = getattr(session, method)
+            factories[method] = getattr(session, method)
     return factories
 
 
@@ -717,7 +718,7 @@ class _BadSession:
     def options(self) -> _Bad:
         raise NotImplementedError
 
-    def snapshots(self) -> Query:  # no reference.snapshots dataset
+    def snapshots(self) -> Query:  # no snapshots dataset
         raise NotImplementedError
 
 
@@ -741,7 +742,7 @@ def test_the_annotation_rule_passes_matching_factories() -> None:
     specs = _catalog(
         (STOCK_BARS, "stocks.bars"),
         (DIVIDENDS, "stocks.dividends"),
-        (DIVIDENDS, "reference.snapshots"),  # served by the session's own `snapshots()`
+        (DIVIDENDS, "snapshots"),  # served by the session's own `snapshots()`
     )
     assert annotation_problems(_GoodSession, specs) == []
 
@@ -755,7 +756,7 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
     )
     assert annotation_problems(_BadSession, specs) == [
         "options.news: a factory with no dataset",
-        "reference.snapshots: a factory with no dataset",
+        "snapshots: a factory with no dataset",
         "options.bars: the bars implementation must return HistoryQuery",
         (
             "options.bars: an overload returns StreamHistoryQuery, but its timespans give "

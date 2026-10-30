@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
 from deephaven_massive._datasets.bar_periods import (
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
 __all__ = [
     "NOT_PUBLISHED",
     "PUBLICATION_GRACE",
+    "Alternative",
     "HistoryWindow",
     "SourceChoice",
     "choose_source",
@@ -435,29 +437,71 @@ def _flat_file_problems(
             problems.append(f"{spec.name} has no flat files")
     if request.adjusted is True:
         problems.append(
-            "flat-file bars are unadjusted (as traded) and one history() never mixes adjusted "
-            "and unadjusted prices, so adjusted bars come only from REST; pass adjusted=False "
-            "for the flat files"
+            "adjusted=True needs REST, since flat-file bars are unadjusted (as traded) and one "
+            "history() never mixes adjusted and unadjusted prices; pass adjusted=False for "
+            "the flat files"
         )
-    zone = _PARTITION_ZONES[spec.asset_class]
-    cutoff = config.flat_file_publish_cutoff
-    late = [d for d in dates if not flat_file_published(d, now=now, zone=zone, cutoff=cutoff)]
-    if late:
-        problems.append(
-            f"the file for {late[0].isoformat()} is {NOT_PUBLISHED} (a day's file counts as "
-            f"published from {cutoff.isoformat('minutes')} New York time after the day ends)"
-        )
+    unpublished = _unpublished(spec, dates, config=config, now=now)
+    if unpublished is not None:
+        problems.append(unpublished)
     return problems
 
 
+def _unpublished(
+    spec: DatasetSpec, dates: Sequence[date], *, config: MassiveConfig, now: datetime
+) -> str | None:
+    """Say which flat file of a request is not published yet, if one is.
+
+    The one reason flat files cannot serve a request that changes with time alone.
+
+    Args:
+        spec: The dataset.
+        dates: The partition dates of the request.
+        config: The session's configuration (the publish cutoff).
+        now: The current instant.
+
+    Returns:
+        The reason, naming the first unpublished date, or None when every file is published.
+    """
+    zone = _PARTITION_ZONES[spec.asset_class]
+    cutoff = config.flat_file_publish_cutoff
+    late = [d for d in dates if not flat_file_published(d, now=now, zone=zone, cutoff=cutoff)]
+    if not late:
+        return None
+    return (
+        f"the file for {late[0].isoformat()} is {NOT_PUBLISHED} (a day's file counts as "
+        f"published from {cutoff.isoformat('minutes')} New York time after the day ends)"
+    )
+
+
+class Alternative(StrEnum):
+    """Whether the source an `AUTO` choice passed over could serve the same call.
+
+    `history()` warns about columns the chosen source leaves null only when the answer can
+    differ between two runs of one call, or when the caller can pick the other source.
+    """
+
+    AVAILABLE = "available"
+    """It can serve the request now: `source=` picks it."""
+    AFTER_PUBLICATION = "after publication"
+    """Flat files are held back only by a day's file not yet published, and once it is,
+    `AUTO` picks them for this call: the same call changes source the next day."""
+    UNAVAILABLE = "unavailable"
+    """It cannot serve the request, for a reason that does not change with time (no
+    credentials, no files or endpoint for the request, adjusted bars, `dm.ALL` over REST),
+    or `AUTO` would not pick it once it could; also for an explicit source."""
+
+
 class SourceChoice(NamedTuple):
-    """Where a `history()` call reads from, and why."""
+    """Where a `history()` call reads from, why, and whether the other source could have."""
 
     source: HistorySource
     """`HistorySource.FLAT_FILES` or `HistorySource.REST`."""
     reason: str
-    """Why, for the log line of an `AUTO` call, such as
+    """Why, for the log line of an `AUTO` call and the table's description, such as
     `"2 symbols < flat_file_symbol_threshold 50"`."""
+    alternative: Alternative = Alternative.UNAVAILABLE
+    """Whether the other source could serve the same call (`Alternative`)."""
 
 
 def choose_source(
@@ -491,7 +535,8 @@ def choose_source(
         now: The current instant, for the publication rule; None reads the clock.
 
     Returns:
-        The source and the reason it was chosen.
+        The source, the reason it was chosen, and under `AUTO` whether the other source could
+        serve the same call (`Alternative`).
 
     Raises:
         ValueError: Under `FLAT_FILES`, if flat files cannot serve the request; under `AUTO`, if
@@ -509,19 +554,28 @@ def choose_source(
             f"{spec.name} history has no possible source. "
             f"Flat files: {'; '.join(flat)}. REST: {rest}."
         )
-    if flat:
-        return SourceChoice(HistorySource.REST, f"flat files cannot serve it: {'; '.join(flat)}")
     if rest is not None:
         return SourceChoice(HistorySource.FLAT_FILES, f"REST cannot serve it: {rest}")
     threshold = config.flat_file_symbol_threshold
+    many = not isinstance(request.symbols, tuple) or len(request.symbols) >= threshold
+    if flat:
+        # Only an unpublished file changes with time; then the call moves to flat files later.
+        later = many and flat == [_unpublished(spec, dates, config=config, now=moment)]
+        return SourceChoice(
+            HistorySource.REST,
+            f"flat files cannot serve it: {'; '.join(flat)}",
+            Alternative.AFTER_PUBLICATION if later else Alternative.UNAVAILABLE,
+        )
     if not isinstance(request.symbols, tuple):
-        return SourceChoice(HistorySource.FLAT_FILES, "every symbol")
+        return SourceChoice(HistorySource.FLAT_FILES, "every symbol", Alternative.AVAILABLE)
     count = len(request.symbols)
-    if count >= threshold:
+    if many:
         reason = f"{count} symbols >= flat_file_symbol_threshold {threshold}"
-        return SourceChoice(HistorySource.FLAT_FILES, reason)
+        return SourceChoice(HistorySource.FLAT_FILES, reason, Alternative.AVAILABLE)
     return SourceChoice(
-        HistorySource.REST, f"{count} symbols < flat_file_symbol_threshold {threshold}"
+        HistorySource.REST,
+        f"{count} symbols < flat_file_symbol_threshold {threshold}",
+        Alternative.AVAILABLE,
     )
 
 

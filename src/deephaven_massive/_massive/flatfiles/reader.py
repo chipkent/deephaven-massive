@@ -158,7 +158,7 @@ class ReadColumn:
         read_type: The Arrow type the CSV reader parses the header as: `int64` for an epoch
             timestamp (in the file's unit), `string` for a list, otherwise the column's type.
         list_type: For a list header, the Arrow list type its comma-separated text is parsed
-            into (such as `list<int32>`); None otherwise.
+            into (such as `list<int64>`); None otherwise.
     """
 
     header: str

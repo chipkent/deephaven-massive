@@ -56,7 +56,7 @@ TRADES = Source(
             unit=WireUnit.MS,
             required=True,
         ),
-        Field(wire_key="c", column="Conditions", wire_type=WireType.INT_ARRAY),
+        Field(wire_key="c", column="Conditions", wire_type=WireType.LONG_ARRAY),
     ),
 )
 # One field of every other type, for the conversion tests.
@@ -393,7 +393,7 @@ def test_every_field_goes_through_the_shared_converter(decoder: FrameDecoder) ->
         ("p", "Price", "1.5", "double", '"1.5"'),
         ("s", "Size", True, "long", "true"),
         ("t", "SipTimestamp", "1536036818784", "epoch", '"1536036818784"'),
-        ("c", "Conditions", [1, 2**31], "int-array", "[1, 2147483648]"),
+        ("c", "Conditions", [1, 2**63], "long-array", "[1, 9223372036854775808]"),
         ("sym", "Ticker", 5, "string", "5"),
     ],
 )

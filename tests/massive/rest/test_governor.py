@@ -1118,11 +1118,35 @@ def test_slots_of_an_unpaced_bucket_change_nothing_with_time() -> None:
     assert governor.next_change() == RATE_WINDOW
 
 
+class _GrantClock(FakeClock):
+    """A fake clock that remembers, per thread, the time it last told that thread.
+
+    The governor reads the clock under its lock and grants on that reading, with no later
+    read before `acquire` returns, so a thread's last reading is the time of its grant. A
+    reading taken after `acquire` returns is not: while the thread is descheduled, another
+    thread's wait for the next free slot may already have moved virtual time a window on.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._read = threading.local()
+
+    @override
+    def monotonic(self) -> float:
+        now = super().monotonic()
+        self._read.last = now
+        return now
+
+    def last_read(self) -> float:
+        """Return the time this clock last told the calling thread."""
+        last: float = self._read.last
+        return last
+
+
 def test_concurrent_paced_requests_on_the_automatic_clock_do_not_race_virtual_time() -> None:
     # No wait without a deadline moves virtual time: only a slot's release does, so time
-    # advances by windows. (A start is read after the grant, when another thread's wait may
-    # already have moved the clock, so the exact starts are not asserted.)
-    clock = FakeClock()
+    # advances by windows.
+    clock = _GrantClock()
     governor = _governor(clock, basic={"stocks"})
     lane = object()
     starts: list[float] = []
@@ -1132,7 +1156,7 @@ def test_concurrent_paced_requests_on_the_automatic_clock_do_not_race_virtual_ti
         for _ in range(5):
             permit = governor.admission("stocks", lane=lane).acquire(Cancel())
             with lock:
-                starts.append(clock.monotonic())
+                starts.append(clock.last_read())  # the time the governor granted it
             governor.done(permit, answered=True)
 
     threads = [threading.Thread(target=work, daemon=True) for _ in range(4)]

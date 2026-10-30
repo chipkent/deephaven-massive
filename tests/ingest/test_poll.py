@@ -137,6 +137,7 @@ def start(
         request=Request(symbols=symbols),
         interval=timedelta(seconds=60),
         mode=mode,
+        query="<Query test>",
         read=script,
         pollers=pollers,
         host="api.massive.com",
@@ -868,6 +869,7 @@ def test_a_stop_during_a_cycle_publishes_nothing(
         request=Request(symbols=("AAPL",)),
         interval=timedelta(seconds=60),
         mode=PollMode.APPEND,
+        query="<Query test>",
         read=slow,
         pollers=pollers,
         host=None,
@@ -909,6 +911,7 @@ def test_an_error_after_a_stop_is_not_reported(
         request=Request(),
         interval=timedelta(seconds=60),
         mode=PollMode.UPSERT,
+        query="<Query test>",
         read=stopped,
         pollers=pollers,
         host=None,
@@ -1231,6 +1234,7 @@ FEED = DatasetSpec(
     fetch_path=PATH,
     symbol_param="ticker.any_of",
     keys={(R, PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     poll_mode=PollMode.APPEND,
     poll_keys=("Id",),
 )
@@ -1254,7 +1258,7 @@ def page(*rows: tuple[str, float]) -> Reply:
 
 def feed(m: dm.MassiveSession) -> Table:
     # The default mode of the feed, APPEND.
-    q = build_query(m._core, FEED, symbols=["AAPL"])
+    q = build_query(m._core, FEED, symbols=["AAPL"], start="2025-01-02")
     assert isinstance(q, Query)
     return q.poll(60)
 
@@ -1287,6 +1291,11 @@ def test_append_skips_every_row_it_already_appended(
     until(lambda: ids(table, dh_to_pylist) == expected)
     (row,) = streams_of(feed_session, dh_to_pylist)
     assert row["RowsPublished"] == 4  # the skipped rows are not counted
+    # The row names the query, which tells two polls of one dataset apart, and its transport.
+    assert (row["Query"], row["Transport"]) == (
+        "<Query stocks.dividends symbols=('AAPL',) start=2025-01-02>",
+        "REST",
+    )
     assert len(fake_rest.requests) == 4
 
 
@@ -1401,7 +1410,7 @@ def test_a_null_poll_key_fails_the_table_in_every_mode(
     rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, bad]
     fake_rest.reply(PATH, Reply(envelope(rows)))
     spec = dataclasses.replace(FEED, poll_keys=poll_keys)
-    q = build_query(feed_session._core, spec, symbols=["AAPL"])
+    q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
     assert isinstance(q, Query)
     table = q.poll(60, mode=mode)
     until(lambda: bool(table.j_table.isFailed()))
@@ -1424,7 +1433,7 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     )
     rows = [{"id": "a", "ticker": "AAPL", "currency": None}, {"id": "b", "ticker": "AAPL"}]
     fake_rest.reply(PATH, Reply(envelope(rows)))
-    q = build_query(feed_session._core, spec, symbols=["AAPL"])
+    q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
     assert isinstance(q, Query)
     table = q.poll(60, mode=mode)
     until(lambda: sorted(row["Id"] for row in dh_to_pylist(table)) == ["a", "b"])
@@ -1450,6 +1459,7 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
         request=Request(symbols=("AAPL",)),
         interval=timedelta(seconds=60),
         mode=PollMode.APPEND,
+        query="<Query test>",
         read=script,
         pollers=pollers,
         host="api.massive.com",
@@ -1511,7 +1521,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
     )
     with dm.MassiveSession(config) as m:
-        q = build_query(m._core, spec, symbols=["AAPL"])
+        q = build_query(m._core, spec, symbols=["AAPL"], start="2025-01-02")
         assert isinstance(q, Query)
         table = q.poll(60, mode=mode)
         expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
@@ -1534,3 +1544,123 @@ def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:
     for error in (poll.RowDataError, poll.UnsupportedParameterError, poll.SymbolRowError):
         assert issubclass(error, PermanentError)
     assert (dm.AuthenticationError, dm.EntitlementError, PermanentError) == poll._FATAL
+
+
+# --- A list column among the poll keys -------------------------------------------------------
+
+# The 13-F holdings keyed by their CUSIP and `OtherManagers`, a `String[]`, which Deephaven
+# cannot key an aggregation on.
+HOLDINGS = dataclasses.replace(
+    _session.CATALOG.by_name["stocks.filings.institutional_holdings"],
+    poll_keys=("Cusip", "OtherManagers"),
+    nullable_poll_keys={"OtherManagers": "for the tests"},
+)
+HOLDINGS_PATH = "/stocks/filings/vX/13-F"
+
+
+class ListScript(Script):
+    # A cycle reader for `HOLDINGS`: each row is a CUSIP, its other managers, and a value.
+    def __init__(self, m: dm.MassiveSession) -> None:
+        super().__init__(m)
+        self.schema = m._core.catalog.dataset_schema(HOLDINGS).arrow_schema()
+
+    def holdings(self, *rows: tuple[str, list[str] | None, float]) -> None:
+        data = [{"Cusip": c, "OtherManagers": o, "MarketValue": v} for c, o, v in rows]
+        self.outcomes.put(pa.Table.from_pylist(data, schema=self.schema))
+
+
+def start_holdings(
+    m: dm.MassiveSession, *, script: ListScript, pollers: Pollers, clock: FakeClock, mode: PollMode
+) -> Table:
+    return open_poll(
+        m._core,
+        spec=HOLDINGS,
+        request=Request(),
+        interval=timedelta(seconds=60),
+        mode=mode,
+        query="<Query test>",
+        read=script,
+        pollers=pollers,
+        host="api.massive.com",
+        path=HOLDINGS_PATH,
+        clock=clock,
+    )
+
+
+def holdings(table: Table, to_pylist: ToPylist) -> list[tuple[str, tuple[str, ...] | None, float]]:
+    rows = to_pylist(table)
+    found = []
+    for r in rows:
+        managers = None if r["OtherManagers"] is None else tuple(r["OtherManagers"])
+        found.append((r["Cusip"], managers, r["MarketValue"]))
+    return sorted(found, key=repr)
+
+
+@pytest.mark.parametrize("mode", [PollMode.UPSERT, PollMode.REPLACE])
+def test_a_list_poll_key_keys_by_its_items(
+    *,
+    massive_session: dm.MassiveSession,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    script = ListScript(massive_session)
+    # Equal lists are one key; a null list, an empty list, and other lists are each their own.
+    script.holdings(("C1", ["A"], 1.0), ("C1", ["A", "B"], 2.0), ("C1", None, 3.0), ("C1", [], 4.0))
+    table = start_holdings(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
+    schema = massive_session._core.catalog.dataset_schema(HOLDINGS)
+    assert table.column_names == list(schema.column_names)  # no hidden column, schema order
+    # The substitution of the hidden key is logged once, with the keys the table uses.
+    (record,) = [r for r in caplog.records if "list poll keys" in r.getMessage()]
+    assert record.levelno == logging.DEBUG
+    assert record.getMessage().endswith(
+        f"poll(mode={mode.value}) keys on ['Cusip', '__MassiveListKey']: the list poll keys "
+        "['OtherManagers'] are keyed by their JSON text in __MassiveListKey"
+    )
+    first = [("C1", (), 4.0), ("C1", ("A",), 1.0), ("C1", ("A", "B"), 2.0), ("C1", None, 3.0)]
+    until(lambda: holdings(table, dh_to_pylist) == sorted(first, key=repr))
+    script.holdings(("C1", ["A"], 5.0))
+    next_cycle(clock)
+    kept: list[tuple[str, tuple[str, ...] | None, float]] = [("C1", ("A",), 5.0)]
+    if mode is PollMode.UPSERT:  # the other keys stay; REPLACE tombstones them
+        kept += [("C1", (), 4.0), ("C1", ("A", "B"), 2.0), ("C1", None, 3.0)]
+    until(lambda: holdings(table, dh_to_pylist) == sorted(kept, key=repr))
+
+
+def test_append_identities_hold_a_list_poll_key(
+    *,
+    massive_session: dm.MassiveSession,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    script = ListScript(massive_session)
+    script.holdings(("C1", ["A"], 1.0), ("C1", ["A"], 9.0))  # the second is the same identity
+    table = start_holdings(
+        massive_session, script=script, pollers=pollers, clock=clock, mode=PollMode.APPEND
+    )
+    until(lambda: holdings(table, dh_to_pylist) == [("C1", ("A",), 1.0)])
+    script.holdings(("C1", ["A"], 2.0), ("C1", ["B"], 3.0))
+    next_cycle(clock)
+    until(lambda: holdings(table, dh_to_pylist) == [("C1", ("A",), 1.0), ("C1", ("B",), 3.0)])
+
+
+@pytest.mark.parametrize("mode", list(PollMode))
+def test_a_list_poll_key_is_order_sensitive(
+    *,
+    massive_session: dm.MassiveSession,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    mode: PollMode,
+) -> None:
+    # The same managers in another order are another key in every mode, as Deephaven compares
+    # arrays: the library never reorders a list Massive sends.
+    script = ListScript(massive_session)
+    script.holdings(("C1", ["A", "B"], 1.0), ("C1", ["B", "A"], 2.0))
+    table = start_holdings(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
+    expected = [("C1", ("A", "B"), 1.0), ("C1", ("B", "A"), 2.0)]
+    until(lambda: holdings(table, dh_to_pylist) == expected)

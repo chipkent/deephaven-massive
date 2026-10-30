@@ -15,7 +15,6 @@ from deephaven_massive._enums import AssetClass, Subscription
 
 ENV = (
     "MASSIVE_API_KEY",
-    "POLYGON_API_KEY",
     "MASSIVE_S3_ACCESS_KEY_ID",
     "MASSIVE_S3_SECRET_ACCESS_KEY",
     "MASSIVE_UNKNOWN_SYMBOLS",
@@ -38,17 +37,21 @@ def base() -> MassiveConfig:
     return MassiveConfig(api_key="k")
 
 
-def test_massive_key_wins_over_polygon_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("POLYGON_API_KEY", "poly")
-    assert MassiveConfig().api_key == "poly"
-    monkeypatch.setenv("MASSIVE_API_KEY", "massive")
+def test_the_key_comes_from_massive_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MASSIVE_API_KEY", " massive ")
     assert MassiveConfig().api_key == "massive"
 
 
-def test_empty_environment_values_are_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MASSIVE_API_KEY", "  ")
+def test_polygon_api_key_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POLYGON_API_KEY", "poly")
-    assert MassiveConfig().api_key == "poly"
+    with pytest.raises(dm.AuthenticationError, match="MASSIVE_API_KEY"):
+        MassiveConfig()
+
+
+def test_blank_environment_values_are_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MASSIVE_API_KEY", "  ")
+    with pytest.raises(dm.AuthenticationError):
+        MassiveConfig()
 
 
 def test_missing_key_raises_authentication_error() -> None:
@@ -253,7 +256,8 @@ def test_an_unknown_symbols_setting_out_of_the_environment_is_refused(
 ) -> None:
     monkeypatch.setenv("MASSIVE_UNKNOWN_SYMBOLS", "ignore")
     with pytest.raises(
-        ValueError, match=r"^MASSIVE_UNKNOWN_SYMBOLS must be 'fail' or 'warn', not 'ignore'$"
+        ValueError,
+        match=r"^MASSIVE_UNKNOWN_SYMBOLS must be 'fail' or 'warn', not 'ignore'$",
     ):
         MassiveConfig(api_key="k")
 

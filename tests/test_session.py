@@ -30,7 +30,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
-from deephaven_massive._namespaces import reference
+from deephaven_massive._namespaces import snapshots
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -324,8 +324,8 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         filters={"type": "options"},
     )
     assert type(query) is Query
-    assert query._spec is reference.SNAPSHOTS
-    assert query._spec is _session.CATALOG.by_name["reference.snapshots"]
+    assert query._spec is snapshots.SNAPSHOTS
+    assert query._spec is _session.CATALOG.by_name["snapshots"]
     assert query._request == Request(
         symbols=("AAPL", "C:EURUSD", "O:SPY251219C00600000", "X:BTCUSD"),
         params=(("order", dm.Order.DESC), ("sort", "ticker")),
@@ -363,8 +363,9 @@ def test_stream_rows_follow_the_holds(
         2,
         "RUNNING",
     )
-    assert (row["SymbolCount"], row["Symbols"], row["Transport"]) == (2, "AAPL, MSFT", "WS")
+    assert (row["SymbolCount"], row["Symbols"], row["Transport"]) == (2, "AAPL, MSFT", "WebSocket")
     assert (row["Host"], row["Path"]) == ("socket.test", "/stocks")
+    assert row["Query"] == repr(q)  # the query that opened it; b reused the stream
     assert row["CreatedAt"] is not None
     massive_session.release(a)
     assert stream_rows()[0]["HeldResults"] == 1
@@ -632,7 +633,7 @@ def test_stream_verbs_work_in_a_console_command(
         ("stocks.quotes", "RUNNING", 1),
         ("stocks.trades", "RUNNING", 3),
     ]
-    rows_when(made["connections"], lambda rows: any(r["Transport"] == "WS" for r in rows))
+    rows_when(made["connections"], lambda rows: any(r["Transport"] == "WebSocket" for r in rows))
     assert made["columns"].size > 0
     for table in made.values():
         if table.is_refreshing:

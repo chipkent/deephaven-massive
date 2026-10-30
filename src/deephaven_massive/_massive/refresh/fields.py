@@ -15,13 +15,15 @@ field gets one column and one type whichever transport serves it:
   last segment is replaced by its `NAMES` entry when Massive names the key nowhere (a name
   derived from the field's description, which the entry quotes). `naming.column_name` joins
   the long names in PascalCase: `prevDay.vw` becomes `PrevDayVwap`.
-- **Representation rules** decide each field's `WireType` (`representation`): an integer is
-  `long`, or an `epoch` when `UNITS` gives it a unit; a number is `double`; a boolean is
-  `bool`; an array of integers is `int-array`; an array of anything else, a free-form object,
-  and a choice of two or more shapes are `json-text`; a string with `format: date-time`, or no
-  format and a name ending in `_utc`, is an `iso-instant`; a string with `format: date`, or
-  named `date` or `*_date`, is a `date`; any other string is `string`. A `TYPE_FIXES` entry
-  then gives the field its named `Conversion`, whose type replaces the rule's.
+- **Representation rules** decide each field's `WireType` (`representation`): an integer, or a
+  number of format `integer`, `int32`, or `int64`, is `long`, or an `epoch` when `UNITS` gives
+  it a unit; any other number is `double`; a boolean is `bool`; an array whose items those rules
+  make a `long` is `long-array`, and one whose items are plain `string` is `string-array`; an
+  array of anything else, a free-form object, and a choice of two or more shapes are
+  `json-text`; a string with `format: date-time`, or no format and a name ending in `_utc`, is
+  an `iso-instant`; a string with `format: date`, or named `date` or `*_date`, is a `date`; any
+  other string is `string`. A `TYPE_FIXES` entry then gives the field its named `Conversion`,
+  whose type replaces the rule's.
 - **Units.** A timestamp-like field (a unit tag, a field documented as a timestamp, or a
   timestamp-like long name) is never left to a default: a `long` or `double` needs a `UNITS`
   entry, and so does text with no `format` unless a `TYPE_FIXES` entry types it.
@@ -85,6 +87,19 @@ _SCALAR_TYPES: Final = {
     "integer": WireType.LONG,
     "number": WireType.DOUBLE,
     "boolean": WireType.BOOL,
+}
+
+# The formats that make a `number` an integer. The vendor declares a few ids as a `number` of
+# format `int32` (the option chain's quote exchange ids), and an id is a `long` everywhere, so
+# it joins the reference table of its ids with no cast.
+_INTEGER_FORMATS: Final = frozenset({"integer", "int32", "int64"})
+
+# The type of an array by the type its items take by the scalar rules; an array of anything else
+# is `json-text`. Lists of integers and of plain text become Deephaven arrays (`long[]`,
+# `String[]`), which `ungroup` and the query language's array functions read directly.
+_ARRAY_TYPES: Final = {
+    WireType.LONG: WireType.LONG_ARRAY,
+    WireType.STRING: WireType.STRING_ARRAY,
 }
 
 
@@ -165,7 +180,7 @@ def representation(schema: JsonObject, last: str) -> WireType | None:
             return WireType.ISO_INSTANT
         dated = form == "date" or last == "date" or last.endswith("_date")
         return WireType.DATE if dated else WireType.STRING
-    if kind == "number" and form == "integer":
+    if kind == "number" and form in _INTEGER_FORMATS:
         return WireType.LONG
     return _SCALAR_TYPES.get(kind) if isinstance(kind, str) else None
 
@@ -317,8 +332,9 @@ class SourceFields:
             The field's type, or `None` (with a problem) for a schema with no usable type.
         """
         if raw.schema.get("type") == "array":
-            items = raw.items or {}
-            return WireType.INT_ARRAY if items.get("type") == "integer" else WireType.JSON_TEXT
+            # The items take the scalar rules, without the name rules of the field itself.
+            item = representation(raw.items or {}, "")
+            return _ARRAY_TYPES.get(item, WireType.JSON_TEXT) if item else WireType.JSON_TEXT
         found = representation(raw.schema, raw.wire_key.rsplit(".", 1)[-1])
         if found is None:
             self.problem(
