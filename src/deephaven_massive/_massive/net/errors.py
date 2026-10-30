@@ -98,6 +98,7 @@ class WireError(Exception):
         path: str | None = None,
         request_id: str | None = None,
         unreadable: bool = False,
+        client_defect: bool = False,
     ) -> None:
         """Create a wire error.
 
@@ -115,6 +116,8 @@ class WireError(Exception):
                 (a malformed or truncated flat file, a header the file lacks): a gap in the
                 library rather than a transport failure, which the library reports as a
                 defect. False, the default, for every failure to reach or hear from Massive.
+            client_defect: True when the client itself failed on an unexpected exception (a
+                bug in it, not anything Massive did), which the library reports as a defect.
         """
         super().__init__(message)
         self._message = message
@@ -123,6 +126,7 @@ class WireError(Exception):
         self._path = path
         self._request_id = request_id
         self._unreadable = unreadable
+        self._client_defect = client_defect
 
     @property
     def message(self) -> str:
@@ -153,6 +157,11 @@ class WireError(Exception):
     def unreadable(self) -> bool:
         """True when Massive delivered the data but the client could not read it."""
         return self._unreadable
+
+    @property
+    def client_defect(self) -> bool:
+        """True when the client itself failed on an unexpected exception: a bug in it."""
+        return self._client_defect
 
 
 class WireAuthError(WireError):

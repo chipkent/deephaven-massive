@@ -85,6 +85,7 @@ from deephaven_massive._errors import (
     MassiveError,
     from_wire,
     library_bug,
+    wire_cause,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar, RowFetch
 from deephaven_massive._ingest.subscriptions import (
@@ -1087,6 +1088,7 @@ class Connection:
                 f"the WebSocket connection to {self.decision.host}{self.path} failed: "
                 f"{error.message}",
                 status=error.status,
+                cause=wire_cause(error),  # an internal error of the client is a defect
             )
         self._last_error = str(public)
         log_failure(logger, public, "%s")

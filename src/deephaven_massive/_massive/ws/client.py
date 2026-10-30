@@ -471,6 +471,7 @@ class WsClient:
                 f"error: {error!r}",
                 host=self._host,
                 path=self._path,
+                client_defect=True,
             )
             failure.__cause__ = error
         else:

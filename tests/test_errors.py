@@ -102,8 +102,10 @@ def test_the_cause_is_read_only() -> None:
 
 def test_from_wire_carries_the_cause_the_caller_knows() -> None:
     assert from_wire(WireError("x")).cause is ErrorCause.EXPECTED
-    # Data Massive delivered that the client could not read is the library's to fix.
+    # Data Massive delivered that the client could not read is the library's to fix, and so
+    # is a failure of the client itself.
     assert from_wire(WireError("bad file", unreadable=True)).cause is ErrorCause.LIBRARY_DEFECT
+    assert from_wire(WireError("bug", client_defect=True)).cause is ErrorCause.LIBRARY_DEFECT
     rejected = from_wire(WireError("bad row"), cause=ErrorCause.LIBRARY_DEFECT)
     assert rejected.cause is ErrorCause.LIBRARY_DEFECT
 

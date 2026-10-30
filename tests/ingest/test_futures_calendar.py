@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, cast
 import pyarrow as pa
 import pytest
 
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
 from deephaven_massive._ingest.futures_calendar import (
     LOAD_PATIENCE,
     RELOAD_SPACING,
@@ -442,6 +442,20 @@ def test_a_failed_lookup_is_logged_and_its_rows_are_misses(
     idle(calendar)
     # Loaded at last: the failure is forgotten and the rows place.
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
+
+
+def test_an_unreadable_lookup_answer_is_logged_as_a_library_defect(
+    *, calendar: FuturesCalendar, fetch: FakeFetch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fetch.answers[CONTRACTS_PATH] = MassiveError("bad page", cause=ErrorCause.LIBRARY_DEFECT)
+    with caplog.at_level(logging.WARNING):
+        watched(calendar, "ESM4")
+        correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
+    [record] = [r for r in caplog.records if "futures schedules: looking up" in r.getMessage()]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == (
+        f"test: futures schedules: looking up its product failed: bad page (ESM4). {LIBRARY_BUG}"
+    )
 
 
 def test_a_failed_schedule_is_logged_its_rows_are_misses_and_it_is_retried(

@@ -66,6 +66,7 @@ __all__ = [
     "from_wire",
     "library_bug",
     "user_defect",
+    "wire_cause",
 ]
 
 LIBRARY_BUG: Final = (
@@ -271,8 +272,24 @@ def from_wire(error: WireError, *, cause: ErrorCause | None = None) -> MassiveEr
     else:
         public = MassiveError
     if cause is None:
-        cause = ErrorCause.LIBRARY_DEFECT if error.unreadable else ErrorCause.EXPECTED
+        cause = wire_cause(error)
     return public(error.message, status=error.status, request_id=error.request_id, cause=cause)
+
+
+def wire_cause(error: WireError) -> ErrorCause:
+    """Return whose problem a wire error is, from what the wire client knows.
+
+    Args:
+        error: The wire error.
+
+    Returns:
+        `ErrorCause.LIBRARY_DEFECT` for data Massive delivered that the client could not read
+        (`unreadable`) or a failure of the client itself (`client_defect`), and
+        `ErrorCause.EXPECTED` for every failure to reach or hear from Massive.
+    """
+    if error.unreadable or error.client_defect:
+        return ErrorCause.LIBRARY_DEFECT
+    return ErrorCause.EXPECTED
 
 
 def cause_of(error: BaseException) -> ErrorCause:
