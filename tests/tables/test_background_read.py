@@ -385,6 +385,42 @@ def test_a_close_after_the_rows_landed_changes_nothing(
     massive_session.release(result)
 
 
+def test_a_console_close_between_the_publish_and_the_landing_shows_the_read_done(
+    *,
+    massive_session: dm.MassiveSession,
+    console_command: Callable[[Callable[[], None]], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The command holds the update graph's lock, so the rows land only after the close has
+    # released the diagnostics: the close records the published read DONE itself.
+    results: list[Table] = []
+    rows = static_rows(massive_session, "AAPL")
+    views = [massive_session.streams()]  # cleared at the end, which drops the view
+
+    def command() -> None:
+        results.append(open_test_read(massive_session, returning(rows)))
+        read = the_read(massive_session)
+        read.thread.join(TIMEOUT)  # it published; the rows wait for the next cycle
+        massive_session.close()
+        assert not read.fail(dm.MassiveError("closed"))  # it has its rows
+
+    console_command(command)
+
+    def read_rows() -> list[tuple[str, int, str | None]]:
+        # The view gets its rows once the command has released the lock.
+        return [
+            (r["State"], r["RowsPublished"], r["Error"])
+            for r in dh_to_pylist(views[0])
+            if r["Kind"] == "read"
+        ]
+
+    until(lambda: read_rows() == [("DONE", 1, None)])
+    assert not failed(results[0])
+    assert tickers(results[0], dh_to_pylist) == ["AAPL"]
+    views.clear()
+    massive_session.release(results[0])
+
+
 def test_a_read_racing_close_after_registering_never_starts(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -47,7 +47,8 @@ partitioned tables), after marking the row `FAILED` and logging `call 7 failed a
 ...` once, at WARNING for an expected failure and at ERROR for a defect, naming whose. An error
 that is not a `MassiveError` is a defect of the library, logged with its traceback and how to
 report it, and the table fails with a `MassiveError` that names it. A close or a failure that
-comes after the rows have landed changes nothing: the table has its complete result.
+comes after the read published its rows fails nothing: the rows land on the next cycle, and
+the row is marked `DONE` at once (`BackgroundRead.fail`), while the session still shows it.
 
 **Threads and locks.** `open_read` runs on the caller thread, which may hold the update graph's
 lock (a console command): it creates tables, registers the row, and starts the thread, and
@@ -139,9 +140,9 @@ class BackgroundRead:
         "_core",
         "_exec_ctx",
         "_failed",
-        "_landed",
         "_name",
         "_publish_lock",
+        "_published",
         "_publisher",
         "_run",
         "_started",
@@ -183,7 +184,7 @@ class BackgroundRead:
         self._run = run
         self._publish_lock = threading.Lock()
         self._failed = False
-        self._landed = False
+        self._published: int | None = None
         self._started = time.monotonic()
         self._thread = threading.Thread(
             target=self._read, name=f"{core.thread_prefix} read-{call}", daemon=True
@@ -221,11 +222,30 @@ class BackgroundRead:
         Args:
             error: The error the table fails with.
 
+        A read that has published its rows is not failed: they land on the next update cycle
+        whatever happens now. It is marked `DONE` at once instead, while a closing session
+        still shows its rows. A close inside a console command holds the update graph's lock,
+        so the cycle that adds the rows, where the result's listener would mark it, runs only
+        after the session's diagnostics are released, and the read would stay `CLOSED`. The
+        `DONE` row reaches `m.streams()` no earlier than the rows reach the result: both were
+        handed to Deephaven before that cycle, the rows first.
+
+        Args:
+            error: The error the table fails with.
+
         Returns:
             False when the table had already failed or already has its rows.
         """
         self._stop.set()
-        return self._fail_once(cast("SessionCore", self._core()), error)
+        core = cast("SessionCore", self._core())
+        if self._fail_once(core, error):
+            return True
+        with self._publish_lock:
+            published = self._published
+        if published is not None:
+            logger.debug("call %d done at the close: its %d rows land next", self._call, published)
+            core.finish_read(self._call, published)
+        return False
 
     def _read(self) -> None:
         """The thread: run the transport call, then publish its result or fail the table.
@@ -321,7 +341,7 @@ class BackgroundRead:
             if self._stopped_by(f"{rows} rows"):
                 return
             self._publisher.add(row)
-            self._landed = True
+            self._published = rows
         logger.debug("call %d published: %d rows in %.3f s", self._call, rows, self._took)
         if not rows:  # no rows to land: the empty result is already what the table shows
             core.finish_read(self._call, 0)
@@ -343,7 +363,7 @@ class BackgroundRead:
             False when the table had already failed or already has its rows.
         """
         with self._publish_lock:
-            if self._failed or self._landed:
+            if self._failed or self._published is not None:
                 return False
             closed = core.fail_stream(self._call, str(error))
             self._publisher.publish_failure(
