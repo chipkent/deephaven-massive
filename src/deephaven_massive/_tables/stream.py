@@ -12,6 +12,8 @@ subscribed; this module owns everything that touches Deephaven for a stream:
   and its blink table (`blink_publisher`, whose failure is delivered exactly once) and, for a
   reactive symbol table, the `SymbolWatch` that follows it. It runs on the caller thread,
   inside the session's execution context.
+- `SharedBatch`, one flush's converted rows of a channel for one dataset, as a static table
+  that every stream of the dataset on the channel selects its rows from.
 - `StreamSink`, a stream as the flush thread sees it: its session, the publisher, the symbols it
   receives (`None` for `dm.ALL`), and its count of published rows.
 - `Flusher`, one per connection: a daemon thread that every `flush_interval` drains the
@@ -30,12 +32,19 @@ session date, so a futures row's `Date` is the 17:00 Chicago rule's, corrected b
 schedules do not cover keeps the rule's date, and the streams that receive it show the miss in their
 `m.streams()` row. A row whose timestamp fails the bound fails only the streams that would have
 received it, and is dropped from the batch. The batch becomes one static Deephaven table
-(`deephaven.arrow.to_table`); then each `dm.ALL` stream gets `publisher.add(batch)` and each symbol
-stream `publisher.add(batch.where_in(filter, "Symbol"))`, where `filter` is a static one-column
-table cached per stream and rebuilt only when the stream's symbols change. So the Python work is
-O(rows) per channel and flush, independent of the number of streams, and the per-stream work is one
-Java filter and one `add`. Each flush ends with one `SessionCore.update_streams` call per session,
-carrying the published-row total of each of its streams.
+(`deephaven.arrow.to_table`), shared by the dataset's streams on the channel (`SharedBatch`). Each
+`dm.ALL` stream, and each symbol stream that holds every symbol of the batch, gets the whole batch;
+a symbol stream that holds none of them gets nothing. A symbol stream that holds exactly one of
+them gets that symbol's rows from a partition of the batch by `Symbol`, built once per flush the
+first time a stream needs it (`Table.partition_by`), so many single-symbol streams cost one
+partition and a lookup each rather than one filter each; a filter costs a few milliseconds
+whatever its rows, which a hundred streams would pay a hundred times per flush. A stream that
+holds two or more of the batch's symbols gets `batch.where_in(filter, "Symbol")`, which keeps the
+rows in arrival order across its symbols, where `filter` is a static one-column table cached per
+stream and rebuilt only when the stream's symbols change. So the Python work is O(rows) per
+channel and flush, independent of the number of streams, and the per-stream work is at most one
+Java lookup or filter and one `add`. Each flush ends with one `SessionCore.update_streams` call per
+session, carrying the published-row total of each of its streams.
 
 **Failures.** The connection's loop thread never calls Java, so it hands every stream failure
 (a refused topic, a rejected row, a rejected key) to the flush thread's control queue; the
@@ -103,7 +112,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
-    from deephaven.table import Table
+    from deephaven.table import PartitionedTable, Table
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.schema import ColumnType, Schema
@@ -120,6 +129,7 @@ __all__ = [
     "FuturesSessionDates",
     "OpenedStream",
     "RowFailure",
+    "SharedBatch",
     "StreamSink",
     "open_stream_tables",
 ]
@@ -232,6 +242,52 @@ class Converted:
     symbols: frozenset[str] = frozenset()
     null_symbols: bool = False
     misses: tuple[tuple[str, str], ...] = ()
+
+
+class SharedBatch:
+    """One flush's converted rows of a channel for one dataset, shared by its streams.
+
+    The flush thread creates one per dataset and channel in each flush, after converting the
+    rows, and hands it to every stream of the dataset on the channel (`StreamSink.publish`);
+    it is dropped when the flush ends. Each stream takes the whole table, nothing, the rows of
+    one symbol (`rows_of`), or a filter of the table. The rows of one symbol come from a
+    partition of the table by `Symbol`, built the first time a stream asks for them and reused
+    by every later stream of the flush, so its cost is paid once per flush however many
+    streams read it. Used by the one flush thread that created it, so it needs no lock.
+
+    Attributes:
+        table: The static table of the batch's rows, in the dataset's schema.
+        converted: The batch's conversion, for its distinct symbols.
+    """
+
+    __slots__ = ("_partition", "converted", "table")
+
+    def __init__(self, table: Table, converted: Converted) -> None:
+        """Wrap a flush's batch; nothing is computed until a stream asks for one symbol's rows.
+
+        Args:
+            table: The static table of the batch's rows (`columns.dataset_table`).
+            converted: The batch's conversion (`ChannelPlan.convert`).
+        """
+        self.table: Final = table
+        self.converted: Final = converted
+        self._partition: PartitionedTable | None = None
+
+    def rows_of(self, symbol: str) -> Table:
+        """Return the batch's rows of one symbol, in arrival order.
+
+        The first call partitions the table by `Symbol` (a static partition, which takes no
+        update-graph lock); every call then looks the symbol up in it.
+
+        Args:
+            symbol: One of the batch's canonical symbols (`Converted.symbols`).
+
+        Returns:
+            A static table of the rows whose `Symbol` is `symbol`, with every column.
+        """
+        if self._partition is None:
+            self._partition = self.table.partition_by(_SYMBOL)
+        return cast("Table", self._partition.get_constituent(symbol))
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -517,8 +573,8 @@ class StreamSink:
       `fail` calls); the publish lock is never taken under `registry_lock`. A caller that holds
       the update-graph lock (a console command) takes it to fail the stream, which is safe
       because nothing done under it takes the update-graph lock or waits for an update cycle:
-      `where_in` of static tables, `publisher.add` of a static table, `publish_failure`, and
-      `SessionCore.fail_stream`.
+      `partition_by` and `where_in` of static tables, `publisher.add` of a static table,
+      `publish_failure`, and `SessionCore.fail_stream`.
 
     A failed stream publishes nothing more, and is failed once, so a failure queued behind the
     session's close never replaces the close.
@@ -609,13 +665,14 @@ class StreamSink:
             symbols = self._symbols
         return symbols is None or (symbol is not None and symbol in symbols)
 
-    def publish(self, batch: Table, converted: Converted) -> int:
+    def publish(self, batch: SharedBatch) -> int:
         """Add the part of a channel's batch this stream receives.
 
         No Python work per row: a `dm.ALL` stream gets the whole batch; a symbol stream gets
         nothing when it holds none of the batch's symbols, the whole batch when it holds all of
-        them (the common single-stream case), and otherwise a `where_in` against its cached
-        filter table, rebuilt only when its symbols changed.
+        them (the common single-stream case), the rows of the one batch symbol it holds from the
+        batch's shared partition (`SharedBatch.rows_of`), and otherwise a `where_in` against its
+        cached filter table, rebuilt only when its symbols changed.
 
         The `where_in` and the publisher's `add` run under the publish lock, which `close()`
         takes from a console command that holds the update graph's exclusive lock (through
@@ -624,8 +681,7 @@ class StreamSink:
         refreshing input here would let `close()` hang.
 
         Args:
-            batch: The channel's static batch in the dataset's schema.
-            converted: The batch's conversion, for its distinct symbols.
+            batch: The channel's shared batch for the stream's dataset.
 
         Returns:
             The rows added; 0 once the stream has failed.
@@ -633,19 +689,18 @@ class StreamSink:
         with self._publish_lock:
             if self.failed:
                 return 0
-            selected = self._select(batch, converted)
+            selected = self._select(batch)
             added = 0 if selected is None else selected.size
             if selected is not None and added:
                 self.publisher.add(selected)
                 self.rows_published += added
             return added
 
-    def _select(self, batch: Table, converted: Converted) -> Table | None:
+    def _select(self, batch: SharedBatch) -> Table | None:
         """Choose the rows of a batch the stream receives; the publish lock is held.
 
         Args:
-            batch: The channel's batch.
-            converted: Its conversion.
+            batch: The channel's shared batch.
 
         Returns:
             The rows, or None when the stream receives none.
@@ -653,15 +708,20 @@ class StreamSink:
         with self._lock:
             symbols, version = self._symbols, self._version
         if symbols is None:
-            return batch
-        if symbols.isdisjoint(converted.symbols):
+            return batch.table
+        converted = batch.converted
+        held = symbols & converted.symbols
+        if not held:
             return None
-        if converted.symbols <= symbols and not converted.null_symbols:
-            return batch
+        if len(held) == len(converted.symbols) and not converted.null_symbols:
+            return batch.table
+        if len(held) == 1:
+            (symbol,) = held
+            return batch.rows_of(symbol)
         if version != self._filter_version:
             self._filter = new_table([string_col(_SYMBOL, sorted(symbols))])
             self._filter_version = version
-        return batch.where_in(cast("Table", self._filter), _SYMBOL)
+        return batch.table.where_in(cast("Table", self._filter), _SYMBOL)
 
     def fail(self, error: MassiveError) -> bool:
         """Fail the stream's table and record the failure, once.
@@ -1059,8 +1119,8 @@ class Flusher:
 
         Failures come first, so a stream that failed gets no row published after its failure
         was reported. Runs under the flush lock, inside the flusher's execution context, with
-        no other library lock held: it calls Deephaven (`to_table`, `where_in`, `add`,
-        `publish_failure`) and then each session with a stream that published once
+        no other library lock held: it calls Deephaven (`to_table`, `partition_by`, `where_in`,
+        `add`, `publish_failure`) and then each session with a stream that published once
         (`update_streams`).
         """
         with self._flush_lock, entered(self._exec_ctx):
@@ -1176,9 +1236,9 @@ class Flusher:
                     sink.fail(error)
         if not converted.batch.num_rows:
             return
-        table = dataset_table(converted.batch, plan.date_columns)
+        shared = SharedBatch(dataset_table(converted.batch, plan.date_columns), converted)
         for sink in readers:
-            if sink.publish(table, converted):
+            if sink.publish(shared):
                 found = updates.get(sink, StreamUpdate())
                 cleared = sink.stream_id not in missed and sink.stream_id in self._shown
                 if cleared:
