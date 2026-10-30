@@ -1622,6 +1622,28 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date(
     ]
 
 
+def test_bars_of_several_days_count_calendar_days_as_massive_does(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive stamps 2-day stock bars on Friday, Sunday, and Tuesday: the Friday bar holds
+    # Friday and Saturday, so Friday's trading alone, and the Sunday bar holds Monday's. Each
+    # ends two calendar days after its stamp, so every bar of Friday to Wednesday is kept.
+    days = [date(2026, 10, 16), date(2026, 10, 18), date(2026, 10, 20)]
+    stamps = [new_york_midnight_ns(day) // 10**6 for day in days]
+    last = new_york_midnight_ns(date(2026, 10, 22)) // 10**6 - 1
+    results = [{"t": t, "c": 1.0, "v": v} for t, v in zip(stamps, [59.9, 34.6, 71.5], strict=True)]
+    fake_rest.reply(
+        f"/v2/aggs/ticker/AAPL/range/2/day/{stamps[0]}/{last}",
+        Reply({"status": "OK", "adjusted": True, "results": results}),
+    )
+    query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, multiplier=2)
+    out = table_rows(query.history("2026-10-16", "2026-10-21", source=dm.HistorySource.REST))
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        (None, new_york_midnight_ns(day), new_york_midnight_ns(day + timedelta(days=2)))
+        for day in days
+    ]
+
+
 def test_a_day_file_moves_an_early_close_and_warns_on_an_unexpected_stamp(
     *,
     flat_session: dm.MassiveSession,

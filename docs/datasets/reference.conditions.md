@@ -14,7 +14,7 @@ m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, s
 | --- | --- |
 | Verbs | `fetch()`, `poll()` |
 | Served by | REST |
-| `poll()` | holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type` and `Id` (`dm.PollMode.REPLACE`) |
+| `poll()` | holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume` (`dm.PollMode.REPLACE`) |
 | `sort` | `asset_class`, `id`, `type`, `name`, `data_types`, `legacy` |
 | `filters` | none |
 

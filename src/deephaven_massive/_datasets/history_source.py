@@ -204,7 +204,7 @@ def history_window(
     a bar of several units, `bar_periods.bar_sessions`, and an intraday bar by its session), and its
     `TimestampEnd` must be no later than `HistoryWindow.bars.latest`. The end is conservative, so
     a bar whose window might reach past the range is left out: an index day bar ends at 01:00
-    New York time, and a bar of several trading days allows for holidays
+    New York time, and a futures bar of several sessions allows for holidays
     (`bar_periods.last_trading_day`).
 
     Args:

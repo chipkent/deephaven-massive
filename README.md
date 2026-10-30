@@ -289,9 +289,9 @@ and the trade count. These rules hold for every `bars()` dataset.
 - **Weeks and longer.** Massive starts a week on Sunday and names it by that Sunday. A stock or
   option week covers Monday to Friday, and its month, quarter, or year leaves out the weekend
   days at either end. Indices, forex, and crypto, which can trade at weekends, cover whole
-  calendar weeks (Sunday to Saturday), months, quarters, and years. A bar of several days counts
-  trading days for stocks, options, and indices, with room for a holiday to push its end later,
-  since the library has no holiday calendar. A futures bar covers its trading sessions.
+  calendar weeks (Sunday to Saturday), months, quarters, and years. A bar of several days spans
+  that many calendar days, weekends included, as Massive counts them: a 2-day stock bar stamped
+  on a Friday holds Friday's trading alone. A futures bar covers its trading sessions.
 - **Join on the end.** A bar's values are final only once its window has ended, so join other
   data on `TimestampEnd`: `trades.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])` gives
   each trade the latest bar that had closed by then. Minute bars of every class end on whole

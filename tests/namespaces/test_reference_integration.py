@@ -1,19 +1,20 @@
 """Live checks of reference data against Massive: keys, repeated rows, and ticker spellings.
 
-Each test records what Massive sent (`evidence`) and asserts only that the requests worked:
-the evidence, not a pass, settles the open question. The library's tables serve where they
-show the answer; raw rows from the wire REST client serve where the library renames or rejects
-the very keys or spellings in question. How to run these tests is in `docs/live-tests.md`.
+Each test records what Massive sent (`evidence`). Most assert only that the requests worked,
+so the evidence, not a pass, settles the open question; the condition key test asserts the
+answer the library relies on. The library's tables serve where they show the answer; raw rows
+from the wire REST client serve where the library renames or rejects the very keys or
+spellings in question. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import deephaven_massive as dm
 from deephaven_massive._massive import (
     RestClient,
     Transport,
@@ -28,8 +29,6 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    import deephaven_massive as dm
-
 pytestmark = pytest.mark.integration
 
 # Fixture types, repeated in each live module: test modules may not import from conftest.
@@ -40,10 +39,6 @@ _EVENTS = "/vX/reference/tickers/{id}/events"
 _TICKERS = "/v3/reference/tickers"
 _RENAMED = "META"
 """A ticker with a ticker-change event (FB became META in 2022)."""
-
-_STOCK_TICKER = re.compile(r"[A-Z]+(?:\.[A-Z]|p[A-Z]?|r|w)?")
-"""An upper-case root and at most one of the suffixes `.X` (class), `pX` (preferred), `r`
-(rights), and `w` (warrants)."""
 
 _TYPES = ("WARRANT", "UNIT", "RIGHT", "PFD")
 _LIMIT = 10_000
@@ -140,42 +135,72 @@ def test_exchanges_are_keyed_by_asset_class_and_id(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("32")
+@pytest.mark.verifies("32")
 @pytest.mark.requests(5)
-def test_conditions_are_keyed_by_asset_class_type_and_id(
+def test_conditions_are_keyed_by_every_column(
     live_session: dm.MassiveSession,
     *,
     classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether `(AssetClass, Type, Id)` identifies one condition, the key it polls by.
+    """Whether every condition differs from the others in some column, the key it polls by.
 
-    Reads up to 10,000 conditions, or 5,000 with Stocks on Basic (five requests at most), and
-    records every repeated key. Reading it: none confirms the key; any means it needs another
-    column.
+    Reads up to 10,000 conditions, or 5,000 with Stocks on Basic (five requests at most). For
+    each `(AssetClass, Type, Id)` Massive lists more than once, records the columns whose
+    values differ between its rows. Passes when no two rows are equal in every column but
+    `TimestampInsert`, so a `poll()` table, keyed by all of them, keeps every condition; a
+    failure names the repeated rows.
     """
     limit = _BASIC_LIMIT if "stocks" in classes_on_basic else _LIMIT
     rows = table_rows(live_session.reference.conditions(limit=limit).fetch())
-    repeated = _repeated((row["AssetClass"], row["Type"], row["Id"]) for row in rows)
     cut = " (cut short at the limit)" if len(rows) == limit else ""
-    evidence(f"conditions: {len(rows)} rows{cut}; repeated (AssetClass, Type, Id): {repeated}")
+    triples = _repeated((row["AssetClass"], row["Type"], row["Id"]) for row in rows)
+    evidence(f"conditions: {len(rows)} rows{cut}; repeated (AssetClass, Type, Id): {triples}")
+    for triple, _count in triples:
+        same = [row for row in rows if (row["AssetClass"], row["Type"], row["Id"]) == triple]
+        differ = sorted(k for k in same[0] if k != "TimestampInsert" and _differs(same, k))
+        evidence(f"    {triple}: the rows differ in {differ}")
+    whole = _repeated(
+        tuple(_hashable(v) for k, v in sorted(row.items()) if k != "TimestampInsert")
+        for row in rows
+    )
     assert rows
+    assert not whole, f"conditions equal in every column: {whole}"
+
+
+def _differs(rows: list[dict[str, Any]], column: str) -> bool:
+    """Tell whether some rows hold different values in a column.
+
+    Returns:
+        True when the rows' values of `column` are not all equal.
+    """
+    return len({_hashable(row[column]) for row in rows}) > 1
+
+
+def _hashable(value: object) -> object:
+    """Return a value that can be counted: a list (`DataTypes`) as a tuple, else the value.
+
+    Returns:
+        The value, a list made a tuple.
+    """
+    return tuple(value) if isinstance(value, list) else value
 
 
 @pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("43")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(110)
-def test_stock_ticker_spellings_outside_the_documented_forms(
+def test_stock_ticker_spellings_the_library_cannot_read(
     live_rest: RestClient, *, classes_on_basic: frozenset[str], evidence: Evidence
 ) -> None:
-    """Which stock ticker spellings fall outside an upper-case root and one documented suffix.
+    """Which stock ticker spellings fall outside the library's canonical stock grammar.
 
     Reads one page of stock tickers of each type `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and
-    one page of three partner datasets, and records every ticker outside the root-and-suffix
-    forms (`.X`, `pX`, `r`, `w`). Reading it: none confirms the symbol grammar; each other
-    spelling must join the grammar or be left to the handling of unknown symbols. A refused
+    one page of three partner datasets, and records every ticker `dm.canonical_symbol_stock`
+    refuses: a row with such a ticker gets a null `Symbol` and keeps the text in `RawSymbol`.
+    Reading it: none confirms the symbol grammar; each other spelling must join the grammar or
+    be left to the handling of unknown symbols. A refused
     partner page (no entitlement) is recorded and skipped. With Stocks on Basic, which allows
     5 requests a minute, the partner pages are left out, so the test sends 4 requests.
     """
@@ -189,9 +214,9 @@ def test_stock_ticker_spellings_outside_the_documented_forms(
         ).rows
         seen += len(rows)
         tickers = sorted({str(row.get("ticker")) for row in rows})
-        odd = [ticker for ticker in tickers if not _STOCK_TICKER.fullmatch(ticker)]
+        odd = [ticker for ticker in tickers if _unreadable(ticker)]
         evidence(f"{ticker_type}: {len(tickers)} tickers, e.g. {tickers[:10]}")
-        evidence(f"    outside the root-and-suffix forms: {odd}")
+        evidence(f"    outside the stock grammar: {odd}")
     if "stocks" in classes_on_basic:
         evidence("Stocks on Basic: the partner pages are not read")
     for path in () if "stocks" in classes_on_basic else _PARTNER_PAGES:
@@ -208,6 +233,19 @@ def test_stock_ticker_spellings_outside_the_documented_forms(
         values = sorted(
             {str(v) for row in rows for k, v in row.items() if "ticker" in k and v is not None}
         )
-        odd = [value for value in values if not _STOCK_TICKER.fullmatch(value)]
-        evidence(f"{path}: {len(values)} ticker values; outside the forms: {odd}")
+        odd = [value for value in values if _unreadable(value)]
+        evidence(f"{path}: {len(values)} ticker values; outside the stock grammar: {odd}")
     assert seen
+
+
+def _unreadable(ticker: str) -> bool:
+    """Tell whether the library refuses a ticker as a canonical stock ticker.
+
+    Returns:
+        True when `dm.canonical_symbol_stock` raises `ValueError` for it.
+    """
+    try:
+        dm.canonical_symbol_stock(ticker)
+    except ValueError:
+        return True
+    return False
