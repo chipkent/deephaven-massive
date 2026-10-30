@@ -12,9 +12,10 @@ import deephaven_massive as dm
 m = dm.MassiveSession()
 
 # Apple's daily bars for one week, read once. Works on every plan, the free one included.
-week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2024-06-03", "2024-06-07")
+week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
 
-# The latest trade of each symbol, updated as trades arrive. Needs a paid Stocks plan.
+# The latest trade of each symbol, updated as trades arrive. Needs a Stocks plan that streams
+# trades: the plan table on the dataset's reference page says which.
 latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
 ```
 
@@ -25,18 +26,22 @@ every dataset with its arguments, its columns, and what each Massive plan includ
 
 ## Install
 
-You need Python 3.11 or later, Java 17 or later (check with `java -version`; any current JDK
-works, such as one from [Adoptium](https://adoptium.net)), and a Massive account. The library
-is not on PyPI yet, so it installs from GitHub:
+The repository is private for now and the library is not on PyPI: outside testers get access
+and a version from the owner, and follow the [tester guide](docs/tester-guide.md), which walks
+through every step. With access to the repository, you need Python 3.11 or later, Java 17 or
+later (check with `java -version`; any current JDK works, such as one from
+[Adoptium](https://adoptium.net)), and a Massive account:
 
 ```bash
 python3 -m venv ~/dh-massive && source ~/dh-massive/bin/activate
 pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git"
 export MASSIVE_API_KEY="your-api-key"    # from the keys page of Massive's dashboard
-deephaven server --port 10000
+deephaven server --port 10000 --jvm-args "-Xmx4g -Dauthentication.psk=choose-a-password"
 ```
 
-Open <http://localhost:10000/ide> and use the **Console** panel; every example here runs there.
+Open <http://localhost:10000/?psk=choose-a-password> and use the **Console** panel; every example
+here runs there. The server asks for a password: the one `-Dauthentication.psk` sets, or,
+without that setting, one it makes up and prints in its startup log as a link that carries it.
 Set the key in the shell that starts the server, before you start it. Avoid typing the key into
 the console itself: every user of a Deephaven server can read the console's variables.
 
@@ -83,12 +88,12 @@ m = dm.MassiveSession()
 
 # History: Apple's daily bars for one week, a static table.
 bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
-week = bars.history("2024-06-03", "2024-06-07")
+week = bars.history("2025-06-02", "2025-06-06")
 
 # What each column of those bars means: Name, Type, Description, SuppliedBy.
 columns = bars.columns()
 
-# Live: the latest trade of each symbol (a paid Stocks plan streams trades).
+# Live: the latest trade of each symbol (needs a Stocks plan that streams trades).
 latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
 
 # Live on any plan: re-read today's Apple headlines every five minutes.
@@ -182,14 +187,14 @@ streaming = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
 
 | Task | Code |
 |---|---|
-| read daily bars | `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2024-01-02", "2024-06-28")` |
-| read every stock's bars for a day | `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2024-06-03", "2024-06-03")` |
+| read daily bars | `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-01-02", "2025-06-30")` |
+| read every stock's bars for a day | `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2025-06-02", "2025-06-02")` |
 | stream minute bars | `m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).append_only()` |
-| keep the current state of symbols, on any plan | `m.stocks.snapshots(["AAPL", "MSFT"]).poll(15)` |
+| keep the current state of symbols without a stream | `m.stocks.snapshots(["AAPL", "MSFT"]).poll(15)`, where your plan includes snapshots |
 | follow a watchlist I can edit | pass a table with a `Symbol` column: see [`symbols`](#symbols) |
 | backfill history, then continue live | the recipe in [split adjustment](#split-adjustment) |
 | read a long range without freezing the console | `history(..., wait=False)`: see [live tables](#live-tables) |
-| list a company's dividends | `m.stocks.dividends("AAPL", start="2024-01-01").fetch()` |
+| list a company's dividends | `m.stocks.dividends("AAPL", start="2025-01-01").fetch()` |
 | follow news as it appears | `m.reference.news("AAPL", start=dh_today()).poll(300)` |
 | stream the contracts of a futures product | `m.futures.trades(m.futures.contracts(product_code="ES").fetch()).last_by()` |
 | find a ticker by name | `m.reference.tickers(search="Nvidia").fetch()` |
@@ -213,7 +218,7 @@ A **static** table never changes once you have it: `fetch()` and `history()` ret
 | every row of a session, to analyze afterwards | `append_only()` (memory grows) |
 | a rolling window of recent rows | `ring(n)` (fixed memory) |
 | the current state of each symbol, as it trades | `last_by()` |
-| the current state of each symbol, on any plan | `snapshots(...).poll(n)` |
+| the current state of each symbol, without a stream | `snapshots(...).poll(n)`, where your plan includes snapshots |
 | a growing feed of news or filings | `poll(n)` on the feed, with a `start` |
 | a reference list, read once | `fetch()` |
 | a fixed range of the past | `history(start, end)` |
@@ -252,8 +257,8 @@ shared columns:
 ```python
 from deephaven import merge
 
-stock = m.stocks.bars("SPY", dm.Timespan.MINUTE).history("2024-06-03", "2024-06-03")
-fx = m.forex.bars("C:EURUSD", dm.Timespan.MINUTE).history("2024-06-03", "2024-06-03")
+stock = m.stocks.bars("SPY", dm.Timespan.MINUTE).history("2025-06-02", "2025-06-02")
+fx = m.forex.bars("C:EURUSD", dm.Timespan.MINUTE).history("2025-06-02", "2025-06-02")
 common = [c for c in stock.column_names if c in fx.column_names]
 both = merge([t.view(common) for t in (stock, fx)])
 ```
@@ -321,7 +326,8 @@ and the trade count. These rules hold for every `bars()` dataset.
 `history()` reads from one of two sources, and one call never mixes them.
 
 - **REST** serves explicit symbols on any dataset with a REST history endpoint. For `dm.ALL` it
-  serves only daily bars, through Massive's grouped daily endpoint, one request per day.
+  serves only the daily bars of stocks, forex, and crypto, through Massive's grouped daily
+  endpoint, one request per day; options and indices have none.
 - **Flat files** serve a read when you have set S3 keys, the dataset has files for the request,
   and every day's file has been published: a day's file appears the next morning, from about
   11:00 New York time. Bars come in files only as 1-minute and 1-day bars (and 1-session bars for
@@ -353,6 +359,9 @@ Massive can restate older prices in the split's terms so the series is continuou
 - `bars()` and `daily_open_close()` of stocks and options take `adjusted=True` by default. Only
   REST serves adjusted bars, and the library checks Massive's `adjusted` echo on every page, so
   one `history()` never mixes the two bases. `adjusted=False` reads REST or flat files.
+
+These examples reach back to June 2024, further than Stocks Basic's two years of history; on
+Basic, try them with a split inside your window.
 
 ```python
 # Split-adjusted daily bars, the default. NVDA split 10 for 1 on 2024-06-10,
@@ -442,7 +451,7 @@ kept = trades.snapshot()
 
 A script that only reads static tables can let a `with` block close the session:
 `with dm.MassiveSession() as m:`. A session nothing references any more is closed on its own,
-with a WARNING.
+with an INFO line in the log.
 
 **The console holds the lock live tables need.** Deephaven runs each console command while
 holding the lock every live table needs to update, so a `history()` or `fetch()` that downloads
@@ -457,7 +466,7 @@ download.
 
 ```python
 m = dm.MassiveSession()
-year = m.stocks.trades(["AAPL", "MSFT"]).history("2023-10-02", "2024-09-30", wait=False)
+year = m.stocks.trades(["AAPL", "MSFT"]).history("2025-01-02", "2025-09-30", wait=False)
 ```
 
 **Never call the library from a table listener.** A listener runs on Deephaven's update thread,
@@ -491,11 +500,12 @@ What a plan changes, in the library's terms:
   with S3 keys.
 - **Pace.** A Basic subscription allows five REST requests a minute; the library spaces its
   requests to fit, so a large download on Basic is slow but completes.
-- **Freshness.** Lower stock, option, and index plans see the market 15 minutes late;
-  `m.connections()` shows `Recency` `DELAYED`. A delayed stream works exactly like a real-time
-  one.
-- **Kinds of data and history.** Higher plans add trades, then quotes; every Basic plan keeps two
-  years of history. Each dataset's page in the [reference](docs/datasets/README.md) has Massive's
+- **Freshness.** Massive's stock, option, and index plans range from end-of-day data on Basic,
+  through 15 minutes late, to real time; a delayed stream shows `Recency` `DELAYED` in
+  `m.connections()` and works exactly like a real-time one.
+- **Kinds of data and history.** Higher plans add more kinds of data, such as streamed trades and
+  quotes, and reach further back: Stocks Basic keeps two years of history, while Indices Basic
+  keeps all of it. Each dataset's page in the [reference](docs/datasets/README.md) has Massive's
   plan table: which plans include it, how fresh, and how far back.
 
 Every refusal is a `dm.EntitlementError`, and a rejected key a `dm.AuthenticationError`, both
@@ -610,9 +620,11 @@ In a live table, `last_by()` drops the row of a symbol that leaves the watchlist
 `append_only()` and `ring()` keep the rows it already produced. A watchlist row that is not
 Massive's spelling is skipped, logged once, and listed in the stream's `Error` in
 `m.streams()`; fix the row and it subscribes. A watchlist whose every row is bad is refused. To
-fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`. One WebSocket
-connection carries at most 1,000 options contracts; more wait their turn, counted in
-`m.streams()`'s `Deferred` column.
+fail instead, set `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`. One session's options
+connection carries at most 1,000 topics, and each stream of a contract is one (its trades and
+its quotes are two). A list or static table of contracts over that cap raises `ValueError`; a
+live watchlist that grows past it defers the extra contracts, counted in `m.streams()`'s
+`Deferred` column, until room frees up.
 
 A schedule is a watchlist too: a symbol table that is empty outside the hours you care about
 stops the stream, and makes a poll send no requests, outside them. This one is live only during
@@ -647,25 +659,25 @@ publication time, and so on; each dataset's reference page names its axis) take 
 bounds are one kind, never mixed:
 
 - **Dates** are whole days in the market's time zone, both ends included:
-  `history("2024-06-03", "2024-06-03")` is all of June 3. Text such as `"2024-06-03"`, a Python
+  `history("2025-06-02", "2025-06-02")` is all of June 2. Text such as `"2025-06-02"`, a Python
   `date`, or a Deephaven `LocalDate`.
 - **Instants** are exact times, the start included and the end excluded. A timezone-aware Python
   `datetime`, a `pandas.Timestamp` or `numpy.datetime64`, Deephaven's `Instant` or
-  `ZonedDateTime` (such as `dh_now()`), or Deephaven time text such as `"2024-06-03T09:30 ET"`.
+  `ZonedDateTime` (such as `dh_now()`), or Deephaven time text such as `"2025-06-02T09:30 ET"`.
   A naive `datetime` is refused.
 
 Values taken from another table work directly. This finds the busiest minute of a day and reads
 every trade inside it:
 
 ```python
-minutes = m.stocks.bars("AAPL", dm.Timespan.MINUTE).history("2024-06-03", "2024-06-03")
+minutes = m.stocks.bars("AAPL", dm.Timespan.MINUTE).history("2025-06-02", "2025-06-02")
 for row in minutes.sort_descending("Volume").head(1).iter_dict():
     inside = m.stocks.trades("AAPL").history(row["TimestampStart"], row["TimestampEnd"])
 ```
 
 An open `end` reads through now in `history()`: through today, in the market's time zone, for
 dates (the current session for futures). On a list dataset an open bound is not sent, so
-`m.stocks.dividends("AAPL", start="2024-01-01")` includes announced dividends still to come. A
+`m.stocks.dividends("AAPL", start="2025-01-01")` includes announced dividends still to come. A
 calendar-date axis, such as an ex-dividend date, takes dates only.
 
 <a id="as-of"></a>
@@ -719,7 +731,8 @@ traded. See [split adjustment](#split-adjustment).
 ### `timespan` and `multiplier`
 
 Every `bars()` call names its bar length: `timespan`, a `dm.Timespan` (`SECOND`, `MINUTE`,
-`HOUR`, `DAY`, `WEEK`, `MONTH`, `QUARTER`, `YEAR`; `SESSION` for futures), required, and
+`HOUR`, `DAY`, `WEEK`, `MONTH`, `QUARTER`, `YEAR`; futures take `SESSION` in place of `DAY`),
+required, and
 `multiplier`, the number of units per bar (default 1). One-second and one-minute bars with
 `multiplier=1` also stream; every other length is history only. Text is refused: write
 `dm.Timespan.DAY`, or convert with `dm.Timespan("day")`.
@@ -728,9 +741,11 @@ Every `bars()` call names its bar length: `timespan`, a `dm.Timespan` (`SECOND`,
 
 ### `venues`
 
-Futures datasets read every exchange by default. On a plan sold per exchange, pass the ones you
-hold: `m.futures.trades("ESZ6", venues={dm.FuturesVenue.CME})`. The members are `CME`, `CBOT`,
-`NYMEX`, and `COMEX`.
+Futures trades, quotes, and bars take `venues`: the exchanges whose flat files `history()`
+reads, all four by default. Massive sells futures flat files per exchange, so on such a plan
+pass the ones you hold:
+`m.futures.trades("ESZ6", venues={dm.FuturesVenue.CME}).history("2026-10-01", "2026-10-02")`.
+The members are `CME`, `CBOT`, `NYMEX`, and `COMEX`. Streams and REST reads ignore it.
 
 <a id="verb-arguments"></a>
 
@@ -754,12 +769,12 @@ this section) and look at what the library did.
 
 | Message or symptom | Cause and fix |
 |---|---|
-| `no Massive API key` | The server cannot see `MASSIVE_API_KEY`. Export it in the shell that starts the server and restart, or pass `dm.MassiveConfig(api_key=...)`. |
+| `no Massive API key` | The server cannot see `MASSIVE_API_KEY`. Export it in the shell that starts the server, then restart the server. Don't type the key into the console. |
 | `MassiveSession must be created inside a Deephaven worker` | The code ran in a plain Python process. Run it in the Deephaven console or a script the server runs. |
 | `timespan must be dm.Timespan` | Arguments that pick from a set take an enum member: `dm.Timespan.DAY`, not `"day"`. |
 | `ValueError` naming a symbol | Not Massive's spelling. See [`symbols`](#symbols) for the converters. |
 | `AttributeError` naming a verb | The dataset cannot serve that verb; the message names the one that can. |
-| `... plan has no WebSocket access` | Your plan for that class reads REST only. Poll a REST dataset, such as `m.stocks.snapshots(symbols).poll(15)`, or read `history()`. |
+| `... plan has no WebSocket access` | Your plan for that class reads REST only. Read `history()`, or `poll()` a REST dataset your plan includes; each dataset's [reference page](docs/datasets/README.md) has the plan table. |
 | `... refused the subscription to ...` | Your plan includes some streams of the class but not this one. Stream bars instead of trades, or use the REST counterpart. |
 | `HTTP 403` from `fetch()`, `poll()`, or `history()` | Your plan does not include this dataset; the message names another where one exists. |
 | `Your plan doesn't include this data timeframe` | The range starts before your plan's history window. Ask for a later start. |

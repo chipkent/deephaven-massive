@@ -431,12 +431,12 @@ def test_the_first_tables_example_runs(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     tmp_path: Path,
 ) -> None:
-    # The whole New York days of 2024-06-03 to 2024-06-07, as the range path's `{from}/{to}`.
+    # The whole New York days of 2025-06-02 to 2025-06-06, as the range path's `{from}/{to}`.
     path = (
-        f"/v2/aggs/ticker/AAPL/range/1/day/{_ms('2024-06-03T04:00:00')}/"
-        f"{_ms('2024-06-08T04:00:00') - 1}"
+        f"/v2/aggs/ticker/AAPL/range/1/day/{_ms('2025-06-02T04:00:00')}/"
+        f"{_ms('2025-06-07T04:00:00') - 1}"
     )
-    days = [_bar(f"2024-06-0{day}", 190.0 + day, 1_000) for day in range(3, 8)]
+    days = [_bar(f"2025-06-0{day}", 190.0 + day, 1_000) for day in range(2, 7)]
     readme_server.reply(path, Reply(envelope(days, adjusted=True, ticker="AAPL")))
     # Every other path, today's headlines among them, answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
@@ -444,11 +444,11 @@ def test_the_first_tables_example_runs(
     names = _run_blocks([block], tmp_path, "first_tables")
 
     assert [r["Date"] for r in dh_to_pylist(names["week"])] == [
-        "2024-06-03",
-        "2024-06-04",
-        "2024-06-05",
-        "2024-06-06",
-        "2024-06-07",
+        "2025-06-02",
+        "2025-06-03",
+        "2025-06-04",
+        "2025-06-05",
+        "2025-06-06",
     ]
     described = {r["Name"]: r["Description"] for r in dh_to_pylist(names["columns"])}
     assert {"Symbol", "Open", "Close", "TimestampEnd"} <= described.keys()
