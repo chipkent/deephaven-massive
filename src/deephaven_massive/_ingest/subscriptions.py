@@ -19,7 +19,7 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING, Final, Protocol
 
-from deephaven_massive._datasets.symbols import ws_symbol
+from deephaven_massive._datasets.wire_symbols import ws_symbol
 from deephaven_massive._massive import StatusKind
 
 if TYPE_CHECKING:

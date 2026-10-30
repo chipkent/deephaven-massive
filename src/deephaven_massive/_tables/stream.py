@@ -53,6 +53,10 @@ Deephaven. Its one lock, the flush lock, serializes flushes (the thread's own an
 calls) and is never taken under another library lock; the routing table has its own leaf lock.
 The flusher holds no session, and a routed sink holds its own only weakly. A flush thread that
 dies on something it cannot carry on after fails every stream it routes before it ends.
+
+The module is one subject although it runs past 1,000 lines: it is one stream's path from its
+publisher to the fan-out, and the flush thread, the routing, and the failures all act on the
+same sinks under the same flush lock.
 """
 
 from __future__ import annotations
@@ -74,13 +78,9 @@ from deephaven.column import string_col
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.row_times import TimeRule, time_column
 from deephaven_massive._datasets.source_columns import key_column, rename, required_fields, widen
-from deephaven_massive._datasets.symbols import (
-    SymbolTable,
-    WireSymbols,
-    option_roots,
-    unknown_symbol_message,
-)
+from deephaven_massive._datasets.symbols import SymbolTable, option_roots
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
+from deephaven_massive._datasets.wire_symbols import WireSymbols, unknown_symbol_message
 from deephaven_massive._enums import NotBars, UnknownSymbols
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType

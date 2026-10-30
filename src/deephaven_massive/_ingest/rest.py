@@ -108,18 +108,12 @@ from deephaven_massive._datasets.row_times import (
     within,
 )
 from deephaven_massive._datasets.source_columns import rename, required_fields, widen
-from deephaven_massive._datasets.symbols import (
-    SymbolTable,
-    WireSymbols,
-    forex_codes,
-    option_roots,
-    symbol_class,
-    unknown_symbol_message,
-)
+from deephaven_massive._datasets.symbols import SymbolTable, forex_codes, option_roots, symbol_class
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
     instants,
 )
+from deephaven_massive._datasets.wire_symbols import WireSymbols, unknown_symbol_message
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,

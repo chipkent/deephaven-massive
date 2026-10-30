@@ -24,7 +24,7 @@ from deephaven.arrow import to_arrow, to_table
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
-from deephaven_massive._datasets import symbols
+from deephaven_massive._datasets import wire_symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -174,7 +174,7 @@ def test_conversion_keeps_unreadable_symbols_in_raw_symbol_under_warn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger("t"), limit=5)
+        wire_symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger("t"), limit=5)
     )
     plan = ChannelPlan.build(
         massive_session._core.catalog, FOREX, "C", unknown_symbols=UnknownSymbols.WARN
