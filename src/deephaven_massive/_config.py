@@ -26,7 +26,13 @@ from dataclasses import dataclass, field
 from datetime import time
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._enums import AssetClass, OnError, Subscription, _require_enum
+from deephaven_massive._enums import (
+    AssetClass,
+    OnError,
+    Subscription,
+    _require_enum,
+    subscription_of,
+)
 from deephaven_massive._errors import AuthenticationError
 from deephaven_massive._types import override
 
@@ -356,8 +362,10 @@ def require_positive_number(name: str, value: object) -> float:
     return number
 
 
-_CURRENCY_CLASSES: Final = frozenset({"forex", "crypto"})
-"""The asset classes that share one subscription, `Subscription.CURRENCIES`."""
+_CURRENCY_CLASSES: Final = frozenset(
+    c.value for c in AssetClass if subscription_of(c) is Subscription.CURRENCIES
+)
+"""The asset classes that share one subscription, `Subscription.CURRENCIES` (`forex`, `crypto`)."""
 
 
 def _validate_basic_subscriptions(value: object) -> frozenset[Subscription]:

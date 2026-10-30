@@ -231,7 +231,7 @@ CLOCK: PollClock = _SystemClock()
 
 
 class CycleReader(Protocol):
-    """Reads one cycle's rows: the REST transport's `RestReader.read_symbols`, bound to a dataset.
+    """Reads one cycle's rows: the REST transport's `RestReader.read_cycle`, bound to a dataset.
 
     It holds no session core, so a poller never keeps the core alive through it.
     """
@@ -907,11 +907,7 @@ def build_table(
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
-    # When every column is a key, `last_by` has no column to aggregate and Deephaven refuses
-    # it. Its rows would be the distinct key rows, which `select_distinct` of a blink table
-    # keeps across cycles. `REPLACE` never takes that branch: its hidden column is not a key,
-    # and neither is a list key, which its text replaces.
-    keyed = blink.select_distinct(keys) if set(definitions) <= set(keys) else blink.last_by(keys)
+    keyed = blink.last_by(keys)
     if replace:
         keyed = keyed.where(LIVE_COLUMN)
     return (keyed.drop_columns(hidden) if hidden else keyed), publisher

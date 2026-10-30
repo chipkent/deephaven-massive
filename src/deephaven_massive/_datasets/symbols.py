@@ -353,6 +353,37 @@ def _function(asset_class: AssetClass) -> str:
     return f"dm.canonical_symbol_{_CLASS_NAMES[asset_class]}"
 
 
+_VOWEL_CLASSES: Final = frozenset({AssetClass.OPTIONS, AssetClass.INDICES})
+"""The classes whose singular noun takes `an`."""
+
+
+def _class_noun_with_article(asset_class: AssetClass) -> str:
+    """Return a class's singular noun with its article, for messages.
+
+    Args:
+        asset_class: The class.
+
+    Returns:
+        For example `"a stock"` or `"an index"`.
+    """
+    article = "an" if asset_class in _VOWEL_CLASSES else "a"
+    return f"{article} {_CLASS_NOUNS[asset_class]}"
+
+
+def _refuse_surrounding_whitespace(text: str) -> None:
+    """Refuse text that is a ticker only once its surrounding whitespace is removed.
+
+    Args:
+        text: The text.
+
+    Raises:
+        ValueError: If the text holds more than whitespace and starts or ends with some,
+            naming the stripped text.
+    """
+    if text.strip() and text != text.strip():
+        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+
+
 def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
     """Refuse text that carries another class's prefix.
 
@@ -367,15 +398,13 @@ def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
     prefix = text[:2].upper()
     other = _CLASS_BY_PREFIX.get(prefix)
     if other is not None and other is not asset_class:
+        found, wanted = _class_noun_with_article(other), _class_noun_with_article(asset_class)
         raise ValueError(
-            f"{text!r} is a{'n' if other in _VOWEL_CLASSES else ''} {_CLASS_NOUNS[other]} "
-            f"ticker (prefix {prefix}), not a{'n' if asset_class in _VOWEL_CLASSES else ''} "
-            f"{_CLASS_NOUNS[asset_class]} one; call {_function(other)}"
+            f"{text!r} is {found} ticker (prefix {prefix}), not {wanted} one; "
+            f"call {_function(other)}"
         )
 
 
-_VOWEL_CLASSES: Final = frozenset({AssetClass.OPTIONS, AssetClass.INDICES})
-"""The classes whose singular noun takes `an`."""
 _SEPARATORS: Final = frozenset("-/ +=^#$*%@!~")
 """Characters other stock conventions use as separators and Massive never does."""
 _CONVENTIONS: Final = ", ".join(f"dm.SymbolConvention.{c.name}" for c in SymbolConvention)
@@ -396,8 +425,7 @@ def _convert_stock(text: str) -> str:
             guess at the ticker, since Massive's tickers are case-sensitive.
     """
     _refuse_other_prefix(AssetClass.STOCKS, text)
-    if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+    _refuse_surrounding_whitespace(text)
     if text.strip() and _SEPARATORS.intersection(text):
         raise ValueError(
             f"{text!r} is not a Massive stock ticker: it uses another convention's separators. "
@@ -452,19 +480,19 @@ def _convert_future(text: str) -> str:
     """Say why text is not a Massive futures ticker: a futures ticker converts from nothing.
 
     Args:
-        text: Text that is neither a single contract nor a spread (the caller checked).
+        text: Text that `canonical_symbol_future` refused as a single contract, or that
+            `canonical_symbol` refused as a futures ticker as Massive writes it.
 
     Returns:
         Nothing: it always raises; the return type is the converters' common one.
 
     Raises:
         ValueError: Always, naming the reason: another class's prefix names that class's
-            function, surrounding whitespace names the stripped text, and lower case says the
-            ticker is upper case; nothing is re-cased.
+            function, surrounding whitespace names the stripped text, and any other text gets
+            the forms a contract and a spread take; nothing is re-cased.
     """
     _refuse_other_prefix(AssetClass.FUTURES, text)
-    if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+    _refuse_surrounding_whitespace(text)
     raise ValueError(
         f"{text!r} is not a Massive futures ticker: a contract is upper-case letters and digits "
         "('ESZ5'), and a spread is written as Massive writes it ('GCQ6-GCZ6', 'BOB 02-01 U6', "
@@ -515,8 +543,7 @@ def _convert_spread(text: str) -> str:
             f"{text!r} is a single futures contract, not a spread; call dm.canonical_symbol_future"
         )
     _refuse_other_prefix(AssetClass.FUTURES, text)
-    if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+    _refuse_surrounding_whitespace(text)
     raise ValueError(
         f"{text!r} is not one of Massive's futures spread spellings: a calendar spread "
         "'GCQ6-GCZ6', a CBOT inter-commodity spread 'BOB 02-01 U6', a NYMEX strategy "
@@ -1106,21 +1133,19 @@ def check_symbol(
     """
     if not isinstance(text, str):
         raise TypeError(f"a symbol must be a str, not {type(text).__name__}")
+    if is_canonical(asset_class, text, as_written=as_written):
+        return text
     if as_written:
-        if _WRITTEN.fullmatch(text) is not None:
-            return text
         raise ValueError(
             f"{text!r} is not a ticker as Massive writes it (not empty, no surrounding "
             "whitespace, no control character, no class prefix)"
         )
     resolved = symbol_class(text) if asset_class is ClassFromPrefix.ANY else asset_class
-    if _CANONICAL[resolved](text):
-        return text
     other = symbol_class(text)
     if other not in {resolved, AssetClass.STOCKS} and _CANONICAL[other](text):
         raise ValueError(
-            f"{text!r} is a{'n' if other in _VOWEL_CLASSES else ''} {_CLASS_NOUNS[other]} "
-            f"ticker; this dataset takes {_CLASS_NOUNS[resolved]} tickers"
+            f"{text!r} is {_class_noun_with_article(other)} ticker; this dataset takes "
+            f"{_CLASS_NOUNS[resolved]} tickers"
         )
     try:
         fixed = _CONVERTERS[resolved](text)
