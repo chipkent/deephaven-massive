@@ -28,6 +28,8 @@ Public API:
       `connections()`, `streams()`, `rate_limits()`, `release(table)`, `close()`, and use as
       a context manager.
     - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
+    - `datasets()`: a static table of every dataset, with its summary, verbs, transports, and
+      the link to its columns; it needs no session and no API key.
     - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions; each one's
       `cause`, an `ErrorCause`, says whose problem it is: expected, a defect in the user's code
       or input, or a defect of the library (whose message says how to report it).
@@ -57,6 +59,10 @@ Public API:
       environment variable `DEEPHAVEN_MASSIVE_LOG=DEBUG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`)
       does the same when the first session is created. Attach that log to a bug report. It
       never holds a secret. `disable_debug_logging()` turns it off again.
+
+    The query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`) and the
+    argument types (`Symbols`, `DateLike`, `FilterValue`) are in the public module
+    `deephaven_massive.queries`, for type annotations; this package does not import it.
 
 Status:
     The library is under active development. The public surface, configuration, session
@@ -124,6 +130,7 @@ __all__ = [
     "canonical_symbol_stock_nasdaq",
     "canonical_symbol_stock_yahoo",
     "canonicalize_symbols",
+    "datasets",
     "disable_debug_logging",
     "enable_debug_logging",
 ]
@@ -170,6 +177,7 @@ _EXPORTS: dict[str, str] = {
     "canonicalize_symbols": "deephaven_massive._tables.symbols",
     "OnError": "deephaven_massive._enums",
     "SymbolConvention": "deephaven_massive._enums",
+    "datasets": "deephaven_massive._dataset_list",
     "disable_debug_logging": "deephaven_massive._debug_log",
     "enable_debug_logging": "deephaven_massive._debug_log",
 }
@@ -178,6 +186,7 @@ _EXPORTS: dict[str, str] = {
 # `__all__`; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._dataset_list import datasets
     from deephaven_massive._datasets.symbols import (
         canonical_symbol,
         canonical_symbol_crypto,
