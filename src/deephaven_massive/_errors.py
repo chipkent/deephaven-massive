@@ -40,9 +40,10 @@ one (its publisher's `publish_failure`), so the failure shows where Deephaven us
 also logged, at the level its cause gives, and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported, and `LIBRARY_BUG`, the sentence that ends every message about a
-defect of the library itself. The rate-limited log helpers, `log_once` and `BoundedLog`, are in
-`_log_limits`.
+fix, which is not exported; `LIBRARY_BUG`, the sentence that ends every message about a
+defect of the library itself; and `raises_through`, the declaration that lets a test check
+the `Raises:` section of a function whose errors come from the helpers it calls. The
+rate-limited log helpers, `log_once` and `BoundedLog`, are in `_log_limits`.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
@@ -50,12 +51,16 @@ The public names are re-exported by `deephaven_massive/__init__.py`; this module
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import ClassVar, Final
+from typing import TYPE_CHECKING, ClassVar, Final, TypeVar
 
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 __all__ = [
     "LIBRARY_BUG",
+    "RAISES_THROUGH",
     "AuthenticationError",
     "EntitlementError",
     "ErrorCause",
@@ -65,9 +70,16 @@ __all__ = [
     "failure_text",
     "from_wire",
     "library_bug",
+    "raises_through",
     "user_defect",
     "wire_cause",
 ]
+
+RAISES_THROUGH: Final = "raises_through"
+"""The attribute in which `raises_through` records a function's helpers."""
+
+_F = TypeVar("_F", bound="Callable[..., object]")
+
 
 LIBRARY_BUG: Final = (
     "This is a bug in deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and "
@@ -203,21 +215,26 @@ class EntitlementError(MassiveError):
     """The key is valid, but the plan does not include what was requested.
 
     Raised when Massive answers HTTP 403 (`NOT_AUTHORIZED`) to a REST request, when a WebSocket
-    subscription is refused with an explicit error for its topic, or when a plan has no
-    WebSocket access for an asset class at all. The message names the nearest entitled
-    alternative when one exists, for example `m.stocks.snapshots(symbols).poll(15)` for delayed
-    NBBO on a plan without real-time quotes. Only the affected table fails; other tables on the
-    same connection keep running.
+    subscription is refused with an explicit error for its topic, when a plan has no WebSocket
+    access for an asset class at all, or when S3 refuses a flat file. Only the affected table
+    fails; other tables on the same connection keep running.
+
+    The library does not model Massive's plans, so the message reports what happened rather than
+    guessing at what the plan holds: the subscription (stocks, options, indices, currencies, or
+    futures), the transport, the request that was refused, and Massive's own text. When the
+    refused request was the library's own, such as the snapshot request that checks a plan's
+    WebSocket host before the first stream of a class, the message says so. Where the library
+    has another way to read the same data, the message names it: a refused flat-file
+    `history()` names `source=dm.HistorySource.REST` when REST can serve the read.
 
     Example:
-        ::
+        Read a day of trades, and report it when the plan lacks them::
 
             import deephaven_massive as dm
 
-            # A plan gap is a MassiveError, so one handler can catch every library failure.
-            assert issubclass(dm.EntitlementError, dm.MassiveError)
+            m = dm.MassiveSession()
             try:
-                raise dm.EntitlementError("NBBO quotes are not on this plan")
+                day = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06")
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
     """
@@ -357,3 +374,50 @@ def failure_text(error: BaseException) -> str:
     if cause_of(error) is not ErrorCause.LIBRARY_DEFECT or LIBRARY_BUG in text:
         return text
     return library_bug(text)
+
+
+def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
+    """Declare the helpers whose errors a function lets through, so its `Raises:` can be checked.
+
+    Most public functions of the library check nothing themselves: a dataset method passes its
+    arguments to `build_query`, and a verb runs through the session's guard and a transport.
+    Their `Raises:` sections document the errors of those helpers, which a linter that reads
+    only the function's own `raise` statements cannot check. This decorator names the helpers,
+    and `tests/test_errors.py` requires each declared function's `Raises:` section to list
+    exactly the exceptions it raises itself and those its helpers' `Raises:` sections list: a
+    helper's error the function leaves out fails the test, and so does a listed error that
+    nothing raises.
+
+    The decorator stores the helpers in the function's `raises_through` attribute
+    (`RAISES_THROUGH`) and returns the same function, so it costs nothing at call time.
+    `functools.wraps` copies the attribute to a wrapper, so a decorated verb keeps it. Apply it
+    beneath any wrapping decorator. It runs once, at import, and is thread-safe.
+
+    Args:
+        *helpers: The functions or methods the decorated function calls whose exceptions it
+            lets through, such as `build_query` or `SessionCore.run_verb`. A helper's own
+            `Raises:` section is what counts.
+
+    Returns:
+        A decorator that records `helpers` on a function and returns it unchanged.
+
+    Example:
+        A dataset method lets through the errors of the factory that checks its arguments::
+
+            from deephaven_massive._errors import RAISES_THROUGH, raises_through
+            from deephaven_massive._namespaces.base import build_query
+
+
+            @raises_through(build_query)
+            def trades(self, symbols):
+                return build_query(self._core, TRADES, symbols=symbols)
+
+
+            assert getattr(trades, RAISES_THROUGH) == (build_query,)
+    """
+
+    def declare(function: _F) -> _F:
+        vars(function)[RAISES_THROUGH] = helpers
+        return function
+
+    return declare

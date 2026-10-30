@@ -13,10 +13,46 @@ Every dataset is a method on a namespace grouped by asset class (`stocks`, `opti
 `futures`, `indices`, `forex`, `crypto`) or by topic (`reference`, `indicators`, `economy`,
 `partners`). Each method returns an immutable query, and a verb on that query picks the table
 shape: `blink()`, `append_only()`, `ring(n)`, `last_by()`, `fetch()`, `poll(interval)`, or
-`history(start, end=None)`. The same code runs on every Massive plan: the library finds the right
-WebSocket host for your key, and a dataset your plan lacks fails the table with a message that
-names the alternative. The library runs inside an existing Deephaven server (it needs an active
-`ExecutionContext`) and never starts one.
+`history(start, end=None)`. Every query also has `columns()`, a table of its columns and what
+each one means. The same code runs on every Massive plan: the library finds the right WebSocket
+host for your key, and a dataset your plan lacks fails with a message that says what was
+refused and, where the library has another way to read the data, names it. The library runs
+inside an existing Deephaven server (it needs an active `ExecutionContext`) and never starts one.
+
+Example:
+    In the Deephaven console, with your key in `MASSIVE_API_KEY`::
+
+        import deephaven_massive as dm
+
+        m = dm.MassiveSession()
+
+        # A live table: each symbol's latest trade, updated as trades arrive.
+        latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
+
+        # A history table: Apple's daily bars for one week, read once.
+        bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
+        week = bars.history("2024-06-03", "2024-06-07")
+
+        # What each column of those bars means.
+        columns = bars.columns()
+
+Status:
+    Every dataset is implemented over all three transports and tested against simulated Massive
+    servers built from Massive's documentation. The live tests have also run against Massive on
+    the owner's own plans, a mix of paid and free tiers. Questions those plans cannot settle
+    remain open (which host a delayed plan streams from, how index daily bars and futures
+    sessions are stamped, parts of the flat files); there the library follows its best reading
+    of the documentation, and where it can tell, it checks what Massive sends and stops with a
+    clear message instead of returning rows it cannot vouch for. `docs/live-tests.md` lists the
+    open questions. The library is not on PyPI yet.
+
+Read next:
+    The README (https://github.com/chipkent/deephaven-massive): installing, first tables, and
+    split adjustment. `docs/getting-started/` walks through table shapes, watchlists, plans,
+    releasing tables, diagnostics, and troubleshooting; `docs/guides/` covers reading history,
+    following a schedule, and joining across asset classes; `docs/datasets/` lists every
+    dataset's columns. `help()` on any session, namespace, dataset method, or query shows its
+    full documentation.
 
 Each public name is imported on first use (PEP 562), so `import deephaven_massive` is cheap
 and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`, and the symbol converters need a
@@ -63,22 +99,6 @@ Public API:
     The query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`) and the
     argument types (`Symbols`, `DateLike`, `FilterValue`) are in the public module
     `deephaven_massive.queries`, for type annotations; this package does not import it.
-
-Status:
-    The library is under active development. The public surface, configuration, session
-    lifecycle, and query classes are in place; the REST, WebSocket, and flat-file transports
-    and the datasets of each namespace are not implemented yet, so the verbs that need a
-    transport raise `NotImplementedError`.
-
-Example:
-    A session with a pinned stocks host, inside a Deephaven worker::
-
-        import deephaven_massive as dm
-
-        cfg = dm.MassiveConfig(ws_hosts={dm.AssetClass.STOCKS: "delayed.massive.com"})
-        m = dm.MassiveSession(cfg)
-        print(m, dm.__version__)  # <MassiveSession #1 open> 0.1.0
-        m.close()
 
 Attributes:
     __version__: The installed distribution's version string, such as `"0.1.0"`. It comes from

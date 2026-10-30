@@ -286,8 +286,9 @@ def decide(
 
     Raises:
         EntitlementError: If the snapshot is refused (HTTP 403 or `NOT_AUTHORIZED`): the plan
-            has no WebSocket access for the class ("stocks plan has no WebSocket access"),
-            with the refusal's status and request id.
+            has no WebSocket access for the class ("stocks plan has no WebSocket access"). The
+            message says the refused request was the library's own host check, names its
+            path, and quotes Massive's text; it keeps the refusal's status and request id.
 
     A timeframe that holds an undocumented value raises the `MassiveError` of `_classify`, and
     any error `fetch` raises other than a refusal propagates unchanged.
@@ -303,11 +304,15 @@ def decide(
         return HostDecision(
             REALTIME_HOST, Recency.REALTIME, "single documented host; Starter is real-time"
         )
+    probe = SNAPSHOT_PROBES[asset_class]
     try:
-        rows = fetch(SNAPSHOT_PROBES[asset_class])
+        rows = fetch(probe)
     except EntitlementError as error:
         raise EntitlementError(
-            f"{asset_class.value} plan has no WebSocket access: {error}",
+            f"{asset_class.value} plan has no WebSocket access: the {asset_class.value} "
+            f"subscription refused the library's own host check, a REST snapshot request "
+            f"({probe.path}) it sends before the first {asset_class.value} stream; Massive "
+            f"said: {error}",
             status=error.status,
             request_id=error.request_id,
         ) from error

@@ -88,7 +88,9 @@ deprecation path, and no rule that rests on the chance of breaking someone.
    Deephaven table shape. No feed, host, channel, or S3 prefix appears in user code.
 3. **Tier is a property of the key.** Identical code runs on every plan. The library learns
    recency (real-time or delayed) from REST responses, never by opening a connection it intends
-   to abandon. A dataset the plan lacks fails loudly and names the alternative.
+   to abandon. A dataset the plan lacks fails loudly and names the alternative where the
+   library has one; the library never models plans, so otherwise the refusal states the
+   subscription, the transport, the request, and Massive's text.
 4. **Tab completion is the contract.** A verb that cannot work for a dataset does not exist on
    that dataset's query class. Where the capability depends on a parameter value (the bar
    timespan), typed `@overload`s pick the class statically. `ValueError` at verb time is reserved
@@ -2225,8 +2227,11 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 ```
 
 - A `str` is one symbol. A `Sequence[str]` is materialized to a tuple at construction. An
-  exhausted generator raises `ValueError("no symbols")`.
-- **`symbols` is required on every market-data dataset, including every `snapshots()`.** `ALL`
+  exhausted generator raises `ValueError` ("no symbols: the list is empty; ..."), naming the
+  next step.
+- **`symbols` is required on every market-data dataset, including every `snapshots()`.**
+  `None` there raises `ValueError` when the query is built, naming the forms it takes and
+  `dm.ALL` where the dataset accepts it. `ALL`
   is accepted by stream verbs (the `<channel>.*` topic), by every per-class `snapshots(ALL)`
   (full market, all pairs, all contracts), and by `history()` when a flat file or a grouped-daily
   REST path exists. Everywhere else `ALL` raises `ValueError` naming the alternative.
@@ -3092,7 +3097,9 @@ TICK family:
      Per-ticker rows carrying "error"/"message" (NOT_ENTITLED) count as absent.
   4. Classify:
      a. HTTP 403 / NOT_AUTHORIZED
-          -> raise EntitlementError("<class> plan has no WebSocket access")   # Basic plans
+          -> raise EntitlementError("<class> plan has no WebSocket access: ...")   # Basic plans
+             (the message says the refused request was the library's own host check, names
+             its path, and quotes Massive's text)
      b. Read the class's ordered timeframe fields, excluding underlying_asset:
           STOCKS, OPTIONS: last_trade.timeframe, last_quote.timeframe
           INDICES:         timeframe (top level; documented DELAYED | REAL-TIME)
@@ -4030,10 +4037,14 @@ session's `DriftRegistry` collects it ([section 19.5](#195-runtime-drift)). Stat
 
 Every failure is logged, at the level [section 17.1](#171-the-log) gives its cause, with the text
 the exception carries: hosts, the HTTP status and
-`request_id` of a REST failure, the server message verbatim, the decision evidence, and the
-nearest entitled alternative. For example: "Quotes are
-not available on 15-minute delayed stock plans; `m.stocks.snapshots(symbols).poll(15)` provides
-delayed NBBO via REST".
+`request_id` of a REST failure, the server message verbatim, the decision evidence, and an
+alternative where the library has one. A plan refusal (`EntitlementError`) states the
+subscription, the transport, the request that was refused (marked as the library's own when it
+was the host check's snapshot request, which a stream needs before it subscribes), and
+Massive's text. The library does not model plans, so it names another way to read the data only
+where one exists: a refused flat-file `history()`, under `FLAT_FILES` or `AUTO`, names
+`source=dm.HistorySource.REST` when REST can serve the read. `AUTO` raises the refusal rather
+than switch to REST, since the two sources fill different columns.
 
 ### 17.1 The log
 

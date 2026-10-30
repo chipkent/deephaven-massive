@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params, one_or_any_of
 
@@ -88,6 +89,7 @@ _PRODUCT_CODE_ARGUMENT: Final = {"product_code.any_of": "product_code"}
 """The argument that sets `product_code.any_of`, for the message that rejects it in `filters`."""
 
 
+@raises_through(one_or_any_of)
 def _product_codes(product_code: object) -> dict[str, object]:
     """Return the wire parameters that carry a `product_code` argument.
 
@@ -100,7 +102,10 @@ def _product_codes(product_code: object) -> dict[str, object]:
     Returns:
         The two wire parameters, `product_code` and `product_code.any_of`, the unset one None.
 
-    The `TypeError` and `ValueError` of `one_or_any_of` propagate.
+    Raises:
+        TypeError: If `product_code` is neither text, a sequence of text, nor None
+            (`one_or_any_of`).
+        ValueError: If `product_code` is an empty sequence (`one_or_any_of`).
     """
     return one_or_any_of("product_code", product_code, every="every product")
 
@@ -277,6 +282,7 @@ class _Futures(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "futures"
 
+    @raises_through(build_query)
     def trades(
         self, symbols: Symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
     ) -> StreamHistoryQuery:
@@ -317,9 +323,12 @@ class _Futures(Namespace):
             A query with the stream verbs (`blink()`, `append_only()`, `ring()`,
             `last_by()`) and `history()`.
 
-        Invalid symbols (none at all, for example from an exhausted generator, or a table
-        without a `Symbol` column) raise `ValueError`; `venues` raises `TypeError` if it is
-        not a set of `dm.FuturesVenue` and `ValueError` if it is empty. No request is made.
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`,
+                or `venues` is not a set of `dm.FuturesVenue`.
+            ValueError: If `venues` is empty, or for invalid symbols: none at all (for example
+                from an exhausted generator), None, a ticker that is not Massive's exact
+                ticker, or a table without a `Symbol` column.
 
         Example:
             ::
@@ -336,6 +345,7 @@ class _Futures(Namespace):
             "StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols, venues=venues)
         )
 
+    @raises_through(build_query)
     def quotes(
         self, symbols: Symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
     ) -> StreamHistoryQuery:
@@ -374,8 +384,12 @@ class _Futures(Namespace):
             A query with the stream verbs (`blink()`, `append_only()`, `ring()`,
             `last_by()`) and `history()`.
 
-        Invalid symbols raise `ValueError`; `venues` raises `TypeError` if it is not a set of
-        `dm.FuturesVenue` and `ValueError` if it is empty. No request is made.
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`,
+                or `venues` is not a set of `dm.FuturesVenue`.
+            ValueError: If `venues` is empty, or for invalid symbols: none at all (for example
+                from an exhausted generator), None, a ticker that is not Massive's exact
+                ticker, or a table without a `Symbol` column.
 
         Example:
             ::
@@ -407,6 +421,7 @@ class _Futures(Namespace):
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
     ) -> HistoryQuery: ...
+    @raises_through(build_query)
     def bars(
         self,
         symbols: Symbols,
@@ -482,11 +497,14 @@ class _Futures(Namespace):
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars, otherwise a `HistoryQuery`.
 
-        `Timespan.DAY` raises `ValueError` naming `Timespan.SESSION`; a `timespan` that is not
-        a `dm.Timespan`, or `venues` that is not a set of `dm.FuturesVenue`, raises
-        `TypeError`, and an empty `venues` `ValueError`; a
-        `multiplier` that is not a positive `int` raises `TypeError` or `ValueError`; invalid
-        symbols raise `ValueError`. No request is made.
+        Raises:
+            TypeError: If `timespan` is not a `dm.Timespan`, `venues` is not a set of
+                `dm.FuturesVenue`, `multiplier` is not an `int`, or `symbols` is not a `str`, a
+                sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If `timespan` is `Timespan.DAY` (the message names
+                `Timespan.SESSION`), `venues` is empty, `multiplier` is not positive, or the
+                symbols are invalid: none at all, None, a ticker that is not Massive's exact
+                ticker, or a table without a `Symbol` column.
 
         Example:
             ::
@@ -512,6 +530,7 @@ class _Futures(Namespace):
         )
         return cast("HistoryQuery", query)
 
+    @raises_through(build_query, list_params, _product_codes)
     def snapshots(
         self,
         symbols: Symbols,
@@ -556,12 +575,12 @@ class _Futures(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
-        Invalid symbols, an unknown filter, a filter value of the wrong kind, or an `order`
-        without `sort` raise `ValueError`; a `sort` that is not a `str` or an `order` that is
-        not a `dm.Order` raises `TypeError`. No request is made.
-
-        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
-        neither a `str` nor a sequence of `str` raises `TypeError`.
+        Raises:
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
+                `product_code` is neither a `str` nor a sequence of `str`.
+            ValueError: For invalid symbols (None among them), an unknown filter, a filter
+                value of the wrong kind, an `order` without `sort`, or an empty `product_code`
+                sequence.
 
         Example:
             ::
@@ -583,6 +602,7 @@ class _Futures(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, list_params, _product_codes)
     def contracts(
         self,
         *,
@@ -623,12 +643,11 @@ class _Futures(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An unknown filter, a filter value of the wrong kind, or an `order` without `sort`
-        raises `ValueError`; a `sort` that is not a `str` or an `order` that is not a
-        `dm.Order` raises `TypeError`. No request is made.
-
-        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
-        neither a `str` nor a sequence of `str` raises `TypeError`.
+        Raises:
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
+                `product_code` is neither a `str` nor a sequence of `str`.
+            ValueError: For an unknown filter, a filter value of the wrong kind, an `order`
+                without `sort`, or an empty `product_code` sequence.
 
         Example:
             ::
@@ -648,6 +667,7 @@ class _Futures(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, list_params, _product_codes)
     def products(
         self,
         *,
@@ -686,13 +706,12 @@ class _Futures(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An unknown filter, a filter value of the wrong kind (a `sector` outside the
-        endpoint's values, for example), or an `order` without `sort` raises `ValueError`; a
-        `sort` that is not a `str` or an `order` that is not a `dm.Order` raises `TypeError`.
-        No request is made.
-
-        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
-        neither a `str` nor a sequence of `str` raises `TypeError`.
+        Raises:
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
+                `product_code` is neither a `str` nor a sequence of `str`.
+            ValueError: For an unknown filter, a filter value of the wrong kind (a `sector`
+                outside the endpoint's values, for example), an `order` without `sort`, or an
+                empty `product_code` sequence.
 
         Example:
             ::
@@ -712,6 +731,7 @@ class _Futures(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def exchanges(self, *, limit: int | None = None) -> Query:
         """Futures exchanges: the exchanges and trading venues of US futures.
 
@@ -733,8 +753,9 @@ class _Futures(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
-        A `limit` that is not a positive `int` raises `TypeError` or `ValueError`. No request
-        is made.
+        Raises:
+            TypeError: If `limit` is not an `int`.
+            ValueError: If `limit` is not positive.
 
         Example:
             ::
@@ -746,6 +767,7 @@ class _Futures(Namespace):
         """
         return cast("Query", build_query(self._core, EXCHANGES, limit=limit))
 
+    @raises_through(build_query, _product_codes)
     def market_status(
         self,
         *,
@@ -776,8 +798,10 @@ class _Futures(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An empty `product_code` sequence raises `ValueError`; a `product_code` that is not a
-        `str` or a sequence of `str` raises `TypeError`. No request is made.
+        Raises:
+            TypeError: If `product_code` is not a `str` or a sequence of `str`, or `limit` is
+                not an `int`.
+            ValueError: If `product_code` is an empty sequence, or `limit` is not positive.
 
         Example:
             ::
@@ -792,6 +816,7 @@ class _Futures(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, list_params, _product_codes)
     def schedules(
         self,
         *,
@@ -839,13 +864,13 @@ class _Futures(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
-        An `end` before `start`, an unparseable bound, a `datetime` bound (`session_end_date`
-        is a calendar date), a `session_end_date` filter, an unknown filter, a filter value of
-        the wrong kind, or an `order` without `sort` raises `ValueError`; a `sort` that is not a
-        `str` or an `order` that is not a `dm.Order` raises `TypeError`. No request is made.
-
-        An empty `product_code` sequence raises `ValueError`, and a `product_code` that is
-        neither a `str` nor a sequence of `str` raises `TypeError`.
+        Raises:
+            TypeError: If `sort` is not a `str`, `order` is not a `dm.Order`, or
+                `product_code` is neither a `str` nor a sequence of `str`.
+            ValueError: For an `end` before `start`, an unparseable bound, a `datetime` bound
+                (`session_end_date` is a calendar date), a `session_end_date` filter, an unknown
+                filter, a filter value of the wrong kind, an `order` without `sort`, or an empty
+                `product_code` sequence.
 
         Example:
             ::

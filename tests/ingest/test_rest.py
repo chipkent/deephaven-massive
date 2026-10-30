@@ -355,6 +355,8 @@ def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBas
     # An indicator is computed over bars of a timespan, which its factory always sets.
     if spec is SMA:
         kwargs.setdefault("timespan", Timespan.MINUTE)
+    # A list dataset's symbols only filter it, as its factory says.
+    kwargs.setdefault("symbols_optional", spec.symbol_param is not None)
     return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
 
 

@@ -1669,3 +1669,34 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
         + BACKGROUND_NOTE
     )
     _released(s3_session, files, forced, landed)
+
+
+def test_a_refused_flat_file_read_names_rest_when_rest_can_serve_it(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+
+    def refused(*_: object, **__: object) -> Table:
+        raise dm.EntitlementError("the plan does not include these flat files", status=403)
+
+    monkeypatch.setattr(flat, "history", refused)
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
+    assert isinstance(q, HistoryQuery)
+    # AUTO chose the flat files (60 symbols), and raises rather than switch columns silently.
+    for source in (HistorySource.AUTO, HistorySource.FLAT_FILES):
+        with pytest.raises(dm.EntitlementError) as info:
+            q.history("2025-03-03", "2025-03-03", source=source)
+        assert str(info.value) == (
+            "the plan does not include these flat files; REST serves this read too: pass "
+            "source=dm.HistorySource.REST to history() (it can fill other columns; columns() "
+            "shows which)"
+        )
+        assert info.value.status == 403
+    assert rest.calls == []
+    # Where REST cannot serve the read, the refusal is raised as it came.
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    with pytest.raises(dm.EntitlementError, match=r"^the plan does not include these flat files$"):
+        values.history("2025-03-03", "2025-03-03")

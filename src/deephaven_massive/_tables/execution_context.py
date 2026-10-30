@@ -36,6 +36,12 @@ __all__ = [
 ]
 
 
+_SCHEDULES_GUIDE: Final = (
+    "https://github.com/chipkent/deephaven-massive/blob/main/docs/guides/schedules.md"
+)
+"""The guide to a symbol table that follows a schedule, which the update-graph refusal names."""
+
+
 # A thread with no execution context gets Deephaven's empty default context, whose update graph
 # is a PoisonedUpdateGraph: creating any refreshing table under it fails. That class is the
 # only signal Deephaven offers for "no context is active".
@@ -114,7 +120,10 @@ def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
     if exec_ctx.update_graph.j_update_graph.currentThreadProcessesUpdates():
         raise ValueError(
             "deephaven_massive calls must not run on a Deephaven update-graph thread "
-            "(for example inside a table listener)"
+            "(for example inside a table listener). To change what a live table follows, pass "
+            "a refreshing symbol table as symbols instead: the stream follows its rows as they "
+            "change, and the schedules guide shows one that follows the trading day: "
+            f"{_SCHEDULES_GUIDE}"
         )
 
 
