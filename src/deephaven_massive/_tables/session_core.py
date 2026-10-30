@@ -881,7 +881,10 @@ class SessionCore:
         recorded on the record, and the stream is returned as is: `stream_result` then raises
         the `MassiveError` naming the failure instead of building a result. A reactive stream
         that shut down during the open has its watchlist listener stopped on the reaper here,
-        since the shutdown had no handle to stop it through.
+        since the shutdown had no handle to stop it through. The row takes the host and path
+        the stream opened on, unless the transport already reported a later host while the
+        open was finishing (a real-time verdict moved the stream to another host before the
+        open returned): that report is newer, so the row keeps it.
 
         Args:
             spec: The dataset.
@@ -905,7 +908,9 @@ class SessionCore:
                 )
             with self.registry_lock:
                 state = self._streams[stream_id]
-                row = replace(state.row, host=opened.host, path=opened.path)
+                row = state.row
+                if row.host is None:  # not moved while opening: it serves from where it opened
+                    row = replace(row, host=opened.host, path=opened.path)
                 self._streams[stream_id] = replace(state, handle=opened, row=row)
                 stored = True  # from here on, releasing the opener's hold releases the stream
                 self.diagnostics.write(row)

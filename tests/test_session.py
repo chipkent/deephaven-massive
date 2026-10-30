@@ -620,11 +620,13 @@ def test_stream_verbs_work_in_a_console_command(
     ws_session.publish(TRADE)
     for shape in ("append_only", "ring", "last_by"):
         rows_when(made[shape], lambda rows: [r["Price"] for r in rows] == [114.125])
-    streams = rows_when(made["streams"], lambda rows: len(rows) == 2)
-    assert sorted((r["Dataset"], r["State"], r["HeldResults"]) for r in streams) == [
-        ("stocks.quotes", "RUNNING", 1),
-        ("stocks.trades", "RUNNING", 3),
-    ]
+    # release() drops the blink table's hold on the reaper thread, so the count of trades
+    # results falls from 4 to 3 some time after the command: wait for it, not for the rows.
+    held = [("stocks.quotes", "RUNNING", 1), ("stocks.trades", "RUNNING", 3)]
+    rows_when(
+        made["streams"],
+        lambda rows: sorted((r["Dataset"], r["State"], r["HeldResults"]) for r in rows) == held,
+    )
     rows_when(made["connections"], lambda rows: any(r["Transport"] == "WS" for r in rows))
     assert made["columns"].size > 0
     for table in made.values():

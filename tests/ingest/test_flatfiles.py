@@ -2352,14 +2352,17 @@ def test_memory_per_reader_does_not_grow_with_the_file(
 ) -> None:
     # A reader holds a window of its file, not the file: about 32 blocks of Arrow's read-ahead
     # plus at most `_TABLE_BLOCKS` blocks of gathered rows. Small blocks give a file of about
-    # 900 blocks, cheap to build and read, in which that window fills within the first third.
+    # 310 blocks, cheap to build and read, in which that window fills within the first third.
+    # Each block costs the same to read whatever its size, so the block count sets the test's
+    # time; at this count a reader that grows by a block per block still rises three times
+    # past the slacks below.
     block = 16 * 1024
     window = 32 + flatfiles._TABLE_BLOCKS
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
-    rows = 192_000
+    rows = 64_000
     text = synthetic_trades(rows)
     blocks = len(text) // block
-    assert blocks > 15 * window  # the last two thirds of the file dwarf the window
+    assert blocks > 6 * window  # the last two thirds of the file dwarf the window
     fake_s3.put(TRADES_0303, make_csv_gz(text))
     fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
     sampler = MemorySampler(2 * blocks + 100)
@@ -2381,17 +2384,17 @@ def test_memory_per_reader_does_not_grow_with_the_file(
         m.close()
     assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
     # Python's peak includes the read-ahead's decompressed text, made on Arrow's own thread,
-    # so it varies from run to run by up to about 40 blocks; a reader that kept a little Python
-    # data per block (a copy of the compressed chunks, or of the RARE rows) adds 100 or more.
+    # so it varies from run to run by up to about 40 blocks; a reader that kept each block's
+    # text or rows as Python objects adds about 200.
     python_slack = 64 * block
     # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
-    # and legitimately grow it by about 17 blocks over the last two thirds of the file (about
-    # 19 between the two files), but each small batch also costs allocation overhead that its
+    # and legitimately grow it by about 6 blocks over the last two thirds of the file (about
+    # 7 between the two files), but each small batch also costs allocation overhead that its
     # byte count does not show: kept as one batch per block instead of merged, they grow it by
-    # about 62 (70 between the files).
-    arrow_slack = 40 * block
+    # about 21 (24 between the files).
+    arrow_slack = 14 * block
     # From a third of the way through the file to its end, a reader that kept each block it
-    # read would rise by about 600 blocks. When every row survives, the result itself (a
+    # read would rise by about 200 blocks. When every row survives, the result itself (a
     # Deephaven table, and its Python wrapper, per `_TABLE_BLOCKS` blocks) legitimately grows
     # with the file, but by far less than a block per table.
     assert every.python_rise < python_slack

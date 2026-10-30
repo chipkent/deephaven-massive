@@ -545,6 +545,34 @@ def test_an_update_made_during_the_open_is_kept(
     massive_session.release(result)
 
 
+def test_a_move_made_during_the_open_keeps_the_new_host(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # The server's real-time verdict moves the stream to another host after the transport
+    # started it but before its open returns: the row shows the host it moved to, not the
+    # host it opened on.
+    core = massive_session._core
+
+    def open_stream(
+        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
+    ) -> StreamHandle:
+        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
+        core.update_streams({stream_id: StreamUpdate(host="delayed.test", path="/moved")})
+        return handle
+
+    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
+    result = stream_query(massive_session).append_only()
+    columns = ("StreamId", "Host", "Path", "State")
+    assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
+        (1, "delayed.test", "/moved", "RUNNING")
+    ]
+    massive_session.release(result)
+
+
 def test_stream_ids_come_from_one_allocator(
     massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
 ) -> None:
