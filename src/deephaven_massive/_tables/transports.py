@@ -281,8 +281,9 @@ class RestTransport(Protocol):
             EntitlementError: If the plan does not include the endpoint (HTTP 403).
             MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
                 schema, a page of adjusted bars echoes another basis than the request, a
-                symbol's later page answers HTTP 404, a bar of a day or longer is stamped at a
-                time Massive is not known to use, or a request fails in any other way.
+                symbol's later page answers HTTP 404, or a request fails in any other way. A
+                bar of a day or longer stamped at a time Massive is not known to use is
+                returned and logs a WARNING; it raises nothing.
         """
         ...
 
@@ -385,9 +386,9 @@ class FlatFileTransport(Protocol):
             EntitlementError: If the plan does not include the files (S3 answers 403); for
                 futures files the message names the venue and the `venue=` parameter.
             MassiveError: If the bucket or endpoint is wrong, the last requested day's file is
-                missing within a day of its publication time, a bar of a day or longer is
-                stamped at a time Massive is not known to use, or a read fails in any other
-                way.
+                missing within a day of its publication time, or a read fails in any other
+                way. A bar of a day or longer stamped at a time Massive is not known to use is
+                returned and logs a WARNING; it raises nothing.
         """
         ...
 

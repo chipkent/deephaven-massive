@@ -533,8 +533,8 @@ def test_option_day_and_week_bar_stamps_from_rest(
     half day and which day's bar it matches. The library's windows for the same requests
     follow. Reading it: range stamps at 00:00 New York time, a last minute bar at 12:59 (13:14
     for SPXW) on the half day, and a `/prev` stamp at 16:00 (16:15 for SPXW; 13:00 or 13:15
-    after a half day) confirm the library's day label; any other stamp is refused with a
-    `MassiveError`, shown in the library lines.
+    after a half day) confirm the library's day label; a bar at any other stamp is served,
+    labelled by the New York day its stamp falls on, with a WARNING in the log.
     """
     days = stamp_days["day"]
     candidates = _stamp_candidates(range_bars, days)

@@ -79,8 +79,15 @@ for stocks, options, and indices; UTC for forex and crypto) and ends at 00:00 af
 day. Index bars end an hour later, at 01:00 New York time; that has not yet been checked
 against Massive. A futures bar keeps Massive's start and ends at 17:00 Chicago time on its
 session date. Each source stamps these bars the same way, so the source never changes which day a
-bar is labelled with. A bar stamped at a time Massive is not known to use stops the read with
-an error that says what to do, rather than guess.
+bar is labelled with.
+
+Every bar Massive returns is in the table. Once in a while Massive may stamp a bar at a time the
+library does not expect, such as a daily bar at 14:30, or a weekly bar on a Wednesday. That bar
+is still returned, and its `Date`, `TimestampStart`, and `TimestampEnd` come from the day its
+stamp falls on. Those columns may then cover other days than the bar really does, so the
+library logs one WARNING per dataset and timespan in a session. The WARNING names the stamp and
+the stamps it expected. Please report it on the
+[issues page](https://github.com/chipkent/deephaven-massive/issues), so the rule can be fixed.
 
 ## Where the rows come from
 

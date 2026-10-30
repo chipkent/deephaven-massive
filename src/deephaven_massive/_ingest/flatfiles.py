@@ -19,8 +19,10 @@ to keep.
   converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's
   start, the 16:00 New York session close (stocks), midnight in Chicago (indices), or
   23:59:59.999 UTC (forex and crypto), are stamped at 00:00 of their day in the class day zone
-  (`row_times.stamp_rule`). Every block's rows then get the library's time columns
-  (`row_times.TimeRule`), with `TimestampInsert` the instant the block was decoded. The
+  (`row_times.stamp_rule`); a stamp of another form is moved the same way and logs one
+  WARNING per dataset and timespan per session, so every bar of a file is served. Every
+  block's rows then get the library's time columns (`row_times.TimeRule`), with
+  `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
   columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
@@ -169,7 +171,6 @@ from deephaven_massive._massive import (
 )
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -471,8 +472,8 @@ class _Transform:
 
         A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
         `timestamps.instants`.
-        A 1-day bar stamped at a time of day Massive is not known to use raises the
-        `MassiveError` of `row_times.day_starts`.
+        A 1-day bar stamped at a time of day Massive is not known to use is served and logs
+        the WARNING of `row_times.StampRule.stamp`.
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
@@ -530,35 +531,6 @@ class _Transform:
                 source=f"the flat files {self.prefix}",
             )
         return values
-
-
-def _flat_file_stamps(spec: DatasetSpec, request: Request) -> StampRule | None:
-    """Return the stamp rule of a flat-file read, with the remedy its refusal names.
-
-    Args:
-        spec: The dataset.
-        request: The normalized arguments.
-
-    Returns:
-        The rule (`row_times.stamp_rule`), whose remedy is reading REST, or, for `dm.ALL`
-        of a dataset without a grouped-daily path (indices), passing explicit symbols to read
-        REST; None when the bars keep their stamps.
-    """
-    rule = stamp_rule(spec, request)
-    if rule is None:
-        return None
-    every = isinstance(request.symbols, _All) and not spec.has_grouped_daily
-    remedy = _EXPLICIT_REST_REMEDY if every else _REST_REMEDY
-    return replace(rule, remedy=remedy)
-
-
-_REST_REMEDY: Final = "read REST with source=dm.HistorySource.REST"
-"""What a flat-file caller can do when a day file's stamp is refused."""
-
-_EXPLICIT_REST_REMEDY: Final = (
-    "pass explicit symbols to read REST with source=dm.HistorySource.REST"
-)
-"""The remedy for `dm.ALL` where REST has no grouped daily, so it takes explicit symbols."""
 
 
 class _CancelledError(Exception):
@@ -651,7 +623,7 @@ class FlatFileHistory:
             request=request,
             window=window,
             unreadable_symbols=self._core.config.unreadable_symbols,
-            stamps=_flat_file_stamps(spec, request),
+            stamps=stamp_rule(spec, request, warnings=self._core.warnings),
         )
         keys = _keys(prefix, request.venues, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None

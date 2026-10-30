@@ -24,9 +24,9 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
   published. When both sources can, many symbols (`MassiveConfig.flat_file_symbol_threshold`
   or more, or `dm.ALL`) read flat files and fewer use REST. One call never mixes sources, and
   so never mixes adjusted and unadjusted prices: adjusted bars come only from REST. Bars of a
-  day or longer are stamped alike by every source (`row_times.stamp_rule`), and a stamp of a form
-  Massive is not known to use fails loudly, so the choice never changes which day a bar is
-  labelled with.
+  day or longer are stamped alike by every source (`row_times.stamp_rule`), so the choice never
+  changes which day a bar is labelled with; a stamp of a form Massive is not known to use is
+  served too, labelled the same way, and logs a WARNING.
 
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
 after the next day starts in the class's day zone (`publish_time`); futures use their

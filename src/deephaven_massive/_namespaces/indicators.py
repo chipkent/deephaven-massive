@@ -19,9 +19,10 @@ one bar of the requested `Symbol`: the bar's window, `TimestampStart` to the exc
 `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class (UTC for
 crypto and forex, New York otherwise), as for that class's bars. A value of a day or longer
 carries the stamp of the aggregate it is computed over, which the aggregates range puts at
-00:00 of the period's first day (01:00 New York time for indices), so it is checked as that
-class's bars are: `fetch()` and `poll()` raise `MassiveError` for a value stamped otherwise,
-since it may cover other days than its label.
+00:00 of the period's first day (01:00 New York time for indices), so it is labelled as that
+class's bars are. A value stamped otherwise is still returned, labelled by the day its stamp
+falls on, and logs one WARNING per dataset and timespan per session, since it may cover other
+days than its label.
 
 Each dataset is one factory method on `_Indicators` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. This module owns the
