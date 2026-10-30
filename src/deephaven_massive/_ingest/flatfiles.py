@@ -167,7 +167,7 @@ from deephaven_massive._massive import (
     object_key,
 )
 from deephaven_massive._tables.columns import dataset_table
-from deephaven_massive._tables.liveness import entered
+from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -183,7 +183,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
 

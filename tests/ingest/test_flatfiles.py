@@ -2249,7 +2249,7 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     client = flat_file_client(m)
     reaper = m._core._reaper.thread
     assert fake_s3.closes == 0
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)

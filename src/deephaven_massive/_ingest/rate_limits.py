@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING, Final
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
 from deephaven_massive._tables.diagnostics import LimitSource, RateLimitRow, RateLimitState
-from deephaven_massive._tables.liveness import holds_update_graph_lock
+from deephaven_massive._tables.execution_context import holds_update_graph_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping

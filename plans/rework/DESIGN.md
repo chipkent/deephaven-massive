@@ -3842,7 +3842,7 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
   is behind the lock or has a single owner.
 - `ExecutionContext` is captured at session construction. Every library thread enters it before
   any Deephaven call, each time through a fresh Python wrapper of the captured Java context
-  (`entered` in `_tables/liveness.py`). The `deephaven` wrapper stores its restore handle on the wrapper object,
+  (`entered` in `_tables/execution_context.py`). The `deephaven` wrapper stores its restore handle on the wrapper object,
   so two threads entering one shared wrapper at once make the first to exit install the other
   thread's previous (empty) context on itself.
 - `LivenessScopeStack` is thread-local, so result scopes are opened and closed on the caller

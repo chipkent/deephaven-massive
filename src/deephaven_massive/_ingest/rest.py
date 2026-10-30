@@ -153,7 +153,7 @@ from deephaven_massive._massive import (
 )
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
-from deephaven_massive._tables.liveness import entered, holds_update_graph_lock
+from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -165,13 +165,14 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.dates import DaySpan, TimeRange
     from deephaven_massive._datasets.history_source import HistoryWindow
-    from deephaven_massive._datasets.request import HostDecision, Request
+    from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._massive import DriftSample, Patience, RestClient, RestPath
-    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.diagnostics import DriftRegistry
+    from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._tables.transports import HostDecision
 
 __all__ = [
     "Call",
