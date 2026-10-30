@@ -866,6 +866,16 @@ def build_table(
         definitions[LIST_KEY_COLUMN] = dtypes.string
         keys = [key for key in keys if key not in lists] + [LIST_KEY_COLUMN]
         hidden.append(LIST_KEY_COLUMN)
+        logger.debug(
+            "stream %d: %s poll(mode=%s) keys on %s: the list poll keys %s are keyed by their "
+            "JSON text in %s",
+            stream_id,
+            spec.name,
+            mode.value,
+            keys,
+            list(lists),
+            LIST_KEY_COLUMN,
+        )
     blink, publisher = blink_publisher(
         f"massive.{spec.name}#{stream_id}", definitions, on_shutdown=on_shutdown, defer=defer
     )

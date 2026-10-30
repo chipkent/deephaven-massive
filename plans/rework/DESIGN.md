@@ -3358,7 +3358,8 @@ How a request is built from a `DatasetSpec` and a `Request`:
   aggregation on an array column, so when a poll key is a list (`long[]` or `String[]`, the
   13-F `OtherManagers`), the `last_by` keys on a hidden text column in its place, the JSON text
   of the row's list keys, which the poller writes beside every row and tombstone and the result
-  drops; the poller's identities hold a list as a tuple. A cycle is one `add`,
+  drops (a DEBUG line names the keys the table uses); the poller's identities hold a list as
+  a tuple. A cycle is one `add`,
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
   every key ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a
   churning key set (an options chain, the day's movers) grows with the keys it has held. The

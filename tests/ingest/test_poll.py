@@ -1592,13 +1592,22 @@ def test_a_list_poll_key_keys_by_its_items(
     clock: FakeClock,
     dh_to_pylist: ToPylist,
     mode: PollMode,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
     script = ListScript(massive_session)
     # Equal lists are one key; a null list, an empty list, and other lists are each their own.
     script.holdings(("C1", ["A"], 1.0), ("C1", ["A", "B"], 2.0), ("C1", None, 3.0), ("C1", [], 4.0))
     table = start_holdings(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
     schema = massive_session._core.catalog.dataset_schema(HOLDINGS)
     assert table.column_names == list(schema.column_names)  # no hidden column, schema order
+    # The substitution of the hidden key is logged once, with the keys the table uses.
+    (record,) = [r for r in caplog.records if "list poll keys" in r.getMessage()]
+    assert record.levelno == logging.DEBUG
+    assert record.getMessage().endswith(
+        f"poll(mode={mode.value}) keys on ['Cusip', '__MassiveListKey']: the list poll keys "
+        "['OtherManagers'] are keyed by their JSON text in __MassiveListKey"
+    )
     first = [("C1", (), 4.0), ("C1", ("A",), 1.0), ("C1", ("A", "B"), 2.0), ("C1", None, 3.0)]
     until(lambda: holdings(table, dh_to_pylist) == sorted(first, key=repr))
     script.holdings(("C1", ["A"], 5.0))
