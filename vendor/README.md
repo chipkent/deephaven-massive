@@ -1,14 +1,18 @@
 # Vendored third-party content
 
 `massive/` holds a pinned snapshot of Massive's published specifications and documentation:
-the OpenAPI specification (`openapi.json`), the documentation index (`llms.txt`), the REST
-documentation pages it links (`rest/`), and `manifest.json`, which records each file's URL and
-SHA-256 hashes.
+the REST and WebSocket specifications (`openapi.json`, `websocket.json`), the documentation
+index (`llms.txt`), the REST, WebSocket, and flat-file documentation pages it links (`rest/`,
+`websocket/`, `flat-files/`), the knowledge-base articles the library relies on
+(`knowledge-base/`, as Markdown extracted from each article's HTML page), and
+`manifest.json`, which records the fetch date and each file's URL and SHA-256 hashes.
 
 These files are Massive's published content, vendored only as input to the schema generator.
 They are not covered by this repository's license and are not distributed in the wheel or the
 sdist. The library reads none of them at run time; it loads the schemas generated from them
-(`src/deephaven_massive/_massive/spec/*.json`).
+(`src/deephaven_massive/_massive/spec/*.json`). The knowledge-base articles generate nothing:
+they are vendored so the drift check reports when Massive changes a rule the library relies
+on.
 
 Never edit the files by hand: the generator verifies every file against the manifest and stops
 on any difference, and on any file the manifest does not list. The only exceptions are the

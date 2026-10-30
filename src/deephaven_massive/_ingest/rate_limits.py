@@ -2,12 +2,12 @@
 
 Massive limits REST requests per subscription (stocks, options, indices, currencies, futures),
 5 per minute on the free Basic tier and none on a paid one, and every API key of an account
-shares the counters. Reference and cross-asset requests are counted in a bucket of their own
-(Massive's knowledge base, "What is the request limit for Massive's RESTful APIs?", at
-`https://massive.com/knowledge-base/article/` and the slug
-`what-is-the-request-limit-for-massives-restful-apis`). The wire package's `RequestGovernor`
-enforces that for the requests it admits; this module decides which requests share one, how
-long each read waits, and what the user is told:
+shares the counters. Reference and cross-asset requests are counted in a bucket of their own.
+Massive's knowledge base states these rules in the article "What is the request limit for
+Massive's RESTful APIs?", which the refresh vendors, and whose changes its drift check reports:
+`vendor/massive/knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md`.
+The wire package's `RequestGovernor` enforces them for the requests it admits; this module
+decides which requests share one, how long each read waits, and what the user is told:
 
 - **Sharing.** `GOVERNORS`, the process's `GovernorRegistry`, keeps one governor per (API key,
   REST origin). Each session takes a `GovernorLease` at construction and releases it when it

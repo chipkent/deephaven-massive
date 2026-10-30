@@ -6,6 +6,10 @@ the free Basic tier a subscription allows `BASIC_REQUESTS_PER_MINUTE` (5) reques
 and every paid tier has no request limit. All the API keys of an account share these counters,
 and a request that exceeds one is refused with HTTP 429 and the message "You've exceeded the
 maximum requests per minute". Massive offers no way to ask which tier a subscription is on.
+Massive's knowledge base states these rules, and that reference and cross-asset endpoints are
+counted in a bucket of their own, in the article "What is the request limit for Massive's
+RESTful APIs?". The refresh vendors it, and its drift check reports any change to it:
+`vendor/massive/knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md`.
 
 The governor holds one *bucket* per subscription (and one for the datasets Massive assigns to
 none), each named by an opaque string fixed at construction. Every attempt of a REST request
@@ -137,7 +141,9 @@ def is_basic_refusal(message: str) -> bool:
     """Tell whether a 429's message says the subscription is on the Basic tier.
 
     Massive's knowledge base names the message "You've exceeded the maximum requests per
-    minute" as the mark of a Basic subscription; a paid subscription has no request limit.
+    minute" as the mark of a Basic subscription; a paid subscription has no request limit
+    (the article vendored as
+    `vendor/massive/knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md`).
 
     Args:
         message: The refusal's text: the server's `message`, or a `WireError` message that
