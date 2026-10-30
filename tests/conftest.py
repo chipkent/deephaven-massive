@@ -3302,7 +3302,7 @@ def _is_common_stock(
     dm = importlib.import_module("deephaven_massive")
 
     def check(symbol: str) -> bool:
-        query = session.reference.tickers(symbols=symbol, ticker_type=dm.TickerType.CS)
+        query = session.reference.tickers(symbol, ticker_type=dm.TickerType.CS)
         return bool(table_rows(query.fetch()))
 
     return check

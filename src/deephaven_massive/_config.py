@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import time
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._enums import AssetClass, Subscription, UnknownSymbols, _require_enum
+from deephaven_massive._enums import AssetClass, OnError, Subscription, _require_enum
 from deephaven_massive._errors import AuthenticationError
 from deephaven_massive._types import override
 
@@ -92,24 +92,44 @@ def _env_s3_secret_access_key() -> str | None:
     return _env("MASSIVE_S3_SECRET_ACCESS_KEY")
 
 
-def _env_unknown_symbols() -> UnknownSymbols:
-    """Read `MASSIVE_UNKNOWN_SYMBOLS`: `fail` (the default when unset) or `warn`, in any case.
+def _env_on_error(name: str) -> OnError:
+    """Read a symbol setting's environment variable: `raise`, `log`, or `ignore`, in any case.
+
+    Args:
+        name: The variable, such as `"DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS"`.
 
     Returns:
-        The setting.
+        The setting; `OnError.LOG` when the variable is unset or blank.
 
     Raises:
-        ValueError: If the variable holds any other text; the message names both values.
+        ValueError: If the variable holds any other text; the message names the variable and
+            the three values.
     """
-    text = _env("MASSIVE_UNKNOWN_SYMBOLS")
+    text = _env(name)
     if text is None:
-        return UnknownSymbols.FAIL
+        return OnError.LOG
     try:
-        return UnknownSymbols(text.lower())
+        return OnError(text.lower())
     except ValueError:
-        raise ValueError(
-            f"MASSIVE_UNKNOWN_SYMBOLS must be 'fail' or 'warn', not {text!r}"
-        ) from None
+        raise ValueError(f"{name} must be 'raise', 'log', or 'ignore', not {text!r}") from None
+
+
+def _env_noncanonical_symbols() -> OnError:
+    """Read `DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS` (`_env_on_error`).
+
+    Returns:
+        The setting; `OnError.LOG` when unset.
+    """
+    return _env_on_error("DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS")
+
+
+def _env_unreadable_symbols() -> OnError:
+    """Read `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS` (`_env_on_error`).
+
+    Returns:
+        The setting; `OnError.LOG` when unset.
+    """
+    return _env_on_error("DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS")
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -179,12 +199,29 @@ class MassiveConfig:
         rest_base_url: The REST API base URL.
         s3_endpoint_url: The flat-file S3 endpoint URL.
         s3_bucket: The flat-file S3 bucket.
-        unknown_symbols: What to do with a symbol Massive sends in a spelling the library
-            cannot read as the dataset's class: `UnknownSymbols.FAIL` fails the request or
-            stream that received it, naming the spelling; `UnknownSymbols.WARN` keeps the row
-            with a null `Symbol`, adds a `RawSymbol` column holding the text, and logs each
-            spelling once at WARNING. Defaults to `MASSIVE_UNKNOWN_SYMBOLS` (`fail` or `warn`),
-            then `FAIL`.
+        noncanonical_symbols: What a row of a symbol table (a Deephaven table passed as
+            `symbols`) does when it is not Massive's exact ticker, for every verb, whether the
+            row is there at the call or added later. `OnError.LOG`, the default, skips the row
+            and logs each distinct value once at WARNING (at most 100 values per process);
+            `OnError.IGNORE` skips it with nothing logged above DEBUG. Under both, the result
+            keeps running on the other rows, a stream's or `poll()` table's `m.streams()` row
+            lists the skipped values in `Error` (their count and the first five) until they
+            are fixed or deleted, a fixed row is subscribed like any added one, and a table
+            whose rows are all bad raises `ValueError` at the call. `OnError.RAISE` raises
+            `ValueError` for a bad row present at the call and fails the result when one is
+            added later. A `str` or a list passed as `symbols` always raises, whatever this
+            says. Defaults to `DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS` (`raise`, `log`, or
+            `ignore`, any case), then `LOG`.
+        unreadable_symbols: What a symbol Massive sends in a spelling the library cannot read
+            does. Such a spelling is a gap in the library, not in the caller's code.
+            `OnError.LOG`, the default, keeps the row with a null `Symbol` and the text in the
+            `RawSymbol` column, and logs each spelling once at ERROR as a bug to report (at
+            most 100 per process); `OnError.IGNORE` keeps it the same way with nothing logged
+            above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under
+            both. `OnError.RAISE` fails the request or stream that received the row, naming the
+            spelling, and the dataset has no `RawSymbol`. Defaults to
+            `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS` (`raise`, `log`, or `ignore`, any case),
+            then `LOG`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -202,12 +239,14 @@ class MassiveConfig:
     rest_base_url: str = "https://api.massive.com"
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
-    unknown_symbols: UnknownSymbols = field(default_factory=_env_unknown_symbols)
+    noncanonical_symbols: OnError = field(default_factory=_env_noncanonical_symbols)
+    unreadable_symbols: OnError = field(default_factory=_env_unreadable_symbols)
 
     def __post_init__(self) -> None:
         """Validate every field; freeze `ws_hosts` and `rest_basic_subscriptions` into copies.
 
-        An `unknown_symbols` that is not a `dm.UnknownSymbols`, a `ws_hosts` key that is not a
+        A `noncanonical_symbols` or `unreadable_symbols` that is not a `dm.OnError`, a
+        `ws_hosts` key that is not a
         `dm.AssetClass`, a host that is not a `str`, a `rest_basic_subscriptions` that is not a
         set of `dm.Subscription`, or a numeric field of a non-numeric type also raises
         `TypeError`, and a non-positive number `ValueError` (`require_positive_number`,
@@ -252,7 +291,8 @@ class MassiveConfig:
             raise TypeError(f"flat_file_publish_cutoff must be a datetime.time, not {kind}")
         if cutoff.tzinfo is not None:
             raise ValueError("flat_file_publish_cutoff is a New York wall-clock time; drop tzinfo")
-        _require_enum(self.unknown_symbols, UnknownSymbols, "unknown_symbols")
+        _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
+        _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         object.__setattr__(self, "ws_hosts", _validate_ws_hosts(self.ws_hosts))
         basic = _validate_basic_subscriptions(self.rest_basic_subscriptions)
         object.__setattr__(self, "rest_basic_subscriptions", basic)

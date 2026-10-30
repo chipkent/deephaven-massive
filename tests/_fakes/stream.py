@@ -72,7 +72,7 @@ class FakeStreamTransport:
     ) -> StreamHandle:
         core = self._core()
         assert core is not None  # a verb holds its session's core while it opens a stream
-        schema = core.catalog.dataset_schema(spec)
+        schema = core.dataset_schema(spec)
         with self._lock:
             self.shutdown[stream_id] = threading.Event()
         scope = new_scope()

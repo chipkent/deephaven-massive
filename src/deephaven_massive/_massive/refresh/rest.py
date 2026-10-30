@@ -390,7 +390,7 @@ class _PathGenerator(SourceFields):
         return params
 
     def parameter(self, node: JsonObject) -> Param | None:
-        """Generate one parameter by the parameter rules.
+        """Generate one parameter by the parameter rules, with the default its schema documents.
 
         Args:
             node: The resolved parameter object.
@@ -408,7 +408,17 @@ class _PathGenerator(SourceFields):
         base = stem if suffix in _FILTER_SUFFIXES else name
         schema = self.spec.schema(node.get("schema", {}), f"{self.path} {name}")
         kind, values, unit = self.parameter_kind(name, base, schema, description=description)
-        return Param(name=name, kind=kind, in_path=location == "path", values=values, unit=unit)
+        default = schema.get("default")
+        if not isinstance(default, (str, int, float)):  # bool is an int; a list or map is no scalar
+            default = None
+        return Param(
+            name=name,
+            kind=kind,
+            in_path=location == "path",
+            values=values,
+            unit=unit,
+            default=default,
+        )
 
     def parameter_kind(
         self, name: str, base: str, schema: JsonObject, *, description: str
