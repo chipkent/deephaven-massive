@@ -28,17 +28,13 @@ what you should see, and what to do if you see something else.
 Send them as a GitHub issue on `chipkent/deephaven-massive`, with the zips attached, or by
 email to the owner, at the address in your invitation, if GitHub refuses the upload.
 
-**Known issue: do not report it.** A fix is on the way: closing a session (`m.close()`) can
-crash the Deephaven server when one live table takes its symbols from another live table. No
-exercise does this. If you try it on your own and the server exits, restart it and carry on.
-
 **Waits on the free plan.** The free plan allows 5 requests a minute per subscription, so
 some commands pause while the library waits for a free slot. No live-run check waits more
 than about a minute on a free plan; a check that would need longer needs a paid plan and is
 skipped without one. A console command that waits more than a few minutes is worth
 reporting.
 
-**Everything else is worth reporting**: a step that fails, hangs, or shows something other
+**Report anything that goes wrong**: a step that fails, hangs, or shows something other
 than this guide says; an error message you cannot understand or act on; a step whose
 instructions were unclear. "The instructions were unclear" is a finding, not a failure on
 your part.
