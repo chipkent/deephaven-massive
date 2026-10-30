@@ -207,28 +207,32 @@ def test_a_defect_fails_the_table_with_a_massive_error_naming_it(
     massive_session.release(result)
 
 
-def stopped_run(rows: Table, *, raises: bool) -> tuple[Run, threading.Event]:
+def stopped_run(rows: Table, *, raises: type[Exception] | None) -> tuple[Run, threading.Event]:
     # A transport call that runs until its stop token is set, then ends the way a stopped call
-    # may: with an error, or with whatever it had read.
+    # may: with an error (the library's own, or any other), or with whatever it had read.
     began = threading.Event()
 
     def run(stop: threading.Event) -> Table:
         began.set()
         assert stop.wait(TIMEOUT)
-        if raises:
-            raise dm.MassiveError("the read was cancelled")
+        if raises is not None:
+            raise raises("the read was stopped")  # a new error each time: none outlives the test
         return rows
 
     return run, began
 
 
-@pytest.mark.parametrize("raises", [True, False])
+@pytest.mark.parametrize(
+    "raises",
+    [dm.MassiveError, OSError, None],
+    ids=["library-error", "other-error", "returned"],
+)
 def test_releasing_a_loading_read_stops_it_and_publishes_nothing(
     massive_session: dm.MassiveSession,
     stream_rows: Rows,
     caplog: pytest.LogCaptureFixture,
     *,
-    raises: bool,
+    raises: type[Exception] | None,
 ) -> None:
     run, began = stopped_run(static_rows(massive_session, "AAPL"), raises=raises)
     with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
@@ -288,7 +292,7 @@ def test_closing_the_session_fails_a_loading_read(
     stream_rows: Rows,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    run, began = stopped_run(static_rows(massive_session), raises=True)
+    run, began = stopped_run(static_rows(massive_session), raises=dm.MassiveError)
     result = open_test_read(massive_session, run)
     read = the_read(massive_session)
     assert began.wait(TIMEOUT)
