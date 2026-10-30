@@ -1,8 +1,9 @@
 """Tests for the refresh gates: the reported problems and the checks that span sources.
 
 The cross-source checks read plain values (`PathUse`, path statuses, page names), so each is
-shown here on hand-built input; `test_rest.py`, `test_ws.py`, and `test_flatfiles.py` show the
-generators feeding them, and one test runs them on the vendored snapshot.
+shown here on hand-built input; `test_rest_sources.py`, `test_ws_sources.py`, and
+`test_flat_file_sources.py` show the generators feeding them, and one test runs them on the vendored
+snapshot.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from deephaven_massive._massive.refresh.gates import (
     unused_description_fixes,
 )
 from deephaven_massive._massive.refresh.hand_input import HandInput
-from deephaven_massive._massive.refresh.rest import generate_rest
+from deephaven_massive._massive.refresh.rest_sources import generate_rest
 from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
 from deephaven_massive._massive.spec.types import Conversion, Transport, WireUnit
 

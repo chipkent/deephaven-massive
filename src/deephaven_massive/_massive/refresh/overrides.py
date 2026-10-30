@@ -37,7 +37,9 @@ parameter of it. An entry that names something the snapshot no longer generates 
 refresh (the `stale-entry` gate), so this module can only shrink as the vendor fixes its
 specifications.
 
-The tables are plain read-only data, built once at import.
+The tables are plain read-only data, built once at import. The module is one subject although
+it runs past 1,000 lines: every entry is a hand-verified wire fact with its reason, one per
+line of evidence, so it grows with Massive's API, not with new subjects.
 """
 
 from __future__ import annotations

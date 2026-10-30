@@ -20,11 +20,17 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import exclusions, generate, lexicon, overrides, rest
+from deephaven_massive._massive.refresh import (
+    exclusions,
+    generate,
+    lexicon,
+    overrides,
+    rest_sources,
+)
 from deephaven_massive._massive.refresh import exclusions as exclusions_module
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
-from deephaven_massive._massive.refresh.rest import Coverage, generate_rest
+from deephaven_massive._massive.refresh.rest_sources import Coverage, generate_rest
 from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
 from deephaven_massive._massive.spec.convert import convert_field
 from deephaven_massive._massive.spec.types import (
@@ -1519,4 +1525,4 @@ def test_problems_found_before_an_unreadable_schema_are_kept() -> None:
 
 
 def test_the_envelope_types_cover_exactly_the_envelope_keys() -> None:
-    assert set(rest._ENVELOPE_TYPES) == ENVELOPE_KEYS
+    assert set(rest_sources._ENVELOPE_TYPES) == ENVELOPE_KEYS

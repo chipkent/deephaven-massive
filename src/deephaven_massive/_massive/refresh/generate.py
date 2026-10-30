@@ -4,13 +4,13 @@
 other modules and adds only the rule for writing:
 
 1. `snapshot.Snapshot.load` reads the vendored snapshot and verifies it against its manifest;
-2. `generate` runs the three generators, `rest.generate_rest` (the OpenAPI specification),
-   `ws.generate_ws` (the WebSocket specification), and `flatfiles.generate_flat_files` (the
-   flat-file pages), each checking the gates met per source; then the checks that span
-   sources and transports (`gates`: stale hand entries, conversions no sample needs any more,
-   one concept per column; `kinds`: one type per column, columns on two transports, the
-   column order), and finally writes each source's memberships and orders its fields from
-   its kind (`kinds.apply`);
+2. `generate` runs the three generators, `rest_sources.generate_rest` (the OpenAPI specification),
+   `ws_sources.generate_ws` (the WebSocket specification), and
+   `flat_file_sources.generate_flat_files` (the flat-file pages), each checking the gates met per
+   source; then the checks that span sources and transports (`gates`: stale hand entries,
+   conversions no sample needs any more, one concept per column; `kinds`: one type per column,
+   columns on two transports, the column order), and finally writes each source's memberships and
+   orders its fields from its kind (`kinds.apply`);
 3. `render` writes the sources as the canonical text of `spec/rest.json`, `spec/ws.json`,
    `spec/flatfiles.json`, and `spec/descriptions.json`; each file is replaced only when every
    gate passed and its text changed, so a refresh that only rewords descriptions leaves the
@@ -28,12 +28,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
 from deephaven_massive._massive.refresh import gates, kinds, render
-from deephaven_massive._massive.refresh.flatfiles import FlatFileCoverage, generate_flat_files
+from deephaven_massive._massive.refresh.flat_file_sources import (
+    FlatFileCoverage,
+    generate_flat_files,
+)
 from deephaven_massive._massive.refresh.gates import Gate, PathUse, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
-from deephaven_massive._massive.refresh.rest import Coverage, generate_rest
+from deephaven_massive._massive.refresh.rest_sources import Coverage, generate_rest
 from deephaven_massive._massive.refresh.snapshot import Snapshot
-from deephaven_massive._massive.refresh.ws import WsCoverage, generate_ws
+from deephaven_massive._massive.refresh.ws_sources import WsCoverage, generate_ws
 from deephaven_massive._massive.spec.types import RestPath, Source, Transport
 
 if TYPE_CHECKING:
