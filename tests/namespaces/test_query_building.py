@@ -17,7 +17,7 @@ import logging
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
-from typing import Any, Literal, cast, overload
+from typing import Any, ClassVar, Literal, cast, overload
 
 import pytest
 from deephaven import new_table
@@ -367,6 +367,20 @@ def test_namespaces_repr_as_their_path(massive_session: dm.MassiveSession) -> No
         assert repr(namespace) == f"<{label} {path}>"
 
 
+def test_a_wrong_call_names_the_method_by_its_path(massive_session: dm.MassiveSession) -> None:
+    m = massive_session
+    bars = cast("Callable[..., object]", m.stocks.bars)  # a call no overload accepts
+    with pytest.raises(
+        TypeError, match=r"^stocks\.bars\(\) takes from 2 to 3 positional arguments but 5 were"
+    ):
+        bars("AAPL", dm.Timespan.MINUTE, 1, "adjusted")
+    news = cast("Callable[..., object]", m.partners.benzinga.news)
+    with pytest.raises(TypeError, match=r"^partners\.benzinga\.news\(\) got an unexpected"):
+        news(tickerz="AAPL")
+    assert m.options.chain.__qualname__ == "options.chain"
+    assert m.stocks.financials.balance_sheets.__qualname__ == "stocks.financials.balance_sheets"
+
+
 NEWS = DatasetSpec(
     name="reference.news",
     summary="A dataset for the tests.",
@@ -450,8 +464,16 @@ def test_a_symbol_table_is_boxed_by_identity(
 def test_a_symbol_table_needs_a_symbol_column(
     massive_session: dm.MassiveSession, dh_exec_ctx: object
 ) -> None:
-    with pytest.raises(ValueError, match="a symbol table must have a Symbol column"):
-        build(massive_session, TRADES_SPEC, symbols=new_table([string_col("Ticker", ["AAPL"])]))
+    table = new_table([string_col("Ticker", ["AAPL"]), string_col("Name", ["Apple"])])
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^a symbol table must have a Symbol column; this one has: Ticker, Name\. Name the "
+            r"column of tickers Symbol, as in t\.view\(\"Symbol = Ticker\"\); .* "
+            r"dm\.canonicalize_symbols\(t, asset_class, column=\"Ticker\"\)$"
+        ),
+    ):
+        build(massive_session, TRADES_SPEC, symbols=table)
 
 
 # The query class of a dataset.
@@ -645,6 +667,9 @@ def test_every_factory_returns_the_class_of_its_dataset() -> None:
 
 class _Good(Namespace):
     __slots__ = ()
+    # Each stand-in has a path of its own: a namespace renames its methods to their paths, and
+    # `typing` files overloads by that name, so two stand-ins on one path would share overloads.
+    _path: ClassVar[str] = "stocks"
 
     @overload
     def bars(
@@ -663,6 +688,7 @@ class _Good(Namespace):
 
 class _Bad(Namespace):
     __slots__ = ()
+    _path: ClassVar[str] = "options"
 
     @overload
     def bars(

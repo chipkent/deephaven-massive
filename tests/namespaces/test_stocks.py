@@ -445,6 +445,11 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
         massive_session.stocks.trades(table)
 
 
+def test_a_lower_case_ticker_names_the_upper_case_one(massive_session: dm.MassiveSession) -> None:
+    with pytest.raises(ValueError, match=r"^'spy' is not a Massive stock ticker: .*use 'SPY'"):
+        massive_session.stocks.trades("spy")
+
+
 @pytest.mark.parametrize(
     "case",
     [

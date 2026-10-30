@@ -1168,6 +1168,13 @@ class HistoryQuery(QueryBase):
         Java `LocalDate`, `Instant`, or `ZonedDateTime`, a `numpy.datetime64`, or a
         `pandas.Timestamp`); the Args below say which is a day and which an instant.
 
+        To backfill a live table, subscribe first and read the history second, so the two
+        overlap instead of leaving a gap, then keep one row per key: for bars,
+        `live = bars.append_only()`, `past = bars.history(dh_today())`, and
+        `merge([past, live]).last_by(["Symbol", "TimestampStart"])`, where a bar both hold shows
+        the stream's. `history()` reads a watchlist table once, when it is called, so a symbol
+        added to the watchlist later gets live rows but no backfill.
+
         Args:
             start: The first day, or the first instant included: an ISO-8601 string, a `date`,
                 a timezone-aware `datetime`, a Java `LocalDate`, `Instant`, or

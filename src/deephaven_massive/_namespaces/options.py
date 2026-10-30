@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
-from deephaven_massive._datasets.symbols import check_symbol, symbol_class
+from deephaven_massive._datasets.symbols import check_symbol, is_canonical, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -79,6 +79,9 @@ _SNAPSHOT_TYPE: Final = "options"
 Tickers never travel with it: Massive answers `type` beside `ticker.any_of` with HTTP 400
 ("Cannot specify tickers and type."), and each contract's `O:` prefix already names its class.
 """
+
+_UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
+"""The classes whose tickers an option can be linked to, the ones `underlying` takes."""
 
 _LAST_TRADE: Final = "/v2/last/trade/{optionsTicker}"
 _TRADES: Final = "/v3/trades/{optionsTicker}"
@@ -321,8 +324,9 @@ def _underlying(value: object) -> str:
             or is not canonical; `check_symbol` names the canonical form when it can.
     """
     if not isinstance(value, str):
-        raise TypeError(f"underlying must be a str, not {type(value).__name__}")
-    if symbol_class(value) not in {AssetClass.STOCKS, AssetClass.INDICES}:
+        kind = "dm.ALL" if value is ALL else type(value).__name__
+        raise TypeError(f"underlying must be one ticker, a str, not {kind}")
+    if symbol_class(value) not in _UNDERLYING_CLASSES:
         raise ValueError(
             f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
         )
@@ -794,9 +798,10 @@ class _Options(Namespace):
             TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
                 `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an `int`, or
                 `filters` is not a mapping.
-            ValueError: If `underlying` is not Massive's exact stock or index ticker, `limit` is not
-                positive, a filter key is not a parameter of the endpoint or is `contract_type`, or
-                a filter value does not fit its parameter.
+            ValueError: If `underlying` is `dm.ALL` (the message names
+                `m.options.snapshots(dm.ALL)`) or is not Massive's exact stock or index ticker,
+                `limit` is not positive, a filter key is not a parameter of the endpoint or is
+                `contract_type`, or a filter value does not fit its parameter.
 
         Example:
             ::
@@ -817,6 +822,13 @@ class _Options(Namespace):
                     ]
                 )
         """
+        if cast("object", underlying) is ALL:  # the type says str; a console caller may pass it
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug("options.chain refused: underlying=dm.ALL")
+            raise ValueError(
+                "options.chain reads one underlying's chain and does not take dm.ALL; "
+                "m.options.snapshots(dm.ALL) lists every contract"
+            )
         params: dict[str, object] = {
             "underlyingAsset": _underlying(underlying),
             "contract_type": _contract_type(contract_type),
@@ -972,7 +984,9 @@ class _Options(Namespace):
             TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
                 `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit`
                 is not an `int`, or `filters` is not a mapping.
-            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol, a sequence
+            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol (one
+                stock or index ticker, such as `"AAPL"`, gets a message that names
+                `underlying="AAPL"`), a sequence
                 is empty or an exhausted generator, a table has no `Symbol` column, `underlying` is
                 not Massive's exact stock or index ticker, `as_of` is a `datetime` or not an
                 ISO-8601 date, `limit` is not positive, a filter key is not a parameter of the
@@ -987,6 +1001,17 @@ class _Options(Namespace):
                     filters={"strike_price_gte": 100, "expiration_date_lte": "2026-01-16"},
                 ).fetch()
         """
+        if (
+            isinstance(symbols, str)
+            and symbol_class(symbols) in _UNDERLYING_CLASSES
+            and is_canonical(ClassFromPrefix.ANY, symbols)
+        ):
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug("options.contracts refused: symbols=%r is an underlying", symbols)
+            raise ValueError(
+                f"{symbols!r} is an underlying, not an options contract: list its contracts "
+                f"with m.options.contracts(underlying={symbols!r})"
+            )
         params: dict[str, object] = {
             "underlying_ticker": None if underlying is None else _underlying(underlying),
             "contract_type": _contract_type(contract_type),

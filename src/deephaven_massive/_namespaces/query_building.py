@@ -30,11 +30,12 @@ here runs synchronously on the calling thread, makes no network call, and create
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from datetime import date, datetime
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final, cast, get_overloads, overload
 
 from deephaven.table import Table
 
@@ -153,6 +154,30 @@ class Namespace:
 
     _path: ClassVar[str] = ""
     """The namespace's path from the session, such as `"stocks"` or `"partners.benzinga"`."""
+
+    @override
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Name each public method of a namespace class by its path, such as `stocks.bars`.
+
+        Python names a function by its `__qualname__` in the `TypeError` of a wrong call
+        (`stocks.bars() takes from 2 to 3 positional arguments but 5 were given`). The class
+        name, such as `_Stocks`, is private and means nothing to a user who reached the method
+        as `m.stocks.bars`, so each public function the class defines itself is renamed to its
+        path from the session when the class is created, at import. `typing` files a
+        function's overloads under its `__qualname__`, so each overload is renamed too and
+        registered again under the new name, which keeps `typing.get_overloads` finding them.
+
+        Args:
+            **kwargs: Passed on to `object.__init_subclass__`.
+        """
+        super().__init_subclass__(**kwargs)
+        for name, value in vars(cls).items():
+            if not name.startswith("_") and inspect.isfunction(value):
+                path = f"{cls._path}.{name}"
+                for variant in get_overloads(value):
+                    variant.__qualname__ = path
+                    overload(variant)
+                value.__qualname__ = path
 
     def __init__(self, core: SessionCore) -> None:
         """Bind the namespace to its session.
@@ -644,7 +669,17 @@ def build_query(
         raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
     if isinstance(symbols, Table):
         if "Symbol" not in symbols.column_names:
-            raise ValueError("a symbol table must have a Symbol column")
+            columns = ", ".join(symbols.column_names)
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug(
+                "%s refused: a symbol table without Symbol, columns %s", spec.name, columns
+            )
+            raise ValueError(
+                f"a symbol table must have a Symbol column; this one has: {columns}. Name the "
+                'column of tickers Symbol, as in t.view("Symbol = Ticker"); for tickers spelled '
+                "another way (lower case, another convention), convert them first with "
+                'dm.canonicalize_symbols(t, asset_class, column="Ticker")'
+            )
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)

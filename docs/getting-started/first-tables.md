@@ -133,19 +133,25 @@ section of the column reference. The second line keeps the datasets that stream.
 
 ## History and live data in one table
 
-A common need is a table that starts with the past and keeps growing with the present. Read
-the history, open the live stream, and merge the two:
+A common need is a table that starts with the past and keeps growing with the present. Open
+the live stream first, then read the history, and merge the two:
 
 ```python
 from deephaven import merge
 from deephaven.time import dh_today
 
 bars = m.stocks.bars("NVDA", dm.Timespan.MINUTE)
-today = merge([bars.history(dh_today()), bars.append_only()])
+live = bars.append_only()
+past = bars.history(dh_today())
+today = merge([past, live]).last_by(["Symbol", "TimestampStart"])
 ```
 
-The history ends at the moment you call it, and the stream starts a moment later, so a bar at
-the boundary can be missing or appear twice. Sort or deduplicate on `TimestampStart` if that
-matters to you.
+Opening the stream before the history read leaves no gap between them: the stream is already
+running when the history ends, so the two overlap instead. `last_by` keeps one row per symbol
+and minute, and because the live rows come after the history in the merge, a minute that both
+hold shows the stream's bar.
+
+`history()` reads a watchlist table once, when you call it. A symbol you add to the watchlist
+later gets live rows but no backfill: build the table again to backfill it.
 
 Next: [Verbs and table shapes](table-shapes.md).

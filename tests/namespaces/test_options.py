@@ -448,8 +448,16 @@ def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.Massiv
 
 def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None:
     chain = massive_session.options.chain
-    with pytest.raises(TypeError, match="underlying must be a str, not _All"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^options\.chain reads one underlying's chain and does not take dm\.ALL; "
+            r"m\.options\.snapshots\(dm\.ALL\) lists every contract$"
+        ),
+    ):
         chain(cast("str", dm.ALL))
+    with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not int$"):
+        chain(cast("str", 1))
     with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
     with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
@@ -524,6 +532,20 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     contracts = massive_session.options.contracts
     with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
         contracts(symbols=dm.ALL)
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^'AAPL' is an underlying, not an options contract: list its contracts with "
+            r"m\.options\.contracts\(underlying='AAPL'\)$"
+        ),
+    ):
+        contracts("AAPL")
+    with pytest.raises(ValueError, match=r"'I:SPX' is an underlying"):
+        contracts("I:SPX")
+    with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
+        contracts("aapl")  # not canonical: the symbol check explains it
+    with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
+        contracts(underlying=cast("str", dm.ALL))
     with pytest.raises(TypeError, match="expired must be a bool, not int"):
         contracts(expired=cast("bool", 1))
     with pytest.raises(ValueError, match="needs a timezone"):

@@ -492,16 +492,19 @@ class MassiveSession:
         `CLOSED` included.
 
         Returns:
-            A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Dataset`
-            (String), such as `stocks.trades`; `Query` (String), the query that opened the
-            stream, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL',)>`, which tells
-            two streams of one dataset apart; `SymbolCount` (int), null for `dm.ALL`;
-            `Symbols` (String), a shortened list; `HeldResults` (int), the stream's tables the
-            library still holds; `Deferred` (int), options contracts held back by the
-            per-connection cap; `Transport` (String), `WebSocket` for a stream or `REST` for a
-            `poll()`; `Host` and `Path` (String); `RowsPublished` (long); `RequestsPerCycle`
-            (int), a `poll()` table's REST requests per cycle; `State` (String), `RUNNING`,
-            `FAILED`, `RELEASED`, or `CLOSED`; `Error` (String), why the stream failed, or a
+            A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Kind`
+            (String), `stream` for a WebSocket stream, `poll` for a `poll()` table, or `read`
+            for a background read; `Dataset` (String), such as `stocks.trades`; `Query`
+            (String), the query that opened the stream, such as
+            `<StreamHistoryQuery stocks.trades symbols=('AAPL',)>`, which tells two streams of
+            one dataset apart; `SymbolCount` (int), null for `dm.ALL`; `Symbols` (String), a
+            shortened list; `HeldResults` (int), the stream's tables the library still holds;
+            `Deferred` (int), options contracts held back by the per-connection cap;
+            `Transport` (String), `WebSocket` for a stream, `REST` for a `poll()` or a REST
+            read, or `flat files` for a read from flat files; `Host` and `Path` (String);
+            `RowsPublished` (long); `RequestsPerCycle` (int), a `poll()` table's REST requests
+            per cycle; `State` (String), `RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or
+            `CLOSED`; `Error` (String), why the stream failed, or a
             warning that does not stop it; `CreatedAt` (Instant); and `SchemaDrift` (String),
             the fields payloads had beyond the documented schema (`transport:field+`) or
             lacked (`transport:field-`). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
@@ -568,10 +571,11 @@ class MassiveSession:
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
         if not self._core.results.release(table):
             raise ValueError(
-                "table is not a live result of this session: release() takes a table that a "
-                "live verb (blink(), append_only(), ring(), last_by(), poll()) of this session "
-                "returned. A table derived from one stops with it once you delete it (del) and "
-                "nothing else holds it; a static fetch() or history() table has no stream to stop"
+                "table is not a live result of this session: release() takes a table that this "
+                "session returned from blink(), append_only(), ring(), last_by(), poll(), "
+                "fetch(wait=False), history(..., wait=False), connections(), streams(), or "
+                "rate_limits(). For a table derived from one, release the live table it came "
+                "from; a static fetch() or history() table has nothing to release"
             )
 
     @raises_through(SessionCore.close, refuse_update_graph_thread)
