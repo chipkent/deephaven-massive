@@ -105,7 +105,7 @@ class WireType(StrEnum):
 
     The refresh assigns each field one of these. Two sources that share a column within a
     dataset kind may differ only by a widening (`LONG` with `DOUBLE` gives `DOUBLE`, `LONG`
-    with `INT_ARRAY` gives `INT_ARRAY`, by `common_type`); any other pair is a conflict the
+    with `LONG_ARRAY` gives `LONG_ARRAY`, by `common_type`); any other pair is a conflict the
     refresh rejects.
     """
 
@@ -127,10 +127,17 @@ class WireType(StrEnum):
     Decoded to exact integer nanoseconds since the Unix epoch (UTC), keeping up to nine
     fractional digits. Text without an offset is an unconvertible value, never assumed UTC.
     """
-    INT_ARRAY = "int-array"
-    """A list of integers, each within the signed 32-bit range (condition codes)."""
+    LONG_ARRAY = "long-array"
+    """A list of integers, each within the signed 64-bit range (condition codes, indicators).
+
+    Every numeric id or code Massive sends is a `long`, alone or in a list, so a list of codes
+    joins the reference table of its ids with no cast.
+    """
+    STRING_ARRAY = "string-array"
+    """A list of text values, such as the tickers an article names."""
     JSON_TEXT = "json-text"
-    """A nested object, a list of strings or objects, or a choice of shapes, kept as JSON text."""
+    """A nested object, a list of anything but integers or text, or a choice of shapes, kept as
+    JSON text."""
 
     def common_type(self, other: WireType) -> WireType | None:
         """Return the narrowest wire type that holds values of both types, or None if none does.
@@ -139,8 +146,8 @@ class WireType(StrEnum):
         is the one rule for that agreement: the refresh's `type-agreement` gate and the
         run-time schema merge both call it, so a kind the refresh accepts always merges.
         Equal types give themselves (two `EPOCH`s each keep their own unit, so they agree
-        too); `LONG` with `DOUBLE` gives `DOUBLE`, and `LONG` with `INT_ARRAY` gives
-        `INT_ARRAY` (a scalar becomes a one-element list). Any other pair is a type conflict.
+        too); `LONG` with `DOUBLE` gives `DOUBLE`, and `LONG` with `LONG_ARRAY` gives
+        `LONG_ARRAY` (a scalar becomes a one-element list). Any other pair is a type conflict.
 
         Args:
             other: The other contribution's type.
@@ -155,7 +162,7 @@ class WireType(StrEnum):
 
 _COMMON_TYPES: Mapping[frozenset[WireType], WireType] = {
     frozenset({WireType.LONG, WireType.DOUBLE}): WireType.DOUBLE,
-    frozenset({WireType.LONG, WireType.INT_ARRAY}): WireType.INT_ARRAY,
+    frozenset({WireType.LONG, WireType.LONG_ARRAY}): WireType.LONG_ARRAY,
 }
 """The common type of each pair of different wire types that has one; every other pair is a
 type conflict."""
@@ -229,7 +236,7 @@ class Conversion(StrEnum):
     and a finite number becomes its decimal text (`double` to `string`)."""
     CODE_LIST_TEXT = "code-list-text"
     """Codes documented as an integer but written as one integer or as integers separated by
-    commas in text, such as `"12,37"` (`long` to `int-array`)."""
+    commas in text, such as `"12,37"` (`long` to `long-array`)."""
     MIDNIGHT_UTC_DATE = "midnight-utc-date"
     """A date also sent as an ISO-8601 instant at exactly midnight with offset `Z` or `+00:00`
     (`date` to `date`)."""
@@ -276,7 +283,7 @@ _CONVERSION_TYPES: Mapping[Conversion, tuple[frozenset[WireType], WireType, bool
                 True,
             ),
             Conversion.NUMBER_LABEL: (frozenset({WireType.DOUBLE}), WireType.STRING, True),
-            Conversion.CODE_LIST_TEXT: (frozenset({WireType.LONG}), WireType.INT_ARRAY, True),
+            Conversion.CODE_LIST_TEXT: (frozenset({WireType.LONG}), WireType.LONG_ARRAY, True),
             Conversion.MIDNIGHT_UTC_DATE: (frozenset({WireType.DATE}), WireType.DATE, True),
             Conversion.DATE_AS_EPOCH: (frozenset({WireType.DATE}), WireType.EPOCH, True),
             Conversion.INTEGER_AS_NUMBER: (frozenset({WireType.LONG}), WireType.DOUBLE, True),

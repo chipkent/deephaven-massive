@@ -210,11 +210,16 @@ def test_an_array_s_items_decide_its_type() -> None:
     assert raw.items == {"type": "integer"}
     item = rules.field(raw)
     assert item is not None
-    assert item.wire_type is WireType.INT_ARRAY
+    assert item.wire_type is WireType.LONG_ARRAY
     texts: JsonObject = {"type": "array", "items": {"type": "string"}}
     names = rules.field(openapi_field(spec, "names", texts, required=False))
     assert names is not None
-    assert names.wire_type is WireType.JSON_TEXT
+    assert names.wire_type is WireType.STRING_ARRAY
+    # An array whose items have no type of their own is kept as JSON text.
+    bare: JsonObject = {"type": "array", "items": {}}
+    untyped = rules.field(openapi_field(spec, "any", bare, required=False))
+    assert untyped is not None
+    assert untyped.wire_type is WireType.JSON_TEXT
     assert openapi_field(spec, "price", {"type": "number"}, required=True).items is None
 
 

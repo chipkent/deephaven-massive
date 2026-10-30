@@ -249,12 +249,12 @@ Benzinga news articles, with headline, teaser, body, and the tickers each one na
 | `Author` | String | The name of the journalist or entity that authored the news article. | REST | `author` |
 | `BenzingaId` | long | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
 | `Body` | String | The full text content of the news article. | REST | `body` |
-| `Channels` | String | A list of categories or topics that the article belongs to (e.g., 'News', 'Price Target'). | REST | `channels` |
-| `Images` | String | A list of images associated with the article. | REST | `images` |
+| `Channels` | String[] | A list of categories or topics that the article belongs to (e.g., 'News', 'Price Target'). | REST | `channels` |
+| `Images` | String[] | A list of images associated with the article. | REST | `images` |
 | `LastUpdated` | Instant | The timestamp (formatted as an ISO 8601 timestamp) when the news article was last updated in the system. | REST | `last_updated` |
-| `Tags` | String | A list of tags that describe the themes or content of the article. | REST | `tags` |
+| `Tags` | String[] | A list of tags that describe the themes or content of the article. | REST | `tags` |
 | `Teaser` | String | A short summary or lead-in to the news article's content. | REST | `teaser` |
-| `Tickers` | String | A list of stock or crypto tickers mentioned in the article. | REST | `tickers` |
+| `Tickers` | String[] | A list of stock or crypto tickers mentioned in the article. | REST | `tickers` |
 | `Title` | String | The headline of the news article. | REST | `title` |
 | `Url` | String | The direct link to the source of the news article. | REST | `url` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
@@ -380,10 +380,10 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `BidAskSpread` | double | The average intraday bid-ask spread as a percentage, calculated by dividing the spread by the lowest ask price sampled during the day. | REST | `bid_ask_spread` |
 | `CallVolume` | double | Call options volume. | REST | `call_volume` |
 | `Category` | String | The broad investment category that describes the ETF's investment focus and strategy. | REST | `category` |
-| `CouponExposure` | String | Coupon exposure breakdown for fixed income ETFs. | REST | `coupon_exposure` |
+| `CouponExposure` | String | Coupon exposure breakdown for fixed income ETFs. The column holds Massive's value as JSON text. | REST | `coupon_exposure` |
 | `CreationFee` | double | The fee for creating new shares of the ETF. | REST | `creation_fee` |
 | `CreationUnitSize` | double | The size of creation units for the ETF. | REST | `creation_unit_size` |
-| `CurrencyExposure` | String | Currency exposure breakdown of the ETF. | REST | `currency_exposure` |
+| `CurrencyExposure` | String | Currency exposure breakdown of the ETF. The column holds Massive's value as JSON text. | REST | `currency_exposure` |
 | `Custodian` | String | The custodian of the ETF assets. | REST | `custodian` |
 | `Description` | String | The official name and description of the ETF product. | REST | `description` |
 | `DevelopmentClass` | String | The economic development classification of the markets the ETF invests in, such as developed, emerging, or frontier markets. | REST | `development_class` |
@@ -395,10 +395,10 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `FiscalYearEnd` | String | The fiscal year end date for the ETF. | REST | `fiscal_year_end` |
 | `Focus` | String | The specific investment focus or exposure that the ETF provides, such as sector, geography, or investment style. | REST | `focus` |
 | `FuturesCommissionMerchant` | String | The futures commission merchant, if applicable. | REST | `futures_commission_merchant` |
-| `GeographicExposure` | String | Geographic exposure breakdown of the ETF. | REST | `geographic_exposure` |
+| `GeographicExposure` | String | Geographic exposure breakdown of the ETF. The column holds Massive's value as JSON text. | REST | `geographic_exposure` |
 | `InceptionDate` | String | The date when this ETF was first launched and became available for trading. | REST | `inception_date` |
-| `IndustryExposure` | String | Industry exposure breakdown of the ETF. | REST | `industry_exposure` |
-| `IndustryGroupExposure` | String | Industry group exposure breakdown of the ETF. | REST | `industry_group_exposure` |
+| `IndustryExposure` | String | Industry exposure breakdown of the ETF. The column holds Massive's value as JSON text. | REST | `industry_exposure` |
+| `IndustryGroupExposure` | String | Industry group exposure breakdown of the ETF. The column holds Massive's value as JSON text. | REST | `industry_group_exposure` |
 | `Issuer` | String | The financial institution or fund company that created and sponsors this ETF. | REST | `issuer` |
 | `LeadMarketMaker` | String | The lead market maker for the ETF. | REST | `lead_market_maker` |
 | `LeverageStyle` | String | Indicates whether the ETF uses leverage to amplify returns ('leveraged'), or does not use leverage ('unleveraged'). | REST | `leverage_style` |
@@ -406,7 +406,7 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `ListingExchange` | String | The primary exchange where the ETF is listed. | REST | `listing_exchange` |
 | `ManagementClassification` | String | Defines whether an ETF is considered active under SEC rules, with managers making investment decisions, or passive, tracking an index. | REST | `management_classification` |
 | `ManagementFee` | double | The annual fee charged by the fund manager for managing the ETF's portfolio and operations. | REST | `management_fee` |
-| `MaturityExposure` | String | Maturity exposure breakdown for fixed income ETFs. | REST | `maturity_exposure` |
+| `MaturityExposure` | String | Maturity exposure breakdown for fixed income ETFs. The column holds Massive's value as JSON text. | REST | `maturity_exposure` |
 | `NetExpenses` | double | Net expenses after waivers. | REST | `net_expenses` |
 | `NumHoldings` | double | Number of holdings in the ETF. | REST | `num_holdings` |
 | `OptionsAvailable` | long | Availability of options on the ETF. | REST | `options_available` |
@@ -419,10 +419,10 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | `PutCallRatio` | double | Put/call ratio for options on the ETF. | REST | `put_call_ratio` |
 | `PutVolume` | double | Put options volume. | REST | `put_volume` |
 | `Region` | String | The geographic region or area of the world where the ETF concentrates its investments. | REST | `region` |
-| `SectorExposure` | String | Sector exposure breakdown of the ETF. | REST | `sector_exposure` |
+| `SectorExposure` | String | Sector exposure breakdown of the ETF. The column holds Massive's value as JSON text. | REST | `sector_exposure` |
 | `ShortInterest` | double | Short interest in the ETF. | REST | `short_interest` |
 | `Subadvisor` | String | The subadvisor of the ETF, if applicable. | REST | `subadvisor` |
-| `SubindustryExposure` | String | Sub-industry exposure breakdown of the ETF. | REST | `subindustry_exposure` |
+| `SubindustryExposure` | String | Sub-industry exposure breakdown of the ETF. The column holds Massive's value as JSON text. | REST | `subindustry_exposure` |
 | `TaxClassification` | String | The tax structure of the ETF, determining whether investors receive 1099 or K1 tax forms (RIC, Partnership, or UIT). | REST | `tax_classification` |
 | `TotalExpenses` | double | The total annual expense ratio of the ETF, including all fees and costs passed on to investors. | REST | `total_expenses` |
 | `TransferAgent` | String | The transfer agent for the ETF. | REST | `transfer_agent` |
@@ -583,4 +583,4 @@ Massive's documentation of this dataset:
 
 ---
 
-Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
+Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and the columns it computes.

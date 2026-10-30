@@ -30,7 +30,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
-from deephaven_massive._namespaces import reference
+from deephaven_massive._namespaces import snapshots
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._namespaces.crypto import _Crypto
 from deephaven_massive._namespaces.economy import _Economy
@@ -324,8 +324,8 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         filters={"type": "options"},
     )
     assert type(query) is Query
-    assert query._spec is reference.SNAPSHOTS
-    assert query._spec is _session.CATALOG.by_name["reference.snapshots"]
+    assert query._spec is snapshots.SNAPSHOTS
+    assert query._spec is _session.CATALOG.by_name["snapshots"]
     assert query._request == Request(
         symbols=("AAPL", "C:EURUSD", "O:SPY251219C00600000", "X:BTCUSD"),
         params=(("order", dm.Order.DESC), ("sort", "ticker")),

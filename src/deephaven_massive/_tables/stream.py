@@ -149,11 +149,12 @@ _WIRE_ARROW: Final[Mapping[WireType, pa.DataType]] = {
     WireType.JSON_TEXT: pa.string(),
     WireType.DATE: pa.date32(),
     WireType.ISO_INSTANT: pa.int64(),
-    WireType.INT_ARRAY: pa.list_(pa.int32()),
+    WireType.LONG_ARRAY: pa.list_(pa.int64()),
+    WireType.STRING_ARRAY: pa.list_(pa.string()),
 }
 """The Arrow type of each wire type as the WebSocket client delivers its values: an epoch as its
 raw integer count (converted by its unit afterwards), an ISO-8601 instant as integer
-nanoseconds, a date as a `datetime.date`, and a list as a list of integers."""
+nanoseconds, a date as a `datetime.date`, and a list as a list of integers or of text."""
 
 
 class FuturesSessionDates(Protocol):

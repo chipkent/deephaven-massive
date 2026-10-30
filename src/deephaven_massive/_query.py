@@ -267,14 +267,14 @@ class QueryBase:
         Returns:
             A static table with one row per column, in result column order:
             `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
-            `int`, `double`, `boolean`, `String`, `Instant`, or `int[]`; every calendar date,
-            such as `Date`, is ISO `yyyy-MM-dd` text, a `String`);
+            `int`, `double`, `boolean`, `String`, `Instant`, `long[]`, or `String[]`; every
+            calendar date, such as `Date`, is ISO `yyyy-MM-dd` text, a `String`);
             `Description` (String), what the column holds, empty when Massive gives no
             description; and `SuppliedBy` (String), the transports whose sources fill the
             column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
             order, joined by ", " (`fetch()` and `poll()` are served by REST, the stream verbs
-            by WebSocket, and `history()` by REST or flat files); empty for a column that only
-            other datasets of the same kind supply, which this dataset always leaves null.
+            by WebSocket, and `history()` by REST or flat files). A dataset has only the
+            columns some transport of its own fills, so every `SuppliedBy` names one.
 
         Like every verb, it raises `ValueError` on a Deephaven update-graph thread, for example
         from a table listener.

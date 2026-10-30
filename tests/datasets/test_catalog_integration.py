@@ -102,9 +102,6 @@ _FIXED_ARGUMENTS: dict[str, object] = {
 }
 """Values of the required arguments other than symbols, timespans, and dates."""
 
-_ATTRIBUTE_PATHS = {"reference.snapshots": ("snapshots",)}
-"""Datasets whose method is not at their catalog name's path."""
-
 _STREAM_CLOSED = [float("-inf")]
 """When the last stream test's session closed."""
 
@@ -239,7 +236,7 @@ def _query(
     """
     spec = CATALOG.by_name[name]
     target: Any = session
-    for part in _ATTRIBUTE_PATHS.get(name, tuple(name.split("."))):
+    for part in name.split("."):  # every dataset method is at its name's path
         target = getattr(target, part)
     method: Callable[..., QueryBase] = target
     arguments: dict[str, object] = {}

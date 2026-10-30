@@ -42,7 +42,7 @@ def _path(*fields: Field) -> RestPath:
 _TRADES = RestPath(
     key="/v3/trades/{stockTicker}",
     fields=(
-        _field("conditions", WireType.INT_ARRAY),
+        _field("conditions", WireType.LONG_ARRAY),
         _field("exchange", WireType.LONG),
         _field("id", WireType.STRING),
         _field("participant_timestamp", WireType.EPOCH),
@@ -73,7 +73,7 @@ def test_a_trades_page_becomes_one_batch_in_field_order(
     batch, drift = to_batch(rows, _TRADES, required={"SipTimestamp"})
     assert batch.schema == pa.schema(
         [
-            ("Conditions", pa.list_(pa.int32())),
+            ("Conditions", pa.list_(pa.int64())),
             ("Exchange", pa.int64()),
             ("Id", pa.string()),
             ("ParticipantTimestamp", pa.int64()),
@@ -241,7 +241,8 @@ def test_a_required_column_the_path_lacks_is_a_caller_error() -> None:
         (WireType.BOOL, False, pa.bool_(), False),
         (WireType.STRING, "x", pa.string(), "x"),
         (WireType.DATE, "2026-02-28", pa.date32(), date(2026, 2, 28)),
-        (WireType.INT_ARRAY, [1, -2], pa.list_(pa.int32()), [1, -2]),
+        (WireType.LONG_ARRAY, [1, -(2**40)], pa.list_(pa.int64()), [1, -(2**40)]),
+        (WireType.STRING_ARRAY, ["a", "b"], pa.list_(pa.string()), ["a", "b"]),
         (WireType.JSON_TEXT, {"k": [1]}, pa.string(), '{"k":[1]}'),
     ],
 )
@@ -268,7 +269,8 @@ def test_an_iso_instant_lands_as_exact_utc_nanoseconds() -> None:
         (WireType.BOOL, 1),
         (WireType.ISO_INSTANT, "2026-01-02T03:04:05"),
         (WireType.ISO_INSTANT, "9999-12-31T00:00:00Z"),
-        (WireType.INT_ARRAY, [2**31]),
+        (WireType.LONG_ARRAY, [2**63]),
+        (WireType.STRING_ARRAY, ["a", 1]),
     ],
 )
 def test_a_value_that_does_not_fit_is_a_wire_error(wire_type: WireType, value: object) -> None:
