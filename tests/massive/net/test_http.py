@@ -1,3 +1,4 @@
+import contextlib
 import os
 import ssl
 import threading
@@ -12,6 +13,10 @@ from deephaven_massive._massive.net import http
 _CERT_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR")
 _KEY_LOG_VAR = "SSLKEYLOGFILE"
 _PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy")
+_TLS = Path(__file__).resolve().parents[2] / "data" / "massive" / "net"
+_HASHED_NAME = "88d0bdcb.0"
+"""The name OpenSSL looks the fixture certificate up by in a certificate directory: the hash
+of its subject (`openssl x509 -hash -noout -in tls_cert.pem`) and a sequence number."""
 
 
 @pytest.fixture
@@ -151,6 +156,121 @@ def test_a_cert_directory_created_after_the_first_call_gets_a_new_context(
     missing = http.ssl_context(REST)
     directory.mkdir()
     assert http.ssl_context(REST) is not missing
+
+
+def _verifies_the_fixture_server(context: ssl.SSLContext) -> bool:
+    """Run a TLS handshake in memory against a server presenting the fixture certificate.
+
+    Returns:
+        Whether `context` accepted the server's certificate.
+    """
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(_TLS / "tls_cert.pem", _TLS / "tls_key.pem")
+    client_in, client_out, server_in, server_out = (ssl.MemoryBIO() for _ in range(4))
+    client = context.wrap_bio(client_in, client_out, server_hostname="127.0.0.1")
+    server = server_context.wrap_bio(server_in, server_out, server_side=True)
+    while True:
+        try:
+            client.do_handshake()
+        except ssl.SSLWantReadError:
+            pass
+        except ssl.SSLCertVerificationError:
+            return False
+        else:
+            return True
+        server_in.write(client_out.read())
+        with contextlib.suppress(ssl.SSLWantReadError):
+            server.do_handshake()
+        client_in.write(server_out.read())
+
+
+def _cert_directory(clean_env: pytest.MonkeyPatch, directory: Path) -> Path:
+    """Point `SSL_CERT_DIR` at `directory` and give it a regular file that trusts the fixture.
+
+    Returns:
+        The hashed certificate file in `directory`.
+    """
+    directory.mkdir()
+    hashed = directory / _HASHED_NAME
+    hashed.write_bytes((_TLS / "tls_cert.pem").read_bytes())
+    clean_env.setenv("SSL_CERT_DIR", str(directory))
+    return hashed
+
+
+def test_a_certificate_edited_in_place_in_a_cert_directory_takes_effect(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    directory = tmp_path / "certs"
+    hashed = _cert_directory(clean_env, directory)
+    trusting = http.ssl_context(REST)
+    assert _verifies_the_fixture_server(trusting)
+    before = directory.stat()
+    hashed.write_bytes(b"")  # the authority is removed by editing its file in place
+    after = directory.stat()
+    # The directory itself looks the same, so only its entries can show the change.
+    assert (after.st_mtime_ns, after.st_size, after.st_ino) == (
+        before.st_mtime_ns,
+        before.st_size,
+        before.st_ino,
+    )
+    distrusting = http.ssl_context(REST)
+    assert distrusting is not trusting
+    assert not _verifies_the_fixture_server(distrusting)
+    assert http.ssl_context(REST) is distrusting
+
+
+def test_a_certificate_linked_from_a_cert_directory_and_edited_takes_effect(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = tmp_path / "store"
+    store.mkdir()
+    bundle = store / "corporate-ca.pem"
+    bundle.write_bytes((_TLS / "tls_cert.pem").read_bytes())
+    directory = tmp_path / "certs"
+    directory.mkdir()
+    # A hashed name linked to a bundle elsewhere, as `c_rehash` and `update-ca-certificates` lay
+    # a directory out.
+    (directory / _HASHED_NAME).symlink_to(bundle)
+    clean_env.setenv("SSL_CERT_DIR", str(directory))
+    trusting = http.ssl_context(REST)
+    assert _verifies_the_fixture_server(trusting)
+    bundle.write_bytes(b"")  # the link and its directory are untouched
+    distrusting = http.ssl_context(REST)
+    assert distrusting is not trusting
+    assert not _verifies_the_fixture_server(distrusting)
+
+
+def test_a_dangling_link_in_a_cert_directory_gets_a_new_context_once_its_target_exists(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = tmp_path / "corporate-ca.pem"
+    directory = tmp_path / "certs"
+    directory.mkdir()
+    (directory / _HASHED_NAME).symlink_to(bundle)
+    clean_env.setenv("SSL_CERT_DIR", str(directory))
+    dangling = http.ssl_context(REST)
+    assert not _verifies_the_fixture_server(dangling)
+    bundle.write_bytes((_TLS / "tls_cert.pem").read_bytes())
+    resolved = http.ssl_context(REST)
+    assert resolved is not dangling
+    assert _verifies_the_fixture_server(resolved)
+
+
+def test_every_directory_in_ssl_cert_dir_is_examined(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    hashed = _cert_directory(clean_env, tmp_path / "second")
+    # An empty component between the two is skipped, as OpenSSL skips it.
+    clean_env.setenv("SSL_CERT_DIR", os.pathsep.join([str(first), "", str(hashed.parent)]))
+    clean_env.chdir(tmp_path)
+    trusting = http.ssl_context(REST)
+    assert _verifies_the_fixture_server(trusting)
+    (tmp_path / "unrelated.txt").write_text("")  # the empty component does not mean "."
+    assert http.ssl_context(REST) is trusting
+    hashed.write_bytes(b"")
+    assert http.ssl_context(REST) is not trusting
 
 
 def test_a_key_log_file_gets_its_own_context(clean_env: pytest.MonkeyPatch, tmp_path: Path) -> None:

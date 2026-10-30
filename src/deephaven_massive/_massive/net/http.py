@@ -79,18 +79,25 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
     each connection, which changes nothing.
 
     The certificate setting is everything that shapes the context: the values of
-    `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `SSLKEYLOGFILE`, and the identity of the file and the
-    directory the first two name (modification time, size, and inode, or nothing when the path
-    does not exist). A certificate file created, replaced, or edited after the first call, or a
-    directory whose certificates change, therefore gets a new context on the next call, so
-    fixing `SSL_CERT_FILE` as an error message advises takes effect for clients created
-    afterwards without restarting. The proxy settings never shape the context, so they are not
-    part of the key. Contexts for settings no longer in use stay cached until the process ends.
+    `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `SSLKEYLOGFILE`; the identity (modification time,
+    size, and inode, or nothing when the path does not exist) of the file `SSL_CERT_FILE`
+    names; and, for each directory in `SSL_CERT_DIR` (several are separated by `os.pathsep`,
+    as OpenSSL reads them), the identity of the directory and the name of every entry in it
+    with the identity of the file the entry resolves to (following symbolic links). Editing a
+    file in place leaves its directory's own identity unchanged, so the entries must be
+    examined too: without them, a certificate replaced or truncated in a hashed directory, or
+    a link retargeted, would keep the old context and a removed authority would still be
+    trusted. A certificate file or directory created, replaced, or edited after the first call
+    therefore gets a new context on the next call, so fixing `SSL_CERT_FILE` as an error
+    message advises takes effect for clients created afterwards without restarting. The proxy
+    settings never shape the context, so they are not part of the key. Contexts for settings no
+    longer in use stay cached until the process ends.
 
-    The file and directory are examined before the module lock is taken. The first call for a
-    key builds the context under the lock, reading the bundle from local disk while it is
-    held, so concurrent first calls build exactly one; later calls take the lock only to look
-    the context up.
+    Examining the settings costs one directory listing per `SSL_CERT_DIR` directory and one
+    `stat` call per entry, on every call; no certificate is read unless a context is built.
+    It happens before the module lock is taken. The first call for a key builds the context
+    under the lock, reading the bundle from local disk while it is held, so concurrent first
+    calls build exactly one; later calls take the lock only to look the context up.
 
     Args:
         consumer: The library that will use the context. urllib3 and `websockets` never share
@@ -113,7 +120,7 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
         cert_file,
         _identity(cert_file),
         cert_dir,
-        _identity(cert_dir),
+        _directories_identity(cert_dir),
         os.environ.get("SSLKEYLOGFILE", ""),
     )
     with _CONTEXTS_LOCK:
@@ -128,16 +135,17 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
         return context
 
 
-def _identity(path: str) -> tuple[int, ...]:
+def _identity(path: str | Path) -> tuple[int, ...]:
     """Return what tells one version of a file or directory from another.
 
     Args:
-        path: The path from `SSL_CERT_FILE` or `SSL_CERT_DIR`; empty when the variable is
-            unset.
+        path: The path to examine, following symbolic links; empty when the variable that
+            names it is unset.
 
     Returns:
         The modification time in nanoseconds, the size, and the inode, or `()` when the path is
-        empty or names nothing that can be examined.
+        empty or names nothing that can be examined (including a symbolic link to a missing
+        file).
     """
     if not path:
         return ()
@@ -146,6 +154,54 @@ def _identity(path: str) -> tuple[int, ...]:
     except OSError:
         return ()
     return (status.st_mtime_ns, status.st_size, status.st_ino)
+
+
+def _directories_identity(cert_dir: str) -> tuple[object, ...]:
+    """Return what tells one version of the `SSL_CERT_DIR` certificate directories from another.
+
+    OpenSSL looks a certificate up in these directories by the hash of its subject, reading
+    the file named `<hash>.<n>` when a connection needs it. Such a file is often a symbolic
+    link to a bundle elsewhere, and is often rewritten in place, which changes neither the
+    directory's modification time, size, nor inode. So each directory contributes its own
+    identity and the name of every entry with the identity of the file it resolves to: what
+    OpenSSL reads is that file, so a link changed to point elsewhere shows up as a different
+    file. File contents are never read.
+
+    Args:
+        cert_dir: The value of `SSL_CERT_DIR`: directories separated by `os.pathsep`, or empty
+            when the variable is unset. Empty components are skipped, as OpenSSL skips them.
+
+    Returns:
+        One `(directory, directory identity, entries)` triple per directory, in the order
+        given, where `entries` holds one `(name, identity)` pair per entry, sorted by name,
+        and is empty when the directory cannot be listed. Identities are as `_identity`
+        returns them.
+    """
+    return tuple(
+        (directory, _identity(directory), _entries_identity(directory))
+        for directory in cert_dir.split(os.pathsep)
+        if directory
+    )
+
+
+def _entries_identity(directory: str) -> tuple[tuple[str, tuple[int, ...]], ...]:
+    """Return the name and identity of every entry in `directory`, sorted by name.
+
+    Args:
+        directory: One directory from `SSL_CERT_DIR`.
+
+    Returns:
+        One `(name, identity)` pair per entry, where the identity is that of the file the
+        entry resolves to, as `_identity` returns it. Empty when the directory does not exist
+        or cannot be listed. An entry removed while it is examined, or a link to a missing
+        file, gets the identity `()`.
+    """
+    root = Path(directory)
+    try:
+        names = sorted(entry.name for entry in root.iterdir())
+    except OSError:
+        return ()
+    return tuple((name, _identity(root / name)) for name in names)
 
 
 def ca_file() -> str:
