@@ -397,7 +397,8 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     at 00:00, 13:00, or 16:00 New York time, longer bars at 00:00 New York time on their
     period's first day (or the weekend before a week's Monday), and matching values confirm
     the library's day label; minute bars ending at 12:59 on the half day confirm a whole day
-    cut short; a `MassiveError` in the library lines shows a stamp it refuses.
+    cut short; a raw stamp of any other form is served by the library, labelled by the New
+    York day it falls on, with a WARNING in the log.
     """
     days = stamp_days["day"]
     basic = "stocks" in classes_on_basic
@@ -645,11 +646,11 @@ def test_daily_indicator_stamps(
 
     Records the daily SMA values of AAPL and `X:BTCUSD` over the most recent week without a
     holiday as Massive sent them, then the library's answer to the same request: each value's
-    `TimestampStart` and `Date`, or the `MassiveError` its stamp check raised. The library
-    checks a daily value as its class's range bars, 00:00 New York time for a stock and 00:00
-    UTC for crypto. Reading it: raw stamps there mean the check and the labels are right;
-    stamps elsewhere make the library refuse the values, and say which day each value really
-    belongs to.
+    `TimestampStart` and `Date`, or the `MassiveError` the read raised. The library expects a
+    daily value where its class's range bars are stamped, 00:00 New York time for a stock and
+    00:00 UTC for crypto. Reading it: raw stamps there mean the labels are right; stamps
+    elsewhere are still served, labelled by the day they fall on, with a WARNING in the log,
+    and say which day each value really belongs to.
     """
     # The wire client encodes a date parameter from a `date`, never from text.
     start, end = recent_week[0], recent_week[1] + timedelta(days=1)
@@ -666,7 +667,7 @@ def test_daily_indicator_stamps(
         try:
             rows = table_rows(q.fetch())
         except dm.MassiveError as error:
-            evidence(f"{symbol} daily SMA refused by the library: {error}")
+            evidence(f"{symbol} daily SMA failed in the library: {error}")
             continue
         stamps = [(instant_text(r["TimestampStart"]), r["Date"]) for r in rows]
         evidence(f"{symbol} daily SMA (TimestampStart, Date): {stamps}")

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
@@ -860,19 +861,36 @@ def test_previous_day_bar_refuses_a_bar_on_another_split_basis(
         rest_session.stocks.previous_day_bar("AAPL").fetch()
 
 
-def test_previous_day_bar_refuses_an_unknown_stamp_naming_the_daily_history(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+    ]
+
+
+def test_previous_day_bar_serves_an_unexpected_stamp_with_a_warning(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # 14:30 New York time is no stamp Massive is known to give a stock 1-day bar.
-    stamp = new_york_midnight_ns(date(2020, 11, 10)) // 10**6 + 14 * 3_600_000 + 1_800_000
+    caplog.set_level(logging.WARNING)
+    # 14:30 New York time is no stamp Massive is known to give a stock 1-day bar; the bar is
+    # still served, labelled by the New York day it falls on.
+    day = new_york_midnight_ns(date(2020, 11, 10))
+    stamp = day // 10**6 + 14 * 3_600_000 + 1_800_000
     bar = {"T": "AAPL", "t": stamp, "c": 115.97}
     fake_rest.reply(
         "/v2/aggs/ticker/AAPL/prev", Reply({"status": "OK", "adjusted": True, "results": [bar]})
     )
-    with pytest.raises(
-        dm.MassiveError, match=r"use bars\(symbols, dm\.Timespan\.DAY\)\.history\(\) for that day"
-    ):
-        rest_session.stocks.previous_day_bar("AAPL").fetch()
+    out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch())
+    assert [(r["Date"], r["TimestampStart"], r["Close"]) for r in out] == [
+        ("2020-11-10", day, 115.97)
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert warning.startswith(
+        "stocks.previous_day_bar: a 1-day bar from /v2/aggs/ticker/{stocksTicker}/prev is "
+        "stamped 2020-11-10T19:30:00+00:00"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1601,9 +1619,14 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date(
     ]
 
 
-def test_a_day_file_moves_an_early_close_and_refuses_an_unknown_stamp(
-    *, flat_session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+def test_a_day_file_moves_an_early_close_and_warns_on_an_unexpected_stamp(
+    *,
+    flat_session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.WARNING)
     # The day after Thanksgiving closes at 13:00 New York time; that close means its day.
     day = new_york_midnight_ns(date(2024, 11, 29))
     key = "us_stocks_sip/day_aggs_v1/2024/11/2024-11-29.csv.gz"
@@ -1616,15 +1639,21 @@ def test_a_day_file_moves_an_early_close_and_refuses_an_unknown_stamp(
     assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in out] == [
         ("BCC", "2024-11-29", day)
     ]
-    # 14:30 is no stamp Massive is known to use: the bar may cover another day, so it fails.
+    assert not stamp_warnings(caplog)
+    # 14:30 is no stamp Massive is known to use: the bar may cover another day, but it is
+    # served, labelled by the New York day it falls on, with one WARNING.
     afternoon = day + 29 * HOUR_NS // 2
     fake_s3.put(key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{afternoon},1\n"))
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^stocks\.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is "
-        r"stamped 2024-11-29T19:30:00\+00:00 .*; read REST with source=dm\.HistorySource\.REST",
-    ):
-        query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES)
+    odd = table_rows(query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES))
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in odd] == [
+        ("BCC", "2024-11-29", day)
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert warning.startswith(
+        "stocks.bars: a 1-day bar from the flat files us_stocks_sip/day_aggs_v1 is stamped "
+        "2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York), which is "
+        "not a stamp Massive is known to use for such a bar"
+    )
 
 
 # Each flat-file prefix: the call, the file's fixture (the vendor's documented example rows,

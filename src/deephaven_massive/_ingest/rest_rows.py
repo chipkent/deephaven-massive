@@ -10,9 +10,9 @@ batches of the dataset's merged schema, one page at a time:
   that carries an `error` (`is_error_row`: a ticker the plan does not include) keeps only its
   symbol key and its `Error` and `Message` columns, or is dropped on a path that joins its
   dataset through a projection.
-- `stamped` applies the stamp rule of bars of a day or longer (`row_times.stamp_rule`, with the
-  verb's remedy from `with_remedy`); `keep_window` and `whole_bars` keep the rows a `history()`
-  window holds.
+- `stamped` applies the stamp rule of bars of a day or longer (`row_times.stamp_rule`), which
+  serves every bar and warns on a stamp Massive is not known to use; `keep_window` and
+  `whole_bars` keep the rows a `history()` window holds.
 
 A row that breaks the schema raises `RowDataError`. Everything here is pure apart from that
 conversion: no request, no thread, and no state, and a converter is shared read-only by the
@@ -23,7 +23,7 @@ decision (`host_decision.py`) uses the same error-row rule.
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -54,7 +54,6 @@ __all__ = [
     "keep_window",
     "stamped",
     "whole_bars",
-    "with_remedy",
 ]
 
 
@@ -273,36 +272,23 @@ def keep_window(
     return batch.filter(functools.reduce(pc.and_, masks))
 
 
-def with_remedy(rule: StampRule | None, remedy: str) -> StampRule | None:
-    """Give a stamp rule the remedy of the verb that applies it.
-
-    Args:
-        rule: The request's rule (`row_times.stamp_rule`), or None.
-        remedy: What the caller can do instead when a stamp is refused.
-
-    Returns:
-        The rule with `remedy`, or None for None.
-    """
-    return None if rule is None else replace(rule, remedy=remedy)
-
-
 def stamped(
     spec: DatasetSpec, source: str, batch: pa.RecordBatch, *, rule: StampRule
 ) -> pa.RecordBatch:
-    """Apply a stamp rule to a batch of bars (`row_times.stamp_rule`).
+    """Apply a stamp rule to a batch of bars (`row_times.stamp_rule`), keeping every bar.
 
     Args:
-        spec: The dataset, for the message.
-        source: The REST path template the bars came from, for the message.
+        spec: The dataset, for the WARNING.
+        source: The REST path template the bars came from, for the WARNING.
         batch: Rows in the dataset's schema.
         rule: The day zone, the stamps Massive is known to use besides 00:00, and the
-            remedy of the verb that reads the bars.
+            session's warnings.
 
     Returns:
         The batch, with its `TimestampStart` at 00:00 of each bar's day in the class day zone.
 
-    A stamp at another time or on another day raises the `MassiveError` of
-    `row_times.day_starts`, which ends with the rule's remedy.
+    A stamp at another time or on another day is moved the same way and logs the WARNING of
+    `row_times.StampRule.stamp`, once per dataset and timespan per session.
     """
     name = time_column(spec.times)
     index = batch.schema.get_field_index(name)

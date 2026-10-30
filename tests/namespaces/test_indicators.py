@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import logging
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
@@ -312,32 +313,62 @@ def test_a_daily_value_takes_the_day_of_its_symbols_class(
     }
 
 
+def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+    ]
+
+
 @pytest.mark.parametrize(
-    ("timespan", "moment"),
+    ("timespan", "moment", "window"),
     [
-        # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day.
-        (dm.Timespan.DAY, datetime(2025, 1, 2, 3, tzinfo=UTC)),
-        # A week value must be stamped on its week's Sunday, where Massive starts the week.
-        (dm.Timespan.WEEK, datetime(2025, 1, 8, 5, tzinfo=UTC)),
+        # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day. The
+        # value is labelled by the New York day its stamp falls on.
+        (
+            dm.Timespan.DAY,
+            datetime(2025, 1, 2, 3, tzinfo=UTC),
+            (
+                "2025-01-01",
+                datetime(2025, 1, 1, 5, tzinfo=UTC),
+                datetime(2025, 1, 2, 5, tzinfo=UTC),
+            ),
+        ),
+        # Massive stamps a week value on its week's Sunday; a Wednesday is labelled by the
+        # week it falls in, a stock week's Monday to Friday.
+        (
+            dm.Timespan.WEEK,
+            datetime(2025, 1, 8, 5, tzinfo=UTC),
+            (None, datetime(2025, 1, 6, 5, tzinfo=UTC), datetime(2025, 1, 11, 5, tzinfo=UTC)),
+        ),
     ],
     ids=["day", "week"],
 )
-def test_a_value_of_a_day_or_longer_at_an_unknown_stamp_fails(
+def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_served_with_a_warning(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     timespan: dm.Timespan,
     moment: datetime,
+    window: tuple[str | None, datetime, datetime],
 ) -> None:
+    caplog.set_level(logging.WARNING)
     stamp = int(moment.timestamp() * 1000)
     reply = Reply(envelope({"values": [{"timestamp": stamp, "value": 1.0}]}))
     fake_rest.reply("/v1/indicators/sma/AAPL", reply)
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^indicators\.sma: an indicator value from /v1/indicators/sma/\{stockTicker\} is "
-        r"stamped .*; compute the indicator from bars\(\)\.history\(\) of the same timespan",
-    ):
-        rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch()
+    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch())
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Value"]) for r in out] == [
+        (*window, 1.0)
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert warning.startswith(
+        "indicators.sma: an indicator value from /v1/indicators/sma/{stockTicker} is stamped "
+        f"{moment.isoformat()}"
+    )
 
 
 def test_adjusted_false_reaches_only_a_path_that_takes_it(
