@@ -239,7 +239,8 @@ from an HTTP response and `None` otherwise: `status`, the HTTP status (`int | No
 ([section 17.1](#171-the-log)): `EXPECTED` (a refusal, a plan or rate limit, a network failure, a
 closed session; the default), `USER_DEFECT` (the user's code or input, such as a symbol table
 that failed upstream; the message names what to fix), or `LIBRARY_DEFECT` (a bug in the library,
-or vendor data it cannot read; the message asks for a bug report). `ErrorCause` is a `StrEnum`
+or vendor data it cannot read, which a wire error marks `unreadable`; the message asks for a bug
+report). `ErrorCause` is a `StrEnum`
 whose values are no wire strings.
 
 `__init__.py` resolves these names lazily, through a module `__getattr__` (PEP 562), with the

@@ -743,6 +743,7 @@ def test_a_dropped_body_fails_the_read_and_is_never_requested_again(
     assert info.value.message.startswith(f"cannot read s3://flatfiles/{KEY} at ")
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
+    assert not info.value.unreadable  # a transport failure, not the file's content
     assert (fake_s3.keys(), clock.waits) == ([KEY], [])
     assert fake_s3.closed_bodies == [KEY]
 
@@ -753,9 +754,10 @@ def test_a_broken_file_is_not_a_dropped_read(*, client: FlatFileClient, fake_s3:
     fake_s3.put(KEY, b"not gzip")
     file = client.open(KEY)
     assert file is not None
-    with file, pytest.raises(WireError, match="Not a gzipped file"):
+    with file, pytest.raises(WireError, match="Not a gzipped file") as info:
         list(file.batches(stocks_plan()))
     assert not file.dropped
+    assert info.value.unreadable  # the file's content: a gap in the library
 
 
 def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(

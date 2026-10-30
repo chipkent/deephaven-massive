@@ -97,6 +97,7 @@ class WireError(Exception):
         host: str | None = None,
         path: str | None = None,
         request_id: str | None = None,
+        unreadable: bool = False,
     ) -> None:
         """Create a wire error.
 
@@ -110,6 +111,10 @@ class WireError(Exception):
                 WebSocket path, or the S3 object key; `None` when there was no request.
             request_id: The `request_id` of Massive's response (`x-amz-request-id` for S3), or
                 `None` when the response had none.
+            unreadable: True when Massive delivered the data but the client could not read it
+                (a malformed or truncated flat file, a header the file lacks): a gap in the
+                library rather than a transport failure, which the library reports as a
+                defect. False, the default, for every failure to reach or hear from Massive.
         """
         super().__init__(message)
         self._message = message
@@ -117,6 +122,7 @@ class WireError(Exception):
         self._host = host
         self._path = path
         self._request_id = request_id
+        self._unreadable = unreadable
 
     @property
     def message(self) -> str:
@@ -142,6 +148,11 @@ class WireError(Exception):
     def request_id(self) -> str | None:
         """The `request_id` of Massive's response, or `None`."""
         return self._request_id
+
+    @property
+    def unreadable(self) -> bool:
+        """True when Massive delivered the data but the client could not read it."""
+        return self._unreadable
 
 
 class WireAuthError(WireError):

@@ -490,7 +490,10 @@ class _Transform:
             elif name == "Symbol":
                 read = self.symbols.read(batch["Symbol"], {})
                 if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
-                    raise MassiveError(unknown_symbol_message(self.dataset, read.unknown))
+                    raise MassiveError(
+                        unknown_symbol_message(self.dataset, read.unknown),
+                        cause=ErrorCause.LIBRARY_DEFECT,  # a spelling the library cannot read
+                    )
                 values, raw = read.symbols, read.raw
             else:
                 values = self._column(batch, column)

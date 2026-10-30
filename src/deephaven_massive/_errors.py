@@ -252,9 +252,10 @@ def from_wire(error: WireError, *, cause: ErrorCause | None = None) -> MassiveEr
 
     Args:
         error: The wire error.
-        cause: Whose problem it is, or `None` (absent) for `ErrorCause.EXPECTED`. A WebSocket
-            row the client could not read is `ErrorCause.LIBRARY_DEFECT`, which only the
-            caller knows.
+        cause: Whose problem it is, or `None` (absent) to take it from the wire error:
+            `ErrorCause.LIBRARY_DEFECT` for data the client could not read (`unreadable`), and
+            `ErrorCause.EXPECTED` otherwise. A WebSocket row the client rejected is a library
+            defect too, which only the caller knows.
 
     Returns:
         `AuthenticationError` for a `WireAuthError`, `EntitlementError` for a
@@ -268,6 +269,8 @@ def from_wire(error: WireError, *, cause: ErrorCause | None = None) -> MassiveEr
         public = EntitlementError
     else:
         public = MassiveError
+    if cause is None:
+        cause = ErrorCause.LIBRARY_DEFECT if error.unreadable else ErrorCause.EXPECTED
     return public(error.message, status=error.status, request_id=error.request_id, cause=cause)
 
 

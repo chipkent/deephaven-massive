@@ -215,6 +215,7 @@ def test_a_futures_file_must_hold_only_its_session(
         "assigned to sessions"
     )
     assert (info.value.path, info.value.host) == (FUTURES_KEY, "files.massive.com")
+    assert info.value.unreadable
 
 
 def test_a_missing_session_date_fails_the_session_check(
@@ -401,8 +402,9 @@ def test_a_missing_key_header_fails_before_the_first_block(
 def test_every_missing_key_header_is_named(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$"):
+    with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$") as info:
         table(opened(KEY, "price\n1.5\n"), plan())
+    assert info.value.unreadable
 
 
 @pytest.mark.parametrize(

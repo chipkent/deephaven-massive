@@ -518,6 +518,29 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
     assert transform.apply(batch, received=7).num_rows == kept
 
 
+def test_an_unreadable_spelling_under_fail_is_a_library_defect() -> None:
+    transform = flatfiles._Transform.build(
+        synthetic_catalog(),
+        SYNTHETIC,
+        prefix=SYNTHETIC_FILES,
+        request=request(dm.ALL),
+        window=whole_days(SYNTHETIC, "2025-03-03"),
+        unknown_symbols=dm.UnknownSymbols.FAIL,
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["!!"],
+            "Timestamp": [1741012200000000123],
+            "ParticipantTimestamp": [1741012199999],
+            "Size": [100],
+            "Conditions": [12],
+        }
+    )
+    with pytest.raises(dm.MassiveError, match="'!!'") as info:
+        transform.apply(batch, received=7)
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+
+
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
@@ -1657,9 +1680,11 @@ def test_a_reread_is_not_made_for_a_broken_file(
 ) -> None:
     fake_s3.put(TRADES_0303, b"not gzip")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(dm.MassiveError, match="Not a gzipped file"):
+    with pytest.raises(dm.MassiveError, match="Not a gzipped file") as info:
         q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert (fake_s3.keys(), retry_clock.waits) == ([TRADES_0303], [])
+    # A file that cannot be read is a defect of the library, never an expected failure.
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
 
 
 @pytest.mark.parametrize(

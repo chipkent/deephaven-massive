@@ -117,7 +117,7 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_sessions,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import ErrorCause, MassiveError
 from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
@@ -644,7 +644,8 @@ class TimeRule:
                 raise MassiveError(
                     f"{self.dataset}: Massive sent a day summary with isUTC false, so its day "
                     "is not the UTC day whose window the library gives it; report it at "
-                    f"{ISSUES_URL}"
+                    f"{ISSUES_URL}",
+                    cause=ErrorCause.LIBRARY_DEFECT,
                 )
         zone = self._zone()
         labels = _column(rows, DATE)
@@ -1242,5 +1243,6 @@ def _refuse(
         f"{label}: {article} {what} from {source} is stamped {bad.isoformat()}{local}, which is "
         f"not a stamp Massive is known to use for such a bar ({expected}), so it may cover "
         f"other days than the one it would be labelled with; {remedy}, and report the stamp at "
-        f"{ISSUES_URL} so the day cut can be settled"
+        f"{ISSUES_URL} so the day cut can be settled",
+        cause=ErrorCause.LIBRARY_DEFECT,
     )

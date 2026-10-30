@@ -708,6 +708,7 @@ def test_an_unknown_stamp_fails_loudly(zone: tzinfo, known: tuple[time, ...], of
             remedy="read the flat files",
         )
     message = str(caught.value)
+    assert caught.value.cause is dm.ErrorCause.LIBRARY_DEFECT  # a stamp the library cannot place
     assert ", which is not a stamp Massive is known to use for such a bar (00:00:00.000" in message
     assert message.endswith(
         f"; read the flat files, and report the stamp at {ISSUES_URL} so the day cut can be settled"
