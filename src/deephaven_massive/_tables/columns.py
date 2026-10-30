@@ -139,7 +139,10 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     of rows of one date is filled by copying its shared `String` and then doubling the filled
     stretch, so a column costs a few Java calls per run. A column of more than `_MAX_RUNS`
     runs, which only interleaved dates make, is interned by a formula instead (`_interned`),
-    whose JVM-interned `String`s are shared within that table too.
+    whose JVM-interned `String`s are shared within that table too. A list-of-strings column
+    that holds no string in some record batch is converted alone and joined the same way,
+    since converted among other columns it would corrupt the columns after it
+    (`_string_lists_without_values`).
     Every transport converts its rows through here, and nothing else may build a dataset
     table: the date columns must be ISO dates, whose set is small, never other text, which
     would grow the pool without bound.
@@ -150,9 +153,9 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     (about 29 against 46 ms on 200,000 rows), all on one loaded machine.
 
     Runs on any thread inside the session's execution context; the table is static and is
-    created in the liveness scope at the top of the calling thread's stack. A schema without
-    a date column is converted as is. `rows` must hold at least one column that is not a date
-    (every dataset has `TimestampInsert`).
+    created in the liveness scope at the top of the calling thread's stack. Rows with neither
+    a date column nor such a list column are converted as is. `rows` must hold at least one
+    column of another kind (every dataset has `TimestampInsert`).
 
     Args:
         rows: The rows, an Arrow table in the dataset's schema.
@@ -161,21 +164,80 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     Returns:
         The static table, with every column of `rows`, in order.
     """
-    if not dates:
+    apart = _string_lists_without_values(rows)
+    if not dates and not apart:
         return dh_arrow.to_table(rows)
-    others = dh_arrow.to_table(rows.drop_columns(list(dates))).j_table
+    if apart:
+        logger.debug(
+            "converting the list columns %s of %d rows alone: a record batch holds no string",
+            apart,
+            rows.num_rows,
+        )
     runs = {name: _DateRuns.of(rows.column(name)) for name in dates}
-    if any(len(found.starts) > _MAX_RUNS for found in runs.values()):
-        return _interned(rows, dates)
+    interned = any(len(found.starts) > _MAX_RUNS for found in runs.values())
+    if interned:
+        runs = {}
+    others = dh_arrow.to_table(rows.drop_columns([*runs, *apart])).j_table
     sources = _LinkedHashMap()
     for name in rows.column_names:
         if name in runs:
             values = runs[name].strings()
             column = _ArrayBackedColumnSource.getMemoryColumnSource(values, _JString.jclass, None)
             sources.put(name, column)
+        elif name in apart:
+            alone = dh_arrow.to_table(rows.select([name])).j_table
+            sources.put(name, alone.getColumnSource(name))
         else:
             sources.put(name, others.getColumnSource(name))
-    return Table(_QueryTable(others.getRowSet(), sources))
+    table = Table(_QueryTable(others.getRowSet(), sources))
+    return _interned(table, dates) if interned else table
+
+
+def _string_lists_without_values(rows: pa.Table) -> list[str]:
+    """Return the list-of-strings columns that some record batch holds no string in.
+
+    `deephaven.arrow.to_table` sends each record batch to Deephaven's Arrow reader. When a
+    list-of-strings column of a batch holds no string at all, because every row is null or an
+    empty list, that reader returns its empty values without consuming their buffers, so every
+    later column of the batch reads the wrong buffers: a later list column fails (`asserted
+    length >= 0`), and a later column of another type silently takes shifted values. As the
+    last column of a batch the column converts correctly, so `dataset_table` converts each
+    such column alone and joins it to the others, and every other column converts as before,
+    with no copy. A list of numbers is not affected.
+
+    The batches checked are those of the whole table, whose boundaries include those of any
+    subset of its columns, so a column that holds a string in every batch here holds one in
+    every batch of the table it is converted in.
+
+    Args:
+        rows: The rows.
+
+    Returns:
+        The names of the columns to convert alone, in the table's order; empty when none is.
+    """
+    lists = [
+        field.name
+        for field in rows.schema
+        if pa.types.is_list(field.type) and pa.types.is_string(field.type.value_type)
+    ]
+    if not lists:
+        return lists
+    batches = rows.to_batches()
+    return [name for name in lists if any(_holds_no_string(batch, name) for batch in batches)]
+
+
+def _holds_no_string(batch: pa.RecordBatch, name: str) -> bool:
+    """Say whether a list column of a record batch holds no element, its offsets all equal.
+
+    Args:
+        batch: The record batch.
+        name: The list column.
+
+    Returns:
+        True when every row of the column is null or an empty list, or the batch has no row.
+    """
+    offsets = cast("pa.ListArray", batch.column(name)).offsets
+    return bool(offsets[0].as_py() == offsets[-1].as_py())
 
 
 _MAX_RUNS: Final = 4096
@@ -274,17 +336,16 @@ class _DateRuns:
         return out
 
 
-def _interned(rows: pa.Table, dates: Sequence[str]) -> Table:
-    """Convert rows with interleaved dates, interning their date columns by a formula.
+def _interned(table: Table, dates: Sequence[str]) -> Table:
+    """Intern the date columns of a converted table with interleaved dates, by a formula.
 
     Args:
-        rows: The rows.
+        table: The table, its date columns converted as plain strings.
         dates: The date columns.
 
     Returns:
         The static table, every date `String` the JVM's interned one.
     """
-    table = dh_arrow.to_table(rows)
     return table.update([f"{name} = {name} == null ? null : {name}.intern()" for name in dates])
 
 
