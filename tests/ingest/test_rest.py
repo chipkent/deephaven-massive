@@ -3781,11 +3781,15 @@ def test_a_background_fetch_lands_the_rows_the_read_requested(
     assert isinstance(q, Query)
     table = q.fetch(wait=False)
     _join_reads(session)
-    deadline = threading.Event()
-    for _ in range(3000):
+    # The read's own row says how it ended; a failure shows its error here.
+    assert session._core.diagnostics.barrier().wait(30.0)
+    (row,) = dh_arrow.to_arrow(session.streams()).to_pylist()
+    assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 1)
+    pause = threading.Event()
+    for _ in range(3000):  # the rows land on the next update cycle
         if table.size:
             break
-        deadline.wait(0.01)
+        pause.wait(0.01)
     assert [(r["Symbol"], r["CashAmount"]) for r in rows(table)] == [("AAPL", 0.25)]
     session.release(table)
 
