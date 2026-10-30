@@ -2347,15 +2347,13 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     *,
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
-    make_csv_gz: Callable[[str], bytes],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A reader holds a window of its file, not the file: about 32 blocks of Arrow's read-ahead
     # plus at most `_TABLE_BLOCKS` blocks of gathered rows. Small blocks give a file of about
     # 310 blocks, cheap to build and read, in which that window fills within the first third.
     # Each block costs the same to read whatever its size, so the block count sets the test's
-    # time; at this count a reader that grows by a block per block still rises three times
-    # past the slacks below.
+    # time; at this count every regression named below still lands well past its slack.
     block = 16 * 1024
     window = 32 + flatfiles._TABLE_BLOCKS
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
@@ -2363,8 +2361,15 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     text = synthetic_trades(rows)
     blocks = len(text) // block
     assert blocks > 6 * window  # the last two thirds of the file dwarf the window
-    fake_s3.put(TRADES_0303, make_csv_gz(text))
-    fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000000000)))
+
+    def stored(csv_text: str) -> bytes:
+        # Stored without compression, so the compressed body is as large as its text: a
+        # reader that kept the body, or a copy of each compressed chunk, would hold a block
+        # of memory per block of the file, as plainly as one that kept the text.
+        return gzip.compress(csv_text.encode(), compresslevel=0)
+
+    fake_s3.put(TRADES_0303, stored(text))
+    fake_s3.put(TRADES_0304, stored(TRADE_HEADER + trade(1, 1741012200000000000)))
     sampler = MemorySampler(2 * blocks + 100)
     sampler.install(monkeypatch)
     m = dm.MassiveSession(config(max_concurrency=1))
@@ -2378,14 +2383,14 @@ def test_memory_per_reader_does_not_grow_with_the_file(
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
         every = sampler.measure(read(dm.ALL))
         rare = sampler.measure(read(["RARE"]))
-        fake_s3.put(TRADES_0303, make_csv_gz(synthetic_trades(rows // 4)))
+        fake_s3.put(TRADES_0303, stored(synthetic_trades(rows // 4)))
         short = sampler.measure(read(["RARE"]))
     finally:
         m.close()
     assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
     # Python's peak includes the read-ahead's decompressed text, made on Arrow's own thread,
-    # so it varies from run to run by up to about 40 blocks; a reader that kept each block's
-    # text or rows as Python objects adds about 200.
+    # so it varies from run to run by up to about 40 blocks. A reader that kept a Python copy of
+    # each compressed chunk it read rises by about 175 over the last two thirds of the file.
     python_slack = 64 * block
     # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
     # and legitimately grow it by about 6 blocks over the last two thirds of the file (about
@@ -2394,7 +2399,7 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     # about 21 (24 between the files).
     arrow_slack = 14 * block
     # From a third of the way through the file to its end, a reader that kept each block it
-    # read would rise by about 200 blocks. When every row survives, the result itself (a
+    # read would rise by about 280 blocks. When every row survives, the result itself (a
     # Deephaven table, and its Python wrapper, per `_TABLE_BLOCKS` blocks) legitimately grows
     # with the file, but by far less than a block per table.
     assert every.python_rise < python_slack
@@ -2403,7 +2408,8 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     assert rare.arrow_rise < arrow_slack
     # The rises leave out whatever a read sets up before its first block, such as the whole
     # body read or decompressed up front: reading a file four times as long must peak about as
-    # high as reading the short one.
+    # high as reading the short one. A reader that read the whole body first would peak about
+    # 235 blocks higher.
     assert rare.python_peak - short.python_peak < python_slack
     assert rare.arrow_peak - short.arrow_peak < arrow_slack
 
