@@ -163,6 +163,29 @@ def test_a_destroyed_table_publishes_no_failure(
     )
 
 
+def test_a_shutdown_right_after_the_pin_is_reserved_publishes_nothing(
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The table is destroyed on another thread just after `publish_failure` reserved its pin:
+    # the shutdown callback hands the still-empty scope on, and the reaper releases it before
+    # the publisher makes it manage the table. The failure must be declined, not raise.
+    pinned = _Pinned(dh_exec_ctx)
+    pinned.record_publishes(monkeypatch)
+    hold = _FailurePin.hold
+
+    def hold_then_shut_down(pin: _FailurePin, scope: LivenessScope) -> bool:
+        held = hold(pin, scope)
+        release_scope(dh_exec_ctx, pinned.scope)  # the destroy runs the shutdown callback
+        pinned.release_deferred()  # the reaper releases the reserved scope
+        return held
+
+    monkeypatch.setattr(_FailurePin, "hold", hold_then_shut_down)
+    pinned.publisher.publish_failure(MassiveError("raced"))
+    assert pinned.published == []
+    assert pinned.deferred_at_shutdown() == [1]  # the reserved scope went to the reaper
+    assert pinned.destroyed()
+
+
 def test_a_second_failure_while_the_first_is_queued_is_not_published(
     dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:

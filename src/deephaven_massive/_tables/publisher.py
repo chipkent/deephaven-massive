@@ -203,6 +203,11 @@ class BlinkPublisher:
             error: The failure; the table fails with a `RuntimeException` carrying its text.
         """
         pin = new_scope()
+        # The Java scope, kept before the pin is reserved: a destroy racing this call may run
+        # the shutdown callback, and the reaper release the reserved scope (which clears the
+        # wrapper's `j_scope`), before the scope manages the table. A released scope manages
+        # nothing (`tryManage` returns False), so the failure is then declined.
+        j_scope = pin.j_scope
         if not self._pin.hold(pin):  # shut down, or already failing: publish nothing
             logger.debug(
                 "%s: failure not published, the table has shut down or an earlier failure is "
@@ -212,13 +217,13 @@ class BlinkPublisher:
             )
             self._release_later(pin)  # it manages nothing
             return
-        if not pin.j_scope.tryManage(self.table.j_table):
+        if not j_scope.tryManage(self.table.j_table):
             logger.debug(
                 "%s: failure not published, the table is being destroyed (%s)",
                 self._pin.name,
                 error,
             )
-            return  # its shutdown callback releases the pin
+            return  # its shutdown callback releases the pin, or already has
         try:
             self._publisher.publish_failure(error)
         except BaseException:
