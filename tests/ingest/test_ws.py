@@ -2236,6 +2236,79 @@ def test_a_stream_waiting_for_a_slot_says_so(
     del capped, every
 
 
+SKIPPED_SPY = (
+    "skipping 1 symbol-table value that is not Massive's ticker: 'spy'; fix or delete that row"
+)
+"""The `Error` text of a stream whose options watchlist holds the bad row `spy`."""
+
+
+def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
+    *,
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: ToPylist,
+) -> None:
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    ws_session = make_ws_session(backoff=1.0)
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "spy"]
+    watchlist.add(new_table([string_col("Symbol", contracts)]))
+    capped = ws_session.query(OPTIONS, watchlist).blink()
+    ws_session.subscribed("T.O:SPY251219C00600000")
+
+    def error() -> object:
+        return streams_of(ws_session, dh_to_pylist)[0]["Error"]
+
+    cap = "over capacity: 2/1; 1 deferred"
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    fake_ws_server.auth_replies.append("max_connections")
+    fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
+    ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
+    stall = (
+        "waiting for a WebSocket slot on socket.test/options: another connection with this "
+        "API key, perhaps from another process, holds it; the plan allows one connection "
+        "per cluster"
+    )
+    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")  # the stall keeps the skipped row
+    watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == stall)  # fixing the row keeps the stall
+    watchlist.add(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")
+    ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall clears alone
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    del capped
+
+
+def test_skipped_rows_and_the_options_cap_neither_hide_nor_clear_each_other(
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    contracts = ["O:SPY251219C00610000", "O:SPY251219C00600000", "spy"]
+    watchlist.add(new_table([string_col("Symbol", contracts)]))
+    result = ws_session.query(OPTIONS, watchlist).blink()
+    ws_session.subscribed("T.O:SPY251219C00600000")
+    connection = ws_session.connection("wss://socket.test/options")
+
+    def error() -> object:
+        ws_session.on_loop(connection, lambda: None)
+        return streams_of(ws_session, dh_to_pylist)[0]["Error"]
+
+    cap = "over capacity: 2/1; 1 deferred"
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == cap)  # fixing the row keeps the cap's warning
+    watchlist.add(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    watchlist.delete(new_table([string_col("Symbol", ["O:SPY251219C00600000"])]))
+    ws_session.subscribed("T.O:SPY251219C00610000")
+    wait_for(lambda: error() == SKIPPED_SPY)  # the cap frees up and keeps the skipped row
+    del result
+
+
 def freed(core: weakref.ref[SessionCore]) -> bool:
     # Bounded wait in Python, not in one C-level wait: a free-threaded build merges a reference
     # dropped on another thread into its creator's count only while the creator runs Python.
