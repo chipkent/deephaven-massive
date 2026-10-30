@@ -86,7 +86,12 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
-from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
+from deephaven_massive._tables.diagnostics import (
+    StreamRow,
+    StreamUpdate,
+    describe_symbols,
+    shown_query,
+)
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
@@ -935,7 +940,7 @@ def open_poll(
             StreamRow(
                 stream_id=stream_id,
                 dataset=spec.name,
-                query=query,
+                query=shown_query(query),
                 symbol_count=count,
                 symbols=text,
                 held_results=1,

@@ -1151,18 +1151,20 @@ row behind: [section 23](#23-open-verification-items)); `PollMode.REPLACE` other
 filing taxonomies included (a taxonomy is a reference list revised in place, not a feed of new
 rows).
 
-**Feeds need `start`.** A *feed* is a dataset whose default `poll()` mode is `APPEND`: the
-news datasets and the filings listed above. Massive keeps a feed's whole archive, and a feed
-query's `start` and `end` are its only bound on what a cycle reads, so a `poll()` without
-`start` would re-read the archive every cycle, spending a Basic subscription's five requests a
-minute on pages the table already holds. `poll()` on a feed query whose `start` is None raises
-`ValueError` before the table exists, in every mode, naming the dataset and the fix:
-`stocks.filings.index poll() needs a start: without one, every cycle re-reads the whole archive
-Massive keeps. Build the query with a start, such as m.stocks.filings.index(...,
-start=date.today()), then call poll()`. The refusal logs one DEBUG line and nothing above it:
-the error is the report. `fetch()` keeps
-reading the whole range. Every feed declares a time axis (the catalog's feed-axis gate), so
-the fix always exists. A moving window that reads only what is new
+**Feeds need `start` or `limit`.** A *feed* is a dataset whose default `poll()` mode is
+`APPEND`: the news datasets and the filings listed above. Massive keeps a feed's whole archive,
+and a feed query's `start`, `end`, and `limit` are its only bounds on what a cycle reads, so a
+`poll()` with neither `start` nor `limit` would re-read the archive every cycle, spending a
+Basic subscription's five requests a minute on pages the table already holds. `poll()` on such
+a feed query raises `ValueError` before the table exists, in every mode, naming the dataset and
+the fix: `reference.news poll() needs a start or a limit: without either, every cycle re-reads
+the whole archive Massive keeps. Build the query with one, such as m.reference.news(...,
+start=date.today()) or m.reference.news(..., limit=50), then call poll(). A fixed start keeps
+widening the window on a poll that runs for days`. A query with a `limit`, such as
+`m.reference.news(symbols="AAPL", limit=50).poll(60)`, is the natural "latest headlines" poll
+and is allowed. The refusal logs one DEBUG line and nothing above it: the error is the report.
+`fetch()` keeps reading the whole range. Every feed declares a time axis (the catalog's
+feed-axis gate), so a `start` can always be given. A moving window that reads only what is new
 since the last cycle is a separate design item: it needs rules for late and revised articles
 and a mark per ticker.
 
@@ -3439,27 +3441,36 @@ An `AUTO` call logs its choice and the reason once, for example
 `stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`.
 
 **The source is never silent.** The two sources of one dataset do not always fill the same
-columns: a REST history endpoint and a flat file can each carry fields the other lacks, and a
-column a source does not carry is null. Under `AUTO` the source changes with the symbol count
-and with the time of day (yesterday's file is published at 11:30 New York time), so the same
-call could return a column filled one hour and null the next. After an `AUTO` choice the query
-compares, when both sources could serve the request, the columns of the chosen source's
-history sources (REST: the history and grouped-daily paths; flat files: every prefix of the
-dataset) with the other source's, by the generated schemas (`Catalog.history_columns`). When
-the other source fills columns the chosen one leaves null, it logs one WARNING per session,
-dataset, and set of such columns (`SessionCore.warnings`), naming them, the choice and its
-reason, and the `source=` that fills them: `stocks.trades history: AUTO read flat files (60
-symbols >= flat_file_symbol_threshold 50); the read leaves DecimalSize null, which REST fills:
-pass source=dm.HistorySource.REST to get them (logged once per session)`. When only one source can
-serve the request (`dm.ALL` trades, which REST cannot read), `AUTO` had no choice and nothing is
-logged, as with an explicit `source=`; the table description still names the source. Every `history()` table records its source in its
-table description ([section 7.4](#74-column-descriptions)), after the summary: `stocks.trades:
-Trades of US-listed stocks, tick by tick. Read from REST: AUTO chose it (2 symbols <
-flat_file_symbol_threshold 50).`, or `Read from flat files: requested with source=...`. The
-flat-file refusal of adjusted bars reads `adjusted=True needs REST, since flat-file bars are
-unadjusted (as traded); pass adjusted=False for the flat files`, so the description says why
-an adjusted read used REST. A range no row can lie in returns its empty table before any
-source is read, with the summary alone. Each
+columns: a REST history endpoint and a flat file can each carry fields the other lacks (REST
+trades have `DecimalSize`; futures files have `Exchange`, and futures trade files
+`Correction`), and a column a source does not carry is null. Under `AUTO` the source changes
+with the symbol count and with the time of day (yesterday's file is published at 11:30 New York
+time), so the same call could return a column filled one hour and null the next. `choose_source`
+therefore classifies the source it passed over (`Alternative`): `AVAILABLE` when it can serve
+the request now; `AFTER_PUBLICATION` when the only reason flat files cannot is a file not yet
+published and, once it is, `AUTO` picks them for this call (`dm.ALL`, or at least
+`flat_file_symbol_threshold` symbols); `UNAVAILABLE` for every reason that does not change with
+time (no S3 credentials, no file or endpoint for the request, adjusted bars, `dm.ALL` over
+REST), or when `AUTO` would not pick the other source anyway. Unless the other source is
+`UNAVAILABLE`, the query compares the columns of the chosen source's history sources (REST: the
+history and grouped-daily paths; flat files: every prefix of the dataset) with the other
+source's, by the generated schemas (`Catalog.history_columns`). When the other source fills
+columns the chosen one leaves null, it logs one WARNING per session, dataset, and set of such
+columns (`SessionCore.warnings`), naming them, the choice and its reason, and what fills them:
+`stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold 50); the
+read leaves DecimalSize null, which the other source, REST, fills: pass
+source=dm.HistorySource.REST to get them (logged once per session)`, or, for
+`AFTER_PUBLICATION`, `... which the other source, flat files, fills: the same call reads them
+once the file lands, the next day`. An `UNAVAILABLE` alternative means the result cannot change
+and the caller cannot pick the other source, so nothing is logged, as with an explicit
+`source=`; a range no row can lie in reads nothing and logs nothing either. Every `history()`
+table records its source in its table description ([section 7.4](#74-column-descriptions)),
+after the summary: `stocks.trades: Trades of US-listed stocks, tick by tick. Read from REST:
+AUTO chose it (2 symbols < flat_file_symbol_threshold 50).`, or `Read from flat files:
+requested with source=...`. The flat-file refusal of adjusted bars reads `adjusted=True needs
+REST, since flat-file bars are unadjusted (as traded); pass adjusted=False for the flat files`,
+so the description says why an adjusted read used REST. A range no row can lie in returns its
+empty table before any source is read, with the summary alone. Each
 transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>`
 (`skipped=none` when nothing was missing), the REST transport `source=REST requests=<n>`.
 Missing keys on non-trading dates are skipped. A trading date is a weekday, a forex Sunday, or
@@ -3575,7 +3586,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 |---|---|
 | `StreamId` | key |
 | `Dataset` | `"stocks.trades"` |
-| `Query` | the `repr` of the query whose verb opened the stream or `poll()`, such as `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`, so two streams of one dataset can be told apart; a stream reused by an equal query keeps the opener's text |
+| `Query` | the `repr` of the query whose verb opened the stream or `poll()`, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
 | `SymbolCount`, `Symbols` | count and a truncated list |
 | `HeldResults` | results currently held by the library (result records not yet released) |
 | `Deferred` | options contracts deferred by the cap |
@@ -3667,8 +3678,9 @@ one INFO line saying so, removes and closes the library's handler, and sets the 
 back to `NOTSET`, so the library is as it was at import (WARNING and ERROR through the
 last-resort handler). The variables then count as read, so a later first session does not turn
 the log back on, and a read of them already under way on another thread installs nothing, as
-after `enable_debug_logging`; only `enable_debug_logging` turns it on again. With nothing turned on it changes nothing. It
-never touches a handler or level the user set on the logger themselves. It takes no argument:
+after `enable_debug_logging`; only `enable_debug_logging` turns it on again. With nothing
+turned on it changes nothing. It leaves a handler the user added to the logger alone, but sets
+the logger's level to `NOTSET` whoever set it last. It takes no argument:
 the switch exists to undo the other two, and a level is what `DEEPHAVEN_MASSIVE_LOG` is for.
 
 Setting the level alone (`logging.getLogger("deephaven_massive").setLevel(logging.DEBUG)`) shows
@@ -6064,7 +6076,7 @@ document already reflects them.
     - A read that joins a lookup another read started bounds its own wait with its own
       patience and keeps sharing the lookup (once console commands can read, issue #206).
     ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
-63. **The library reports what streams and reads are doing** (2026-10-29; the coordinator
+65. **The library reports what streams and reads are doing** (2026-10-29; the coordinator
     decided each point after an adversarial review by a Deephaven quant user and a library
     maintainer; the owner may object to any of them, and an objection reopens it).
     - The diagnostics tables spell transports as `columns()` does: `WebSocket`, `REST`, and
@@ -6079,14 +6091,15 @@ document already reflects them.
       setting, no fallbacks, and nothing warns about the old name, since the library has no
       users yet.
     - `history()` under `AUTO` warns once per session, dataset, and set of columns when the
-      chosen source leaves null columns the other fills, naming them and the `source=` that
-      fills them; every `history()` table's description records its source and why. A table
+      chosen source leaves null columns the other fills and the other source could serve the
+      call, now (naming the `source=` that fills them) or once a day's file is published
+      (saying the call changes source the next day); every `history()` table's description records its source and why. A table
       must never silently change what it fills; a global sort, or a REST-only `AUTO`, costs
       far more than it buys.
     - `poll()` on a feed (a dataset whose default mode is `APPEND`: news and filings) refuses
-      to start without `start`, naming the fix, since every cycle would otherwise re-read
-      Massive's whole archive. A moving window that reads only new rows is a separate design
-      item.
+      to start with neither `start` nor `limit`, naming the fix, since every cycle would
+      otherwise re-read Massive's whole archive; a `limit` alone is the "latest headlines"
+      poll. A moving window that reads only new rows is a separate design item.
     ([section 5](#5-massiveconfig), [section 7](#7-query-classes-and-verbs),
     [section 16](#16-historysourceauto), [section 17](#17-diagnostics),
     [section 17.1](#171-the-log)).

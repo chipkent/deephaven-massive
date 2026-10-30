@@ -102,6 +102,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamState,
     StreamUpdate,
     describe_symbols,
+    shown_query,
 )
 from deephaven_massive._tables.execution_context import (
     entered,
@@ -852,7 +853,7 @@ class SessionCore:
             row = StreamRow(
                 stream_id=stream_id,
                 dataset=spec.name,
-                query=query,
+                query=shown_query(query),
                 symbol_count=count,
                 symbols=text,
                 held_results=1,

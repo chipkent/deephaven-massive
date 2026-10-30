@@ -1123,7 +1123,8 @@ class _StockFilings(Namespace):
                 re-read each `poll()` cycle); None for every filer.
             form_type: The SEC form type, such as `"10-K"` or `"8-K"`; None for every form.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1187,7 +1188,8 @@ class _StockFilings(Namespace):
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1251,7 +1253,8 @@ class _StockFilings(Namespace):
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1315,7 +1318,8 @@ class _StockFilings(Namespace):
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1378,7 +1382,8 @@ class _StockFilings(Namespace):
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1441,7 +1446,8 @@ class _StockFilings(Namespace):
             filer_cik: The SEC CIK of the filing manager, as text with its leading zeros,
                 such as `"0001067983"`; None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1515,7 +1521,8 @@ class _StockFilings(Namespace):
             owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
                 way (`owner_cik` or `owner_cik.any_of`); None for every owner.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1589,7 +1596,8 @@ class _StockFilings(Namespace):
             owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
                 way (`owner_cik` or `owner_cik.any_of`); None for every owner.
             start: The first filing date to include, inclusive; None for no lower bound,
-                which `poll()` refuses: it would re-read every filing each cycle.
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.

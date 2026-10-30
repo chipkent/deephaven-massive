@@ -18,6 +18,7 @@ from deephaven_massive._datasets.dates import (
 )
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import (
+    Alternative,
     HistoryWindow,
     SourceChoice,
     choose_source,
@@ -474,7 +475,7 @@ def test_auto_with_only_flat_files_possible_reads_flat_files() -> None:
     assert decide(INDEX_VALUES_SPEC, request(("I:SPX",))) == SourceChoice(
         HistorySource.FLAT_FILES,
         "REST cannot serve it: indices.values has no REST history",
-        alternative="indices.values has no REST history",
+        Alternative.UNAVAILABLE,
     )
 
 
@@ -485,19 +486,52 @@ def test_auto_with_only_rest_possible_uses_rest() -> None:
     assert decide(YIELDS, request(None)) == SourceChoice(
         HistorySource.REST,
         "flat files cannot serve it: economy.yields has no flat files",
-        alternative="economy.yields has no flat files",
+        Alternative.UNAVAILABLE,
     )
+
+
+@pytest.mark.parametrize(
+    ("symbols", "cfg", "expected"),
+    [
+        # Only the unpublished file holds flat files back, and 500 symbols read them once it
+        # lands: the same call changes source the next day.
+        (many(500), None, Alternative.AFTER_PUBLICATION),
+        (dm.ALL, None, Alternative.AFTER_PUBLICATION),
+        # Two symbols stay on REST after publication too: nothing changes.
+        (many(2), None, Alternative.UNAVAILABLE),
+        # A reason that does not change with time comes with it.
+        (many(500), "no s3", Alternative.UNAVAILABLE),
+    ],
+)
+def test_an_unpublished_file_is_the_one_reason_that_changes(
+    symbols: object, cfg: str | None, expected: Alternative
+) -> None:
+    unpublished = datetime(2025, 3, 4, 10, tzinfo=NEW_YORK)  # March 3's file lands at 11:30
+    req = request(symbols, timespan=Timespan.DAY, adjusted=False)
+    choice = decide(STOCK_BARS, req, now=unpublished, cfg=NO_S3 if cfg else None)
+    assert (choice.source, choice.alternative) == (HistorySource.REST, expected)
 
 
 @pytest.mark.parametrize(
     ("symbols", "expected"),
     [
-        (many(49), SourceChoice(HistorySource.REST, "49 symbols < flat_file_symbol_threshold 50")),
+        (
+            many(49),
+            SourceChoice(
+                HistorySource.REST,
+                "49 symbols < flat_file_symbol_threshold 50",
+                Alternative.AVAILABLE,
+            ),
+        ),
         (
             many(50),
-            SourceChoice(HistorySource.FLAT_FILES, "50 symbols >= flat_file_symbol_threshold 50"),
+            SourceChoice(
+                HistorySource.FLAT_FILES,
+                "50 symbols >= flat_file_symbol_threshold 50",
+                Alternative.AVAILABLE,
+            ),
         ),
-        (dm.ALL, SourceChoice(HistorySource.FLAT_FILES, "every symbol")),
+        (dm.ALL, SourceChoice(HistorySource.FLAT_FILES, "every symbol", Alternative.AVAILABLE)),
     ],
 )
 def test_auto_with_both_possible_switches_at_the_threshold(

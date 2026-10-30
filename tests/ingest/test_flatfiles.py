@@ -129,6 +129,10 @@ STOCK_BARS = DatasetSpec(
         Timespan.DAY: "us_stocks_sip/day_aggs_v1",
     },
     keys={
+        (R, "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"): keys(
+            from_request("stocksTicker"), "WindowStart"
+        ),
+        (R, "/v2/aggs/grouped/locale/us/market/stocks/{date}"): keys("Ticker", "WindowStart"),
         (FF, "us_stocks_sip/minute_aggs_v1"): keys("Ticker", "WindowStart"),
         (FF, "us_stocks_sip/day_aggs_v1"): keys("Ticker", "WindowStart"),
     },
@@ -771,7 +775,7 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
         # REST's grouped-daily bars could have served it, with the columns the file lacks.
         (
             "stocks.bars history: AUTO read flat files (every symbol); the read leaves Otc, "
-            "Ticker, Vwap, WindowStart null, which REST fills: pass "
+            "Vwap null, which the other source, REST, fills: pass "
             "source=dm.HistorySource.REST to get them (logged once per session)"
         ),
         "stocks.bars history: source=S3 files=1 skipped=none",

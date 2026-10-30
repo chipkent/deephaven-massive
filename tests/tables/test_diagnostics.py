@@ -25,6 +25,7 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
+    QUERY_SHOWN,
     RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
     STREAMS,
@@ -40,6 +41,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     as_row,
     describe_symbols,
+    shown_query,
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._types import override
@@ -893,3 +895,13 @@ def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
     diagnostics.release()
     assert source.pulls == 2
     assert "failed to update the rate_limits table" in caplog.text
+
+
+def test_a_long_query_is_cut_like_the_symbol_list() -> None:
+    short = "<Query reference.news start=2025-01-02>"
+    assert shown_query(short) == short
+    exact = "q" * QUERY_SHOWN
+    assert shown_query(exact) == exact
+    long = "<StreamHistoryQuery stocks.trades symbols=(" + "'AAPL', " * 100 + ")>"
+    assert shown_query(long) == long[: QUERY_SHOWN - 1] + "…"
+    assert len(shown_query(long)) == QUERY_SHOWN

@@ -56,6 +56,7 @@ from deephaven_massive._config import require_positive_int, require_positive_num
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.history_source import (
+    Alternative,
     SourceChoice,
     choose_source,
     history_window,
@@ -449,8 +450,9 @@ class Query(QueryBase):
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
         non-positive `interval` raises `ValueError`. A feed (a dataset whose default mode is
         `APPEND`: the news and filings datasets) raises `ValueError` in every mode when the
-        query has no `start`, since every cycle would re-read the whole archive Massive keeps;
-        the message names the fix, a query built with `start=`.
+        query has neither `start` nor `limit`, since every cycle would re-read the whole archive
+        Massive keeps; the message names the fix. A fixed `start` keeps widening the window on
+        a poll that runs for days, since every cycle reads everything since it.
 
         Before the table exists it raises `ValueError` if a path does not take a parameter or
         filter the query set: with static symbols any path the call reads, and with a reactive
@@ -493,18 +495,21 @@ class Query(QueryBase):
             `Symbol`), `APPEND` adds one row per symbol.
 
         Raises:
-            ValueError: If the query is a feed's and has no `start`, if `interval` is not
+            ValueError: If the query is a feed's and has neither `start` nor `limit`, if
+                `interval` is not
                 positive, or if a parameter or symbol is refused as described above.
         """
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
-        if self._spec.is_feed and self._request.start is None:
+        request = self._request
+        if self._spec.is_feed and request.start is None and request.limit is None:
             name = self._spec.name
-            logger.debug("%r poll() refused: a feed's poll needs a start", self)
+            logger.debug("%r poll() refused: a feed's poll needs a start or a limit", self)
             raise ValueError(
-                f"{name} poll() needs a start: without one, every cycle re-reads the whole "
-                f"archive Massive keeps. Build the query with a start, such as "
-                f"m.{name}(..., start=date.today()), then call poll()"
+                f"{name} poll() needs a start or a limit: without either, every cycle re-reads "
+                f"the whole archive Massive keeps. Build the query with one, such as "
+                f"m.{name}(..., start=date.today()) or m.{name}(..., limit=50), then call "
+                "poll(). A fixed start keeps widening the window on a poll that runs for days"
             )
         if isinstance(self._request.symbols, SymbolTable):
             with entered(self._core.exec_ctx):
@@ -955,12 +960,13 @@ class HistoryQuery(QueryBase):
                 choice.source.name,
                 choice.reason,
             )
-            self._warn_unfilled(choice)
             note = f"Read from {label}: AUTO chose it ({choice.reason})."
         else:
             note = f"Read from {label}: requested with source=dm.HistorySource.FLAT_FILES."
         if window.empty:
             return self._empty()
+        if chosen is HistorySource.AUTO:
+            self._warn_unfilled(choice)
         if choice.source is HistorySource.REST:
             return self._described(
                 self._core.rest_transport().history(self._spec, request, window, call=call),
@@ -978,18 +984,22 @@ class HistoryQuery(QueryBase):
 
         Under `AUTO` the source changes with the symbol count and with the time of day (a
         day's flat file is published the next morning), so the same call could fill a column
-        one hour and leave it null the next. When both sources could serve the request, the
-        columns each fills come from the generated schemas (`Catalog.history_columns`), and the
-        WARNING names the columns the chosen one leaves null, the choice and its reason, and
-        the `source=` that fills them; it is logged once per session, dataset, and set of
-        columns. When only one source could serve it, `AUTO` had no choice and nothing is
-        logged: the table description says which source it was.
+        one hour and leave it null the next. The columns each source fills come from the
+        generated schemas (`Catalog.history_columns`). The WARNING names the columns the chosen
+        source leaves null, the choice and its reason, and what fills them: the `source=` of
+        the other source when it can serve the request now (`Alternative.AVAILABLE`), or, when
+        only an unpublished file holds flat files back and the same call will read them once
+        it lands (`Alternative.AFTER_PUBLICATION`), that it changes source the next day. It is
+        logged once per session, dataset, and set of columns. When the other source can never
+        serve the call (`Alternative.UNAVAILABLE`), the result cannot change and nothing is
+        logged: the table description says which source it was. The caller skips it for a
+        range no row can lie in, which reads nothing.
 
         Args:
             choice: The `AUTO` choice.
         """
-        if choice.alternative is not None:
-            return  # the other source cannot serve this request: AUTO had no choice
+        if choice.alternative is Alternative.UNAVAILABLE:
+            return  # the result cannot change, and the caller cannot pick the other source
         spec = self._spec
         other = (
             HistorySource.FLAT_FILES if choice.source is HistorySource.REST else HistorySource.REST
@@ -1001,16 +1011,21 @@ class HistoryQuery(QueryBase):
         if not missing:
             return
         columns = ", ".join(sorted(missing))
+        remedy = (
+            f"pass source=dm.HistorySource.{other.name} to get them"
+            if choice.alternative is Alternative.AVAILABLE
+            else "the same call reads them once the file lands, the next day"
+        )
         self._core.warnings.warn(
             f"history source {spec.name} {choice.source.name}: {columns}",
-            "%s history: AUTO read %s (%s); the read leaves %s null, which %s fills: pass "
-            "source=dm.HistorySource.%s to get them (logged once per session)",
+            "%s history: AUTO read %s (%s); the read leaves %s null, which the other source, "
+            "%s, fills: %s (logged once per session)",
             spec.name,
             TRANSPORT_LABELS[_HISTORY_TRANSPORTS[choice.source]],
             choice.reason,
             columns,
             TRANSPORT_LABELS[_HISTORY_TRANSPORTS[other]],
-            other.name,
+            remedy,
         )
 
     def _empty(self) -> Table:

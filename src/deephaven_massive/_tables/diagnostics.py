@@ -8,9 +8,6 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
 - **streams**: one row per stream (a live subscription with its own publisher) and per `poll()`
   table, with the `repr` of the query that opened it in `Query`. Keyed by `StreamId`.
 
-Both spell a transport as every other text a user reads does (`TRANSPORT_LABELS`: `WebSocket`,
-`REST`, `flat files`), in `Transport` and in a stream's `SchemaDrift` entries; the rows hold
-the `Transport` member, and `as_row` writes its label.
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
@@ -18,6 +15,12 @@ the `Transport` member, and `as_row` writes its label.
   (`rate_limits_changed`), and a row can never be overtaken by an older one. The writer also
   pulls again when the state changes with time alone (a pause ends, a slot frees): it waits on
   its queue no longer than until the moment the pull names.
+
+All of them spell a transport as every other text a user reads does (`TRANSPORT_LABELS`:
+`WebSocket`, `REST`, `flat files`), in `Transport` and in a stream's `SchemaDrift` entries; the
+rows hold the `Transport` member, and `as_row` writes its label. A stream's `Query` is cut to
+`QUERY_SHOWN` characters (`shown_query`), as `Symbols` is cut to its first symbols, so a query
+over a long list stays readable.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. Users never get the tables themselves: `m.connections()` and
@@ -81,6 +84,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
+    "QUERY_SHOWN",
     "RATE_LIMITS",
     "RATE_LIMIT_KEYS",
     "SCHEMA_DRIFT_SHOWN",
@@ -99,12 +103,16 @@ __all__ = [
     "StreamUpdate",
     "as_row",
     "describe_symbols",
+    "shown_query",
 ]
 
 logger = logging.getLogger(__name__)
 
 _SYMBOLS_SHOWN: Final = 20
 """How many symbols the `Symbols` column lists before it truncates."""
+
+QUERY_SHOWN: Final = 200
+"""The longest `Query` text, in characters; a longer one is cut and ends in `…`."""
 
 SCHEMA_DRIFT_SHOWN: Final = 200
 """The longest `SchemaDrift` text, in characters; a longer one is cut and ends in `…`."""
@@ -315,8 +323,8 @@ class StreamRow:
         stream_id: The stream's identifier (the key).
         dataset: The dataset name, such as `"stocks.trades"`.
         query: The `repr` of the query whose verb opened the stream or `poll()`, such as
-            `"<StreamHistoryLatestQuery stocks.trades symbols=('AAPL',)>"`, which tells two
-            streams of one dataset apart.
+            `"<StreamHistoryQuery stocks.trades symbols=('AAPL',)>"`, which tells two streams
+            of one dataset apart; cut to `QUERY_SHOWN` characters (`shown_query`).
         symbol_count: How many symbols the stream covers; null for `dm.ALL` and reactive
             tables until the transport fills it in.
         symbols: A truncated, readable list of the symbols.
@@ -497,6 +505,18 @@ def _shown(value: object) -> object:
         The value to write.
     """
     return TRANSPORT_LABELS[value] if isinstance(value, Transport) else value
+
+
+def shown_query(query: str) -> str:
+    """Return a query's `repr` as the `Query` column shows it: cut to `QUERY_SHOWN` characters.
+
+    Args:
+        query: The query's `repr`, such as `"<Query reference.news start=2025-01-02>"`.
+
+    Returns:
+        The text, or its first `QUERY_SHOWN - 1` characters and `…` when it is longer.
+    """
+    return query if len(query) <= QUERY_SHOWN else query[: QUERY_SHOWN - 1] + "…"
 
 
 def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:

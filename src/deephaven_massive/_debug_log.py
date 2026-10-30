@@ -212,10 +212,11 @@ def disable_debug_logging() -> None:
     `deephaven_massive` logger and sets that logger's level back to `NOTSET`. The library is
     then as it was at import: WARNING and ERROR records reach `sys.stderr` through Python's
     last-resort handler, and lower levels are dropped. A handler a user added to the logger
-    themselves stays. The environment variables count as read afterwards, so a later first
-    session does not turn the log back on, and a read of them already under way on another
-    thread installs nothing; `enable_debug_logging()` does turn it on again. With the log already
-    off it changes nothing.
+    themselves stays, but the level is reset to `NOTSET` whoever set it. The environment
+    variables count as read afterwards, so a later first session does not turn the log back
+    on, and a read of them already under way on another thread installs nothing;
+    `enable_debug_logging()` does turn it on again. With the log already off it changes
+    nothing.
 
     Example:
         ::

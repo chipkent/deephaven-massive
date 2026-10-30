@@ -919,8 +919,9 @@ class _Benzinga(Namespace):
         static table, and `poll(interval)` re-reads the endpoint into a live table that, by
         default (`PollMode.APPEND`), only grows: each cycle appends the articles it has not
         seen before, keyed by `BenzingaId`, so every article appears once. `poll()` needs a
-        `start`, and raises `ValueError` without one: every cycle reads every page of the
-        range, and without one the range is the whole Benzinga archive. There is no stream
+        `start` or a `limit`, and raises `ValueError` without either: every cycle reads every
+        page of the range, and without them the range is the whole Benzinga archive. A fixed
+        `start` keeps widening the window of a poll that runs for days. There is no stream
         and no `history()`; use `start` and `end` for a past range. The columns and what they
         mean are in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-news,
@@ -935,7 +936,7 @@ class _Benzinga(Namespace):
             start: The earliest publication time: an ISO date (`"2025-06-02"`) or `date`,
                 meaning 00:00 America/New_York that day, or a timezone-aware `datetime` or
                 ISO text with an offset. None, the default, sets no lower bound, which
-                `poll()` refuses.
+                `poll()` refuses unless `limit` is set.
             end: The end of the publication range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, and an aware
                 `datetime` is the first instant excluded. None (the default) sends no upper bound,

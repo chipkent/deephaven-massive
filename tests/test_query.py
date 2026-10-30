@@ -24,6 +24,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._enums import (
     AssetClass,
@@ -110,6 +111,39 @@ FUTURES_SPEC = DatasetSpec(
     asset_class=AssetClass.FUTURES,
     channels={NotBars.ANY: "T"},
     history_path="/futures/v1/trades/{ticker}",
+)
+
+# Both history sources, with the keys of the real datasets, so the columns each fills are real.
+TRADES_FILES_SPEC = DatasetSpec(
+    name="stocks.trades",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.STOCKS,
+    history_path="/v3/trades/{stockTicker}",
+    flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
+    keys={
+        (R, "/v3/trades/{stockTicker}"): SourceKeys(
+            KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp")
+        ),
+        (FF, "us_stocks_sip/trades_v1"): TICKER_AND_SIP,
+    },
+)
+FUTURES_FILES_SPEC = DatasetSpec(
+    name="futures.trades",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.FUTURES,
+    row_times=RowTimes.TICK,
+    history_path="/futures/v1/trades/{ticker}",
+    flat_file_prefixes={NotBars.ANY: "us_futures_{venue}/trades_v1"},
+    keys={
+        (R, "/futures/v1/trades/{ticker}"): SourceKeys(
+            KeySpec("ticker", from_request=True),
+            KeySpec("Timestamp"),
+            date=KeySpec("SessionEndDate"),
+        ),
+        (FF, "us_futures_{venue}/trades_v1"): SourceKeys(
+            KeySpec("Ticker"), KeySpec("Timestamp"), date=KeySpec("SessionEndDate")
+        ),
+    },
 )
 
 
@@ -298,9 +332,10 @@ def test_a_feed_without_start_refuses_to_poll(
 ) -> None:
     # Every cycle would re-read Massive's whole archive; the message names the fix.
     message = (
-        "economy.inflation poll() needs a start: without one, every cycle re-reads the whole "
-        "archive Massive keeps. Build the query with a start, such as "
-        "m.economy.inflation(..., start=date.today()), then call poll()"
+        "economy.inflation poll() needs a start or a limit: without either, every cycle "
+        "re-reads the whole archive Massive keeps. Build the query with one, such as "
+        "m.economy.inflation(..., start=date.today()) or m.economy.inflation(..., limit=50), "
+        "then call poll(). A fixed start keeps widening the window on a poll that runs for days"
     )
     with (
         pytest.raises(ValueError, match=f"^{re.escape(message)}$"),
@@ -312,6 +347,14 @@ def test_a_feed_without_start_refuses_to_poll(
     assert [r.levelno for r in caplog.records] == [logging.DEBUG]
     news(massive_session).fetch()  # fetch() reads the whole range, as asked
     assert [c[0] for c in rest.calls] == ["fetch"]
+
+
+def test_a_feed_with_a_limit_polls_its_latest_rows(
+    massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    # The "latest headlines" poll: each cycle reads at most `limit` rows, never the archive.
+    news(massive_session, limit=50).poll(60)
+    assert [c[0] for c in rest.calls] == ["poll"]
 
 
 @pytest.mark.parametrize(
@@ -1274,3 +1317,68 @@ def test_a_history_table_names_its_source(
             "source=dm.HistorySource.FLAT_FILES."
         ),
     ]
+
+
+def _symbols(count: int) -> list[str]:
+    return [f"S{n:03d}" for n in range(count)]
+
+
+def test_auto_warns_once_about_columns_the_other_source_fills(
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
+    assert isinstance(q, HistoryQuery)
+    instant = datetime(2025, 3, 3, 15, tzinfo=UTC)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        q.history(instant, instant)  # no row can lie in the range: nothing is read, no warning
+        assert caplog.messages == []
+        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-04", "2025-03-04")  # once per session
+    warning = (
+        "stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold "
+        "50); the read leaves DecimalSize null, which the other source, REST, fills: pass "
+        "source=dm.HistorySource.REST to get them (logged once per session)"
+    )
+    assert caplog.messages == [warning]
+
+
+def test_auto_warns_that_an_unpublished_file_changes_the_source_the_next_day(
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    # 10:00 New York on March 4: March 3's files land at 11:30.
+    monkeypatch.setattr(history_source, "_now", lambda: datetime(2025, 3, 4, 15, tzinfo=UTC))
+    many = make(s3_session, FUTURES_FILES_SPEC, symbols=_futures(60))
+    few = make(s3_session, FUTURES_FILES_SPEC, symbols=_futures(2))
+    assert isinstance(many, HistoryQuery)
+    assert isinstance(few, HistoryQuery)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        few.history("2025-03-03", "2025-03-03")  # stays on REST once published: no warning
+        assert caplog.messages == []
+        many.history("2025-03-03", "2025-03-03")
+    [message] = caplog.messages
+    assert message.startswith(
+        "futures.trades history: AUTO read REST (flat files cannot serve it: "
+    )
+    assert message.endswith(
+        "the read leaves Correction, Exchange null, which the other source, flat files, "
+        "fills: the same call reads them once the file lands, the next day (logged once per "
+        "session)"
+    )
+    assert [c[0] for c in rest.calls] == ["history", "history"]
+
+
+def _futures(count: int) -> list[str]:
+    months = "FGHJKMNQUVXZ"
+    return [f"E{chr(65 + n // 12)}{months[n % 12]}5" for n in range(count)]
