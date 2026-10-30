@@ -698,24 +698,24 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
     prev = rest_session.indices.previous_day_bar("I:SPX")
     assert [r["TimestampStart"] for r in rows(prev.fetch())] == [MIDNIGHT_MS * MS]
-    # A week bar stamped 01:00 on the Sunday before its week covers that week, and since an
-    # index can update around the clock, it may hold that Sunday too: it starts at Sunday's
-    # midnight and ends an hour after the next Monday's. A range must reach both Sundays.
-    saturday, sunday = MIDNIGHT_MS - 2 * DAY_MS, MIDNIGHT_MS - DAY_MS
-    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{saturday}/{MIDNIGHT_MS + 7 * DAY_MS - 1}"
+    # Massive starts a week on its Sunday, so a week bar is stamped 01:00 (midnight in
+    # Chicago) on its Sunday; since an index can update around the clock, the week holds its
+    # weekend: it starts at Sunday's midnight and ends an hour after the next Sunday's. A
+    # range must reach the Saturday.
+    sunday = MIDNIGHT_MS - DAY_MS
+    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{sunday}/{MIDNIGHT_MS + 6 * DAY_MS - 1}"
     fake_rest.reply(
         quote(week_path),
-        bars_reply(sunday + HOUR_MS),
         bars_reply(sunday + HOUR_MS),
         bars_reply(sunday + 16 * HOUR_MS),
     )
     week = rest_session.indices.bars("I:SPX", dm.Timespan.WEEK)
-    first, last = date(2025, 6, 1), date(2025, 6, 8)
+    first, last = date(2025, 6, 1), date(2025, 6, 7)
     weeks = rows(week.history(first, last, source=dm.HistorySource.REST))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in weeks] == [
-        (None, sunday * MS, (MIDNIGHT_MS + 7 * DAY_MS + HOUR_MS) * MS)
+        (None, sunday * MS, (MIDNIGHT_MS + 6 * DAY_MS + HOUR_MS) * MS)
     ]
-    # A range from the Monday leaves it out: the bar may hold the Sunday before.
+    # A range from the Monday holds no whole week, so it asks for none.
     assert rows(week.history(day, last, source=dm.HistorySource.REST)) == []
     # A week bar at the close, or a day bar at 02:00, is another cut: each fails loudly.
     with pytest.raises(

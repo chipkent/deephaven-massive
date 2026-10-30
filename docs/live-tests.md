@@ -97,8 +97,8 @@ consequences:
   the "Every class on Basic" row below. Together they declare about 68 requests to stocks
   (reference data included), 32 to currencies, 26 to futures, 8 to options, and 7 to indices,
   so the stock requests alone take at least 13 minutes at 5 a minute; with the rate-limit
-  tests, which wait out about six minutes between them, the run takes roughly 20 minutes. On paid plans nothing waits, and the tests read their full
-  sets.
+  tests, which wait out about six minutes between them, the run takes roughly 20 minutes.
+  On paid plans nothing waits, and the tests read their full sets.
 - **Indices.** Indices Basic excludes SPX, DJI, RUT, and VIX ([S6]): with Indices on Basic,
   the index tests use `I:NDX` instead of `I:SPX`.
 

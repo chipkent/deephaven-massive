@@ -382,16 +382,16 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Whether a forex week bar covers the calendar week from Monday 00:00 UTC.
+    """Whether a forex week bar covers the calendar week from Sunday 00:00 UTC.
 
     For each raw week bar of `C:EURUSD` over the four weeks ending with the most recent week without
     a holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
     own; `MATCH` marks the bucket. Decides by comparison, not by an absolute tolerance: passes when,
-    for every bar of those weeks, the week from Monday 00:00 UTC, the calendar week the library
-    assumes, is the closest window, ties allowed; a failure names the bars whose closest window
-    starts elsewhere (such as Sunday 17:00 New York, the trading week's open), and the library's
-    forex week windows must start there. The last line shows which bars the library's `history()`
-    keeps.
+    for every bar of those weeks, the week from Sunday 00:00 UTC, where Massive stamps it and the
+    library starts its forex week, is the closest window, ties allowed (forex does not trade from
+    Friday evening to Sunday evening UTC, so every start in that gap ties); a failure names the
+    bars whose closest window starts elsewhere, and the library's forex week windows must start
+    there. The last line shows which bars the library's `history()` keeps.
     """
     lines, checked, misses = week_bar_report("forexTicker", _PAIR, "UTC")
     for line in lines:

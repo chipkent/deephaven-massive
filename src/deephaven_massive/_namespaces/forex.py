@@ -398,12 +398,13 @@ class _Forex(Namespace):
         is, and the grouped daily and the day files (stamped 23:59:59.999 UTC) are
         moved to the start of their day. The interbank forex day rolls at 17:00 New York time,
         so Massive's UTC day is not the dealers' day. A bar of several days or longer must be
-        stamped 00:00 UTC, a week on its Monday and a month, quarter, or year on its 1st. Any
+        stamped 00:00 UTC, a week on its Sunday and a month, quarter, or year on its 1st. Any
         other stamp fails the call with `MassiveError` naming the source, since the bar may
         cover other days than its label. `history()` returns only the bars whose whole window
         lies inside the range and has ended, so the current day's bar never appears. Forex
-        trades from Sunday evening UTC, so its weeks run Monday to Sunday and its months,
-        quarters, and years are whole calendar periods.
+        trades from Sunday evening UTC, and Massive starts its weeks at 00:00 UTC on Sunday, so
+        its weeks run Sunday to Saturday and its months, quarters, and years are whole calendar
+        periods.
 
         Each column is described in the web UI's column tooltips, by `columns()`, and at
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.md#bars.

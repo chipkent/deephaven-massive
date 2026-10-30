@@ -320,16 +320,17 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Whether a stock week bar starts in the weekend before its Monday, wherever stamped.
+    """Whether a stock week bar covers the week from its Sunday 00:00 New York time.
 
     For each raw week bar of `AAPL` over the four weeks ending with the most recent week without a
-    holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
-    own; `MATCH` marks the bucket. Passes when, for every bar of those weeks, the week from Monday
-    00:00 New York time, the library's week (stamped on the Monday or on the weekend before, which
-    the library keeps for its week), is the closest window, ties allowed. Stocks do not trade at
-    weekends, so every start from Friday evening to Monday morning ties: the check can only catch a
-    week that starts in the middle of the week. A failure names the bars whose closest window starts
-    elsewhere. The last line shows which bars the library's `history()` keeps.
+    holiday, records its stamp and the candidate windows whose day-bar volume is closest to its
+    own (hour bars do not add up to a stock week bar's volume, day bars do); `MATCH` marks the
+    bucket. Passes when, for every bar of those weeks, the week from Sunday 00:00 New York time,
+    where Massive stamps it and the library's week starts, is the closest window, ties allowed.
+    Stocks do not trade at weekends, so every start from Friday evening to Monday morning ties: the
+    check can only catch a week that starts in the middle of the week. A failure names the bars
+    whose closest window starts elsewhere. The last line shows which bars the library's `history()`
+    keeps.
     """
     lines, checked, misses = week_bar_report("stocksTicker", _SYMBOL, "New York")
     for line in lines:

@@ -1221,8 +1221,8 @@ class HistoryQuery(QueryBase):
                 holiday and the next session's file, which holds the holiday's hours, is not
                 published yet or does not exist within 7 days; or a bar of a day or longer is
                 stamped at a time of day, or on a day, Massive is not known to use for its
-                class (a crypto 1-day bar at midnight New York time, or a crypto week bar on a
-                Sunday), naming the dataset, the source, and what to do instead.
+                class (a crypto 1-day bar at midnight New York time, or a week bar on a
+                Monday), naming the dataset, the source, and what to do instead.
 
         Example:
             ::
