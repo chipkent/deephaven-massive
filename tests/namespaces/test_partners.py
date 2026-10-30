@@ -22,7 +22,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix, Order, PollMode
-from deephaven_massive._massive import Transport, sources
+from deephaven_massive._massive import RestPath, Transport, sources
 from deephaven_massive._namespaces import partners
 from deephaven_massive._namespaces.base import Namespace, query_class
 from deephaven_massive._query import Query
@@ -299,14 +299,26 @@ def test_every_poll_key_tells_fixture_rows_apart(
 # The factories.
 
 
+def a_sort_field(spec: DatasetSpec) -> str:
+    # A `sort` every REST path of the dataset takes: one of the listed fields where the spec
+    # lists them, else a field of the rows of the first path.
+    paths = [cast("RestPath", CATALOG.source(Transport.REST, p)) for p in spec.rest_paths]
+    sorts = [p for path in paths for p in path.params if p.name == "sort"]
+    listed = [p.values for p in sorts if p.values]
+    if listed:
+        return listed[0][0]
+    return paths[0].fields[0].wire_key
+
+
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_list_factories_build_the_request(massive_session: dm.MassiveSession, name: str) -> None:
-    q = factory(massive_session, name)(["MSFT", "AAPL"], sort="date", order=Order.DESC, limit=10)
+    sort = a_sort_field(spec_of(name))
+    q = factory(massive_session, name)(["MSFT", "AAPL"], sort=sort, order=Order.DESC, limit=10)
     assert type(q) is Query
     assert q._spec is spec_of(name)
     request = q._request
     assert request.symbols == ("AAPL", "MSFT")
-    assert request.params == (("order", Order.DESC), ("sort", "date"))
+    assert request.params == (("order", Order.DESC), ("sort", sort))
     assert request.limit == 10
     assert request.filters == ()
     assert request.start is None
@@ -412,7 +424,7 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
 def test_news_selects_articles_by_ticker_and_time(massive_session: dm.MassiveSession) -> None:
     end = datetime(2025, 6, 3, 14, 30, tzinfo=UTC)
     q = massive_session.partners.benzinga.news(
-        symbols="X:BTCUSD",
+        "X:BTCUSD",
         start=datetime(2025, 6, 2, tzinfo=UTC),
         end=end,
         filters={"channels_any_of": ["news"]},
@@ -422,8 +434,6 @@ def test_news_selects_articles_by_ticker_and_time(massive_session: dm.MassiveSes
     assert request.start == datetime(2025, 6, 2, tzinfo=UTC)
     assert request.end == end
     assert request.filters == (("channels_any_of", ("news",)),)
-    news = inspect.signature(partners._Benzinga.news).parameters
-    assert news["symbols"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 @pytest.mark.parametrize(

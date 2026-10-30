@@ -6,7 +6,7 @@ Each section lists one dataset's columns in the order every verb returns them. *
 
 A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
 
-In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.crypto.trades`, `m.crypto.quotes`, `m.crypto.bars`, `m.crypto.previous_day_bar`, `m.crypto.fmv`, `m.crypto.snapshots`, `m.crypto.movers`, and `m.crypto.daily_open_close` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+`m.crypto.trades`, `m.crypto.quotes`, `m.crypto.bars`, `m.crypto.previous_day_bar`, `m.crypto.fmv`, `m.crypto.snapshots`, `m.crypto.movers`, and `m.crypto.daily_open_close` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="trades"></a>
 
@@ -19,6 +19,7 @@ Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `cryptoTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The crypto pair." | REST, flat files, WebSocket | request | `ticker` | `pair` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `participant_timestamp` | `participant_timestamp` | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request | `ticker` | `pair` |
 | `Conditions` | long[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `conditions` | `conditions` | `c` |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `exchange` | `exchange` | `x` |
 | `Id` | String | The Trade ID which uniquely identifies a trade on the exchange that the trade happened on. | REST, flat files, WebSocket | `id` | `id` | `i` |
@@ -65,6 +66,7 @@ Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `pair`: "The crypto pair." | WebSocket | `pair` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS." | WebSocket | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | WebSocket | `pair` |
 | `AskPrice` | double | The ask price. | WebSocket | `ap` |
 | `AskSize` | double | The ask size. | WebSocket | `as` |
 | `BidPrice` | double | The bid price. | WebSocket | `bp` |
@@ -89,6 +91,7 @@ Open, high, low, close, and volume bars of crypto pairs, over any time window.
 | `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the UTC date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 UTC of its window's first day (a week's Monday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 UTC after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request, `T` | `ticker` | `pair` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -120,6 +123,7 @@ The previous UTC day's open, high, low, close, and volume of each crypto pair.
 | `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the UTC date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST |  |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 UTC of its window's first day (a week's Monday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the end of the aggregate window." | REST | `t` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 UTC after its window's last day. | REST |  |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `T` |
 | `Volume` | double | The trading volume of the symbol in the given time period. | REST | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST | `o` |
 | `Close` | double | The close price for the symbol in the given time period. | REST | `c` |
@@ -144,6 +148,7 @@ Massive's fair market value of crypto pairs, streamed as it updates.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | WebSocket | `sym` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
@@ -160,6 +165,7 @@ The current state of crypto pairs: today's, the last minute's, and yesterday's b
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.l` |
@@ -205,6 +211,7 @@ The 20 crypto pairs that gained or lost the most since the previous day's close.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.l` |
@@ -253,6 +260,7 @@ The open and close prices of crypto pairs on one UTC day, with the trades behind
 | `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a UTC calendar day. From REST `day`: "The date requested." | REST | `day` |
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 UTC of `Date`. | REST |  |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 UTC of the next day. | REST |  |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `symbol` |
 | `Close` | double | The close price for the symbol in the given time period. | REST | `close` |
 | `ClosingTrades` | String | An array of results containing the requested data. The column holds Massive's value as JSON text. | REST | `closingTrades` |
 | `IsUtc` | boolean | Whether or not the timestamps are in UTC timezone. | REST | `isUTC` |

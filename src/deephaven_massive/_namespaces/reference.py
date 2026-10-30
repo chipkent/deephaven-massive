@@ -252,7 +252,7 @@ class _Reference(Namespace):
 
             m = dm.MassiveSession()
             details = m.reference.ticker_details(["AAPL", "MSFT"]).fetch()
-            news = m.reference.news(symbols="AAPL", start="2025-06-01").poll(60)
+            news = m.reference.news("AAPL", start="2025-06-01").poll(60)
     """
 
     __slots__ = ()
@@ -261,14 +261,14 @@ class _Reference(Namespace):
     @raises_through(build_query, list_params, calendar_day, _require_enum, _text)
     def tickers(
         self,
-        *,
         symbols: Symbols | None = None,
+        *,
         market: Market | None = None,
         ticker_type: TickerType | None = None,
         exchange: str | None = None,
         cusip: str | None = None,
         cik: str | None = None,
-        date: DateLike | None = None,
+        as_of: DateLike | None = None,
         active: bool = True,
         search: str | None = None,
         sort: str | None = None,
@@ -296,9 +296,10 @@ class _Reference(Namespace):
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            date: The day the listing is as of: a `date` or ISO-8601 date text (a `datetime`
-                raises `ValueError`: it is a calendar date); None for today.
-            active: True lists tickers traded on `date`; False lists delisted ones.
+            as_of: The day the listing is as of, sent as the wire parameter `date`: a `date`
+                or ISO-8601 date text (a `datetime` raises `ValueError`: it is a calendar
+                date); None for today.
+            active: True lists tickers traded on `as_of`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
             order: The sort direction; None for the endpoint's default.
@@ -312,7 +313,7 @@ class _Reference(Namespace):
 
         Raises:
             TypeError: If `active` is not a `bool`, or another argument has the wrong type.
-            ValueError: For `dm.ALL`, an invalid symbol, a `datetime` as `date`, or an unknown
+            ValueError: For `dm.ALL`, an invalid symbol, a `datetime` as `as_of`, or an unknown
                 filter.
         """
         if not isinstance(active, bool):
@@ -325,7 +326,7 @@ class _Reference(Namespace):
             "exchange": _text("exchange", exchange),
             "cusip": _text("cusip", cusip),
             "cik": _text("cik", cik),
-            "date": None if date is None else calendar_day(TICKERS, date, "date"),
+            "date": None if as_of is None else calendar_day(TICKERS, as_of, "as_of"),
             "active": active,
             "search": _text("search", search),
             **list_params(sort=sort, order=order),
@@ -337,14 +338,14 @@ class _Reference(Namespace):
             symbols_optional=True,
             all_alternative="leave symbols out for every ticker",
             params=params,
-            arguments={"type": "ticker_type"},
+            arguments={"type": "ticker_type", "date": "as_of"},
             filters=filters,
             limit=limit,
         )
         return cast("Query", query)
 
     @raises_through(build_query, calendar_day)
-    def ticker_details(self, symbols: Symbols, *, date: DateLike | None = None) -> Query:
+    def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> Query:
         """One ticker's company and listing details: address, branding, shares, and more.
 
         Served over REST (`/v3/reference/tickers/{ticker}`), one request per symbol; a symbol
@@ -357,15 +358,16 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
                 column.
-            date: The day the details are as of: a `date` or ISO-8601 date text (a
-                `datetime` raises `ValueError`: it is a calendar date); None for the latest.
+            as_of: The day the details are as of, sent as the wire parameter `date`: a `date`
+                or ISO-8601 date text (a `datetime` raises `ValueError`: it is a calendar
+                date); None for the latest.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
         Raises:
             TypeError: For an argument of the wrong type.
-            ValueError: For `dm.ALL`, an invalid symbol, or a `datetime` as `date`. Also for
+            ValueError: For `dm.ALL`, an invalid symbol, or a `datetime` as `as_of`. Also for
                 `symbols` of None, with a message that names the forms it takes.
         """
         query = build_query(
@@ -373,7 +375,10 @@ class _Reference(Namespace):
             TICKER_DETAILS,
             symbols=symbols,
             all_alternative="use m.reference.tickers() for every ticker",
-            params={"date": None if date is None else calendar_day(TICKER_DETAILS, date, "date")},
+            params={
+                "date": None if as_of is None else calendar_day(TICKER_DETAILS, as_of, "as_of")
+            },
+            arguments={"date": "as_of"},
         )
         return cast("Query", query)
 
@@ -473,8 +478,8 @@ class _Reference(Namespace):
     @raises_through(build_query, list_params, normalize)
     def news(
         self,
-        *,
         symbols: Symbols | None = None,
+        *,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -489,7 +494,7 @@ class _Reference(Namespace):
         so `poll()` needs `start` or `limit` and raises `ValueError` without either; a fixed
         `start` keeps widening the window of a poll that runs for days. Massive documents no
         default order for this endpoint, so a poll of the latest headlines asks for one:
-        `m.reference.news(symbols="AAPL", sort="published_utc", order=dm.Order.DESC,
+        `m.reference.news("AAPL", sort="published_utc", order=dm.Order.DESC,
         limit=50).poll(60)`. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
         (a `String[]`: `table.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps the

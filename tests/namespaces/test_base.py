@@ -12,6 +12,7 @@ against synthetic namespaces that break it.
 import collections.abc
 import dataclasses
 import datetime as dt
+import inspect
 import logging
 import typing
 from collections.abc import Callable, Iterator, Mapping
@@ -288,11 +289,27 @@ def test_bars_pick_their_class(massive_session: dm.MassiveSession) -> None:
     assert type(build(massive_session, STOCK_BARS, symbols="AAPL")) is HistoryQuery
 
 
-def test_venue_is_an_enum(massive_session: dm.MassiveSession) -> None:
-    q = build(massive_session, FUTURES_BARS, symbols="ESZ5", venue=FuturesVenue.CME)
-    assert q._request.venue is FuturesVenue.CME
-    with pytest.raises(TypeError, match=r"venue must be dm\.FuturesVenue"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venue="cme")
+def test_venues_are_a_set_of_the_enum(massive_session: dm.MassiveSession) -> None:
+    q = build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={FuturesVenue.CME})
+    assert q._request.venues == (FuturesVenue.CME,)
+    assert build(massive_session, FUTURES_BARS, symbols="ESZ5")._request.venues is None
+    with pytest.raises(TypeError, match=r"venues must be a set of dm\.FuturesVenue"):
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")
+    with pytest.raises(TypeError, match=r"venues must hold only dm\.FuturesVenue members, not str"):
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={"cme"})
+
+
+def test_sort_is_checked_when_the_query_is_built(massive_session: dm.MassiveSession) -> None:
+    m = massive_session
+    assert dict(m.reference.tickers(sort="name")._request.params)["sort"] == "name"
+    with pytest.raises(ValueError, match=r"^reference\.tickers: sort 'nam' is not a sort field"):
+        m.reference.tickers(sort="nam")
+    statements = m.stocks.financials.balance_sheets
+    assert dict(statements(sort="period_end.desc,fiscal_year")._request.params)["sort"] == (
+        "period_end.desc,fiscal_year"
+    )
+    with pytest.raises(ValueError, match=r"sort part 'period_end\.desc' has its own direction"):
+        statements(sort="period_end.desc", order=dm.Order.ASC)
 
 
 def test_filter_validation(massive_session: dm.MassiveSession) -> None:
@@ -570,6 +587,7 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
         **vars(_query),
         **vars(_types),
         **vars(_enums),
+        "AbstractSet": collections.abc.Set,
         "Literal": Literal,
     }
     return typing.get_type_hints(function, localns=names)
@@ -826,6 +844,20 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
 
 def test_every_factory_docstring_starts_with_its_summary() -> None:
     assert summary_problems(dm.MassiveSession, CATALOG.by_name) == []
+
+
+def test_symbols_is_the_first_positional_parameter_of_every_factory() -> None:
+    # One form per parameter: `m.reference.news("AAPL")` reads like `m.stocks.trades("AAPL")`,
+    # also where `symbols` may be left out.
+    found = []
+    for name, factory in _factory_map(dm.MassiveSession).items():
+        params = list(inspect.signature(factory).parameters.values())[1:]  # after self
+        if any(p.name == "symbols" for p in params):
+            found.append(name)
+            assert params[0].name == "symbols", name
+            assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, name
+    assert {"reference.tickers", "reference.news", "options.contracts"} <= set(found)
+    assert "partners.benzinga.news" in found
 
 
 class _Summarized(Namespace):

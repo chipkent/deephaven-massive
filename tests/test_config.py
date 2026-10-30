@@ -17,7 +17,8 @@ ENV = (
     "MASSIVE_API_KEY",
     "MASSIVE_S3_ACCESS_KEY_ID",
     "MASSIVE_S3_SECRET_ACCESS_KEY",
-    "MASSIVE_UNKNOWN_SYMBOLS",
+    "DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS",
+    "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS",
 )
 
 
@@ -88,7 +89,8 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.rest_base_url == "https://api.massive.com"
     assert base.s3_endpoint_url == "https://files.massive.com"
     assert base.s3_bucket == "flatfiles"
-    assert base.unknown_symbols is dm.UnknownSymbols.FAIL
+    assert base.noncanonical_symbols is dm.OnError.LOG
+    assert base.unreadable_symbols is dm.OnError.LOG
 
 
 def test_defaults_live_in_exactly_one_place() -> None:
@@ -236,41 +238,52 @@ def test_rest_basic_subscriptions_hold_subscriptions_only(base: MassiveConfig) -
             _replace(base, rest_basic_subscriptions={currency})
 
 
+_SYMBOL_SETTINGS = [
+    ("noncanonical_symbols", "DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS"),
+    ("unreadable_symbols", "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS"),
+]
+
+
+@pytest.mark.parametrize(("setting", "variable"), _SYMBOL_SETTINGS)
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("warn", dm.UnknownSymbols.WARN),
-        (" WARN ", dm.UnknownSymbols.WARN),
-        ("fail", dm.UnknownSymbols.FAIL),
+        ("raise", dm.OnError.RAISE),
+        (" RAISE ", dm.OnError.RAISE),
+        ("log", dm.OnError.LOG),
+        ("Ignore", dm.OnError.IGNORE),
     ],
 )
-def test_unknown_symbols_from_the_environment(
-    monkeypatch: pytest.MonkeyPatch, text: str, expected: dm.UnknownSymbols
+def test_symbol_settings_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, *, setting: str, variable: str, text: str, expected: dm.OnError
 ) -> None:
-    monkeypatch.setenv("MASSIVE_UNKNOWN_SYMBOLS", text)
-    assert MassiveConfig(api_key="k").unknown_symbols is expected
+    monkeypatch.setenv(variable, text)
+    config = MassiveConfig(api_key="k")
+    assert getattr(config, setting) is expected
+    other = next(name for name, _ in _SYMBOL_SETTINGS if name != setting)
+    assert getattr(config, other) is dm.OnError.LOG  # each variable sets only its own setting
 
 
-def test_an_unknown_symbols_setting_out_of_the_environment_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("setting", "variable"), _SYMBOL_SETTINGS)
+def test_a_symbol_setting_out_of_the_environment_is_refused(
+    monkeypatch: pytest.MonkeyPatch, setting: str, variable: str
 ) -> None:
-    monkeypatch.setenv("MASSIVE_UNKNOWN_SYMBOLS", "ignore")
+    del setting
+    monkeypatch.setenv(variable, "warn")
     with pytest.raises(
-        ValueError,
-        match=r"^MASSIVE_UNKNOWN_SYMBOLS must be 'fail' or 'warn', not 'ignore'$",
+        ValueError, match=rf"^{variable} must be 'raise', 'log', or 'ignore', not 'warn'$"
     ):
         MassiveConfig(api_key="k")
 
 
-def test_unknown_symbols_is_the_enum(base: MassiveConfig) -> None:
-    assert _replace(base, unknown_symbols=dm.UnknownSymbols.WARN).unknown_symbols is (
-        dm.UnknownSymbols.WARN
-    )
+@pytest.mark.parametrize(("setting", "variable"), _SYMBOL_SETTINGS)
+def test_symbol_settings_are_the_enum(base: MassiveConfig, setting: str, variable: str) -> None:
+    del variable
+    assert getattr(_replace(base, **{setting: dm.OnError.IGNORE}), setting) is dm.OnError.IGNORE
     with pytest.raises(
-        TypeError,
-        match=r"^unknown_symbols must be dm\.UnknownSymbols, e\.g\. dm\.UnknownSymbols\.WARN$",
+        TypeError, match=rf"^{setting} must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"
     ):
-        _replace(base, unknown_symbols="warn")
+        _replace(base, **{setting: "log"})
 
 
 def test_publish_cutoff_is_a_wall_clock_time(base: MassiveConfig) -> None:

@@ -1,9 +1,11 @@
 """Tests for the `m.indicators` namespace."""
 
+import inspect
 import json
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from enum import Enum
+from typing import Any, Final, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
@@ -77,6 +79,7 @@ def test_a_windowed_indicator_builds_its_query(
     assert query._request == Request(
         symbols=("AAPL", "X:BTCUSD"),
         timespan=dm.Timespan.DAY,
+        adjusted=True,
         # `expand_underlying=false` is fixed by the library on every request.
         params=(
             ("expand_underlying", False),
@@ -260,9 +263,10 @@ def test_each_symbol_class_is_served_by_its_own_path(
         "timestamp.gte": ["1517529600000"],
         "timestamp.lt": ["1517616000000"],
     }
-    # `adjusted` is None, so neither path receives it.
+    # `adjusted=True`, the default, reaches only the stock path: the crypto path has no such
+    # parameter, and a pair has no splits.
     assert sent(fake_rest) == {
-        "/v1/indicators/sma/AAPL": shared,
+        "/v1/indicators/sma/AAPL": {**shared, "adjusted": ["true"]},
         "/v1/indicators/sma/X:BTCUSD": shared,
     }
     assert sorted((r["Symbol"], r["Value"]) for r in out) == [
@@ -335,7 +339,7 @@ def test_a_value_of_a_day_or_longer_at_an_unknown_stamp_fails(
         rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch()
 
 
-def test_an_explicit_adjusted_reaches_only_a_path_that_takes_it(
+def test_adjusted_false_reaches_only_a_path_that_takes_it(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -344,8 +348,32 @@ def test_an_explicit_adjusted_reaches_only_a_path_that_takes_it(
     fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
     rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch()
     assert sent(fake_rest)["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
+    # Unadjusted prices are never dropped silently on the crypto path, which has no basis.
     with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
-        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=True).fetch()
+        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch()
+
+
+_SIGNATURE_PARAMS: Final = ("window", "short_window", "long_window", "signal_window")
+"""The indicator arguments, beside `timespan`, `series_type`, and `adjusted`, named as on the
+wire."""
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_every_signature_default_is_the_default_massive_documents(name: str) -> None:
+    spec = CATALOG.by_name[f"indicators.{name}"]
+    path = source(R, cast("str", spec.fetch_path))
+    assert isinstance(path, RestPath)
+    documented = {p.name: p.default for p in path.params}
+    signature = inspect.signature(getattr(indicators._Indicators, name)).parameters
+    compared = [
+        n for n in (*_SIGNATURE_PARAMS, "timespan", "series_type", "adjusted") if n in signature
+    ]
+    assert len(compared) == (6 if name == "macd" else 4)
+    for argument in compared:
+        default = signature[argument].default
+        shown = default.value if isinstance(default, Enum) else default
+        assert shown == documented[argument], argument
+        assert documented[argument] is not None
 
 
 def test_macd_returns_its_three_lines(

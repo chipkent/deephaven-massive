@@ -26,9 +26,10 @@ one (its publisher's `publish_failure`), so the failure shows where Deephaven us
 also logged at ERROR and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported, and `raises_through`, the declaration that lets a test check the
-`Raises:` section of a function whose errors come from the helpers it calls. The rate-limited
-log helpers, `log_once` and `BoundedWarnings`, are in `_log_limits`.
+fix, which is not exported; `LIBRARY_BUG`, the sentence that ends every message about a
+defect of the library itself; and `raises_through`, the declaration that lets a test check
+the `Raises:` section of a function whose errors come from the helpers it calls. The
+rate-limited log helpers, `log_once` and `BoundedLog`, are in `_log_limits`.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = [
+    "LIBRARY_BUG",
     "RAISES_THROUGH",
     "AuthenticationError",
     "EntitlementError",
@@ -56,6 +58,15 @@ RAISES_THROUGH: Final = "raises_through"
 """The attribute in which `raises_through` records a function's helpers."""
 
 _F = TypeVar("_F", bound="Callable[..., object]")
+
+
+LIBRARY_BUG: Final = (
+    "This is a bug in deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and "
+    "report it with the log and m.streams() at "
+    "https://github.com/chipkent/deephaven-massive/issues."
+)
+"""The last sentence of every message about a defect of the library itself, never the user's:
+how to report it, with what."""
 
 
 class MassiveError(Exception):

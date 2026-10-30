@@ -6,8 +6,8 @@ value is the exact string Massive puts on the wire, so a member can be sent to t
 one spelling per value, tab completion in every IDE and in the Deephaven web console, and typo
 safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
 names the member to use; `Timespan("minute")` is the documented way to convert text.
-An enum of a library setting that never reaches the wire (`HistorySource`, `SymbolConvention`,
-`OnError`, `UnknownSymbols`, `Subscription`) takes its member names in lower case as values.
+An enum of a library setting that never reaches the wire (`PollMode`, `HistorySource`,
+`SymbolConvention`, `OnError`, `Subscription`) takes its member names in lower case as values.
 
 Four further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is) and `ChannelFamily` (which host a channel is served from), which appear as values in
@@ -18,7 +18,7 @@ class of a dataset whose symbols span classes, each read from its prefix; and `N
 plain `Enum` too (so it never equals a `Timespan` value), whose one member `ANY` keys the one
 WebSocket channel and flat-file prefix of a dataset that is not bars.
 
-The nineteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
+The eighteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private. `subscription_of` maps an asset class to the subscription that covers it.
 """
 
@@ -51,7 +51,6 @@ __all__ = [
     "TickerType",
     "Timeframe",
     "Timespan",
-    "UnknownSymbols",
     "subscription_of",
 ]
 
@@ -143,6 +142,9 @@ class NotBars(Enum):
 class PollMode(StrEnum):
     """How a `poll()` table combines successive request cycles.
 
+    - `AUTO`, the default of `poll()`: the dataset's own mode, one of the three below, which
+      each dataset's docstring names: `APPEND` for the news and filing feeds, `UPSERT` for
+      IPOs, and `REPLACE` for the rest.
     - `REPLACE`: a keyed table that holds exactly the latest cycle; keys absent from it are
       deleted, including when the cycle returns no rows.
     - `UPSERT`: a keyed table that adds and updates rows but never deletes. On a dataset
@@ -163,6 +165,7 @@ class PollMode(StrEnum):
             assert dm.PollMode("append") is dm.PollMode.APPEND
     """
 
+    AUTO = "auto"
     REPLACE = "replace"
     UPSERT = "upsert"
     APPEND = "append"
@@ -193,7 +196,8 @@ class FuturesVenue(StrEnum):
     """A futures exchange, used only to pick the futures flat-file prefix.
 
     Futures streams always use the `/futures` cluster path whatever the venue, so the venue is
-    not part of a stream's identity. `venue=None` on a futures dataset reads all four prefixes.
+    not part of a stream's identity. A futures dataset's `venues`, a set of members, picks the
+    prefixes read; every venue by default.
 
     Example:
         ::
@@ -443,45 +447,42 @@ class SymbolConvention(StrEnum):
 
 
 class OnError(StrEnum):
-    """What `canonicalize_symbols` does with a row it cannot convert.
+    """What a bad symbol does: fail, or keep going with or without a log record.
 
-    - `RAISE`: fail. A static table raises `ValueError` naming the bad values; a refreshing
-      table fails when such a row arrives.
-    - `NULL`: write a null symbol for that row and log the value at WARNING, a bounded number
-      of times, so one typo in a watchlist does not stop it.
+    One enum for every symbol problem, used in three places:
+
+    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The
+      default there is `RAISE`.
+    - `MassiveConfig.noncanonical_symbols` (`DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS`), for a
+      row of a symbol table passed as `symbols` that is not Massive's exact ticker. A `str` or
+      a list passed in code always raises, whatever the setting. The default is `LOG`.
+    - `MassiveConfig.unreadable_symbols` (`DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS`), for a symbol
+      Massive sends in a spelling the library cannot read. The default is `LOG`.
+
+    The members:
+
+    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`),
+      and a live table fails when the bad value arrives.
+    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at
+      WARNING for a value the user supplied, and at ERROR, as a library defect to report, for
+      a spelling from Massive the library cannot read. `canonicalize_symbols` writes a null
+      symbol for the row; a symbol table's bad row is skipped and listed in its result's
+      `m.streams()` row; an unreadable spelling keeps its row with a null `Symbol` and the text
+      in the `RawSymbol` column.
+    - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Example:
         ::
 
             import deephaven_massive as dm
 
-            assert dm.OnError("null") is dm.OnError.NULL
+            assert dm.OnError("log") is dm.OnError.LOG
+            strict = dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)
     """
 
     RAISE = "raise"
-    NULL = "null"
-
-
-class UnknownSymbols(StrEnum):
-    """What a session does with a symbol Massive sends in a spelling the library cannot read.
-
-    The setting of `MassiveConfig.unknown_symbols`, and of the `MASSIVE_UNKNOWN_SYMBOLS`
-    environment variable (`fail` or `warn`).
-
-    - `FAIL`: fail the request or the stream that received the row, naming the spelling.
-    - `WARN`: keep the row with a null `Symbol` and the text in an added `RawSymbol` column,
-      and log each spelling once at WARNING (a bounded number of spellings).
-
-    Example:
-        ::
-
-            import deephaven_massive as dm
-
-            assert dm.UnknownSymbols("warn") is dm.UnknownSymbols.WARN
-    """
-
-    FAIL = "fail"
-    WARN = "warn"
+    LOG = "log"
+    IGNORE = "ignore"
 
 
 class Subscription(StrEnum):

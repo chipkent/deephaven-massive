@@ -736,7 +736,7 @@ def test_the_trades_pair_shares_its_columns_in_one_order_with_one_timestamp() ->
 
 
 def test_a_projected_member_renames_through_its_projection() -> None:
-    schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES)
+    schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES, raw_symbol=False)
     assert schema.column_names == ("Symbol", "Date", "Timestamp", "Value", "TimestampInsert")
     assert Catalog((INDEX_VALUES,)).problems() == ()
     # The forex last quote joins the quotes kind with `ask` and `bid` under the kind's names.
@@ -748,17 +748,17 @@ def test_a_projected_member_renames_through_its_projection() -> None:
 def test_keys_rename_to_symbol_timestamp_and_underlying() -> None:
     catalog = Catalog((CONTRACTS, RELATED, FUTURES_TRADES))
     assert catalog.problems() == ()
-    contracts = catalog.dataset_schema(CONTRACTS).column_names
+    contracts = catalog.dataset_schema(CONTRACTS, raw_symbol=False).column_names
     assert contracts[0] == "Symbol"
     assert "Underlying" in contracts
     assert {"Ticker", "UnderlyingTicker"}.isdisjoint(contracts)
     # The peer is the row's symbol, and the company asked about comes from the request.
-    assert catalog.dataset_schema(RELATED).column_names == (
+    assert catalog.dataset_schema(RELATED, raw_symbol=False).column_names == (
         "Symbol",
         "Underlying",
         "TimestampInsert",
     )
-    futures = catalog.dataset_schema(FUTURES_TRADES).column_names
+    futures = catalog.dataset_schema(FUTURES_TRADES, raw_symbol=False).column_names
     assert futures[:3] == ("Symbol", "Date", "Timestamp")
     assert "SessionEndDate" not in futures  # the session is the row's Date
 
@@ -1559,7 +1559,7 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
             ),
         ),
         (NEWS, "published_utc_gt", "2025-06-02", "no exact unit to end a day with"),
-        (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes a sequence of text"),
+        (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes no numbers, not 1"),
         (DIVIDENDS, "distribution_type_any_of", 5, "takes a sequence of text"),
     ],
 )
@@ -1588,8 +1588,79 @@ def test_a_list_of_dates_writes_its_date_items_as_days() -> None:
     assert check(RATINGS, {"date_any_of": (date(2025, 6, 2), "2025-06-03,2025-06-04")}) == {
         "date_any_of": ("2025-06-02", "2025-06-03", "2025-06-04")
     }
-    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes text items, not"):
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes no dates, not"):
         check(RATINGS, {"ticker_any_of": (date(2025, 6, 2),)})
+
+
+SHORT_INTEREST = DatasetSpec(
+    name="stocks.short_interest",
+    summary="A dataset for the tests.",
+    fetch_path="/stocks/v1/short-interest",
+)
+
+
+def test_a_list_of_numbers_writes_each_number_as_its_parameter_does() -> None:
+    # `days_to_cover` is a number, `avg_daily_volume` an integer.
+    assert check(SHORT_INTEREST, {"days_to_cover_any_of": (2, 2.5, "3")}) == {
+        "days_to_cover_any_of": ("2", "2.5", "3")
+    }
+    assert check(SHORT_INTEREST, {"avg_daily_volume_any_of": (100, 200)}) == {
+        "avg_daily_volume_any_of": ("100", "200")
+    }
+    with pytest.raises(ValueError, match=r"'avg_daily_volume_any_of' takes integer values, not"):
+        check(SHORT_INTEREST, {"avg_daily_volume_any_of": (4.5,)})
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes no numbers, not 5"):
+        check(RATINGS, {"ticker_any_of": (5,)})
+    with pytest.raises(ValueError, match=r"filter 'days_to_cover_any_of' takes no dates, not"):
+        check(SHORT_INTEREST, {"days_to_cover_any_of": (date(2025, 6, 2),)})
+    # A bool is never a number: the encoder refuses it as an item of a list.
+    with pytest.raises(ValueError, match=r"'days_to_cover_any_of'.*takes a sequence of text"):
+        check(SHORT_INTEREST, {"days_to_cover_any_of": (True,)})
+
+
+def test_every_sort_default_massive_documents_passes_the_sort_check() -> None:
+    checked = 0
+    for spec in CATALOG.by_name.values():
+        for path in spec.rest_paths:
+            rest_path = sources(R)[path]
+            assert isinstance(rest_path, RestPath)
+            for param in rest_path.params:
+                if param.name == "sort" and isinstance(param.default, str):
+                    CATALOG.check_sort(spec, param.default, ordered=False)
+                    checked += 1
+    assert checked > 40
+
+
+@pytest.mark.parametrize(
+    ("spec", "sort", "ordered", "message"),
+    [
+        # An enum sort takes one of its listed fields.
+        (OPTION_CONTRACTS, "strike_price", True, None),
+        (
+            OPTION_CONTRACTS,
+            "strike",
+            False,
+            r"sort 'strike' is not a sort field of /v3/reference/options/contracts; it takes \[",
+        ),
+        # A text sort takes fields of the rows, each with an optional direction.
+        (RATINGS, "date.desc, ticker", False, None),
+        (RATINGS, "date", True, None),
+        (RATINGS, "dat.desc", False, r"sort part 'dat\.desc' names no field of"),
+        (RATINGS, "date,,ticker", False, r"sort part '' names no field of"),
+        (RATINGS, "date.desc", True, r"sort part 'date\.desc' has its own direction"),
+        # A dataset whose paths take no sort is left to build_query.
+        (INDICATOR, "anything", False, None),
+    ],
+)
+def test_sort_is_checked_against_the_sort_fields_of_each_path(
+    *, spec: DatasetSpec, sort: str, ordered: bool, message: str | None
+) -> None:
+    catalog = Catalog((spec,))
+    if message is None:
+        catalog.check_sort(spec, sort, ordered=ordered)
+    else:
+        with pytest.raises(ValueError, match=rf"^{spec.name}: {message}"):
+            catalog.check_sort(spec, sort, ordered=ordered)
 
 
 def _two_paths(as_text: tuple[str, ...]) -> tuple[Catalog, DatasetSpec]:
