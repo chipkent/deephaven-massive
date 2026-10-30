@@ -19,16 +19,16 @@ a `ResultRecord`:
 4. The `Reaper`, one daemon thread per session, runs the job: it releases the result scope
    (under the update graph's shared lock, `release_scope`) and then calls the record's
    `on_released` callback, which for a stream decrements the stream's held-result count (and at
-   zero releases the stream scope), for a `poll()` table marks its row released, and for a
-   diagnostics view drops the session's count of held views. A failing job is logged at ERROR
+   zero releases the stream scope), for a `poll()` table or a background read
+   (`wait=False`) marks its row released, and for a diagnostics view drops the session's count
+   of held views. A failing job is logged at ERROR
    and the thread carries on.
-
-Releasing a result scope drops the library's liveness reference only. A table the user derived
-from the result, an open UI panel, or a user liveness scope keeps the Java table alive, and with
-it the stream or the poller: topic reference counts and pollers are bound to the blink table's
-`on_shutdown_callback`, never to result records. The owner callbacks hold the session core only
-weakly, so a result never keeps a session alive through its record; the session's live set does
-that (`_tables/session_core.py`).
+ Releasing a result scope drops the library's liveness reference only. A table the user derived from
+the result, an open UI panel, or a user liveness scope keeps the Java table alive, and with it the
+stream, the poller, or the background read: topic reference counts, pollers, and reads are bound to
+the blink table's `on_shutdown_callback`, never to result records. The owner callbacks hold the
+session core only weakly, so a result never keeps a session alive through its record; the session's
+live set does that (`_tables/session_core.py`).
 
 **Every release holds the update graph's lock.** Releasing a scope can drop the last reference
 to a refreshing table, which destroys it. The library releases every scope through
@@ -174,8 +174,9 @@ class ResultRecord:
         record_id: A process-unique identifier, for logs.
         scope: The result scope that holds the result.
         on_released: Runs on the reaper thread after the scope is released: for a stream it
-            decrements the stream's held-result count, for a `poll()` table it marks the row
-            released, and for a diagnostics view it drops the session's count of held views.
+            decrements the stream's held-result count, for a `poll()` table or a background
+            read it marks the row released, and for a diagnostics view it drops the session's
+            count of held views.
         finalizer: The collection finalizer on the result's Python wrapper, set by `track`
             right after the record is created; `finalizer.peek()` yields the wrapper while it
             is alive and None once it is collected.

@@ -440,17 +440,21 @@ class MassiveSession:
         return self._core.diagnostics_view(self._core.diagnostics.connections)
 
     def streams(self) -> Table:
-        """Return the live diagnostics table of streams and `poll()` tables.
+        """Return the live diagnostics table of streams, `poll()` tables, and background reads.
 
-        One row per stream: dataset, symbols, `HeldResults`, deferred option contracts,
-        host, rows published, requests per poll cycle, state, error, and `SchemaDrift`: the
-        fields the stream's payloads had beyond the documented schema (`transport:field+`) or
-        lacked (`transport:field-`), shown apart from the error because drift is not a
-        failure. `Error` also shows warnings that do not stop a stream: the options cap's
-        deferral, and the wait for a WebSocket slot that another connection with the key (for
-        example from another process) holds. Each call returns a new view, a live result like
-        any other: while it is held it keeps the session running and current, and after
-        `close()` it keeps showing the final rows, `CLOSED` included.
+        One row per WebSocket stream, `poll()` table, and background read (`fetch(wait=False)` or
+        `history(..., wait=False)`), told apart by `Kind` (`stream`, `poll`, `read`): the dataset,
+        the query, symbols, `HeldResults`, deferred option contracts, host, rows published, requests
+        per poll cycle, `State`, error, and `SchemaDrift`. A stream or poll is `RUNNING`; a
+        background read is `LOADING` until its whole result lands in its table, then `DONE`, and
+        `FAILED` with the error when its download fails. `SchemaDrift` holds the fields the stream's
+        payloads had beyond the documented schema (`transport:field+`) or lacked
+        (`transport:field-`), shown apart from the error because drift is not a failure. `Error`
+        also shows warnings that do not stop a stream: the options cap's deferral, and the wait for
+        a WebSocket slot that another connection with the key (for example from another process)
+        holds. Each call returns a new view, a live result like any other: while it is held it keeps
+        the session running and current, and after `close()` it keeps showing the final rows,
+        `CLOSED` included.
 
         Returns:
             A view of the `streams` table, keyed by `StreamId`; its columns are `STREAMS` in
@@ -486,15 +490,15 @@ class MassiveSession:
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
-        The library's hold on the table is released on the session's reaper thread, right
-        away; inside a console command, which holds the update graph's lock, it is released
-        once the command ends. The table keeps ticking only while something else holds it (a
-        derived table, an open UI panel); once nothing does, its stream unsubscribes, or its
-        poller stops. A table derived in the console is held only weakly by the console, so after
-        `del` it keeps its stream running until the JVM next collects it: usually seconds, but
-        unbounded on an idle heap; `close()` stops everything at once. Releasing a result twice
-        does nothing, and `release()` keeps working after `close()`. Static results (`fetch()`,
-        `history()`) are not tracked.
+        The library's hold on the table is released on the session's reaper thread, right away;
+        inside a console command, which holds the update graph's lock, it is released once the
+        command ends. The table keeps ticking only while something else holds it (a derived table,
+        an open UI panel); once nothing does, its stream unsubscribes, its poller stops, or its
+        background read (`wait=False`) stops downloading. A table derived in the console is held
+        only weakly by the console, so after `del` it keeps its stream running until the JVM next
+        collects it: usually seconds, but unbounded on an idle heap; `close()` stops everything at
+        once. Releasing a result twice does nothing, and `release()` keeps working after `close()`.
+        Static results (`fetch()`, `history()` with the default `wait=True`) are not tracked.
 
         Args:
             table: A live table returned by a verb of this session.

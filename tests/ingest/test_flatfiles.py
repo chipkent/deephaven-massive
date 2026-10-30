@@ -1,6 +1,7 @@
 """Tests for flat-file history: source choice, partition dates, and streaming S3 reads."""
 
 import csv
+import dataclasses
 import functools
 import gc
 import gzip
@@ -1083,9 +1084,16 @@ class RestRecorder:
         self.calls: list[tuple[DatasetSpec, Request, HistoryWindow]] = []
 
     def history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         assert call > 0
+        assert stop is None  # a blocking read has no stop token
         self.calls.append((spec, request, window))
         # A table in the dataset's schema, as the REST transport returns.
         return dh_arrow.to_table(
@@ -2731,3 +2739,39 @@ def test_every_row_of_a_day_shares_one_stored_date(
     t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert t.size == 20
     assert string_objects(t, "Date") == 1
+
+
+# --- Background reads ------------------------------------------------------------------------
+
+
+def test_a_background_history_lands_the_files_rows(
+    *, session: dm.MassiveSession, put: Callable[[str, str], None]
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    table = q.history("2025-03-03", "2025-03-03", wait=False)
+    for state in list(session._core._workers.values()):
+        cast("Any", state.fail).__self__.thread.join(30.0)
+    pause = threading.Event()
+    for _ in range(3000):
+        if table.size:
+            break
+        pause.wait(0.01)
+    assert [r["Symbol"] for r in rows(table)] == ["AAPL", "MSFT", "AAPL", "SPY"]
+    session.release(table)
+
+
+def test_a_set_stop_token_cancels_a_flat_file_read(
+    *, session: dm.MassiveSession, put: Callable[[str, str], None]
+) -> None:
+    put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    day = date(2025, 3, 3)
+    request = dataclasses.replace(q._request, start=day, end=day)
+    window = history_window(STOCK_TRADES, request, start=day, end=day, classes=())
+    stop = _massive.Cancel()
+    stop.set()
+    with pytest.raises(dm.MassiveError, match=r"stocks\.trades history: the read was cancelled"):
+        session._core.flat_file_transport().history(
+            STOCK_TRADES, request, window, dates=[day], call=1, stop=stop
+        )

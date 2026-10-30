@@ -346,7 +346,7 @@ class StreamRow:
         stream_id: The stream's identifier (the key); a background read's is its call id.
         kind: What feeds the table: a stream, a `poll()` table, or a background read.
         dataset: The dataset name, such as `"stocks.trades"`.
-        query: The `repr` of the query whose verb opened the stream or `poll()`, such as
+        query: The `repr` of the query whose verb opened the stream, `poll()`, or read, such as
             `"<StreamHistoryQuery stocks.trades symbols=('AAPL',)>"`, which tells two streams
             of one dataset apart; cut to `QUERY_SHOWN` characters (`shown_query`).
         symbol_count: How many symbols the stream covers; null for `dm.ALL` and reactive

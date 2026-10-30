@@ -1262,17 +1262,21 @@ class SessionCore:
         The read's thread calls it right after it published the one row that holds the
         complete result, outside every lock. `DONE` replaces `LOADING`, `RELEASED` (a derived
         table kept the read going after its result was released), and `CLOSED` (a close that
-        raced the publish, which then failed nothing: the table has its rows); a `FAILED` row
-        keeps its state, though the read's publish lock makes that unreachable. `DONE` is
-        final. One short critical section under `registry_lock`; an id that has left the
-        registry is ignored. No Deephaven call, no wait.
+        raced the publish, which then failed nothing: the table has its rows). The read's
+        publish lock fails a read only before its rows land, so no row is `FAILED` here. `DONE`
+        is final. `RowsPublished` is set and `Error` cleared. One short critical section under
+        `registry_lock`; an id that has left the registry is ignored. No Deephaven call, no
+        wait.
 
         Args:
             stream_id: The read's `StreamId`.
             rows: How many rows the result holds, for `RowsPublished`.
         """
         with self.registry_lock:
-            self._update_worker(stream_id, functools.partial(_done_row, rows=rows))
+            done = functools.partial(
+                replace, state=StreamState.DONE, rows_published=rows, error=None
+            )
+            self._update_worker(stream_id, done)
 
     def _update_worker(self, stream_id: int, change: Callable[[StreamRow], StreamRow]) -> bool:
         """Change a registered worker table's row and write it; `registry_lock` is held.
@@ -1543,19 +1547,3 @@ def _closed_row(row: StreamRow, error: str) -> StreamRow:
     if row.state in (StreamState.FAILED, StreamState.DONE):
         return row
     return replace(row, state=StreamState.CLOSED, error=error)
-
-
-def _done_row(row: StreamRow, *, rows: int) -> StreamRow:
-    """Return a background read's row marked `DONE` with its row count (`finish_read`).
-
-    Args:
-        row: The read's current row.
-        rows: How many rows the result holds.
-
-    Returns:
-        The new row, with `RowsPublished` set and `Error` cleared; a `FAILED` row is returned
-        unchanged.
-    """
-    if row.state is StreamState.FAILED:
-        return row
-    return replace(row, state=StreamState.DONE, rows_published=rows, error=None)
