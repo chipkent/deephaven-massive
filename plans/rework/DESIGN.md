@@ -1945,7 +1945,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{X:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
-| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
+| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent; a row whose `isUTC` is false is served with the UTC day's window and logs one WARNING per dataset per session, decision 77) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
 
 ### 8.7 `m.reference`
 

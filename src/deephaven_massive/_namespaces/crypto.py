@@ -731,8 +731,9 @@ class _Crypto(Namespace):
         Each row is one pair on one day: its open and close prices, and the first and last
         trades of the day (`OpenTrades` and `ClosingTrades`, JSON text). The crypto day runs
         from midnight to midnight UTC, which is the row's `TimestampStart` to `TimestampEnd`;
-        a row Massive marks as not UTC (`IsUtc` false) fails the call with `MassiveError`,
-        since its day would cover other hours.
+        a row Massive marks as not UTC (`IsUtc` false) is served with that UTC window too, and
+        logs one WARNING per session: Massive cut its day elsewhere, so its dates may not line
+        up with the other crypto tables'.
 
         Transports: REST, `/v1/open-close/crypto/{from}/{to}/{date}`, one request per pair.
         `fetch()` returns one row per pair and `poll(interval)` repeats the requests, keyed

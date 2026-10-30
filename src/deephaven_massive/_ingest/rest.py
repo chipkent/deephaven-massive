@@ -863,7 +863,7 @@ class RestReader:
         own = own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
         stamps = stamp_rule(spec, request, warnings=self.warnings, asset_class=zone_class)
-        times = time_rule(spec, request, asset_class=zone_class)
+        times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
         try:
             for page in self.state.client.pages(

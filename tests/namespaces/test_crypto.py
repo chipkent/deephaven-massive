@@ -863,20 +863,32 @@ def test_daily_open_close_reads_one_pair_and_day_a_request(
     assert json.loads(row["OpenTrades"])[0]["i"] == "511235746"
 
 
-def test_a_day_summary_not_in_utc_fails(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+def test_a_day_summary_not_in_utc_is_served_with_one_warning(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Its day would not be the UTC day the window is filled with, so its end could be early.
+    # Massive cut its day elsewhere than UTC midnight: the row is served with the UTC day's
+    # window, and the session warns once that its dates may not line up with other tables.
+    caplog.set_level(logging.WARNING)
     path = "/v1/open-close/crypto/BTC/USD/2020-10-09"
     body = json.loads(load_fixture(OWNER, "open_close.json"))
     serve(fake_rest, path, json.dumps({**body, "isUTC": False}).encode())
     serve_pairs(fake_rest)
     q = rest_session.crypto.daily_open_close("X:BTCUSD", "2020-10-09")
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^crypto\.daily_open_close: Massive sent a day summary with isUTC false",
-    ):
-        q.fetch()
+    [row] = rows(q.fetch())
+    assert (row["Date"], row["IsUtc"]) == ("2020-10-09", False)
+    rows(q.fetch())  # a second read logs nothing more
+    day = int(datetime(2020, 10, 9, tzinfo=UTC).timestamp()) * NS
+    assert (row["TimestampStart"], row["TimestampEnd"]) == (day, day + 86_400 * NS)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    [warning] = [w for w in warnings if "isUTC false" in w]
+    assert warning.startswith(
+        "crypto.daily_open_close: Massive sent a day summary with isUTC false, so its day "
+        "boundary is not the UTC midnight the other crypto tables use"
+    )
 
 
 # --- End to end: WebSocket -----------------------------------------------------------------------
