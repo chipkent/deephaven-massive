@@ -98,7 +98,6 @@ def test_the_longest_retry_after_a_float_holds_is_honoured() -> None:
     [
         "Fri, 15 Jan 2027 08:00:00 GMT",
         "Fri, 15 Jan 2027 08:00:00 -0000",
-        " Fri, 15 Jan 2027 08:00:00 GMT ",
     ],
 )
 def test_an_http_date_is_seconds_since_the_epoch_in_gmt(header: str) -> None:

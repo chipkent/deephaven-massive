@@ -181,7 +181,7 @@ def http_date_seconds(value: str | None) -> float | None:
     if value is None:
         return None
     try:
-        when = parsedate_to_datetime(value.strip())
+        when = parsedate_to_datetime(value)
     except (TypeError, ValueError):
         return None
     if when.tzinfo is None:
