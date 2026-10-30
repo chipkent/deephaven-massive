@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import time
 import urllib.parse
 from typing import TYPE_CHECKING
@@ -61,6 +62,7 @@ from typing import TYPE_CHECKING
 import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT, http
+from deephaven_massive._massive.net.errors import is_proxy_auth_failure
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.refresh import docs, knowledge_base, snapshot
 
@@ -88,6 +90,8 @@ WEBSOCKET_URL = "https://api.massive.com/specs/websocket.json"
 
 LLMS_URL = "https://massive.com/docs/llms.txt"
 """Where Massive publishes its documentation index."""
+
+_log = logging.getLogger(__name__)
 
 # Connect and read timeouts for one download, in seconds. The specification is about 1 MB.
 _TIMEOUT = urllib3.Timeout(connect=10.0, read=60.0)
@@ -240,8 +244,15 @@ class HttpGetter:
                     proxy_ssl_context=context,
                     ssl_context=context,
                 )
+                _log.debug(
+                    "downloads from %s go through the proxy %s (credentials sent: %s)",
+                    host,
+                    proxy_url,
+                    bool(proxy_headers),
+                )
             else:
                 self._pools[host] = urllib3.PoolManager(ssl_context=context)
+                _log.debug("downloads from %s connect directly, through no proxy", host)
         return self._pools[host]
 
     def __call__(self, url: str) -> bytes:
@@ -254,11 +265,13 @@ class HttpGetter:
             The response body, exactly as received (urllib3 removes any gzip encoding).
 
         Raises:
-            FetchError: If the connection fails, the server still answers 429 after five
-                waits, or it answers anything else but HTTP 200 (a redirect included, since
-                none is followed).
+            FetchError: If the connection fails, the proxy refuses its credentials (HTTP 407 to
+                the tunnel request, which names `HTTPS_PROXY` and never the password), the
+                server still answers 429 after five waits, or it answers anything else but
+                HTTP 200 (a redirect included, since none is followed).
         """
-        pool = self._pool(urllib.parse.urlsplit(url).hostname or "")
+        host = urllib.parse.urlsplit(url).hostname or ""
+        pool = self._pool(host)
         waits = iter(_RATE_LIMIT_WAITS)
         while True:
             try:
@@ -271,6 +284,11 @@ class HttpGetter:
                     redirect=False,
                 )
             except urllib3.exceptions.HTTPError as error:
+                if is_proxy_auth_failure(error):
+                    raise FetchError(
+                        f"GET {url}: the proxy refused its credentials (HTTP 407 for a tunnel "
+                        f"to {host}); check the user and password in HTTPS_PROXY"
+                    ) from error
                 raise FetchError(f"GET {url} failed: {error}") from error
             if response.status == _HTTP_OK:
                 return response.data
@@ -278,7 +296,15 @@ class HttpGetter:
             if response.status != _HTTP_TOO_MANY_REQUESTS or wait is None:
                 raise FetchError(f"GET {url} answered HTTP {response.status}")
             asked = retry_after_seconds(response.headers.get("Retry-After"), time.time())
-            self._sleep(min(wait if asked is None else asked, _MAX_WAIT))
+            waited = min(wait if asked is None else asked, _MAX_WAIT)
+            _log.debug(
+                "GET %s answered HTTP 429; Retry-After asks %s s, the cap is %s s; waiting %s s",
+                url,
+                asked,
+                _MAX_WAIT,
+                waited,
+            )
+            self._sleep(waited)
 
 
 def _download(get: Callable[[str], bytes]) -> list[snapshot.VendorFile]:
