@@ -40,6 +40,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     as_row,
     describe_symbols,
+    pascal_case,
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._types import override
@@ -891,3 +892,17 @@ def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
     diagnostics.release()
     assert source.pulls == 2
     assert "failed to update the rate_limits table" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("sip_timestamp", "SipTimestamp"),
+        ("last_trade.sip_timestamp", "LastTradeSipTimestamp"),
+        ("id", "Id"),
+        ("filer_cik", "FilerCik"),
+        ("alreadyCamel", "AlreadyCamel"),
+    ],
+)
+def test_pascal_case(path: str, expected: str) -> None:
+    assert pascal_case(path) == expected

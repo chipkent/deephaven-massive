@@ -23,7 +23,7 @@ module does the work they share when a dataset method is called:
   dataset methods.
 
 Filter keys and value kinds are checked against the generated parameters of the dataset's REST
-paths (`Catalog.check_filters` in `_datasets/catalog.py`) synchronously at construction, so a
+paths (`check_filters` in `_datasets/filters.py`) synchronously at construction, so a
 bad filter fails before any verb runs, and the `Request` stores each value as the check parsed
 it (ISO-8601 text of a date parameter becomes a `date`), never the caller's text. Everything
 here runs synchronously on the calling thread, makes no network call, and creates no table.
@@ -39,13 +39,14 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 from deephaven.table import Table
 
 from deephaven_massive._config import require_positive_int
-from deephaven_massive._datasets.catalog import (
+from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
+from deephaven_massive._datasets.filters import (
+    check_filters,
     filter_key,
     param_family,
     symbol_family,
     takes_instants,
 )
-from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
@@ -469,7 +470,7 @@ def _calendar_axis(core: SessionCore, spec: DatasetSpec) -> str | None:
 
     An axis is a calendar date when one of the dataset's REST paths takes its lower parameter
     as a date of a calendar-date row field (`ex_dividend_date`, `filing_date`, the futures
-    `session_end_date`), not an instant (`catalog.takes_instants`).
+    `session_end_date`), not an instant (`filters.takes_instants`).
 
     Args:
         core: The session core, whose catalog holds the generated paths.
@@ -579,7 +580,7 @@ def build_query(
             names differently from the wire (`{"type": "ticker_type"}`), so a refused filter
             names the argument to use; None when every argument has its wire name.
         filters: The `filters` mapping, by key: a wire parameter name with its dots written
-            as underscores. `Catalog.check_filters` validates it and parses each value into
+            as underscores. `filters.check_filters` validates it and parses each value into
             the form that is sent (ISO-8601 text of a date or timestamp parameter becomes a
             `date` or an aware `datetime`, and a list parameter's value the tuple of its
             comma-separated items); the `Request` holds those parsed values.
@@ -655,7 +656,7 @@ def build_query(
                 (k, _value(k, v)) for k, v in {**(params or {}), **library}.items() if v is not None
             )
         ),
-        filters=core.catalog.check_filters(spec, dict(given), typed=params or {}),
+        filters=check_filters(core.catalog, spec, dict(given), typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
     return cls(core, spec, request)

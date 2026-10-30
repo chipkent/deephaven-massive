@@ -20,10 +20,10 @@ import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,

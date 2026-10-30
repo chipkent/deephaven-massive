@@ -63,7 +63,7 @@ class Request:
         params: The dataset's other typed parameters, by wire parameter name, sorted by name.
         filters: The `filters` mapping, by key (a wire parameter name with its dots written as
             underscores), sorted by name. Each value is the one sent, as
-            `Catalog.check_filters` parsed it: ISO-8601 text of a date or timestamp parameter
+            `filters.check_filters` parsed it: ISO-8601 text of a date or timestamp parameter
             is held as a `date` or an aware `datetime`, never as the text.
         limit: The cap on the total number of rows across pages, or None for every row. It is
             not a wire parameter: the page size is internal (`DatasetSpec.page_size`), and

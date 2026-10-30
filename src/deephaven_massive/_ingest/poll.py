@@ -74,8 +74,8 @@ import pyarrow.compute as pc
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 
+from deephaven_massive._datasets.column_descriptions import RAW_SYMBOL
 from deephaven_massive._datasets.row_times import INSERT
-from deephaven_massive._datasets.schema import RAW_SYMBOL
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import (

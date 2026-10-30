@@ -23,8 +23,8 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_ORDER
 from deephaven_massive._datasets.column_reference import (
-    _TRANSPORT_ORDER,
     COMMAND,
     SyncResult,
     anchor,
@@ -118,7 +118,7 @@ def test_the_session_method_s_section_says_why_it_is_on_the_reference_page() -> 
 def test_the_wire_columns_follow_the_order_of_every_supplied_by() -> None:
     # The page orders the wire-field columns by transport; every column of the real catalog
     # lists its transports in that same order.
-    rank = {transport: index for index, transport in enumerate(_TRANSPORT_ORDER)}
+    rank = {transport: index for index, transport in enumerate(TRANSPORT_ORDER)}
     for spec in CATALOG.by_name.values():
         for column in CATALOG.dataset_schema(spec).columns:
             ranks = [rank[t] for t in column.supplied_by]

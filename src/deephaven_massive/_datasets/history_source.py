@@ -46,7 +46,7 @@ from deephaven_massive._datasets.bar_periods import (
     futures_bar_request,
     intraday,
 )
-from deephaven_massive._datasets.catalog import filter_key, param_family, timespan_key
+from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import (
     DAY_ZONES,
     NEW_YORK,
@@ -58,6 +58,7 @@ from deephaven_massive._datasets.dates import (
     day_zone,
     midnight,
 )
+from deephaven_massive._datasets.filters import filter_key, param_family
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
     futures_session,

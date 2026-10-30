@@ -12,7 +12,8 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.schema import ColumnType, required_fields
+from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import indicators

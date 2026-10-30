@@ -22,14 +22,13 @@ to keep.
   (`row_times.stamp_rule`). Every block's rows then get the library's time columns
   (`row_times.TimeRule`), with `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields
-  (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
-  columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files
-  do not carry is null and a column a kind widens (an integer size in a `double` column) is
-  widened (`schema.widen`). A file's surviving rows become one static Deephaven table per
-  `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at
-  the end. No block is ever
-  converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on its own
-  I/O threads, so a reader holds about 32 blocks of decompressed text plus at most
+  (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`source_columns.rename`), and
+  the columns are the dataset's merged schema (`Catalog.dataset_schema`), so a column the files do
+  not carry is null and a column a kind widens (an integer size in a `double` column) is widened
+  (`source_columns.widen`). A file's surviving rows become one static Deephaven table per
+  `_TABLE_BLOCKS` blocks of data (usually one table per file), and the tables are merged at the end.
+  No block is ever converted to Python objects. Arrow reads about 32 blocks ahead of the consumer on
+  its own I/O threads, so a reader holds about 32 blocks of decompressed text plus at most
   `_TABLE_BLOCKS` blocks of surviving rows, whatever the file's length.
 
 Rows come in partition-date order, then (for futures) venue order (CME, CBOT, NYMEX, COMEX),
@@ -115,6 +114,7 @@ import pyarrow as pa
 from deephaven import merge
 
 from deephaven_massive._datasets.catalog import timespan_key
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.dates import TimeRange, is_trading_day
 from deephaven_massive._datasets.history_source import (
     NOT_PUBLISHED,
@@ -131,13 +131,7 @@ from deephaven_massive._datasets.row_times import (
     time_rule,
     within,
 )
-from deephaven_massive._datasets.schema import (
-    OPTION_ROOT,
-    RAW_SYMBOL,
-    rename,
-    required_fields,
-    widen,
-)
+from deephaven_massive._datasets.source_columns import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
     WireSymbols,
     option_roots,
@@ -180,7 +174,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._datasets.schema import ColumnType, SourceColumn
+    from deephaven_massive._datasets.schema import ColumnType
+    from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
@@ -350,7 +345,7 @@ class _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
         The headers to read are the generated fields of `source(FLAT_FILES, prefix)`, renamed
-        for the dataset (`schema.rename`), and the schema is the dataset's merged schema.
+        for the dataset (`source_columns.rename`), and the schema is the dataset's merged schema.
         `DatasetSpec` guarantees, when it is created, that every prefix declares its `symbol`
         and `time` keys from its own columns, and its `session` key for futures.
 
