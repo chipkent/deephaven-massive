@@ -3,13 +3,14 @@
 Each test records what Massive sent (`evidence`). A test marked `settles` asserts only that the
 requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
 asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
-from the wire REST and flat-file clients, because the library moves or refuses the very stamps in
-question; the library's own answer to the same request is recorded beside them. How to run these
+from the wire REST and flat-file clients, because the library moves the very stamps in question;
+the library's own answer to the same request is recorded beside them. How to run these
 tests is in `docs/live-tests.md`.
 
 The library's rule under test: a crypto bar of one day covers one UTC day and is stamped at
 00:00 UTC of it, from every source; a 1-day bar stamped anywhere else in its day but its first
-or last millisecond fails the request with `MassiveError` rather than being relabelled.
+or last millisecond is still served, labelled by the UTC day its stamp falls on, and logs a
+WARNING that it may cover other days.
 """
 
 from __future__ import annotations
@@ -185,7 +186,8 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     makes of the same requests. Reading it: stamps at 00:00 UTC that agree everywhere confirm
     the library's day cut. Stamps at midnight New York time (04:00 or 05:00 UTC) mean REST
     uses another day cut or only another stamp; the minute-rebuild test says which, and the
-    library refuses those bars with `MassiveError` (shown here) until that is decided. A
+    library serves those bars labelled by the UTC day their stamp falls on (shown here), with
+    a WARNING in the log, until that is decided. A
     grouped stamp at no day boundary (such as 20:48 UTC) is the same bar with a write-time
     stamp if its OHLCV equal the range bar's, otherwise another day cut. With Currencies on
     Basic, which allows 5 requests a minute, it leaves out the library's `previous_day_bar`

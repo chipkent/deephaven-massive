@@ -15,6 +15,7 @@ import csv
 import io
 import itertools
 import json
+import logging
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -702,29 +703,53 @@ def test_previous_day_bar_reads_the_previous_day(
         ] == [("X:BTCUSD", "2020-11-15", NOV_15 * MS, (NOV_15 + DAY_MS) * MS, 16035.9)]
 
 
-def test_a_daily_bar_stamped_inside_its_utc_day_fails_loudly(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
+def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+    ]
+
+
+def test_a_daily_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The documented sample sits at midnight New York time, 05:00 UTC: another day cut.
+    caplog.set_level(logging.WARNING)
+    # The documented sample sits at midnight New York time, 05:00 UTC: maybe another day cut.
+    # The bar is served, labelled by the UTC day its stamp falls on.
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
-    q = rest_session.crypto.previous_day_bar("X:BTCUSD")
-    with pytest.raises(
-        dm.MassiveError,
-        match=(
-            r"^crypto\.previous_day_bar: a 1-day bar from /v2/aggs/ticker/\{cryptoTicker\}/prev "
-            r"is stamped 2020-11-15T05:00:00(?s:.*)bars\(symbols, dm\.Timespan\.DAY\)\.history\(\)"
-        ),
-    ):
-        q.fetch()
+    out = rows(rest_session.crypto.previous_day_bar("X:BTCUSD").fetch())
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
+        ("2020-11-15", NOV_15 * MS, (NOV_15 + DAY_MS) * MS)
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert warning.startswith(
+        "crypto.previous_day_bar: a 1-day bar from /v2/aggs/ticker/{cryptoTicker}/prev is "
+        "stamped 2020-11-15T05:00:00+00:00, which is not a stamp Massive is known to use"
+    )
+    caplog.clear()
+    # The grouped-daily samples sit at no day boundary at all; both bars are served.
     path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
     serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"/v2/aggs/grouped/locale/global/market/crypto/\{date\} is stamped 2020-02-02T20:48",
-    ):
+    day = int(datetime(2020, 2, 2, tzinfo=UTC).timestamp()) * 1000
+    every = rows(
         rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY).history(
             "2020-02-02", "2020-02-02", source=dm.HistorySource.REST
         )
+    )
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in every] == [
+        ("X:ARDRUSD", "2020-02-02", day * MS),
+        ("X:NGCUSD", "2020-02-02", day * MS),
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert "/v2/aggs/grouped/locale/global/market/crypto/{date} is stamped 2020-02-02T20:48" in (
+        warning
+    )
 
 
 # X:BTCXYZ is in no ticker list: this path's {from}/{to} are the range, not the pair's two
@@ -1009,12 +1034,14 @@ def test_one_flat_file_block_round_trips(
     assert {r["Date"] for r in found} == {"2023-03-28"}
 
 
-def test_a_flat_file_day_bar_stamped_inside_its_utc_day_fails_loudly(
+def test_a_flat_file_day_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
     *,
     s3_session: dm.MassiveSession,
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.WARNING)
     stamp = int(datetime(2023, 3, 28, 4, tzinfo=UTC).timestamp()) * 10**9  # New York midnight
     csv_text = (
         "ticker,volume,open,close,high,low,window_start,transactions\n"
@@ -1022,12 +1049,16 @@ def test_a_flat_file_day_bar_stamped_inside_its_utc_day_fails_loudly(
     )
     fake_s3.put("global_crypto/day_aggs_v1/2023/03/2023-03-28.csv.gz", make_csv_gz(csv_text))
     q = s3_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^crypto\.bars: a 1-day bar from the flat files global_crypto/day_aggs_v1 is "
-        r"stamped 2023-03-28T04:00:00",
-    ):
-        q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES)
+    out = rows(q.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES))
+    day = int(datetime(2023, 3, 28, tzinfo=UTC).timestamp()) * 10**9
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in out] == [
+        ("X:BTCUSD", "2023-03-28", day)
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert warning.startswith(
+        "crypto.bars: a 1-day bar from the flat files global_crypto/day_aggs_v1 is stamped "
+        "2023-03-28T04:00:00+00:00, which is not a stamp Massive is known to use"
+    )
 
 
 def test_a_flat_file_that_dashes_its_pairs_is_read(
