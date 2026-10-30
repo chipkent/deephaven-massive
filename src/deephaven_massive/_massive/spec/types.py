@@ -436,6 +436,10 @@ class Param:
         unit: The unit an instant is sent in, set exactly when `kind` is `TIMESTAMP`: `NS` for
             the trade and quote filters, `MS` for the indicator filters. An instant is sent as
             an exact integer count of it.
+        default: The value Massive's specification documents as the parameter's default, as
+            the JSON scalar it gives (`50` for an indicator's `window`, `"day"` for its
+            `timespan`, `True` for `adjusted`); `None` when it documents none, or documents
+            one that is not a scalar.
     """
 
     name: str
@@ -443,6 +447,7 @@ class Param:
     in_path: bool = False
     values: tuple[str, ...] = ()
     unit: WireUnit | None = None
+    default: str | int | float | bool | None = None
 
     def __post_init__(self) -> None:
         """Check that values are given exactly for an enum, and a unit exactly for a timestamp.

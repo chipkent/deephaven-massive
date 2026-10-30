@@ -579,11 +579,23 @@ def test_list_datasets_filter_by_optional_symbols(
         make(dm.ALL)
 
 
+def a_sort_field(spec: DatasetSpec) -> str:
+    # A `sort` every REST path of the dataset takes: one of the listed fields where the spec
+    # lists them, else a field of the rows of the first path.
+    paths = [cast("RestPath", CATALOG.source(Transport.REST, p)) for p in spec.rest_paths]
+    sorts = [p for path in paths for p in path.params if p.name == "sort"]
+    listed = [p.values for p in sorts if p.values]
+    if listed:
+        return listed[0][0]
+    return paths[0].fields[0].wire_key
+
+
 @pytest.mark.parametrize("name", [*LIST_WITH_SYMBOLS, *LIST_WITHOUT_SYMBOLS])
 def test_list_datasets_take_the_list_block(massive_session: dm.MassiveSession, name: str) -> None:
-    query = factory(massive_session, name)(sort="x", order=dm.Order.DESC, limit=25)
+    sort = a_sort_field(spec_of(name))
+    query = factory(massive_session, name)(sort=sort, order=dm.Order.DESC, limit=25)
     assert type(query) is query_class(spec_of(name))
-    assert dict(query._request.params) == {"order": dm.Order.DESC, "sort": "x"}
+    assert dict(query._request.params) == {"order": dm.Order.DESC, "sort": sort}
     assert query._request.limit == 25
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         factory(massive_session, name)(order="asc")
@@ -670,8 +682,14 @@ def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession)
     query = filings.institutional_holdings(filer_cik="0001067983")
     assert dict(query._request.params) == {"filer_cik": "0001067983"}
     assert query._request.symbols is None
+    several = filings.institutional_holdings(filer_cik=["0001067983", "0000102909"])
+    assert dict(several._request.params) == {"filer_cik.any_of": ("0001067983", "0000102909")}
     with pytest.raises(TypeError, match="filer_cik must be a str"):
         filings.institutional_holdings(filer_cik=cast("Any", 1067983))
+    with pytest.raises(ValueError, match="filer_cik is empty; pass None for every filer"):
+        filings.institutional_holdings(filer_cik=[])
+    with pytest.raises(ValueError, match=r"^filer_cik_any_of is set through its own argument"):
+        filings.institutional_holdings(filters={"filer_cik_any_of": ["0001067983"]})
 
 
 @pytest.mark.parametrize(

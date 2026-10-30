@@ -126,7 +126,7 @@ from deephaven_massive._datasets.symbols import (
     forex_codes,
     option_roots,
     symbol_class,
-    unknown_symbol_message,
+    unreadable_symbol_message,
 )
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
@@ -135,8 +135,8 @@ from deephaven_massive._datasets.timestamps import (
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
+    OnError,
     Timespan,
-    UnknownSymbols,
     subscription_of,
 )
 from deephaven_massive._errors import MassiveError, PermanentError, from_wire
@@ -658,7 +658,9 @@ def _base(
 
     Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
     in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
-    segment, the indicators' query parameter); `Request.adjusted` when it is set; and the
+    segment, the indicators' query parameter); `Request.adjusted` when it is set and the path
+    takes it (a path without it, the crypto indicators', serves prices no split changes, so
+    `True` is left out there); and the
     futures `resolution` and the page size when the path takes them. The page size is
     `DatasetSpec.page_size`, or `Request.limit` when that is smaller.
 
@@ -673,8 +675,8 @@ def _base(
         `(path parameters, query parameters)`.
 
     Raises:
-        ValueError: If `Request.adjusted` is set and the path has no `adjusted` parameter
-            (the crypto indicators); an explicit value is never dropped.
+        ValueError: If `Request.adjusted` is False and the path has no `adjusted` parameter
+            (the crypto indicators): unadjusted prices are never dropped silently.
 
     Any other parameter the caller set that the path does not take raises the `ValueError` of
     `_caller_params`.
@@ -685,10 +687,10 @@ def _base(
         path["multiplier"] = request.multiplier
     if request.timespan is not None and "timespan" in params:
         (path if params["timespan"].in_path else query)["timespan"] = request.timespan
-    if request.adjusted is not None:
-        if "adjusted" not in params:
-            raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
+    if "adjusted" in params and request.adjusted is not None:
         query["adjusted"] = request.adjusted
+    elif request.adjusted is False:
+        raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if spec.page_size is not None and "limit" in params:
@@ -839,7 +841,7 @@ class _Converter:
         spec: DatasetSpec,
         rest_path: RestPath,
         *,
-        unknown_symbols: UnknownSymbols,
+        unreadable_symbols: OnError,
     ) -> _Converter:
         """Prepare the conversion from the path's generated fields and the dataset's schema.
 
@@ -847,13 +849,13 @@ class _Converter:
             catalog: The catalog, for the dataset's merged schema.
             spec: The dataset.
             rest_path: The path.
-            unknown_symbols: The session's rule for a symbol spelling the library cannot
-                read; `WARN` also adds the `RawSymbol` column to the schema.
+            unreadable_symbols: The session's setting for a symbol spelling the library
+                cannot read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
 
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.
@@ -866,7 +868,7 @@ class _Converter:
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
             required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
             symbols=WireSymbols(
-                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
             ),
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
             time_name=time_column(spec.times),
@@ -926,8 +928,8 @@ class _Converter:
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
-                session's `unknown_symbols` is `FAIL`; under `WARN` such a row keeps a null
-                `Symbol` and the text in `RawSymbol`.
+                session's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a
+                row keeps a null `Symbol` and the text in `RawSymbol`.
 
         A timestamp out of range raises the `UnitMismatchError` of `timestamps.instants`.
         """
@@ -948,8 +950,8 @@ class _Converter:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
                     read = self.symbols.read(values, {})
-                    if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
-                        raise RowDataError(unknown_symbol_message(self.dataset, read.unknown))
+                    if read.unreadable and not self.symbols.keeps:
+                        raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
                     values, raw = read.symbols, read.raw
                 if source.unit is not None:
                     label = f"{self.dataset}.{name}"
@@ -1229,8 +1231,8 @@ class RestReader:
         catalog: The dataset catalog.
         drift: The session's drift registry.
         max_concurrency: The most requests of one fan-out at a time.
-        unknown_symbols: The session's rule for a symbol spelling the library cannot read
-            (`MassiveConfig.unknown_symbols`).
+        unreadable_symbols: The session's setting for a symbol spelling the library cannot
+            read (`MassiveConfig.unreadable_symbols`).
         threads: The name prefix of the threads of a fan-out pool this reader makes, such as
             `"massive #1 call-7 rest"`: the session, the call, and the transport.
         exec_ctx: The session's execution context, which tells whether a read's thread holds
@@ -1241,7 +1243,7 @@ class RestReader:
     catalog: Catalog
     drift: DriftRegistry
     max_concurrency: int
-    unknown_symbols: UnknownSymbols
+    unreadable_symbols: OnError
     threads: str
     exec_ctx: ExecutionContext
 
@@ -1526,7 +1528,7 @@ class RestReader:
         session raises `MassiveError("... is closed")`.
         """
         converter = _Converter.build(
-            self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
+            self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
         )
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
@@ -1896,7 +1898,7 @@ class RestReader:
         """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
 
         A reactive symbol table can route a new symbol to a path that lacks a parameter the
-        caller set (an explicit `adjusted` on the crypto indicators). Retrying cannot fix that,
+        caller set (`adjusted=False` on the crypto indicators). Retrying cannot fix that,
         so its `ValueError` becomes `UnsupportedParameterError`, which fails the table. Before
         reading, the cycle's requests per bucket go to `pace`, which warns once when the paced
         ones outlast the interval.
@@ -2096,7 +2098,7 @@ class RestReader:
             requests += made
         if not tables:
             schema = self.catalog.dataset_schema(
-                spec, raw_symbol=self.unknown_symbols is UnknownSymbols.WARN
+                spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
@@ -2156,7 +2158,7 @@ class RestEndpoints:
             core.catalog,
             core.drift,
             core.config.max_concurrency,
-            core.config.unknown_symbols,
+            core.config.unreadable_symbols,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
         )

@@ -105,11 +105,12 @@ _MERGE: Final = (
 merge tables of different classes."""
 
 _RAW_SYMBOL_NOTE: Final = (
-    "In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or "
-    "`MASSIVE_UNKNOWN_SYMBOLS=warn`), {datasets} also {have} a `RawSymbol` String column, which "
-    "holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is "
-    "null, and `RawSymbol` is null on every other row. The tables below show the default "
-    "session, without it."
+    "{datasets} {have} a `RawSymbol` String column, which holds Massive's spelling of a "
+    "symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on "
+    "every other row. It is the one column whose presence depends on a setting: a session "
+    "with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) "
+    "fails on such a row instead and has no `RawSymbol`. The tables below show the default "
+    "session, with it."
 )
 """The paragraph under the guide of a page whose datasets read their symbol from rows,
 formatted with those datasets' call paths and the verb that agrees with their number."""
@@ -194,18 +195,19 @@ def render(catalog: Catalog, provenance: Provenance) -> dict[str, str]:
     itself (`m.snapshots`), has a page of its own, named after it. A page starts with a title, a
     short guide, and, where a dataset's kind has other members, the recipe that merges tables of
     different asset classes on their shared columns, then, when some of its datasets read their
-    symbol from rows, a note that names them and the `RawSymbol` column they gain in a session
-    with `UnknownSymbols.WARN` (the tables show the default session), then holds one section per
-    dataset of the namespace, in declaration order: the anchor (`anchor`), a heading with the
-    dataset's call path (`call_path`), its `DatasetSpec.summary`, and a table with one row per
-    column in result order. The table's columns are **Column**, **Deephaven type** (the
-    `ColumnType` value, such as `Instant`), **Description**, **Supplied by** (the transports
-    that fill the column, as `REST`, `flat files`, and `WebSocket`), and one wire-field column
-    per transport the dataset reads (`REST field`, `Flat-file field`, `WebSocket field`), each
-    listing the distinct wire keys behind the column in source order, or `request` for a key
-    filled from the request. Under the table comes the sorted, distinct list of Massive's pages
-    documenting the dataset's own sources (`_dataset_urls`), omitted when they have none. A
-    footer gives the generator command and the date Massive's documentation was fetched.
+    symbol from rows, a note that names them and their `RawSymbol` column, which a session with
+    `unreadable_symbols=dm.OnError.RAISE` lacks (the tables show the default session, with it),
+    then holds one section per dataset of the namespace, in declaration order: the anchor
+    (`anchor`), a heading with the dataset's call path (`call_path`), its
+    `DatasetSpec.summary`, and a table with one row per column in result order. The table's
+    columns are **Column**, **Deephaven type** (the `ColumnType` value, such as `Instant`),
+    **Description**, **Supplied by** (the transports that fill the column, as `REST`,
+    `flat files`, and `WebSocket`), and one wire-field column per transport the dataset reads
+    (`REST field`, `Flat-file field`, `WebSocket field`), each listing the distinct wire keys
+    behind the column in source order, or `request` for a key filled from the request. Under
+    the table comes the sorted, distinct list of Massive's pages documenting the dataset's own
+    sources (`_dataset_urls`), omitted when they have none. A footer gives the generator command
+    and the date Massive's documentation was fetched.
 
     A `|` in a cell is escaped with a backslash, no line has trailing whitespace, and every
     page ends in exactly one newline, so the pages pass the repository's commit hooks
@@ -267,7 +269,7 @@ def _page(
     kept = [
         f"`{call_path(spec)}`"
         for spec in specs
-        if RAW_SYMBOL in catalog.dataset_schema(spec, raw_symbol=True).column_names
+        if RAW_SYMBOL in catalog.dataset_schema(spec).column_names
     ]
     if kept:
         named = " and ".join(kept[-2:])
@@ -312,7 +314,8 @@ def _section(spec: DatasetSpec, catalog: Catalog, provenance: Provenance) -> lis
         _row(header),
         _row(["---"] * len(header)),
     ]
-    lines.extend(_row(_cells(column, wire)) for column in catalog.dataset_schema(spec).columns)
+    schema = catalog.dataset_schema(spec)  # the default session's columns, RawSymbol included
+    lines.extend(_row(_cells(column, wire)) for column in schema.columns)
     urls = _dataset_urls(spec, provenance)
     if urls:
         lines.extend(("", _LINKS_HEADING, ""))

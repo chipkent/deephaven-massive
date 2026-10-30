@@ -338,20 +338,24 @@ def _contract_type(value: object) -> ContractType | None:
 
 
 def _expired(value: object) -> bool | None:
-    """Check the optional `expired` argument of the contracts.
+    """Check the `expired` argument of the contracts and return what is sent.
+
+    `False` is Massive's default, so it is not sent: the request is then the same as one that
+    never mentions `expired`, and the per-contract path, which has no such parameter, accepts
+    it.
 
     Args:
         value: The argument as passed.
 
     Returns:
-        The value: True, False, or None.
+        True to send `expired=true`; None for False, which sends nothing.
 
     Raises:
-        TypeError: If the value is neither None nor a `bool`.
+        TypeError: If the value is not a `bool`.
     """
-    if value is not None and not isinstance(value, bool):
+    if not isinstance(value, bool):
         raise TypeError(f"expired must be a bool, not {type(value).__name__}")
-    return value
+    return True if value else None
 
 
 class _Options(Namespace):
@@ -859,12 +863,12 @@ class _Options(Namespace):
 
     def contracts(
         self,
-        *,
         symbols: Symbols | None = None,
+        *,
         underlying: str | None = None,
         contract_type: ContractType | None = None,
         as_of: DateLike | None = None,
-        expired: bool | None = None,
+        expired: bool = False,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
@@ -878,7 +882,7 @@ class _Options(Namespace):
         narrowed by the other arguments; with `symbols` it reads each contract's own endpoint
         (`/v3/reference/options/contracts/{options_ticker}`), one request per contract, which
         takes only `as_of`: with `symbols`, a verb raises `ValueError` before any request if
-        `underlying`, `contract_type`, `expired`, `sort`, `order`, or a filter is set.
+        `underlying`, `contract_type`, `expired=True`, `sort`, `order`, or a filter is set.
         `poll()` re-reads it each interval.
 
         `limit` caps the total number of rows across pages (None, the default, returns every
@@ -919,8 +923,8 @@ class _Options(Namespace):
                 date text such as `"2025-3-3"`, a Java `LocalDate`, or a day-precision
                 `numpy.datetime64` (a `datetime` or an instant raises `ValueError`: it is a
                 calendar date); None for today.
-            expired: True for expired contracts only, False for active ones only; None for
-                the endpoint's default, active contracts.
+            expired: False, the default (Massive's), lists contracts still trading; True lists
+                expired ones only. False is not sent, since it is the endpoint's default.
             sort: The field to sort by: `"ticker"`, `"underlying_ticker"`,
                 `"expiration_date"`, or `"strike_price"`; None for the endpoint's order.
             order: The sort direction; None for the endpoint's default.

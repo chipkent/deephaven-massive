@@ -176,7 +176,7 @@ def test_the_wire_details_of_the_specs() -> None:
 
 
 def columns(spec: DatasetSpec) -> list[tuple[str, str]]:
-    return [(c.name, c.type.value) for c in CRYPTO.dataset_schema(spec).columns]
+    return [(c.name, c.type.value) for c in CRYPTO.dataset_schema(spec, raw_symbol=False).columns]
 
 
 def test_trades_schema() -> None:

@@ -493,7 +493,7 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
         underlying="NVDA",
         contract_type=dm.ContractType.CALL,
         as_of="2025-01-02",
-        expired=False,
+        expired=True,
         filters={"strike_price_gte": 100, "expiration_date_lte": date(2026, 1, 16)},
     )
     assert type(listed) is Query
@@ -502,14 +502,18 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
         "params": {
             "as_of": date(2025, 1, 2),
             "contract_type": dm.ContractType.CALL,
-            "expired": False,
+            "expired": True,
             "underlying_ticker": "NVDA",
         },
         "filters": {"expiration_date_lte": date(2026, 1, 16), "strike_price_gte": 100},
     }
-    described = contracts(symbols=[CONTRACT])
+    described = contracts([CONTRACT])
     assert request_of(described) == {"symbols": (CONTRACT,), "params": {}, "filters": {}}
+    assert request_of(contracts(symbols=[CONTRACT])) == request_of(described)
     assert request_of(contracts()) == {"symbols": None, "params": {}, "filters": {}}
+    # False, the default, is Massive's own, so it is not sent, also beside named contracts.
+    assert request_of(contracts(expired=False)) == request_of(contracts())
+    assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
 
 
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
@@ -931,7 +935,7 @@ def test_contracts_list_or_read_each_contract(
             underlying="AAPL",
             contract_type=dm.ContractType.CALL,
             as_of=date(2021, 11, 1),
-            expired=False,
+            expired=True,
             sort="strike_price",
             order=dm.Order.DESC,
             filters={"strike_price_lte": 90},
@@ -944,7 +948,7 @@ def test_contracts_list_or_read_each_contract(
                 "underlying_ticker": ["AAPL"],
                 "contract_type": ["call"],
                 "as_of": ["2021-11-01"],
-                "expired": ["false"],
+                "expired": ["true"],
                 "sort": ["strike_price"],
                 "order": ["desc"],
                 "strike_price.lte": ["90"],
@@ -963,7 +967,7 @@ def test_contracts_list_or_read_each_contract(
     fake_rest.reply(
         wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
     )
-    described = rows(rest_session.options.contracts(symbols=one, as_of="2021-11-01").fetch())
+    described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch())
     assert sent(fake_rest)[-1] == (
         f"/v3/reference/options/contracts/{one}",
         {"as_of": ["2021-11-01"]},

@@ -51,7 +51,7 @@ NAMES = [
 
 
 def _types(spec: DatasetSpec) -> dict[str, ColumnType]:
-    return {c.name: c.type for c in CATALOG.dataset_schema(spec).columns}
+    return {c.name: c.type for c in CATALOG.dataset_schema(spec, raw_symbol=False).columns}
 
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
@@ -101,7 +101,7 @@ def test_ticker_events_take_the_symbol_from_the_request() -> None:
         "id", from_request=True
     )
     # The event's `Date` is the vendor's date, not a trading day: reference rows have none.
-    assert CATALOG.dataset_schema(spec).column_names == (
+    assert CATALOG.dataset_schema(spec, raw_symbol=False).column_names == (
         "Symbol",
         "Date",
         "Type",
@@ -115,7 +115,11 @@ def test_related_companies_name_the_peer_and_the_company_asked_about() -> None:
     spec = reference.RELATED_COMPANIES
     keys = spec.keys_for(R, "/v1/related-companies/{ticker}")
     assert keys == SourceKeys(symbol=KeySpec("Ticker"), fanout=KeySpec("ticker", from_request=True))
-    assert CATALOG.dataset_schema(spec).column_names == ("Symbol", "Underlying", "TimestampInsert")
+    assert CATALOG.dataset_schema(spec, raw_symbol=False).column_names == (
+        "Symbol",
+        "Underlying",
+        "TimestampInsert",
+    )
     assert spec.poll_keys == ("Underlying", "Symbol")
 
 
@@ -184,13 +188,13 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     assert query._spec is reference.TICKERS
     assert query._request == Request(params=(("active", True),))
     full = ref.tickers(
-        symbols=["MSFT", "AAPL"],
+        ["MSFT", "AAPL"],
         market=dm.Market.STOCKS,
         ticker_type=dm.TickerType.CS,
         exchange="XNAS",
         cusip="037833100",
         cik="0000320193",
-        date="2025-01-02",
+        as_of="2025-01-02",
         active=False,
         search="apple",
         sort="ticker",
@@ -219,15 +223,15 @@ def test_tickers_query(massive_session: dm.MassiveSession) -> None:
 
 def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
-    details = ref.ticker_details("AAPL", date=date(2024, 1, 2))
+    details = ref.ticker_details("AAPL", as_of=date(2024, 1, 2))
     assert details._spec is reference.TICKER_DETAILS
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
     # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
-        ref.ticker_details("AAPL", date=early)
-    with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
-        ref.tickers(date=early)
+    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+        ref.ticker_details("AAPL", as_of=early)
+    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+        ref.tickers(as_of=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)
     )
@@ -275,7 +279,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
         limit=50,
     )
     assert ref.news()._request == Request()
-    assert ref.news(symbols=["AAPL"])._request == Request(symbols=("AAPL",))
+    assert ref.news(["AAPL"])._request == Request(symbols=("AAPL",))
 
 
 def test_news_takes_a_watchlist(massive_session: dm.MassiveSession) -> None:
@@ -379,9 +383,9 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     with pytest.raises(TypeError, match="active must be a bool, not NoneType"):
         ref.tickers(active=None)
     with pytest.raises(ValueError, match="needs a timezone"):
-        ref.tickers(date="2025-01-02T09:30")
+        ref.tickers(as_of="2025-01-02T09:30")
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
-        ref.ticker_details("AAPL", date="soon")
+        ref.ticker_details("AAPL", as_of="soon")
     with pytest.raises(ValueError, match="types is empty"):
         ref.ticker_events("AAPL", types=[])
     with pytest.raises(TypeError, match="types must hold only str"):
@@ -394,6 +398,8 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     # A reserved wire name names the factory's argument, which may be spelled differently.
     with pytest.raises(ValueError, match=r"^type is set through its own argument, ticker_type="):
         ref.tickers(filters={"type": "CS"})
+    with pytest.raises(ValueError, match=r"^date is set through its own argument, as_of="):
+        ref.tickers(filters={"date": "2025-01-02"})
     with pytest.raises(ValueError, match=r"^id_gte is set through its own argument, condition_id="):
         ref.conditions(filters={"id_gte": 1})
     with pytest.raises(ValueError, match="published_utc_gte is set through start= and end="):
@@ -535,7 +541,7 @@ def test_tickers_fetch(
     fake_rest.reply("/v3/reference/tickers", sample(load_fixture, "tickers"))
     out = dh_to_pylist(
         rest_session.reference.tickers(
-            symbols="A", market=dm.Market.STOCKS, ticker_type=dm.TickerType.CS, date="2021-04-25"
+            "A", market=dm.Market.STOCKS, ticker_type=dm.TickerType.CS, as_of="2021-04-25"
         ).fetch()
     )
     assert sent(fake_rest) == [
@@ -565,7 +571,7 @@ def test_tickers_without_symbols_list_every_ticker_and_symbols_fan_out(
     fake_rest.reply("/v3/reference/tickers", Reply(envelope([])))
     rest_session.reference.tickers().fetch()
     assert sent(fake_rest) == [("/v3/reference/tickers", {"active": ["true"], "limit": ["1000"]})]
-    rest_session.reference.tickers(symbols=["MSFT", "AAPL"]).fetch()
+    rest_session.reference.tickers(["MSFT", "AAPL"]).fetch()
     # The per-symbol requests run concurrently, so they arrive in any order.
     fanned = sorted(params["ticker"] for _, params in sent(fake_rest)[1:])
     assert fanned == [["AAPL"], ["MSFT"]]
@@ -580,7 +586,7 @@ def test_ticker_details_fetch_one_request_per_symbol(
     dh_to_pylist: ToRows,
 ) -> None:
     fake_rest.reply("/v3/reference/tickers/AAPL", sample(load_fixture, "ticker_details"))
-    out = dh_to_pylist(rest_session.reference.ticker_details("AAPL", date="2024-01-02").fetch())
+    out = dh_to_pylist(rest_session.reference.ticker_details("AAPL", as_of="2024-01-02").fetch())
     assert sent(fake_rest) == [("/v3/reference/tickers/AAPL", {"date": ["2024-01-02"]})]
     assert [(r["Symbol"], r["AddressCity"], r["ListDate"]) for r in out] == [
         ("AAPL", "Cupertino", "1980-12-12")
@@ -618,6 +624,7 @@ def test_related_companies_name_the_peer_and_the_ticker_asked_about(
     assert {k: v for k, v in out[0].items() if k != "TimestampInsert"} == {
         "Symbol": "MSFT",
         "Underlying": "AAPL",
+        "RawSymbol": None,
     }
 
 
@@ -748,7 +755,7 @@ def test_a_news_page_without_keywords_keeps_every_column(
     for article in body["results"]:
         del article["keywords"]
     fake_rest.reply("/v2/reference/news", Reply(body))
-    (row,) = dh_to_pylist(rest_session.reference.news(symbols="UBS").fetch())
+    (row,) = dh_to_pylist(rest_session.reference.news("UBS").fetch())
     assert row["Keywords"] is None
     assert row["Tickers"] == ["UBS"]
     assert row["Author"] == "Sam Boughedda"
