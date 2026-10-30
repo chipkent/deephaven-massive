@@ -215,22 +215,27 @@ class _AbandonedError(Exception):
     """
 
 
-def _shared_failure(error: BaseException, context: str) -> BaseException:
+def _shared_failure(error: BaseException, context: str, *, stopped: bool = False) -> BaseException:
     """Return what a failed shared lookup's future holds for the callers waiting on it.
 
     Args:
         error: What stopped the caller making the lookup: its public error, or the exception
             that interrupted it.
         context: What failed, for an unexpected error's message, such as `"the read failed"`.
+        stopped: True when the maker's own read was stopped (a background read whose table
+            was released), which ends its requests with a cancellation.
 
     Returns:
-        `_AbandonedError` when the maker stopped for its own reason: a `MassiveError` with
-        status 429 (its patience ran out; the client never gives up on a 429 otherwise) or an
-        interruption that is not an `Exception` (`KeyboardInterrupt`). Otherwise the
+        `_AbandonedError` when the maker stopped for its own reason: its read was stopped, a
+        `MassiveError` with status 429 (its patience ran out; the client never gives up on a
+        429 otherwise), or an interruption that is not an `Exception` (`KeyboardInterrupt`).
+        Otherwise the
         `MassiveError` itself, or for any other error a `MassiveError` naming it, a defect of
         the library (`ErrorCause.LIBRARY_DEFECT`, with how to report it), which every waiter
         raises a copy of (`_outcome`).
     """
+    if stopped:
+        return _AbandonedError(f"its read was stopped: {error}")
     if isinstance(error, MassiveError):
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
             return _AbandonedError(str(error))
@@ -483,7 +488,7 @@ class RestReader:
         """
         return self.catalog.rest_path(template)
 
-    def crypto_pair(self, symbol: str) -> tuple[str, str]:
+    def crypto_pair(self, symbol: str, *, cancel: Cancel | None = None) -> tuple[str, str]:
         """Return a crypto ticker's base and quote currencies, with no guess.
 
         A joined ticker does not say where its quote starts (`X:DOTUSD` could be `DOT-USD` or
@@ -502,6 +507,9 @@ class RestReader:
 
         Args:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
+            cancel: A background read's stop token: once it is set, the list's pages and the
+                wait for another caller's read of it stop, and the call raises. None when only
+                the session's close should stop them.
 
         Returns:
             `(base, quote)`, such as `("DOT", "USD")`.
@@ -511,11 +519,12 @@ class RestReader:
                 join to the ticker; a `poll()` table fails with it.
 
         A failed read raises its public error (`AuthenticationError`, `EntitlementError`, or
-        `MassiveError`). Every message names the ticker; nothing falls back to a guessed split.
+        `MassiveError`), and so does a stopped one (`"... cancelled"`). Every message names the
+        ticker; nothing falls back to a guessed split.
         """
         where = f"{symbol!r} cannot be split into its two currencies"
         try:
-            tickers = self._crypto_tickers()
+            tickers = self._crypto_tickers(cancel)
         except MassiveError as public:
             raise type(public)(
                 f"{where}: reading Massive's crypto tickers failed: {public}",
@@ -530,13 +539,18 @@ class RestReader:
             raise UnlistedPairError(f"{where}: {entry}")
         return entry
 
-    def _crypto_tickers(self) -> CryptoTickers:
+    def _crypto_tickers(self, cancel: Cancel | None) -> CryptoTickers:
         """Return the session's crypto ticker list, reading it on first need.
 
         The first caller reads the list; a caller that arrives meanwhile waits for that read
         within its own patience (`wait_for_shared`). If the caller reading it stops for a reason
-        of its own (it gave up on a pause, or was interrupted), each waiting caller tries again
-        with the patience it has left: one of them reads the list, and the others wait on it.
+        of its own (it gave up on a pause, was interrupted, or its read was stopped), each
+        waiting caller tries again with the patience it has left: one of them reads the list,
+        and the others wait on it.
+
+        Args:
+            cancel: The caller's stop token, which its pages and its wait listen to; None for
+                none.
 
         Returns:
             Each crypto ticker Massive lists: its `(base, quote)`, or why its currencies
@@ -556,7 +570,11 @@ class RestReader:
         future, created = self.state.crypto_future()
         while not created:
             if self.wait_for_shared(
-                future, bucket=OTHER, patience=patience, what="the crypto ticker list"
+                future,
+                bucket=OTHER,
+                patience=patience,
+                what="the crypto ticker list",
+                cancel=cancel,
             ):
                 return _outcome(future)
             future, created = self.state.crypto_future()
@@ -564,11 +582,12 @@ class RestReader:
         # starts included: a claim left open would hang every later caller. The claim is
         # forgotten before its future fails, so a waiter that tries again never finds it.
         try:
-            tickers = self._read_crypto_tickers(patience)
+            tickers = self._read_crypto_tickers(patience, cancel)
         except WireError as error:
             public = self._public(error)
             self.state.forget_crypto()
-            future.set_exception(_shared_failure(public, "the read failed"))
+            stopped = cancel is not None and cancel.is_set()
+            future.set_exception(_shared_failure(public, "the read failed", stopped=stopped))
             raise public from error
         except BaseException as error:
             # The reader's own unexpected error propagates; its waiters get a MassiveError.
@@ -582,11 +601,13 @@ class RestReader:
         future.set_result(tickers)
         return tickers
 
-    def _read_crypto_tickers(self, patience: Patience) -> CryptoTickers:
+    def _read_crypto_tickers(self, patience: Patience, cancel: Cancel | None) -> CryptoTickers:
         """Read Massive's whole crypto ticker list, every page of both lists.
 
         Args:
             patience: The reading caller's patience, for every page.
+            cancel: The reading caller's stop token, which every page listens to; None for
+                none.
 
         Returns:
             The list.
@@ -597,8 +618,9 @@ class RestReader:
         tickers: dict[str, tuple[str, str] | str] = {}
         # The list is reference data, which Massive counts in a bucket of its own. Its pages
         # share one lane of their own, so they wait their turn with other reads instead of
-        # queueing behind them; closing the client still ends their waits.
-        with Cancel() as lane:
+        # queueing behind them; closing the client, or setting the caller's stop token, still
+        # ends their waits.
+        with Cancel(*(() if cancel is None else (cancel,))) as lane:
             # Listed pairs first, then delisted ones, so that a past date of a delisted pair
             # still splits; a ticker in both keeps its listed entry.
             for active in (True, False):
@@ -618,7 +640,13 @@ class RestReader:
         return tickers
 
     def wait_for_shared(
-        self, future: Future[T], *, bucket: str, patience: Patience, what: str
+        self,
+        future: Future[T],
+        *,
+        bucket: str,
+        patience: Patience,
+        what: str,
+        cancel: Cancel | None = None,
     ) -> bool:
         """Wait for a lookup another caller is making, within this caller's own patience.
 
@@ -631,8 +659,9 @@ class RestReader:
         console command, which waits out 90 s of pauses, never waits out the ten minutes of the
         caller it joined; the lookup goes on for that caller and every other one still waiting.
 
-        Blocks the calling thread until the lookup ends or this caller gives up; holds no lock
-        meanwhile. It always removes its governor listener; the callback it adds to the future
+        Blocks the calling thread until the lookup ends, this caller gives up, or its stop
+        token is set; holds no lock meanwhile. It always removes its governor and stop-token
+        listeners; the callback it adds to the future
         cannot be removed, so it stays there, setting an event nobody waits on once this call
         returns (a future cached for the session keeps one per caller that waited on it). Logs
         the wait at DEBUG, a lookup abandoned by its maker at INFO, and giving up at DEBUG: the
@@ -643,6 +672,8 @@ class RestReader:
             bucket: The governor bucket the lookup's requests are charged to.
             patience: This caller's patience; the pauses it waits out are charged to it.
             what: The lookup, for the log, such as `"the crypto ticker list"`.
+            cancel: This caller's stop token (a background read's): once it is set, the
+                caller stops waiting. None when only the session's close should end the wait.
 
         Returns:
             True when the future holds the lookup's outcome (`_outcome` returns or raises it);
@@ -651,7 +682,8 @@ class RestReader:
 
         Once a pause of the lookup outlasts this caller's patience, it raises the public error
         of a request that gives up (`_public`): `MassiveError("rate limited: ...")` with status
-        429, or `"... is closed"` if the session closed meanwhile.
+        429, or `"... is closed"` if the session closed meanwhile. Once `cancel` is set, it
+        raises `MassiveError("waiting for <what>: cancelled")`, or the closed session's error.
         """
         logger.debug(
             "%s: waits for %s another caller is making, through at most %.0f s of its pauses",
@@ -663,6 +695,7 @@ class RestReader:
         changed = threading.Event()
         future.add_done_callback(lambda _: changed.set())
         governor.subscribe_bucket(bucket, changed.set)
+        forget_stop = None if cancel is None else cancel.on_set(changed.set)
         try:
             while True:
                 changed.clear()  # before looking, so no change is missed
@@ -677,6 +710,15 @@ class RestReader:
                         )
                         return False
                     return True
+                if cancel is not None and cancel.is_set():
+                    public = self._public(WireError(f"waiting for {what}: cancelled"))
+                    logger.debug(
+                        "%s: stops waiting for %s, its read was stopped: %s",
+                        self.state.label,
+                        what,
+                        public,
+                    )
+                    raise public
                 failure = governor.charge_pause(bucket, patience)
                 if failure is not None:
                     public = self._public(failure)
@@ -690,6 +732,8 @@ class RestReader:
                 governor.clock.wait(changed, math.inf)
         finally:
             governor.unsubscribe(changed.set)
+            if forget_stop is not None:
+                forget_stop()
 
     def read(
         self,
@@ -1140,7 +1184,7 @@ class RestReader:
         Any other error is that of `read_fetch`.
         """
         try:
-            planned = self.plan_fetch(spec, request, symbols)
+            planned = self.plan_fetch(spec, request, symbols, cancel=cancel)
         except ValueError as error:
             raise UnsupportedParameterError(str(error)) from error
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
@@ -1201,6 +1245,7 @@ class RestReader:
         symbols: NormalizedSymbols | None,
         *,
         split: CryptoSplit | None = None,
+        cancel: Cancel | None = None,
     ) -> list[tuple[RestPath, list[Call]]]:
         """Plan the requests of a `fetch()` or `poll()` cycle, path by path.
 
@@ -1213,6 +1258,8 @@ class RestReader:
             symbols: The static symbols.
             split: Splits a crypto pair into its currencies; None for `crypto_pair`. A check
                 that must make no request passes `_unsplit`.
+            cancel: The read's stop token, which a read of the crypto ticker list listens to;
+                None for none.
 
         Returns:
             Each path the cycle reads (`fetch_paths`) with its calls; none for an empty symbol
@@ -1232,7 +1279,9 @@ class RestReader:
                 request,
                 symbols=own,
                 dates=(request.start, request.end),
-                split=self.crypto_pair if split is None else split,
+                split=functools.partial(self.crypto_pair, cancel=cancel)
+                if split is None
+                else split,
             )
             planned.append((rest_path, calls))
         return planned
@@ -1275,7 +1324,7 @@ class RestReader:
         Errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `shared_params`.
         """
-        planned = self.plan_fetch(spec, request, symbols)
+        planned = self.plan_fetch(spec, request, symbols, cancel=cancel)
         patience = self.patience()  # once for every path, on this thread, before any fan-out
         logger.debug(
             "%s fetch: %d requests on %d paths; the read waits out %.0f s of pauses",
@@ -1718,7 +1767,11 @@ class RestEndpoints:
         """
         reader = self._reader(f"call-{call}")
         rest_path, calls, shape = _history_plan(
-            reader, spec, request, window=window, split=reader.crypto_pair
+            reader,
+            spec,
+            request,
+            window=window,
+            split=functools.partial(reader.crypto_pair, cancel=_token(stop)),
         )
         announce(
             self._state.client.governor,
