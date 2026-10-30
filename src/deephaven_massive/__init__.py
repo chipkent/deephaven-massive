@@ -38,12 +38,13 @@ Example:
 
 Status:
     Every dataset is implemented over all three transports and tested against simulated Massive
-    servers built from Massive's documentation. The library has not yet been run against
-    Massive itself with a real key, so details the documentation leaves open (which host a
-    delayed plan streams from, how index daily bars and futures sessions are stamped, the
-    exact text of some refusals) are the library's best reading; where it can tell, it checks
-    them in what Massive sends and stops with a clear message instead of returning rows it
-    cannot vouch for. The library is not on PyPI yet.
+    servers built from Massive's documentation. The live tests have also run against Massive on
+    the owner's own plans, a mix of paid and free tiers. Questions those plans cannot settle
+    remain open (which host a delayed plan streams from, how index daily bars and futures
+    sessions are stamped, parts of the flat files); there the library follows its best reading
+    of the documentation, and where it can tell, it checks what Massive sends and stops with a
+    clear message instead of returning rows it cannot vouch for. `docs/live-tests.md` lists the
+    open questions. The library is not on PyPI yet.
 
 Read next:
     The README (https://github.com/chipkent/deephaven-massive): installing, first tables, and

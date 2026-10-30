@@ -12,13 +12,14 @@ history from REST or the flat files. The same code runs on every Massive plan, a
 your plan lacks fails with a message that says so. Each dataset is tested against simulated
 Massive servers that answer the way Massive's documentation says Massive does.
 
-What is not verified yet is Massive itself. The library has not yet been run against the real
-service with a real key, so some details the documentation leaves open are the library's best
-reading of it: which host a delayed plan streams from, how some bars are stamped (index daily
-bars, futures sessions), and the exact text of some refusals. Where it can tell, the library
-checks such a detail in what Massive sends and stops with a clear message rather than return
-rows it cannot vouch for. [`docs/live-tests.md`](docs/live-tests.md) lists every open question
-and the plan that settles it.
+The library has also run against Massive itself: the live tests have run on the owner's own
+plans, a mix of paid and free tiers. Some questions remain open because those plans cannot
+settle them, such as which host a delayed plan streams from, how index daily bars and futures
+sessions are stamped, and parts of the flat files. On those points the library follows its best
+reading of Massive's documentation. Where it can tell, it checks such a detail in what Massive
+sends and stops with a clear message rather than return rows it cannot vouch for.
+[`docs/live-tests.md`](docs/live-tests.md) lists the open questions and the plan that settles
+each one.
 
 The library is not on PyPI yet. [Install](docs/getting-started/install.md) says how to install it
 into a Deephaven server.
