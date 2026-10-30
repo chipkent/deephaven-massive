@@ -68,6 +68,27 @@ def test_links_emphasis_and_code_take_their_markdown_form() -> None:
     )
 
 
+def test_a_link_address_markdown_would_break_is_kept_whole() -> None:
+    article = (
+        "<article><p><a href='/a (b).html'>parens</a>, <a href='/a b'>space</a>, "
+        "<a href='/a<b>'>brackets</a>.</p></article>"
+    )
+    assert markdown(article).splitlines()[2] == (
+        "[parens](<https://massive.com/a (b).html>), "
+        "[space](<https://massive.com/a b>), "
+        "[brackets](<https://massive.com/a%3Cb%3E>)."
+    )
+
+
+def test_scripts_styles_and_templates_contribute_no_text() -> None:
+    article = (
+        "<article><script>var a = 1;</script><p>Kept<style>p { color: red }</style> "
+        "text.</p><noscript><p>Enable scripts.</p></noscript>"
+        "<template><p>Hidden.</p></template>Loose<script>b()</script> words.</article>"
+    )
+    assert markdown(article) == "# A question?\n\nKept text.\n\nLoose words.\n"
+
+
 def test_lists_number_ordered_items_and_indent_nested_ones() -> None:
     article = (
         "<article><ul>\n<li>One</li>\n<li>Two<ol><li>Two a</li><li><p>Two b</p></li></ol></li>"

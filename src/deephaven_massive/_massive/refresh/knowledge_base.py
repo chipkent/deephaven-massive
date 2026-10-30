@@ -84,6 +84,10 @@ _VOID: Final = frozenset(
     {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "wbr"}
 )
 _LISTS: Final = frozenset({"ul", "ol"})
+# The elements whose content is code or markup rather than text a reader sees.
+_HIDDEN: Final = frozenset({"noscript", "script", "style", "template"})
+# The characters that end or break a bare Markdown link destination.
+_UNSAFE_DESTINATION: Final = re.compile(r"[\s()<>]")
 _WHITESPACE: Final = re.compile(r"\s+")
 
 
@@ -176,7 +180,8 @@ def _collapse(text: str) -> str:
 def _inline(node: _Element | str, url: str) -> str:
     """Return the Markdown of a node's text, with its links, emphasis, and code.
 
-    A nested list contributes nothing: `_list` writes it as lines of its own.
+    A nested list contributes nothing, since `_list` writes it as lines of its own, and
+    neither does a script, style, template, or `noscript` element.
 
     Args:
         node: An element or a piece of text.
@@ -187,7 +192,7 @@ def _inline(node: _Element | str, url: str) -> str:
     """
     if isinstance(node, str):
         return node
-    if node.tag in _LISTS:
+    if node.tag in _LISTS or node.tag in _HIDDEN:
         return ""
     text = " " if node.tag == "br" else "".join(_inline(child, url) for child in node.children)
     return _marked(node, text, url)
@@ -207,12 +212,27 @@ def _marked(node: _Element, text: str, url: str) -> str:
         backticks, a block element's text between spaces, and any other text as it is.
     """
     if node.tag == "a" and "href" in node.attrs:
-        return f"[{text}]({urljoin(url, node.attrs['href'])})"
+        return f"[{text}]({_destination(urljoin(url, node.attrs['href']))})"
     if node.tag not in _INLINE:
         return f" {text} "
     code = node.tag == "code" or "font-mono" in node.attrs.get("class", "").split()
     delimiter = "`" if code else _EMPHASIS.get(node.tag, "")
     return f"{delimiter}{text}{delimiter}"
+
+
+def _destination(href: str) -> str:
+    """Return a link address as a Markdown link destination that keeps it whole.
+
+    Args:
+        href: The resolved address.
+
+    Returns:
+        The address as it is, or, when it holds whitespace, a parenthesis, or an angle
+        bracket, the address between `<` and `>` with each angle bracket percent-encoded.
+    """
+    if not _UNSAFE_DESTINATION.search(href):
+        return href
+    return "<" + href.replace("<", "%3C").replace(">", "%3E") + ">"
 
 
 def _list(node: _Element, url: str, depth: int) -> list[str]:
@@ -285,7 +305,8 @@ def _table(node: _Element, url: str) -> str:
 def _blocks(node: _Element, url: str) -> list[str]:
     """Return the Markdown blocks of an element's children.
 
-    Text and inline elements that sit between blocks form a paragraph of their own.
+    Text and inline elements that sit between blocks form a paragraph of their own. Script,
+    style, template, and `noscript` elements are skipped.
 
     Args:
         node: An element that holds blocks.
@@ -298,6 +319,8 @@ def _blocks(node: _Element, url: str) -> list[str]:
     run: list[str] = []
     # An empty paragraph at the end ends the last run of text like any block does.
     for child in [*node.children, _Element("p", {})]:
+        if isinstance(child, _Element) and child.tag in _HIDDEN:
+            continue
         if isinstance(child, str) or child.tag in _INLINE:
             run.append(_inline(child, url))
             continue
