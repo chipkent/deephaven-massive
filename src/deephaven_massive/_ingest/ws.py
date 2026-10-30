@@ -97,7 +97,12 @@ from deephaven_massive._ingest.subscriptions import (
     stream_topics,
     wildcard,
 )
-from deephaven_massive._log_limits import BoundedLog, log_failure, mark_failure_logged
+from deephaven_massive._log_limits import (
+    BoundedLog,
+    bounded_list,
+    log_failure,
+    mark_failure_logged,
+)
 from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
@@ -248,20 +253,25 @@ class _Traffic:
     """A connection's traffic in the current summary window. Loop-confined.
 
     `Connection._summarize` logs it every `SUMMARY_INTERVAL` seconds and starts the next
-    window; `last_data` outlives the window, so a channel that went quiet shows how long ago it
-    last had rows.
+    window. `last_data`, `acknowledged`, and `published` outlive the window: a channel that
+    went quiet shows how long ago it last had rows, and the next summary names the topics
+    added and removed since this one and the rows each stream got in between.
 
     Attributes:
         batches: The data batches received in the window, one per channel of a frame.
         rows: The valid rows received in the window, per channel.
         rejects: The rows rejected in the window.
         last_data: When each channel last had rows, in nanoseconds since the epoch.
+        acknowledged: The acknowledged topics at the last summary.
+        published: Each stream's `StreamSink.rows_published` at the last summary, by stream id.
     """
 
     batches: int = 0
     rows: dict[str, int] = field(default_factory=dict)
     rejects: int = 0
     last_data: dict[str, int] = field(default_factory=dict)
+    acknowledged: frozenset[str] = frozenset()
+    published: dict[int, int] = field(default_factory=dict)
 
     def received(self, channel: str, rows: int, rejects: int, *, now: int) -> None:
         """Count one batch of a channel.
@@ -600,12 +610,12 @@ class Connection:
 
         Returns:
             False when the loop has closed (the connection ended), so the callback never runs;
-            the case is logged at INFO.
+            the case is logged at DEBUG.
         """
         try:
             self._client.loop.call_soon_threadsafe(callback, *args)
         except RuntimeError:
-            logger.info(
+            logger.debug(
                 "%s has closed; dropped %s", self.url, getattr(callback, "__name__", callback)
             )
             return False
@@ -948,39 +958,53 @@ class Connection:
 
         Runs on the loop thread every `SUMMARY_INTERVAL` seconds from the first generation on,
         whether or not DEBUG is on (the line is built only when it is): the data batches and
-        rows per channel received, the rejected rows, the acknowledged topics, and how long
-        ago each channel last had data, so a stream that went quiet shows in the log even
-        though nothing failed. It also checks for a silent connection (`_check_frames`).
+        rows per channel received, the rejected rows, the rows each stream published and the
+        streams that published none, the acknowledged topics (their count, the first
+        `LIST_LIMIT`, and those added and removed since the last summary), and how long ago
+        each channel last had data, so a stream that went quiet shows in the log even though
+        nothing failed. Every list is bounded (`bounded_list`), so a connection of thousands
+        of topics or streams logs one short line. It also checks for a silent connection
+        (`_check_frames`).
         """
         self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
         self._check_frames(time.time_ns())
+        traffic = self._traffic
+        acknowledged = frozenset(self.subscriptions.acknowledged)
+        published = {sid: stream.sink.rows_published for sid, stream in self._streams.items()}
         if logger.isEnabledFor(logging.DEBUG):
             now = time.time_ns()
             topics, acked, pending, no_ack = self.subscriptions.counts()
-            traffic = self._traffic
             rows = ", ".join(f"{c}={n}" for c, n in sorted(traffic.rows.items()))
             ages = ", ".join(
                 f"{c} {(now - at) / 1e9:.0f} s ago" for c, at in sorted(traffic.last_data.items())
             )
+            # A stream attached during the window counts from zero: its sink is new.
+            got = {sid: n - traffic.published.get(sid, 0) for sid, n in sorted(published.items())}
             logger.debug(
-                "%s: last %.0f s: %d data batches, rows %s, %d rejected; %d of %d topics "
-                "acknowledged %s, %d pending, %d with no acknowledgement; last data %s; "
-                "state %s, %d reconnects",
+                "%s: last %.0f s: %d data batches, rows %s, %d rejected; rows per stream %s, "
+                "streams with no rows %s; %d of %d topics acknowledged %s, added %s, removed %s, "
+                "%d pending, %d with no acknowledgement; last data %s; state %s, %d reconnects",
                 self.url,
                 SUMMARY_INTERVAL,
                 traffic.batches,
                 rows or "none",
                 traffic.rejects,
+                bounded_list(f"{sid}={n}" for sid, n in got.items() if n),
+                bounded_list(sid for sid, n in got.items() if not n),
                 acked,
                 topics,
-                sorted(self.subscriptions.acknowledged),
+                bounded_list(sorted(acknowledged)),
+                bounded_list(sorted(acknowledged - traffic.acknowledged)),
+                bounded_list(sorted(traffic.acknowledged - acknowledged)),
                 pending,
                 no_ack,
                 ages or "never",
                 self._state.value,
                 self._reconnects,
             )
-        self._traffic.next_window()
+        traffic.acknowledged = acknowledged
+        traffic.published = published
+        traffic.next_window()
 
     def _check_frames(self, now: int) -> None:
         """Warn once per episode when the connection goes silent while its market trades.
@@ -2115,7 +2139,7 @@ class WsConnections:
         if asset_class is AssetClass.CRYPTO:
             if isinstance(symbols, SymbolTable):
                 rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
-                self.resolve_pairs(read_symbols(rule, symbols.table).symbols)
+                self.resolve_pairs(read_symbols(rule, symbols.table, stream_id=stream_id).symbols)
             elif isinstance(symbols, tuple):
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
@@ -2140,6 +2164,7 @@ class WsConnections:
                 stream_id=stream_id,
                 host=decision.host,
                 path=connection.path,
+                evidence=decision.evidence,
                 # Held from Java until the JVM collects the publisher or the listener: weakly,
                 # so a finished session is freed without waiting for a JVM collection.
                 on_shutdown=functools.partial(_weakly, weakref.ref(self), "_shut_down", stream_id),

@@ -1440,6 +1440,7 @@ def open_stream_tables(
     stream_id: int,
     host: str,
     path: str,
+    evidence: str,
     on_shutdown: Callable[[], None],
     on_symbols: Callable[[frozenset[str], frozenset[str]], None],
 ) -> OpenedStream:
@@ -1465,6 +1466,7 @@ def open_stream_tables(
         stream_id: The id the session minted for the stream.
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
+        evidence: Why the host was chosen (`HostDecision.evidence`), carried by the handle.
         on_shutdown: The blink table's `on_shutdown_callback`.
         on_symbols: Receives the watch's changes of a reactive symbol table.
 
@@ -1501,6 +1503,7 @@ def open_stream_tables(
                     rule,
                     symbols.table,
                     on_symbols,
+                    stream_id=stream_id,
                     on_invalid=functools.partial(_fail_later, weakref.ref(sink)),
                     on_skipped=functools.partial(_show_skipped, weakref.ref(sink)),
                 )
@@ -1511,6 +1514,7 @@ def open_stream_tables(
             scope,
             host,
             path,
+            evidence,
             sink.fail,
             stop_watch=None if watch is None else watch.stop,
         )

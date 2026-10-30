@@ -586,7 +586,8 @@ class MassiveSession:
         the command is over; there `close()` returns at once, waiting for nothing). The
         session's streams leave their WebSocket connections, and
         every connection no other session of the same key uses is closed. "MassiveSession #1
-        closed; N live tables failed" is logged, at WARNING when N > 0. After `close()`, verbs,
+        closed; N live tables failed, streams N [...]" is logged, naming the failed tables'
+        stream ids, at WARNING when N > 0. After `close()`, verbs,
         `connections()`, `streams()`, and `rate_limits()` raise
         `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
         and `release()` keep working.

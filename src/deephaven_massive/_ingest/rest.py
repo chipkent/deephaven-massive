@@ -160,6 +160,7 @@ from deephaven_massive._ingest.rate_limits import (
     bucket_of,
     read_patience,
 )
+from deephaven_massive._log_limits import log_once
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -1912,6 +1913,7 @@ class RestReader:
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
         cancel: Cancel,
+        patience: Patience,
         pace: PaceCheck,
     ) -> tuple[pa.Table, int]:
         """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
@@ -1929,6 +1931,7 @@ class RestReader:
             record: Records each page's drift in the table's `SchemaDrift`.
             executor: The poller's fan-out pool.
             cancel: The poller's stop token, which ends the cycle's waits.
+            patience: The cycle's patience (`rate_limits.read_patience`, taken by the poller).
             pace: The table's pace check.
 
         Returns:
@@ -1946,7 +1949,13 @@ class RestReader:
             raise UnsupportedParameterError(str(error)) from error
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
         return self._read_planned(
-            spec, request, planned, record=record, executor=executor, cancel=cancel
+            spec,
+            request,
+            planned,
+            record=record,
+            executor=executor,
+            cancel=cancel,
+            patience=patience,
         )
 
     def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
@@ -2043,9 +2052,10 @@ class RestReader:
     ) -> tuple[pa.Table, int]:
         """Read a dataset's fetch paths for the symbols: `fetch()`.
 
-        Once planned, the read logs at INFO the least time its paced requests take, when they
-        cannot all start within a minute (`rate_limits.announce`); at WARNING when the read
-        holds the update graph's lock.
+        Once planned, the read logs at DEBUG its request count and how many seconds of rate
+        limit pauses it waits out (`patience`), and at INFO the least time its paced requests
+        take, when they cannot all start within a minute (`rate_limits.announce`); at WARNING
+        when the read holds the update graph's lock.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2068,6 +2078,14 @@ class RestReader:
         `ValueError` of `_base`.
         """
         planned = self.plan_fetch(spec, request, symbols)
+        patience = self.patience()  # once for every path, on this thread, before any fan-out
+        logger.debug(
+            "%s fetch: %d requests on %d paths; the read waits out %.0f s of pauses",
+            spec.name,
+            sum(len(calls) for _, calls in planned),
+            len(planned),
+            patience.seconds,
+        )
         announce(
             self.state.client.governor,
             f"{spec.name} fetch",
@@ -2075,7 +2093,13 @@ class RestReader:
             pauses_live_tables=pauses_live_tables,
         )
         return self._read_planned(
-            spec, request, planned, record=record, executor=executor, cancel=cancel
+            spec,
+            request,
+            planned,
+            record=record,
+            executor=executor,
+            cancel=cancel,
+            patience=patience,
         )
 
     def _read_planned(
@@ -2087,6 +2111,7 @@ class RestReader:
         record: Callable[[DriftReport], None] | None,
         executor: ThreadPoolExecutor | None,
         cancel: Cancel | None,
+        patience: Patience,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the total rows at `Request.limit`.
 
@@ -2101,6 +2126,7 @@ class RestReader:
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
             cancel: Ends the reads' waits when set, or None.
+            patience: The patience of the whole read, shared by every path's requests.
 
         Returns:
             The rows of every path, in path order, and the request count.
@@ -2109,7 +2135,6 @@ class RestReader:
         """
         tables = []
         requests = 0
-        patience = self.patience()  # once for every path, on this thread, before any fan-out
         for rest_path, calls in planned:
             table, made = self.read(
                 spec,
@@ -2489,6 +2514,7 @@ class RestEndpoints:
             shape=shape,
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
+        patience = reader.patience()
         table, requests = reader.read(
             spec,
             rest_path,
@@ -2498,9 +2524,14 @@ class RestEndpoints:
             window=window,
             remedy=_history_remedy(request),
             cancel=_token(stop),
-            patience=reader.patience(),
+            patience=patience,
         )
-        logger.info("%s history: source=REST requests=%d", spec.name, requests)
+        logger.info(
+            "%s history: source=REST requests=%d, waiting out at most %.0f s of pauses",
+            spec.name,
+            requests,
+            patience.seconds,
+        )
         return self._static(spec, table)
 
     def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
@@ -2606,8 +2637,10 @@ def call_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
 def _request_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
     """Return the bucket a request about to be made is charged to, logging it and why.
 
-    Called once per request, so the log has one line for each; the planning that announces a
-    read's buckets beforehand uses `call_bucket`, which logs nothing.
+    Called once per request. The choice is logged at DEBUG once per process for each dataset,
+    path template, and bucket (`log_once`), with the first request's symbols and the reason: a
+    `poll()` every few seconds would otherwise log the same choice for every request. The
+    planning that announces a read's buckets beforehand uses `call_bucket`, which logs nothing.
 
     Args:
         spec: The dataset.
@@ -2618,13 +2651,17 @@ def _request_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
         The bucket's name (`call_bucket`).
     """
     bucket, reason = _charge(spec, template, call)
-    logger.debug(
-        "%s %s (symbols: %s) is charged to the %s bucket: %s",
+    log_once(
+        logger,
+        f"bucket\0{spec.name}\0{template}\0{bucket}",
+        "%s %s (symbols: %s) is charged to the %s bucket: %s; later requests of this path "
+        "charged to it are not logged",
         spec.name,
         template,
         ", ".join(_own_symbols(spec, call.symbol, call.query)) or "none",
         bucket,
         reason,
+        level=logging.DEBUG,
     )
     return bucket
 

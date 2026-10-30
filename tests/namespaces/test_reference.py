@@ -821,6 +821,7 @@ class _Statuses:
         record: Callable[[object], None],
         executor: ThreadPoolExecutor,
         cancel: object,
+        patience: object,
     ) -> tuple[pa.Table, int]:
         return self.tables.pop(0) if len(self.tables) > 1 else self.tables[0], 1
 

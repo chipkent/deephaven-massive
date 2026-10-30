@@ -30,7 +30,7 @@ from deephaven_massive._enums import AssetClass, PollMode
 from deephaven_massive._errors import PermanentError
 from deephaven_massive._ingest import poll
 from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, open_poll
-from deephaven_massive._massive import Cancel, DriftReport, Transport
+from deephaven_massive._massive import Cancel, DriftReport, Patience, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import Query
 from deephaven_massive._tables.liveness import (
@@ -73,6 +73,7 @@ class Script:
         self.drift: DriftReport | None = None
         self.took = 0.0  # how far each cycle's read moves the clock
         self.clock: FakeClock | None = None
+        self.patience: Patience | None = None  # the last cycle's
 
     def rows(self, *pairs: tuple[str, float]) -> None:
         data = [{"Symbol": symbol, "CashAmount": amount} for symbol, amount in pairs]
@@ -90,9 +91,11 @@ class Script:
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
         cancel: threading.Event,
+        patience: Patience,
     ) -> tuple[pa.Table, int]:
         self.symbols.append(symbols)
         self.cancel = cancel
+        self.patience = patience
         if self.drift is not None:
             record(self.drift)
         outcome = self.outcomes.get(timeout=TIMEOUT)
@@ -387,9 +390,20 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
         next_cycle(clock)  # the same rows again: read, but nothing new to publish
         script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
         next_cycle(clock)
+    patience = "waiting out at most 600 s of pauses"
     assert caplog.messages == [
-        "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in 0.000 s",
-        "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 0 published in 0.000 s",
+        (
+            f"{massive_session._core.label}: poll() stream 1 started: <Query test> every "
+            "60.000 s, mode APPEND, symbols 2 [AAPL, MSFT]"
+        ),
+        (
+            f"stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in "
+            f"0.000 s, {patience}"
+        ),
+        (
+            f"stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 0 published in "
+            f"0.000 s, {patience}"
+        ),
         (
             "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as scheduled: "
             "HTTP 503 from GET /stocks/v1/dividends"
@@ -715,6 +729,7 @@ def test_close_stops_every_poller_and_marks_the_rows(
     script: Script,
     clock: FakeClock,
     dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     pollers = cast("Any", massive_session._core.rest_transport())._state.pollers
     script.rows(("AAPL", 1.0))
@@ -722,11 +737,15 @@ def test_close_stops_every_poller_and_marks_the_rows(
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
     streams = massive_session.streams()
     poller = poller_of(pollers)
-    massive_session.close()
-    assert poller.stopped
-    clock.advance(60)
-    poller.thread.join(TIMEOUT)
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        massive_session.close()
+        assert poller.stopped
+        clock.advance(60)
+        poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
+    assert "stocks.dividends poll() stream 1 stopped after 1 cycles: its table failed" in (
+        caplog.messages
+    )
     # The table failed, naming the close, and keeps its rows for a snapshot.
     until(lambda: bool(table.j_table.isFailed()))
     assert pairs(table.snapshot(), dh_to_pylist) == [("AAPL", 1.0)]
@@ -871,18 +890,28 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
 
 
 def test_a_collected_table_stops_its_poller(
-    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers, clock: FakeClock
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows()
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
-    del table
-    gc.collect()
-    until(lambda: poller.stopped)
-    clock.advance(60)
-    poller.thread.join(TIMEOUT)
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        del table
+        gc.collect()
+        until(lambda: poller.stopped)
+        clock.advance(60)
+        poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
+    assert (
+        "stocks.dividends poll() stream 1 stopped after 1 cycles: it was stopped: its table "
+        "shut down"
+    ) in caplog.messages
 
 
 def test_a_poll_keeps_its_session_alive_while_its_table_is_used(
@@ -1019,6 +1048,7 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
     poller._core = cast("Any", lambda: None)
     with ThreadPoolExecutor(1) as pool:
         assert poller._cycle(pool) is False
+    assert poller._end_reason() == "its session is gone"
 
 
 def test_a_stop_during_a_cycle_publishes_nothing(

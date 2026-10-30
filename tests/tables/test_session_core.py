@@ -1450,7 +1450,12 @@ def test_a_failure_while_the_shape_is_derived_is_named(
 
     with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
         core.stream_result(
-            SPEC, q._request, channel="T", query="<Query test>", build=failing_then_shaping
+            SPEC,
+            q._request,
+            channel="T",
+            query="<Query test>",
+            verb="blink",
+            build=failing_then_shaping,
         )
     assert isinstance(raised.value.__cause__, DHError)
     drain()
@@ -1471,7 +1476,12 @@ def test_a_close_while_the_shape_is_derived_raises_the_closed_session(
 
     with pytest.raises(dm.MassiveError, match=rf"^{re.escape(core.label)} is closed$") as raised:
         core.stream_result(
-            SPEC, q._request, channel="T", query="<Query test>", build=closing_then_shaping
+            SPEC,
+            q._request,
+            channel="T",
+            query="<Query test>",
+            verb="blink",
+            build=closing_then_shaping,
         )
     assert isinstance(raised.value.__cause__, DHError)
 
@@ -1496,7 +1506,12 @@ def test_a_close_the_streams_row_does_not_show_yet_raises_the_closed_session(
 
     with pytest.raises(dm.MassiveError, match=rf"^{re.escape(core.label)} is closed$") as raised:
         core.stream_result(
-            SPEC, q._request, channel="T", query="<Query test>", build=closing_then_describing
+            SPEC,
+            q._request,
+            channel="T",
+            query="<Query test>",
+            verb="blink",
+            build=closing_then_describing,
         )
     assert type(raised.value.__cause__) is RuntimeError
 
@@ -1519,7 +1534,12 @@ def test_a_failure_while_the_blink_copy_is_described_is_named(
 
     with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
         core.stream_result(
-            SPEC, q._request, channel="T", query="<Query test>", build=failing_then_describing
+            SPEC,
+            q._request,
+            channel="T",
+            query="<Query test>",
+            verb="blink",
+            build=failing_then_describing,
         )
     assert type(raised.value.__cause__) is RuntimeError
     drain()
@@ -1537,7 +1557,7 @@ def test_a_deephaven_error_of_a_live_stream_is_not_wrapped(
 
     with pytest.raises(DHError):
         massive_session._core.stream_result(
-            SPEC, q._request, channel="T", query="<Query test>", build=broken
+            SPEC, q._request, channel="T", query="<Query test>", verb="blink", build=broken
         )
 
 
@@ -1682,12 +1702,42 @@ def test_the_stream_lifecycle_is_logged(
         massive_session.release(first)
         massive_session.release(second)
         assert fake_streams.shutdown[1].wait(TIMEOUT)  # the last release has run
-    assert [m for m in caplog.messages if m.startswith("stream 1")] == [
-        "stream 1 opened: test.trades channel T on socket.test/stocks",
-        "stream 1 reused: test.trades channel T",
+    name = label(massive_session)
+    assert [m for m in caplog.messages if "stream 1" in m] == [
+        (
+            f"{name}: stream 1 opened: {q!r}.blink -> channel T on socket.test/stocks "
+            "(test host); symbols 1 [AAPL]"
+        ),
+        f"{name}: stream 1 reused: {q!r}.append_only -> channel T",
         "stream 1: a hold released, 1 left",
         "stream 1: a hold released, 0 left; its stream scope is released",
     ]
+
+
+@pytest.mark.parametrize(
+    ("symbols", "shown"),
+    [
+        (
+            [f"S{n:02d}" for n in range(25)],
+            "25 [" + ", ".join(f"S{n:02d}" for n in range(20)) + ", +5 more]",
+        ),
+        (dm.ALL, "ALL"),
+    ],
+)
+def test_a_stream_open_names_its_symbols_bounded(
+    massive_session: dm.MassiveSession,
+    *,
+    fake_streams: FakeStreamTransport,
+    caplog: pytest.LogCaptureFixture,
+    symbols: object,
+    shown: str,
+) -> None:
+    q = stream_query(massive_session, symbols)
+    with caplog.at_level(logging.DEBUG, logger=_core.__name__):
+        massive_session.release(q.ring(5))
+    [opened] = [m for m in caplog.messages if "stream 1 opened" in m]
+    assert f"{q!r}.ring -> channel T" in opened
+    assert opened.endswith(f"; symbols {shown}")
 
 
 # --- The live set, failing on close, diagnostics views, and dying threads -----------------------
@@ -1766,6 +1816,7 @@ def test_a_verb_that_races_close_never_returns_its_table(
             Request(symbols=("AAPL",)),
             channel="T",
             query="<Query test>",
+            verb="blink",
             build=build_and_close,
         )
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # failed by the close, then released
@@ -1828,8 +1879,8 @@ def test_a_table_that_cannot_be_failed_does_not_spare_the_others(
     second = stream_query(massive_session, ["MSFT"]).append_only()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
-    assert f"{label(massive_session)}: could not fail a live table" in caplog.text
-    assert f"{label(massive_session)} closed; 1 live tables failed" in caplog.text
+    assert f"{label(massive_session)}: could not fail the table of stream 1" in caplog.text
+    assert f"{label(massive_session)} closed; 1 live tables failed, streams 1 [2]" in caplog.text
     assert list(fake_streams.failed) == [2]
     massive_session.release(first)
     massive_session.release(second)

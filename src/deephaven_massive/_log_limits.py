@@ -1,7 +1,8 @@
-"""Log records that are rate-limited: once per process, per value up to a limit, or per failure.
+"""Log records kept bounded: once per process, per value up to a limit, per failure, or by length.
 
-Some facts are worth logging once rather than on every event, and some bad values can arrive
-without end. The helpers here keep these records from flooding the log:
+Some facts are worth logging once rather than on every event, some bad values can arrive
+without end, and some lists can hold thousands of items. The helpers here keep these records
+from flooding the log:
 
 - `log_once` logs a fact the first time its key is seen in the process, and never again: the
   unit the FMV magnitude rule detected, the WebSocket host chosen for a Business key, a futures
@@ -13,6 +14,9 @@ without end. The helpers here keep these records from flooding the log:
 - `log_failure` logs a failure that fails a live table, once per failure object, at the level
   its cause gives (`_errors.ErrorCause`): one connection failure that fails a hundred streams
   is one record, not a hundred.
+- `bounded_list` renders a list of any length as its count and its first `LIST_LIMIT` items,
+  for a record that names symbols, topics, or stream ids: a stream of 5,000 symbols logs one
+  short line, not 5,000 names.
 
 All are thread-safe. Each holds a leaf lock only while it updates the keys, values, or failures
 it has seen, never while it logs. The module imports only the standard library and `_errors`,
@@ -25,10 +29,24 @@ from __future__ import annotations
 import logging
 import threading
 import weakref
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._errors import ErrorCause, MassiveError, cause_of, failure_text
 
-__all__ = ["BoundedLog", "log_failure", "log_once", "mark_failure_logged"]
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+__all__ = [
+    "LIST_LIMIT",
+    "BoundedLog",
+    "bounded_list",
+    "log_failure",
+    "log_once",
+    "mark_failure_logged",
+]
+
+LIST_LIMIT: Final = 20
+"""How many items `bounded_list` shows before it only counts the rest."""
 
 
 _logged_lock = threading.Lock()
@@ -56,6 +74,29 @@ def log_once(
             return
         _logged.add(key)
     log.log(level, message, *args)
+
+
+def bounded_list(items: Iterable[object], limit: int = LIST_LIMIT) -> str:
+    """Render a list for a log record: its count and its first `limit` items.
+
+    Args:
+        items: The items, in the order to show them; each is shown by `str`.
+        limit: How many items to show; `LIST_LIMIT` (20) by default.
+
+    Returns:
+        `"<count> [<item>, <item>, ...]"`, with `", +<N> more"` before the bracket when items
+        are left out: `"3 [AAPL, MSFT, NVDA]"`, `"0 []"`, or `"25 [A, B, ..., T, +5 more]"`.
+
+    Example:
+        ::
+
+            logger.debug("subscribed %s", bounded_list(topics))
+    """
+    listed = list(items)
+    shown = [str(item) for item in listed[:limit]]
+    if len(listed) > limit:
+        shown.append(f"+{len(listed) - limit} more")
+    return f"{len(listed)} [{', '.join(shown)}]"
 
 
 class BoundedLog:

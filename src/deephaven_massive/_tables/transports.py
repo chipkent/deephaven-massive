@@ -85,6 +85,8 @@ class StreamHandle:
         scope: The stream scope that manages `blink` and the publisher.
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
+        evidence: Why the stream's host was chosen (`HostDecision.evidence`), for the log line
+            of the open.
         fail: Fails the stream's table with the error and records the failure, once; returns
             False when the stream had already failed. Takes the stream's publish lock and
             makes a Deephaven call, so never call it under `registry_lock` or on an
@@ -98,6 +100,7 @@ class StreamHandle:
     scope: LivenessScope
     host: str
     path: str
+    evidence: str
     fail: Callable[[MassiveError], bool]
     stop_watch: Callable[[], None] | None = None
 

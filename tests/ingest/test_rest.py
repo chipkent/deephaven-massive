@@ -25,7 +25,7 @@ from deephaven.table import Table
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _massive, _session
+from deephaven_massive import _log_limits, _massive, _session
 from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
@@ -1997,7 +1997,10 @@ def test_history_bounds_a_timestamp_axis_exactly_and_pages(
     query_sent = sent(fake_rest)[0][1]
     assert query_sent["timestamp.gte"] == [str(start)]
     assert query_sent["timestamp.lt"] == [str(start + 86_400 * NS)]
-    assert "stocks.trades history: source=REST requests=2" in caplog.text
+    assert (
+        "stocks.trades history: source=REST requests=2, waiting out at most 600 s of pauses"
+        in caplog.text
+    )
 
 
 def test_bars_fill_the_range_segments_in_milliseconds(
@@ -3255,20 +3258,34 @@ def test_every_reference_endpoint_is_charged_to_other_whatever_its_dataset_class
     assert rest.call_bucket(spec, template, rest.Call({}, {}, "AAPL")) == "other"
 
 
-def test_each_request_logs_its_bucket_and_why_once(
-    *, session: dm.MassiveSession, snapshots: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_each_path_logs_its_bucket_and_why_once(
+    *,
+    session: dm.MassiveSession,
+    snapshots: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(_log_limits, "_logged", set())  # as in a fresh process
     snapshots.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
     snapshots.reply(NEWS_PATH, Reply(envelope([])))
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
+        fetch(session, DIVIDENDS, symbols=["MSFT"])  # the same path and bucket: not logged again
         fetch(session, NEWS)
     charged = [message for message in caplog.messages if " is charged to the " in message]
+    later = "; later requests of this path charged to it are not logged"
     stocks = "is charged to the stocks bucket: its data's class"
     other = "is charged to the other bucket: a reference endpoint"
     assert charged == [
-        f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbols: AAPL) {stocks}",
-        f"{NEWS.name} {NEWS_PATH} (symbols: none) {other}",
+        f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbols: AAPL) {stocks}{later}",
+        f"{NEWS.name} {NEWS_PATH} (symbols: none) {other}{later}",
+    ]
+    # Each fetch names its patience once, in its own line, not once per request.
+    reads = [m for m in caplog.messages if " fetch: " in m]
+    assert reads == [
+        f"{DIVIDENDS.name} fetch: 1 requests on 1 paths; the read waits out 600 s of pauses",
+        f"{DIVIDENDS.name} fetch: 1 requests on 1 paths; the read waits out 600 s of pauses",
+        f"{NEWS.name} fetch: 1 requests on 1 paths; the read waits out 600 s of pauses",
     ]
 
 

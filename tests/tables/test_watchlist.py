@@ -67,16 +67,18 @@ def spanning(mode: OnError = OnError.RAISE) -> SymbolRowRule:
 
 def test_read_symbols_returns_the_rows_sorted_without_nulls(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:GBPUSD", None, "C:EURUSD", "C:GBPUSD"])])
-    assert read_symbols(rule(), table) == SymbolRows(("C:EURUSD", "C:GBPUSD"))
-    assert read_symbols(rule(), new_table([string_col("Symbol", [None])])) == SymbolRows(())
+    assert read_symbols(rule(), table, stream_id=7) == SymbolRows(("C:EURUSD", "C:GBPUSD"))
+    assert read_symbols(
+        rule(), new_table([string_col("Symbol", [None])]), stream_id=None
+    ) == SymbolRows(())
 
 
 def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["ERIC B", "7203"])])
     events = rule(partners.TMX_CORPORATE_EVENTS)
-    assert read_symbols(events, table).symbols == ("7203", "ERIC B")
+    assert read_symbols(events, table, stream_id=7).symbols == ("7203", "ERIC B")
     with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
-        read_symbols(events, new_table([string_col("Symbol", [" x"])]))
+        read_symbols(events, new_table([string_col("Symbol", [" x"])]), stream_id=None)
 
 
 @pytest.mark.parametrize("mode", list(OnError))
@@ -92,7 +94,7 @@ def test_read_symbols_refuses_a_failed_table(dh_exec_ctx: object, mode: OnError)
         match=r"^the symbol table passed to forex\.quotes failed upstream, so the result can no "
         r"longer follow it: it is failed\. Fix that table and call forex\.quotes again",
     ):
-        read_symbols(rule(mode=mode), watch)
+        read_symbols(rule(mode=mode), watch, stream_id=7)
     scope.release()
 
 
@@ -105,7 +107,18 @@ def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -
         r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX, on_error=dm\.OnError\.LOG\), "
         r"which converts what it can and nulls the rest$",
     ):
-        read_symbols(rule(), table)
+        read_symbols(rule(), table, stream_id=7)
+
+
+def test_a_skipped_row_read_before_any_stream_names_the_call(
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    bad = "EUR/USD call"  # a value of its own: each value is logged once per dataset and process
+    table = new_table([string_col("Symbol", [bad])])
+    with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
+        read_symbols(rule(mode=OnError.LOG), table, stream_id=None)
+    [record] = [r.getMessage() for r in caplog.records if bad in r.getMessage()]
+    assert record.startswith(f"forex.quotes a call's read: a symbol table holds {bad!r}")
 
 
 @pytest.mark.parametrize(("mode", "level"), [(OnError.LOG, "WARNING"), (OnError.IGNORE, "DEBUG")])
@@ -116,11 +129,15 @@ def test_read_symbols_skips_a_row_that_is_not_canonical(
     bad = f"EUR/USD {mode.value}"
     table = new_table([string_col("Symbol", ["C:EURUSD", bad, bad, None])])
     with caplog.at_level("DEBUG", logger=WATCHLIST_LOG):
-        assert read_symbols(rule(mode=mode), table) == SymbolRows(("C:EURUSD",), (bad,))
-        read_symbols(rule(mode=mode), table)  # a second read logs nothing more
+        assert read_symbols(rule(mode=mode), table, stream_id=7) == SymbolRows(
+            ("C:EURUSD",), (bad,)
+        )
+        read_symbols(rule(mode=mode), table, stream_id=7)  # a second read logs nothing more
     records = [r for r in caplog.records if bad in r.getMessage()]
     assert [r.levelname for r in records] == [level]
-    assert records[0].getMessage().startswith(f"forex.quotes: a symbol table holds {bad!r}")
+    assert (
+        records[0].getMessage().startswith(f"forex.quotes stream 7: a symbol table holds {bad!r}")
+    )
     assert records[0].getMessage().endswith("; the row is skipped until it is fixed or deleted")
 
 
@@ -171,7 +188,9 @@ def watching(table: Table, mode: OnError = OnError.RAISE) -> Watching:
         with lock:
             skipped.append(values)
 
-    watch = SymbolWatch(rule(mode=mode), table, record, on_invalid=refuse, on_skipped=skip)
+    watch = SymbolWatch(
+        rule(mode=mode), table, record, stream_id=7, on_invalid=refuse, on_skipped=skip
+    )
     return watch, seen, refused, skipped
 
 
@@ -245,7 +264,11 @@ def test_an_empty_table_reports_nothing(dh_exec_ctx: object) -> None:
 def test_a_failing_watch_is_logged_and_refused(caplog: pytest.LogCaptureFixture) -> None:
     refused: list[str] = []
     counter = _SymbolCounter(
-        spanning(), lambda *_: None, on_invalid=refused.append, on_skipped=lambda _: None
+        spanning(),
+        lambda *_: None,
+        stream_id=7,
+        on_invalid=refused.append,
+        on_skipped=lambda _: None,
     )
     counter.on_error(RuntimeError("table broke"))
     expected = (
@@ -324,6 +347,7 @@ def test_the_counter_reports_set_changes_of_updates() -> None:
     counter = _SymbolCounter(
         spanning(),
         lambda a, r: seen.append((a, r)),
+        stream_id=7,
         on_invalid=refused.append,
         on_skipped=skipped.append,
     )
@@ -348,6 +372,7 @@ def test_the_counter_reports_skipped_values_of_updates() -> None:
     counter = _SymbolCounter(
         spanning(OnError.IGNORE),
         lambda a, r: seen.append((a, r)),
+        stream_id=7,
         on_invalid=refused.append,
         on_skipped=skipped.append,
     )

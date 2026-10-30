@@ -106,7 +106,8 @@ from deephaven_massive._errors import (
     cause_of,
     failure_text,
 )
-from deephaven_massive._log_limits import log_failure
+from deephaven_massive._ingest.rate_limits import read_patience
+from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import (
@@ -132,7 +133,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._massive import DriftReport
+    from deephaven_massive._massive import DriftReport, Patience
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -266,6 +267,7 @@ class CycleReader(Protocol):
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
         cancel: Cancel,
+        patience: Patience,
     ) -> tuple[pa.Table, int]:
         """Request the dataset for the symbols and return the rows and the request count.
 
@@ -275,6 +277,8 @@ class CycleReader(Protocol):
             executor: The poller's pool for fan-out requests.
             cancel: The poller's stop token: once set, the cycle's requests stop waiting for
                 the rate governor.
+            patience: The cycle's patience (`rate_limits.read_patience`), shared by its
+                requests.
 
         Returns:
             The rows in the dataset's schema, and how many requests were made.
@@ -360,6 +364,7 @@ class Poller:
         "__weakref__",
         "_clock",
         "_core",
+        "_cycles",
         "_exec_ctx",
         "_failed",
         "_failing",
@@ -447,6 +452,7 @@ class Poller:
         # The identities an APPEND table holds; only the poller thread touches it.
         self._seen: set[tuple[Hashable, ...]] = set()
         self._published = 0
+        self._cycles = 0  # cycles started; only the poller thread touches it
         self._thread = threading.Thread(target=self._run, name=self._thread_name, daemon=True)
 
     @property
@@ -497,8 +503,10 @@ class Poller:
     def _run(self) -> None:
         """Run cycles until stopped or failed, waiting `interval` from one start to the next.
 
-        The poller leaves the session's `Pollers` when the thread ends, however it ends.
+        The poller leaves the session's `Pollers` when the thread ends, however it ends, and
+        logs at DEBUG why it ended (`_end_reason`) and how many cycles it started.
         """
+        reason = "its thread raised"
         try:
             with (
                 entered(self._exec_ctx),
@@ -506,13 +514,39 @@ class Poller:
             ):
                 while not self._stop.is_set():
                     began = self._clock.monotonic()
+                    self._cycles += 1
                     if not self._cycle(pool):
-                        return
+                        break
                     took = self._clock.monotonic() - began
                     self._note_pace(took)
                     self._clock.wait(self._stop, max(self._interval - took, 0.0))
+            reason = self._end_reason()
         finally:
             self._pollers.discard(self)
+            logger.debug(
+                "%s poll() stream %d stopped after %d cycles: %s",
+                self._spec.name,
+                self._stream_id,
+                self._cycles,
+                reason,
+            )
+
+    def _end_reason(self) -> str:
+        """Say why the poller's loop ended, for the log line of its end.
+
+        Returns:
+            `"its table failed"` when the table failed (a fatal cycle, the session's close, or
+            a library thread's death); `"its session is gone"` when the session's core was
+            collected; otherwise `"it was stopped: its table shut down"`, since only the stop
+            token ends the loop then.
+        """
+        with self._publish_lock:
+            failed = self._failed
+        if failed:
+            return "its table failed"
+        if self._core() is None:
+            return "its session is gone"
+        return "it was stopped: its table shut down"
 
     def _note_pace(self, took: float) -> None:
         """Log the start and the end of a run of cycles that end after their interval.
@@ -564,7 +598,7 @@ class Poller:
         if not isinstance(symbols, SymbolTable):
             return symbols, ()
         try:
-            rows = read_symbols(self._rule, symbols.table)
+            rows = read_symbols(self._rule, symbols.table, stream_id=self._stream_id)
         except ValueError as error:
             raise SymbolRowError(str(error)) from None
         return rows.symbols, rows.skipped
@@ -616,21 +650,24 @@ class Poller:
         began = self._clock.monotonic()
         symbols, skipped = self._symbols()
         record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST)
+        patience = read_patience(self._exec_ctx)
         table, requests = self._read(
-            symbols=symbols, record=record, executor=pool, cancel=self._stop
+            symbols=symbols, record=record, executor=pool, cancel=self._stop, patience=patience
         )
         if self._stop.is_set():
             return False
         published = self._publish(table)
         self._published += published
         logger.debug(
-            "stream %d: %s poll() cycle: %d requests, %d rows read, %d published in %.3f s",
+            "stream %d: %s poll() cycle: %d requests, %d rows read, %d published in %.3f s, "
+            "waiting out at most %.0f s of pauses",
             self._stream_id,
             self._spec.name,
             requests,
             table.num_rows,
             published,
             self._clock.monotonic() - began,
+            patience.seconds,
         )
         # A successful cycle clears an earlier cycle's error; the skipped rows are kept apart.
         update = StreamUpdate(
@@ -1111,7 +1148,9 @@ def open_poll(
     the row released. Only then does the poller's thread start, unless the session closed
     meanwhile: the result is then released and the closed session's `MassiveError` raised. If
     any step raises, even `KeyboardInterrupt`, every step already taken is undone and nothing
-    keeps running. Asynchronous exceptions are handled on a best-effort basis, as
+    keeps running. The start is logged at DEBUG, with the session's label, the stream id,
+    the query, the interval, the mode, and the symbols (the count and the first twenty); the
+    poller logs its own end. Asynchronous exceptions are handled on a best-effort basis, as
     `release_scope` documents for its own lock: a `KeyboardInterrupt` landing in the instant
     between the table's creation returning and the cleanup's `try` would leave the table's
     scope unreleased.
@@ -1192,5 +1231,18 @@ def open_poll(
     if core.closed:  # close() failed the table meanwhile; never start its poller
         core.results.release(result)
         raise MassiveError(f"{core.label} is closed")
+    logger.debug(
+        "%s: poll() stream %d started: %s every %.3f s, mode %s, symbols %s",
+        core.label,
+        stream_id,
+        query,
+        interval.total_seconds(),
+        mode.name,
+        "none"
+        if symbols is None
+        else bounded_list(symbols)
+        if isinstance(symbols, tuple)
+        else text,
+    )
     poller.start()
     return result
