@@ -75,22 +75,12 @@ def test_an_unusable_retry_after_is_none_and_logged(
     )
 
 
-def test_a_retry_after_of_more_seconds_than_a_float_holds_is_none_and_logged(
+def test_a_retry_after_of_any_length_is_returned_as_asked_for_the_caller_to_cap(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Four hundred digits read as an infinite float: no pause could ever end.
-    header = "9" * 400
-    assert retry.retry_after_seconds(header, now=0.0) is None
-    [record] = caplog.records
-    assert (record.name, record.levelname) == (retry.__name__, "WARNING")
-    assert record.getMessage() == (
-        f"ignoring a Retry-After too large to be a number of seconds: {header!r}"
-    )
-
-
-def test_the_longest_retry_after_a_float_holds_is_honoured() -> None:
-    header = "9" * 308
-    assert retry.retry_after_seconds(header, now=0.0) == float(header)
+    assert retry.retry_after_seconds("9" * 20, now=0.0) == 1e20
+    assert retry.retry_after_seconds("9" * 400, now=0.0) == math.inf
+    assert caplog.records == []
 
 
 @pytest.mark.parametrize(

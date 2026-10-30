@@ -3225,8 +3225,8 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   cycle behind two long histories of eight workers each waits for one request of each, not
   sixteen.
 - **Pauses.** A 429 pauses its bucket for every session sharing it: for its `Retry-After`
-  (seconds, or an HTTP date measured against the response's own `Date`); without one, or with
-  one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
+  (seconds, or an HTTP date measured against the response's own `Date`), up to 10 minutes;
+  without one, or with one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
   30, then 60 s by the refusals of the run, so a request is never sent again at once. A pause
   only grows. When it ends, one request of the bucket goes first as a probe while the others
   wait for its answer: an answer other than 429 releases them, and a 429 pauses again. So a
@@ -4461,7 +4461,8 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   paced bucket (declared, or learned from a 429 whose message names the per-minute maximum)
   admits a request only while fewer than 5 slots are held, a slot lasting from the request's
   start until 61 s after its response; a 429 pauses the bucket (its `Retry-After` in either
-  form, an HTTP date measured against the response's own `Date` header, else a whole window
+  form, an HTTP date measured against the response's own `Date` header, up to 10 minutes
+  (`MAX_RETRY_AFTER`; a longer one is clamped and logged at DEBUG), else a whole window
   when paced, else 15, 30, then 60 s by the run's refusals; a `Retry-After` of zero counts as
   none), the burst of 429s in flight when the pause began counting once; after a pause one
   probe request goes alone until it is answered; a run ends with an answer to a request
@@ -5888,7 +5889,7 @@ document already reflects them.
 30. **Wire behaviour settled in review** (2026-10-26; the REST 429 half revised 2026-10-28 by
     decision 60). A REST 429 pauses its subscription's requests: without a usable
     `Retry-After`, for a whole 61 s window when the subscription is paced and for 15, 30, then
-    60 s when it is not; with one, for as long as it asks; and for at most 10 minutes of pauses
+    60 s when it is not; with one, for as long as it asks, up to 10 minutes; and for at most 10 minutes of pauses
     in a run; a TLS certificate failure is never
     retried; a 429 at the WebSocket upgrade is retried; wildcard transitions make before they
     break, accepting a brief duplicate rather than a gap

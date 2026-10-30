@@ -199,21 +199,17 @@ def retry_after_seconds(value: str | None, now: float) -> float | None:
             a wait.
 
     Returns:
-        The wait in seconds, finite and never negative (a date in the past asks for no wait),
-        or `None` when `value` is `None`, is neither form, or is a number of seconds too large
-        for a float (more than 308 digits), which no wait can honour. An unusable value is
-        logged at WARNING, quoted, on this module's logger, so the caller's fallback wait is
-        never silent. A date is read as `http_date_seconds` reads it.
+        The wait in seconds, never negative (a date in the past asks for no wait), or `None`
+        when `value` is `None` or is neither form. The wait is as asked, however long (more
+        than 308 digits read as `math.inf`): each caller caps what it honours. An unusable
+        value is logged at WARNING, quoted, on this module's logger, so the caller's fallback
+        wait is never silent. A date is read as `http_date_seconds` reads it.
     """
     if value is None:
         return None
     text = value.strip()
     if text.isascii() and text.isdigit():
-        seconds = float(text)
-        if math.isinf(seconds):
-            _log.warning("ignoring a Retry-After too large to be a number of seconds: %r", value)
-            return None
-        return seconds
+        return float(text)
     when = http_date_seconds(text)
     if when is None:
         _log.warning("ignoring a Retry-After that is neither seconds nor an HTTP date: %r", value)

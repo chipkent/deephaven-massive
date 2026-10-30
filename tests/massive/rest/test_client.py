@@ -699,13 +699,15 @@ def test_with_an_unusable_date_an_http_date_is_measured_on_the_local_clock(
     assert clock.waits == [12.0]
 
 
-def test_a_retry_after_too_large_for_a_float_falls_back_to_the_first_pause(
-    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
+@pytest.mark.parametrize("header", ["86400", "9" * 400, "Fri, 31 Dec 9999 23:59:59 GMT"])
+def test_a_retry_after_beyond_ten_minutes_pauses_ten_minutes(
+    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock, *, header: str
 ) -> None:
-    headers = {"Retry-After": "9" * 400}
-    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers), _ok())
+    fake_rest.reply(
+        "/v3/trades/AAPL", Reply(b"", status=429, headers={"Retry-After": header}), _ok()
+    )
     client.get(_TRADES, _AAPL, {}, bucket="stocks")
-    assert clock.waits == [15.0]
+    assert clock.waits == [600.0]
 
 
 def test_a_429_without_retry_after_pauses_15_30_then_60_and_never_counts_as_a_retry(
@@ -742,17 +744,17 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     refusal = Reply(
-        {"request_id": "r", "message": "quota"}, status=429, headers={"Retry-After": "601"}
+        {"request_id": "r", "message": "quota"}, status=429, headers={"Retry-After": "301"}
     )
     fake_rest.reply("/v3/trades/AAPL", refusal)
     with pytest.raises(WireError) as caught:
-        client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(600.0))
+        client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(300.0))
     assert str(caught.value).startswith(
         "Massive is refusing stocks requests with HTTP 429 (latest refusal: HTTP 429 from GET "
         "/v3/trades/AAPL on 127.0.0.1 (request_id r): quota). Its next request, a probe, goes at "
-        "2027-01-15T08:10:01+00:00 ("
+        "2027-01-15T08:05:01+00:00 ("
     )
-    assert "waits out at most 600 s of pauses and has spent 0 s of its patience" in str(
+    assert "waits out at most 300 s of pauses and has spent 0 s of its patience" in str(
         caught.value
     )
     assert caught.value.status == 429
@@ -760,7 +762,7 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     # Another call with the same patience fails at once, without being sent.
     fake_rest.reply("/v3/trades/MSFT", _ok())
     with pytest.raises(WireError, match="Its next request, a probe, goes at") as again:
-        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", patience=Patience(600.0))
+        client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", patience=Patience(300.0))
     assert (again.value.status, again.value.path) == (429, "/v3/trades/MSFT")
     assert len(fake_rest.requests) == 1
     assert clock.waits == []
