@@ -716,7 +716,8 @@ def test_daily_indicator_stamps(
     stamps elsewhere make the library refuse the values, and say which day each value really
     belongs to.
     """
-    start, end = recent_week[0].isoformat(), (recent_week[1] + timedelta(days=1)).isoformat()
+    # The wire client encodes a date parameter from a `date`, never from text.
+    start, end = recent_week[0], recent_week[1] + timedelta(days=1)
     found = 0
     paths = {"AAPL": ("stockTicker", "AAPL"), "X:BTCUSD": ("cryptoTicker", "X:BTCUSD")}
     for symbol, (name, ticker) in paths.items():
