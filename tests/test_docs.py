@@ -158,6 +158,10 @@ def readme_server(
     yield fake_rest
     for made in opened:
         made.close()
+    # The package resolves `MassiveSession` lazily, so the name is not bound in the module;
+    # undoing the patch would bind it, so the binding is removed after the undo.
+    monkeypatch.undo()
+    vars(dm).pop("MassiveSession", None)
 
 
 def _run_blocks(blocks: Sequence[str], tmp_path: Path, name: str) -> dict[str, Any]:
