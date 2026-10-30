@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Callable, Sequence
     from datetime import date, timedelta
 
@@ -174,7 +175,14 @@ class RestTransport(Protocol):
         """
         ...
 
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+    def fetch(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 
         Args:
@@ -182,6 +190,10 @@ class RestTransport(Protocol):
             request: The normalized arguments.
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+            stop: A background read's stop token (`IngestPorts.read_stop`): once set, the
+                read's requests stop waiting for the rate governor and no new one starts, so
+                the call ends soon with an error the caller ignores. None for a call only the
+                session's close stops.
 
         Returns:
             A static table with the dataset's columns, in its schema's order.
@@ -193,6 +205,22 @@ class RestTransport(Protocol):
             EntitlementError: The plan does not include the dataset (HTTP 403).
             RowDataError: A row breaks the dataset's schema.
             MassiveError: Any other failure, such as a rate limit or a closed session.
+        """
+        ...
+
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+        """Check, with no request, that `fetch` can plan its requests for the request.
+
+        A background `fetch(wait=False)` calls it on the caller thread, so a parameter a path
+        does not take raises there, at the call, as `fetch` raises it before its first request.
+        The plan splits no crypto pair (that may read Massive's ticker list): the read does.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments, with static symbols.
+
+        Raises:
+            ValueError: The request sets a parameter a path of the call does not take.
         """
         ...
 
@@ -225,7 +253,13 @@ class RestTransport(Protocol):
         ...
 
     def history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, static.
 
@@ -235,6 +269,7 @@ class RestTransport(Protocol):
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
+            stop: A background read's stop token, as `fetch` takes it.
 
         Returns:
             A static table with the dataset's columns, holding the rows inside `window`.
@@ -247,6 +282,22 @@ class RestTransport(Protocol):
             RowDataError: A row breaks the dataset's schema.
             MassiveError: Any other failure, including a page or bar the library cannot
                 place in the window.
+        """
+        ...
+
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+        """Check, with no request, that `history` can plan its requests over `window`.
+
+        The `check_fetch` of a background `history(..., source=REST or AUTO, wait=False)` that
+        chose REST.
+
+        Args:
+            spec: The dataset; `history()` has checked that REST can serve the request.
+            request: The normalized arguments, with static symbols and the parsed bounds.
+            window: The call's window.
+
+        Raises:
+            ValueError: The request sets a parameter a path of the call does not take.
         """
         ...
 
@@ -304,6 +355,7 @@ class FlatFileTransport(Protocol):
         *,
         dates: Sequence[date],
         call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the rows of `window` from the dataset's flat files, static.
 
@@ -316,6 +368,9 @@ class FlatFileTransport(Protocol):
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+            stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
+                file read stops at its next block and no new one starts. None for a call only
+                the session's close stops.
 
         Returns:
             A static table with the dataset's columns: the files' rows in date order. A
@@ -366,5 +421,15 @@ class IngestPorts(Protocol):
 
         Raises:
             ValueError: If the configuration has no S3 credentials.
+        """
+        ...
+
+    def read_stop(self) -> threading.Event:
+        """Return a new stop token for one background read, unset.
+
+        The token is the wire layer's cancellation token, which the transports' `fetch` and
+        `history` accept as `stop`: setting it ends the read's waits for the rate governor at
+        once and stops its file reads at their next block. The tables layer only sets it and
+        reads it, as the `threading.Event` it is.
         """
         ...
