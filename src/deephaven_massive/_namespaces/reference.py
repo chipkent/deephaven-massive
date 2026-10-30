@@ -28,6 +28,7 @@ from deephaven_massive._enums import (
     TickerType,
     _require_enum,
 )
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     Namespace,
@@ -165,6 +166,7 @@ _REST_ASSET_CLASS: Final = {
 """The `asset_class` value of each class on the reference endpoints, which spell forex `fx`."""
 
 
+@raises_through(_require_enum)
 def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | None:
     """Translate an `asset_class` argument to the wire value of the dataset's endpoint.
 
@@ -181,9 +183,8 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
         The wire value, or None when `value` is None.
 
     Raises:
+        TypeError: If `value` is neither None nor a `dm.AssetClass` (`_require_enum`).
         ValueError: If the endpoint does not accept the class; the message lists those it does.
-
-    A `value` that is not a `dm.AssetClass` raises the `TypeError` of `_require_enum`.
     """
     if value is None:
         return None
@@ -260,6 +261,7 @@ class _Reference(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "reference"
 
+    @raises_through(build_query, list_params, day_argument, _require_enum, _text)
     def tickers(
         self,
         symbols: Symbols | None = None,
@@ -314,10 +316,9 @@ class _Reference(Namespace):
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
         Raises:
-            TypeError: If `active` is not a `bool`.
-
-        `dm.ALL`, an invalid symbol, a `datetime` as `as_of`, or an unknown filter raises
-        `ValueError`; another argument of the wrong type raises `TypeError`.
+            TypeError: If `active` is not a `bool`, or another argument has the wrong type.
+            ValueError: For `dm.ALL`, an invalid symbol, a `datetime` as `as_of`, or an unknown
+                filter.
         """
         if not isinstance(active, bool):
             raise TypeError(f"active must be a bool, not {type(active).__name__}")
@@ -338,7 +339,8 @@ class _Reference(Namespace):
             self._core,
             TICKERS,
             symbols=symbols,
-            all_alternative="symbols=None for every ticker",
+            symbols_optional=True,
+            all_alternative="leave symbols out for every ticker",
             params=params,
             arguments={"type": "ticker_type", "date": "as_of"},
             filters=filters,
@@ -346,6 +348,7 @@ class _Reference(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, day_argument)
     def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> Query:
         """One ticker's company and listing details: address, branding, shares, and more.
 
@@ -367,14 +370,16 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or a `datetime` as `as_of` raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, an invalid symbol, or a `datetime` as `as_of`. Also for
+                `symbols` of None, with a message that names the forms it takes.
         """
         query = build_query(
             self._core,
             TICKER_DETAILS,
             symbols=symbols,
-            all_alternative="m.reference.tickers() for every ticker",
+            all_alternative="use m.reference.tickers() for every ticker",
             params={
                 "date": None if as_of is None else day_argument(TICKER_DETAILS, as_of, "as_of")
             },
@@ -382,6 +387,7 @@ class _Reference(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, _require_enum, _asset_class)
     def ticker_types(
         self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
     ) -> Query:
@@ -401,8 +407,9 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        An `asset_class` the endpoint does not accept (`FUTURES`) raises `ValueError`; an
-        argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For an `asset_class` the endpoint does not accept (`FUTURES`).
         """
         params = {
             "asset_class": _asset_class(self._core, TICKER_TYPES, asset_class),
@@ -410,6 +417,7 @@ class _Reference(Namespace):
         }
         return cast("Query", build_query(self._core, TICKER_TYPES, params=params))
 
+    @raises_through(build_query, _event_types)
     def ticker_events(self, symbols: Symbols, *, types: Sequence[str] | None = None) -> Query:
         """The timeline of a ticker's events, such as ticker changes, one row per event.
 
@@ -430,18 +438,21 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or an empty `types` raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, an invalid symbol, or an empty `types`. Also for `symbols` of
+                None, with a message that names the forms it takes.
         """
         query = build_query(
             self._core,
             TICKER_EVENTS,
             symbols=symbols,
-            all_alternative="a list of symbols",
+            all_alternative="pass a list of symbols",
             params={"types": _event_types(types)},
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def related_companies(self, symbols: Symbols) -> Query:
         """The companies Massive relates to a ticker, from news and returns data, one row each.
 
@@ -459,14 +470,17 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL` or an invalid symbol raises `ValueError`; an argument of the wrong type
-        raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL` or an invalid symbol. Also for `symbols` of None, with a
+                message that names the forms it takes.
         """
         query = build_query(
-            self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="a list of symbols"
+            self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="pass a list of symbols"
         )
         return cast("Query", query)
 
+    @raises_through(build_query, list_params)
     def news(
         self,
         symbols: Symbols | None = None,
@@ -533,15 +547,16 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an empty list, an invalid symbol, a naive `datetime`, a range that ends
-        before it starts, or an unknown filter raises `ValueError`; an argument of the wrong
-        type raises `TypeError`.
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: For `dm.ALL`, an empty list, an invalid symbol, a naive `datetime`, a
+                range that ends before it starts, or an unknown filter.
         """
         query = build_query(
             self._core,
             NEWS,
             symbols=symbols,
-            all_alternative="symbols=None for every article",
+            all_alternative="leave symbols out for every article",
             start=start,
             end=end,
             params=list_params(sort=sort, order=order),
@@ -550,6 +565,7 @@ class _Reference(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(build_query, _require_enum, _asset_class)
     def exchanges(
         self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
     ) -> Query:
@@ -569,8 +585,9 @@ class _Reference(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        An `asset_class` the endpoint does not accept (`INDICES`) raises `ValueError`; an
-        argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For an `asset_class` the endpoint does not accept (`INDICES`).
         """
         params = {
             "asset_class": _asset_class(self._core, EXCHANGES, asset_class),
@@ -578,6 +595,7 @@ class _Reference(Namespace):
         }
         return cast("Query", build_query(self._core, EXCHANGES, params=params))
 
+    @raises_through(build_query, list_params, _require_enum, _asset_class)
     def conditions(
         self,
         *,
@@ -616,10 +634,9 @@ class _Reference(Namespace):
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
         Raises:
-            TypeError: If `condition_id` is neither None nor an `int`.
-
-        An `asset_class` the endpoint does not accept or an unknown filter raises
-        `ValueError`; another argument of the wrong type raises `TypeError`.
+            TypeError: If `condition_id` is neither None nor an `int`, or another argument has
+                the wrong type.
+            ValueError: For an `asset_class` the endpoint does not accept, or an unknown filter.
         """
         if condition_id is not None and (
             isinstance(condition_id, bool) or not isinstance(condition_id, int)

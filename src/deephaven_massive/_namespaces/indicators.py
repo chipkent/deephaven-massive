@@ -38,6 +38,7 @@ from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, accepted_values, build_query, list_params
 
@@ -111,6 +112,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (SMA, EMA, RSI, MACD)
 """Every dataset of `m.indicators`, one `DatasetSpec` each (for example `indicators.sma`)."""
 
 
+@raises_through(_require_enum)
 def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> Timespan:
     """Validate the bar size an indicator is computed over, against its generated parameter.
 
@@ -126,10 +128,9 @@ def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> T
         The timespan.
 
     Raises:
+        TypeError: If `timespan` is not a `dm.Timespan` (`_require_enum`).
         ValueError: If the endpoint does not accept the timespan; the message lists those it
             does.
-
-    A `timespan` that is not a `dm.Timespan` raises the `TypeError` of `_require_enum`.
     """
     span = _require_enum(timespan, Timespan, "timespan")
     accepted = accepted_values(core, spec, "timespan")
@@ -158,6 +159,7 @@ class _Indicators(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "indicators"
 
+    @raises_through(_check_timespan, require_positive_int, _require_enum, list_params, build_query)
     def _query(
         self,
         spec: DatasetSpec,
@@ -192,9 +194,13 @@ class _Indicators(Namespace):
         Returns:
             The dataset's `Query`.
 
-        Invalid timespans, windows, a `series_type` that is not a `dm.SeriesType`, or other
-        invalid arguments raise the `TypeError` or `ValueError` of `_check_timespan`,
-        `require_positive_int`, `_require_enum`, and `build_query`.
+        Raises:
+            TypeError: If an argument has the wrong type, such as a `series_type` that is not
+                a `dm.SeriesType` (`_check_timespan`, `require_positive_int`, `_require_enum`,
+                `list_params`, `build_query`).
+            ValueError: If the endpoint does not accept the timespan, a window is not
+                positive, or another argument has a value the dataset refuses
+                (`_check_timespan`, `require_positive_int`, `build_query`).
         """
         span = _check_timespan(self._core, spec, timespan)
         params: dict[str, ParamValue | None] = {
@@ -206,7 +212,7 @@ class _Indicators(Namespace):
             self._core,
             spec,
             symbols=symbols,
-            all_alternative="a list of symbols",
+            all_alternative="pass a list of symbols",
             timespan=span,
             adjusted=adjusted,
             start=start,
@@ -217,6 +223,7 @@ class _Indicators(Namespace):
         )
         return cast("Query", query)
 
+    @raises_through(_query)
     def sma(
         self,
         symbols: Symbols,
@@ -272,9 +279,11 @@ class _Indicators(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, a timespan the endpoints do not accept, a window that is not positive, a
-        naive `datetime`, a range that ends before it starts, or an unknown filter raises
-        `ValueError`; an argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, a timespan the endpoints do not accept, a window that is not
+                positive, a naive `datetime`, a range that ends before it starts, or an unknown
+                filter. Also for `symbols` of None, with a message that names the forms it takes.
         """
         return self._query(
             SMA,
@@ -290,6 +299,7 @@ class _Indicators(Namespace):
             filters=filters,
         )
 
+    @raises_through(_query)
     def ema(
         self,
         symbols: Symbols,
@@ -346,9 +356,11 @@ class _Indicators(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, a timespan the endpoints do not accept, a window that is not positive, a
-        naive `datetime`, a range that ends before it starts, or an unknown filter raises
-        `ValueError`; an argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, a timespan the endpoints do not accept, a window that is not
+                positive, a naive `datetime`, a range that ends before it starts, or an unknown
+                filter. Also for `symbols` of None, with a message that names the forms it takes.
         """
         return self._query(
             EMA,
@@ -364,6 +376,7 @@ class _Indicators(Namespace):
             filters=filters,
         )
 
+    @raises_through(_query)
     def rsi(
         self,
         symbols: Symbols,
@@ -420,9 +433,11 @@ class _Indicators(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, a timespan the endpoints do not accept, a window that is not positive, a
-        naive `datetime`, a range that ends before it starts, or an unknown filter raises
-        `ValueError`; an argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, a timespan the endpoints do not accept, a window that is not
+                positive, a naive `datetime`, a range that ends before it starts, or an unknown
+                filter. Also for `symbols` of None, with a message that names the forms it takes.
         """
         return self._query(
             RSI,
@@ -438,6 +453,7 @@ class _Indicators(Namespace):
             filters=filters,
         )
 
+    @raises_through(_query)
     def macd(
         self,
         symbols: Symbols,
@@ -501,9 +517,11 @@ class _Indicators(Namespace):
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, a timespan the endpoints do not accept, a window that is not positive, a
-        naive `datetime`, a range that ends before it starts, or an unknown filter raises
-        `ValueError`; an argument of the wrong type raises `TypeError`.
+        Raises:
+            TypeError: For an argument of the wrong type.
+            ValueError: For `dm.ALL`, a timespan the endpoints do not accept, a window that is not
+                positive, a naive `datetime`, a range that ends before it starts, or an unknown
+                filter. Also for `symbols` of None, with a message that names the forms it takes.
         """
         return self._query(
             MACD,

@@ -43,6 +43,7 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
@@ -328,6 +329,7 @@ def _underlying(value: object) -> str:
     return check_symbol(ClassFromPrefix.ANY, value)
 
 
+@raises_through(_require_enum)
 def _contract_type(value: object) -> ContractType | None:
     """Check the optional `contract_type` argument of the chain and the contracts.
 
@@ -337,7 +339,8 @@ def _contract_type(value: object) -> ContractType | None:
     Returns:
         The member, or None when the argument is None.
 
-    A value that is not a `dm.ContractType` raises the `TypeError` of `_require_enum`.
+    Raises:
+        TypeError: If the value is neither None nor a `dm.ContractType` (`_require_enum`).
     """
     return None if value is None else _require_enum(value, ContractType, "contract_type")
 
@@ -383,6 +386,7 @@ class _Options(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "options"
 
+    @raises_through(build_query)
     def trades(self, symbols: Symbols) -> StreamHistoryQuery:
         """Trades of US-listed options contracts (OPRA), tick by tick.
 
@@ -402,10 +406,6 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#trades,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if a symbol is not an OCC option symbol,
-        a sequence is empty or an exhausted generator, or a table has no `Symbol` column;
-        `TypeError` if `symbols` is of another type.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol)
                 (`"O:AAPL250117C00150000"`); one `str`, a sequence, a Deephaven table with a
@@ -414,6 +414,12 @@ class _Options(Namespace):
 
         Returns:
             A query with `history()` and the stream verbs.
+
+        Raises:
+            TypeError: If `symbols` is of another type.
+            ValueError: If a symbol is not an OCC option symbol, a sequence is empty or an exhausted
+                generator, or a table has no `Symbol` column. Also for `symbols` of None, with a
+                message that names the forms it takes.
 
         Example:
             ::
@@ -424,6 +430,7 @@ class _Options(Namespace):
         """
         return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
 
+    @raises_through(build_query)
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed options contract.
 
@@ -446,10 +453,6 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#last_trade,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a symbol
-        is not an OCC option symbol, a sequence is empty or an exhausted generator, or a table
-        has no `Symbol` column; `TypeError` if `symbols` is of another type.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column, re-read each `poll()`
@@ -457,6 +460,12 @@ class _Options(Namespace):
 
         Returns:
             A query with `fetch()` and `poll()`.
+
+        Raises:
+            TypeError: If `symbols` is of another type.
+            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol, a sequence
+                is empty or an exhausted generator, or a table has no `Symbol` column. Also for
+                `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -467,10 +476,11 @@ class _Options(Namespace):
             self._core,
             LAST_TRADE,
             symbols=symbols,
-            all_alternative="m.options.chain(underlying).fetch()",
+            all_alternative="use m.options.chain(underlying).fetch()",
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """Quotes of US-listed options contracts (OPRA), tick by tick.
 
@@ -491,16 +501,18 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#quotes,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if a symbol is not an OCC option symbol,
-        a sequence is empty or an exhausted generator, or a table has no `Symbol` column;
-        `TypeError` if `symbols` is of another type.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
 
         Returns:
             A query with `history()` and the stream verbs.
+
+        Raises:
+            TypeError: If `symbols` is of another type.
+            ValueError: If a symbol is not an OCC option symbol, a sequence is empty or an exhausted
+                generator, or a table has no `Symbol` column. Also for `symbols` of None, with a
+                message that names the forms it takes.
 
         Example:
             ::
@@ -527,6 +539,7 @@ class _Options(Namespace):
         multiplier: int = 1,
         adjusted: bool = True,
     ) -> HistoryQuery: ...
+    @raises_through(build_query)
     def bars(
         self,
         symbols: Symbols,
@@ -584,12 +597,6 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#bars,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if `timespan` is `Timespan.SESSION`,
-        `multiplier` is not positive, a symbol is not an OCC option symbol, a sequence is empty or
-        an exhausted generator, or a table has no `Symbol` column; `TypeError` if `timespan` is not
-        a `dm.Timespan`, `multiplier` is not an `int`, `adjusted` is not a `bool`, or `symbols` is
-        of another type.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
@@ -602,6 +609,14 @@ class _Options(Namespace):
 
         Returns:
             A `StreamHistoryQuery` or `HistoryQuery`, as listed above.
+
+        Raises:
+            TypeError: If `timespan` is not a `dm.Timespan`, `multiplier` is not an `int`,
+                `adjusted` is not a `bool`, or `symbols` is of another type.
+            ValueError: If `timespan` is `Timespan.SESSION`, `multiplier` is not positive, a symbol
+                is not an OCC option symbol, a sequence is empty or an exhausted generator, or a
+                table has no `Symbol` column. Also for `symbols` of None, with a message that names
+                the forms it takes.
 
         Example:
             ::
@@ -623,6 +638,7 @@ class _Options(Namespace):
             ),
         )
 
+    @raises_through(build_query)
     def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> Query:
         """The previous trading day's open, high, low, close, and volume of options contracts.
 
@@ -652,11 +668,6 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#previous_day_bar,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a symbol
-        is not an OCC option symbol, a sequence is empty or an exhausted generator, or a table
-        has no `Symbol` column; `TypeError` if `adjusted` is not a `bool` or `symbols` is of
-        another type.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column, re-read each `poll()`
@@ -666,6 +677,12 @@ class _Options(Namespace):
 
         Returns:
             A query with `fetch()` and `poll()`.
+
+        Raises:
+            TypeError: If `adjusted` is not a `bool` or `symbols` is of another type.
+            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol, a sequence
+                is empty or an exhausted generator, or a table has no `Symbol` column. Also for
+                `symbols` of None, with a message that names the forms it takes.
 
         Example:
             ::
@@ -677,13 +694,15 @@ class _Options(Namespace):
             PREVIOUS_DAY_BAR,
             symbols=symbols,
             all_alternative=(
-                "m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)"
+                "use m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day), "
+                "every contract's bar of that day"
             ),
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
@@ -701,16 +720,18 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#fmv,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if a symbol is not an OCC option symbol,
-        a sequence is empty or an exhausted generator, or a table has no `Symbol` column;
-        `TypeError` if `symbols` is of another type.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
 
         Returns:
             A query with the stream verbs.
+
+        Raises:
+            TypeError: If `symbols` is of another type.
+            ValueError: If a symbol is not an OCC option symbol, a sequence is empty or an exhausted
+                generator, or a table has no `Symbol` column. Also for `symbols` of None, with a
+                message that names the forms it takes.
 
         Example:
             ::
@@ -719,6 +740,7 @@ class _Options(Namespace):
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
+    @raises_through(build_query, list_params, _contract_type, _underlying)
     def chain(
         self,
         underlying: str,
@@ -745,13 +767,6 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#chain,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if `underlying` is not Massive's
-        exact stock or index ticker, `limit` is not positive, a filter key is not a parameter
-        of the endpoint or is `contract_type`, or a filter value does not fit its parameter;
-        `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
-        `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an `int`, or `filters`
-        is not a mapping.
-
         `Underlying` is the instrument Massive links each contract to, exactly as it sends it;
         it names that instrument, not what the contract delivers. An adjusted contract (a root
         such as `AAPL1` after a merger or a special dividend) may deliver another number of
@@ -774,6 +789,14 @@ class _Options(Namespace):
 
         Returns:
             A query with `fetch()` and `poll()`.
+
+        Raises:
+            TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
+                `dm.ContractType`, `order` is not a `dm.Order`, `limit` is not an `int`, or
+                `filters` is not a mapping.
+            ValueError: If `underlying` is not Massive's exact stock or index ticker, `limit` is not
+                positive, a filter key is not a parameter of the endpoint or is `contract_type`, or
+                a filter value does not fit its parameter.
 
         Example:
             ::
@@ -803,6 +826,7 @@ class _Options(Namespace):
             "Query", build_query(self._core, CHAIN, params=params, filters=filters, limit=limit)
         )
 
+    @raises_through(build_query, list_params)
     def snapshots(
         self,
         symbols: Symbols,
@@ -830,14 +854,6 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#snapshots,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if a symbol is not an OCC option symbol,
-        a sequence is empty or an exhausted generator, a table has no `Symbol` column, `limit` is
-        not positive, a filter key is not a parameter of the endpoint or is `type` (the library
-        sends `type=options` for `dm.ALL`, and Massive refuses it beside tickers), or a filter
-        value does not fit its parameter; `TypeError` if `symbols` is of another type, `sort` is
-        not a `str`, `order` is not a `dm.Order`, `limit` is not an `int`, or `filters` is not a
-        mapping.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column (read again each `poll()`
@@ -851,6 +867,16 @@ class _Options(Namespace):
 
         Returns:
             A query with `fetch()` and `poll()`.
+
+        Raises:
+            TypeError: If `symbols` is of another type, `sort` is not a `str`, `order` is not a
+                `dm.Order`, `limit` is not an `int`, or `filters` is not a mapping.
+            ValueError: If a symbol is not an OCC option symbol, a sequence is empty or an exhausted
+                generator, a table has no `Symbol` column, `limit` is not positive, a filter key is
+                not a parameter of the endpoint or is `type` (the library sends `type=options` for
+                `dm.ALL`, and Massive refuses it beside tickers), or a filter value does not fit
+                its parameter. Also for `symbols` of None, with a
+                message that names the forms it takes.
 
         Example:
             ::
@@ -876,6 +902,7 @@ class _Options(Namespace):
             ),
         )
 
+    @raises_through(build_query, list_params, day_argument, _contract_type, _expired, _underlying)
     def contracts(
         self,
         symbols: Symbols | None = None,
@@ -913,16 +940,6 @@ class _Options(Namespace):
         record. An adjusted contract keeps its own root (`AAPL1`) and its
         own `Symbol`; the library never maps it to `AAPL`.
 
-        It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a
-        symbol is not an OCC option symbol, a sequence is empty or an exhausted generator, a
-        table has no `Symbol` column, `underlying` is not Massive's exact stock or index
-        ticker, `as_of` is a `datetime` or not an ISO-8601 date, `limit` is not positive, a
-        filter key is not a parameter of the endpoints or is set by a typed argument, or a
-        filter value does not fit its parameter;
-        `TypeError` if `underlying` or `sort` is not a `str`, `contract_type` is not a
-        `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit` is
-        not an `int`, or `filters` is not a mapping.
-
         The columns, their types, and what each holds are listed in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#contracts,
         in the web UI's column tooltips, and by `columns()`.
@@ -951,6 +968,17 @@ class _Options(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
+        Raises:
+            TypeError: If `underlying` or `sort` is not a `str`, `contract_type` is not a
+                `dm.ContractType`, `expired` is not a `bool`, `order` is not a `dm.Order`, `limit`
+                is not an `int`, or `filters` is not a mapping.
+            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol, a sequence
+                is empty or an exhausted generator, a table has no `Symbol` column, `underlying` is
+                not Massive's exact stock or index ticker, `as_of` is a `datetime` or not an
+                ISO-8601 date, `limit` is not positive, a filter key is not a parameter of the
+                endpoints or is set by a typed argument, or a filter value does not fit its
+                parameter.
+
         Example:
             ::
 
@@ -972,13 +1000,15 @@ class _Options(Namespace):
                 self._core,
                 CONTRACTS,
                 symbols=symbols,
-                all_alternative="m.options.contracts() without symbols",
+                symbols_optional=True,
+                all_alternative="use m.options.contracts() without symbols",
                 params=params,
                 filters=filters,
                 limit=limit,
             ),
         )
 
+    @raises_through(build_query, day_argument)
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, high, low, close, and volume of each options contract on one day.
 
@@ -996,11 +1026,6 @@ class _Options(Namespace):
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#daily_open_close,
         in the web UI's column tooltips, and by `columns()`.
 
-        It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a symbol is
-        not an OCC option symbol, a sequence is empty or an exhausted generator, a table has no
-        `Symbol` column, or `date` is a `datetime` or not an ISO-8601 date; `TypeError` if `symbols`
-        or `date` is of another type, or `adjusted` is not a `bool`.
-
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column.
@@ -1014,6 +1039,13 @@ class _Options(Namespace):
         Returns:
             A query with `fetch()` and `poll()`.
 
+        Raises:
+            TypeError: If `symbols` or `date` is of another type, or `adjusted` is not a `bool`.
+            ValueError: If `symbols` is `dm.ALL`, a symbol is not an OCC option symbol, a sequence
+                is empty or an exhausted generator, a table has no `Symbol` column, or `date` is a
+                `datetime` or not an ISO-8601 date. Also for `symbols` of None, with a message that
+                names the forms it takes.
+
         Example:
             ::
 
@@ -1025,7 +1057,7 @@ class _Options(Namespace):
                 self._core,
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
-                all_alternative="m.options.snapshots(dm.ALL)",
+                all_alternative="use m.options.snapshots(dm.ALL)",
                 adjusted=require_bool("adjusted", adjusted),
                 params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
