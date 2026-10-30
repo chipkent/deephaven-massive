@@ -136,6 +136,7 @@ def start(
         request=Request(symbols=symbols),
         interval=timedelta(seconds=60),
         mode=mode,
+        query="<Query test>",
         read=script,
         pollers=pollers,
         host="api.massive.com",
@@ -867,6 +868,7 @@ def test_a_stop_during_a_cycle_publishes_nothing(
         request=Request(symbols=("AAPL",)),
         interval=timedelta(seconds=60),
         mode=PollMode.APPEND,
+        query="<Query test>",
         read=slow,
         pollers=pollers,
         host=None,
@@ -908,6 +910,7 @@ def test_an_error_after_a_stop_is_not_reported(
         request=Request(),
         interval=timedelta(seconds=60),
         mode=PollMode.UPSERT,
+        query="<Query test>",
         read=stopped,
         pollers=pollers,
         host=None,
@@ -1230,6 +1233,7 @@ FEED = DatasetSpec(
     fetch_path=PATH,
     symbol_param="ticker.any_of",
     keys={(R, PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    time_axis=("ex_dividend_date.gte", "ex_dividend_date.lte"),
     poll_mode=PollMode.APPEND,
     poll_keys=("Id",),
 )
@@ -1253,7 +1257,7 @@ def page(*rows: tuple[str, float]) -> Reply:
 
 def feed(m: dm.MassiveSession) -> Table:
     # The default mode of the feed, APPEND.
-    q = build_query(m._core, FEED, symbols=["AAPL"])
+    q = build_query(m._core, FEED, symbols=["AAPL"], start="2025-01-02")
     assert isinstance(q, Query)
     return q.poll(60)
 
@@ -1286,6 +1290,11 @@ def test_append_skips_every_row_it_already_appended(
     until(lambda: ids(table, dh_to_pylist) == expected)
     (row,) = streams_of(feed_session, dh_to_pylist)
     assert row["RowsPublished"] == 4  # the skipped rows are not counted
+    # The row names the query, which tells two polls of one dataset apart, and its transport.
+    assert (row["Query"], row["Transport"]) == (
+        "<Query stocks.dividends symbols=('AAPL',) start=2025-01-02>",
+        "REST",
+    )
     assert len(fake_rest.requests) == 4
 
 
@@ -1400,7 +1409,7 @@ def test_a_null_poll_key_fails_the_table_in_every_mode(
     rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, bad]
     fake_rest.reply(PATH, Reply(envelope(rows)))
     spec = dataclasses.replace(FEED, poll_keys=poll_keys)
-    q = build_query(feed_session._core, spec, symbols=["AAPL"])
+    q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
     assert isinstance(q, Query)
     table = q.poll(60, mode=mode)
     until(lambda: bool(table.j_table.isFailed()))
@@ -1423,7 +1432,7 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     )
     rows = [{"id": "a", "ticker": "AAPL", "currency": None}, {"id": "b", "ticker": "AAPL"}]
     fake_rest.reply(PATH, Reply(envelope(rows)))
-    q = build_query(feed_session._core, spec, symbols=["AAPL"])
+    q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
     assert isinstance(q, Query)
     table = q.poll(60, mode=mode)
     until(lambda: sorted(row["Id"] for row in dh_to_pylist(table)) == ["a", "b"])
@@ -1449,6 +1458,7 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
         request=Request(symbols=("AAPL",)),
         interval=timedelta(seconds=60),
         mode=PollMode.APPEND,
+        query="<Query test>",
         read=script,
         pollers=pollers,
         host="api.massive.com",
@@ -1510,7 +1520,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
     )
     with dm.MassiveSession(config) as m:
-        q = build_query(m._core, spec, symbols=["AAPL"])
+        q = build_query(m._core, spec, symbols=["AAPL"], start="2025-01-02")
         assert isinstance(q, Query)
         table = q.poll(60, mode=mode)
         expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]

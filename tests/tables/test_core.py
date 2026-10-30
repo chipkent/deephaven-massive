@@ -35,7 +35,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._massive import DriftReport
+from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables import core as _core
@@ -133,10 +133,11 @@ def _when_waiting(
         request: Request,
         key: StreamKey,
         *,
+        query: str,
         may_wait: bool,
         holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
-        found = claim(spec, request, key, may_wait=may_wait, holds=holds)
+        found = claim(spec, request, key, query=query, may_wait=may_wait, holds=holds)
         if isinstance(found, threading.Event):
             waiting.set()
         return found
@@ -389,10 +390,11 @@ def test_an_interrupt_right_after_a_reuse_claim_leaks_no_hold(
         request: Request,
         key: StreamKey,
         *,
+        query: str,
         may_wait: bool,
         holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
-        found = claim(spec, request, key, may_wait=may_wait, holds=holds)
+        found = claim(spec, request, key, query=query, may_wait=may_wait, holds=holds)
         if isinstance(found, StreamHandle):
             raise KeyboardInterrupt
         return found
@@ -1418,7 +1420,9 @@ def test_a_failure_while_the_shape_is_derived_is_named(
         return blink_to_append_only(blink)
 
     with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
-        core.stream_result(SPEC, q._request, channel="T", build=failing_then_shaping)
+        core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=failing_then_shaping
+        )
     assert isinstance(raised.value.__cause__, DHError)
     drain()
     assert core.results.held() == 0
@@ -1441,7 +1445,9 @@ def test_a_failure_while_the_blink_copy_is_described_is_named(
         return describe(blink, SPEC, schema)
 
     with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
-        core.stream_result(SPEC, q._request, channel="T", build=failing_then_describing)
+        core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=failing_then_describing
+        )
     assert type(raised.value.__cause__) is RuntimeError
     drain()
     assert core.results.held() == 0
@@ -1457,7 +1463,9 @@ def test_a_deephaven_error_of_a_live_stream_is_not_wrapped(
         return ring_table(blink, -1)
 
     with pytest.raises(DHError):
-        massive_session._core.stream_result(SPEC, q._request, channel="T", build=broken)
+        massive_session._core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=broken
+        )
 
 
 # --- The ingest ports and the catalog --------------------------------------------------------
@@ -1524,21 +1532,23 @@ def test_stream_drift_reaches_the_row_and_is_forgotten_when_the_stream_leaves(
 ) -> None:
     core = massive_session._core
     result = stream_query(massive_session).append_only()
-    core.record_stream_drift(1, "WS", HALTED)
-    core.record_stream_drift(1, "WS", HALTED)  # nothing new: the row is not rewritten
-    core.record_stream_drift(1, "WS", DriftReport(missing=frozenset({"trfi"})))
-    core.record_stream_drift(99, "WS", HALTED)  # not in the registry: ignored, not kept
+    core.record_stream_drift(1, Transport.WS, HALTED)
+    core.record_stream_drift(1, Transport.WS, HALTED)  # nothing new: the row is not rewritten
+    core.record_stream_drift(1, Transport.WS, DriftReport(missing=frozenset({"trfi"})))
+    core.record_stream_drift(99, Transport.WS, HALTED)  # not in the registry: ignored, not kept
     assert [(r["StreamId"], r["SchemaDrift"], r["Error"]) for r in stream_rows()] == [
-        (1, "WS:halted+, WS:trfi-", None)
+        (1, "WebSocket:halted+, WebSocket:trfi-", None)
     ]
-    assert core.drift.record(99, "WS", HALTED) == "WS:halted+"  # nothing was kept for 99
+    # Nothing was kept for 99.
+    assert core.drift.record(99, "WebSocket", HALTED) == "WebSocket:halted+"
     # Released, then shut down: the record leaves the registry at the shutdown.
     massive_session.release(result)
     drain()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     assert core._streams == {}
-    assert core.drift.record(1, "WS", HALTED) == "WS:halted+"  # forgotten, so new again
-    assert [r["SchemaDrift"] for r in stream_rows()] == ["WS:halted+, WS:trfi-"]  # last row
+    # Forgotten, so new again; the last row keeps its text.
+    assert core.drift.record(1, "WebSocket", HALTED) == "WebSocket:halted+"
+    assert [r["SchemaDrift"] for r in stream_rows()] == ["WebSocket:halted+, WebSocket:trfi-"]
 
 
 def test_stream_drift_is_forgotten_when_the_last_hold_of_a_shut_down_stream_goes(
@@ -1549,15 +1559,15 @@ def test_stream_drift_is_forgotten_when_the_last_hold_of_a_shut_down_stream_goes
 ) -> None:
     core = massive_session._core
     result = stream_query(massive_session).append_only()
-    core.record_stream_drift(1, "WS", HALTED)
+    core.record_stream_drift(1, Transport.WS, HALTED)
     # Shut down while held: the record stays until the hold is released.
     fake_streams.publishers[1].publish_failure(RuntimeError("gone"))
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core.drift.record(1, "WS", HALTED) is None  # still remembered
+    assert core.drift.record(1, "WebSocket", HALTED) is None  # still remembered
     massive_session.release(result)
     drain()
     assert core._streams == {}
-    assert core.drift.record(1, "WS", HALTED) == "WS:halted+"
+    assert core.drift.record(1, "WebSocket", HALTED) == "WebSocket:halted+"
 
 
 def test_stream_drift_recorded_during_the_open_is_kept(
@@ -1573,12 +1583,12 @@ def test_stream_drift_recorded_during_the_open_is_kept(
         spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
     ) -> StreamHandle:
         handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-        core.record_stream_drift(stream_id, "WS", HALTED)  # the row is not written yet
+        core.record_stream_drift(stream_id, Transport.WS, HALTED)  # the row is not written yet
         return handle
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     result = stream_query(massive_session).append_only()
-    assert [(r["StreamId"], r["SchemaDrift"]) for r in stream_rows()] == [(1, "WS:halted+")]
+    assert [(r["StreamId"], r["SchemaDrift"]) for r in stream_rows()] == [(1, "WebSocket:halted+")]
     massive_session.release(result)
 
 
@@ -1673,7 +1683,13 @@ def test_a_verb_that_races_close_never_returns_its_table(
         return shaped
 
     with pytest.raises(dm.MassiveError, match=f"^{label(massive_session)} is closed$"):
-        core.stream_result(spec, Request(symbols=("AAPL",)), channel="T", build=build_and_close)
+        core.stream_result(
+            spec,
+            Request(symbols=("AAPL",)),
+            channel="T",
+            query="<Query test>",
+            build=build_and_close,
+        )
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # failed by the close, then released
 
 

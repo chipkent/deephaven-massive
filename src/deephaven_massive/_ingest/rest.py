@@ -2156,7 +2156,13 @@ class RestEndpoints:
         return self._static(spec, table)
 
     def poll(
-        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        interval: timedelta,
+        mode: PollMode,
+        query: str,
     ) -> Table:
         """Return a live table that re-reads the dataset's fetch path every `interval`.
 
@@ -2168,6 +2174,7 @@ class RestEndpoints:
             request: The normalized arguments; a reactive symbol table is read each cycle.
             interval: The time from one cycle's start to the next.
             mode: How cycles combine.
+            query: The `repr` of the query, for the `Query` column of `m.streams()`.
 
         Returns:
             The live table, tracked by the session.
@@ -2194,6 +2201,7 @@ class RestEndpoints:
             request=request,
             interval=interval,
             mode=mode,
+            query=query,
             read=functools.partial(
                 reader.read_cycle,
                 spec,

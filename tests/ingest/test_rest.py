@@ -2400,7 +2400,13 @@ def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
     watch = SymbolTable(new_table([string_col("Symbol", ["ESZ5"])]))
     request = Request(symbols=watch, end=date(2025, 3, 4))
     with pytest.raises(ValueError, match=r"timestamp\.lte takes nanoseconds"):
-        transport.poll(spec, request, interval=timedelta(seconds=60), mode=PollMode.REPLACE)
+        transport.poll(
+            spec,
+            request,
+            interval=timedelta(seconds=60),
+            mode=PollMode.REPLACE,
+            query="<Query test>",
+        )
     assert fake_rest.requests == []
 
 

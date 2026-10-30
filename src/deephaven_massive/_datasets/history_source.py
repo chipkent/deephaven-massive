@@ -597,9 +597,9 @@ def _flat_file_problems(
             problems.append(f"{spec.name} has no flat files")
     if request.adjusted is True:
         problems.append(
-            "flat-file bars are unadjusted (as traded) and one history() never mixes adjusted "
-            "and unadjusted prices, so adjusted bars come only from REST; pass adjusted=False "
-            "for the flat files"
+            "adjusted=True needs REST, since flat-file bars are unadjusted (as traded) and one "
+            "history() never mixes adjusted and unadjusted prices; pass adjusted=False for "
+            "the flat files"
         )
     zone = _PARTITION_ZONES[spec.asset_class]
     cutoff = config.flat_file_publish_cutoff
@@ -613,13 +613,16 @@ def _flat_file_problems(
 
 
 class SourceChoice(NamedTuple):
-    """Where a `history()` call reads from, and why."""
+    """Where a `history()` call reads from, why, and whether the other source could have."""
 
     source: HistorySource
     """`HistorySource.FLAT_FILES` or `HistorySource.REST`."""
     reason: str
-    """Why, for the log line of an `AUTO` call, such as
+    """Why, for the log line of an `AUTO` call and the table's description, such as
     `"2 symbols < flat_file_symbol_threshold 50"`."""
+    alternative: str | None = None
+    """Why the other source cannot serve the request, or None when it can (or, for an
+    explicit `FLAT_FILES`, was not asked)."""
 
 
 def choose_source(
@@ -653,7 +656,8 @@ def choose_source(
         now: The current instant, for the publication rule; None reads the clock.
 
     Returns:
-        The source and the reason it was chosen.
+        The source, the reason it was chosen, and under `AUTO` why the other source cannot
+        serve the request (None when both can).
 
     Raises:
         ValueError: Under `FLAT_FILES`, if flat files cannot serve the request; under `AUTO`, if
@@ -672,9 +676,14 @@ def choose_source(
             f"Flat files: {'; '.join(flat)}. REST: {rest}."
         )
     if flat:
-        return SourceChoice(HistorySource.REST, f"flat files cannot serve it: {'; '.join(flat)}")
+        problems = "; ".join(flat)
+        return SourceChoice(
+            HistorySource.REST, f"flat files cannot serve it: {problems}", alternative=problems
+        )
     if rest is not None:
-        return SourceChoice(HistorySource.FLAT_FILES, f"REST cannot serve it: {rest}")
+        return SourceChoice(
+            HistorySource.FLAT_FILES, f"REST cannot serve it: {rest}", alternative=rest
+        )
     threshold = config.flat_file_symbol_threshold
     if not isinstance(request.symbols, tuple):
         return SourceChoice(HistorySource.FLAT_FILES, "every symbol")

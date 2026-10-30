@@ -1,5 +1,6 @@
 """Tests for the query classes, the verbs' synchronous validation, and their columns' order."""
 
+import dataclasses
 import logging
 import re
 import threading
@@ -92,6 +93,7 @@ NEWS_SPEC = DatasetSpec(
     name="economy.inflation",
     summary="A dataset for the tests.",
     fetch_path="/fed/v1/inflation",
+    time_axis=("date.gte", "date.lte"),
     poll_mode=PollMode.APPEND,
     poll_keys=("Date",),
 )
@@ -140,9 +142,15 @@ class Recorder:
         return self._record("fetch", spec, request)
 
     def poll(
-        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        interval: timedelta,
+        mode: PollMode,
+        query: str,
     ) -> Table:
-        return self._record("poll", spec, request, interval=interval, mode=mode)
+        return self._record("poll", spec, request, interval=interval, mode=mode, query=query)
 
     def history(
         self,
@@ -181,10 +189,15 @@ def trades(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamHis
     return q
 
 
-def news(session: dm.MassiveSession) -> Query:
-    q = make(session, NEWS_SPEC)
+def news(session: dm.MassiveSession, **kwargs: object) -> Query:
+    q = make(session, NEWS_SPEC, **kwargs)
     assert isinstance(q, Query)
     return q
+
+
+def feed(session: dm.MassiveSession) -> Query:
+    # A feed query that may poll: it has a start.
+    return news(session, start="2025-01-02")
 
 
 # --- Query objects ---------------------------------------------------------------------------
@@ -239,7 +252,9 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
         "<HistoryQuery forex.bars symbols=('C:EURUSD',) timespan=Timespan.MINUTE multiplier=5 "
         "adjusted=False start=2025-01-02 params={'sort': 'timestamp'}>"
     )
-    filtered = make(massive_session, NEWS_SPEC, filters={"date_gte": "2025-01-02"})
+    # Without a time axis, the date filters are free for `filters=`.
+    unbounded = dataclasses.replace(NEWS_SPEC, time_axis=None)
+    filtered = make(massive_session, unbounded, filters={"date_gte": "2025-01-02"})
     # The filter is held as the date its text names, rendered like `start`.
     assert repr(filtered) == "<Query economy.inflation filters={'date_gte': 2025-01-02}>"
 
@@ -260,15 +275,42 @@ def test_class_hierarchy() -> None:
 
 
 def test_fetch_and_poll_delegate(massive_session: dm.MassiveSession, rest: Recorder) -> None:
-    q = news(massive_session)
+    q = feed(massive_session)
     q.fetch()
     q.poll(30)
     q.poll(timedelta(minutes=1), mode=PollMode.REPLACE)
+    shown = repr(q)
     assert [(c[0], c[3]) for c in rest.calls] == [
         ("fetch", {}),
-        ("poll", {"interval": timedelta(seconds=30), "mode": PollMode.APPEND}),
-        ("poll", {"interval": timedelta(minutes=1), "mode": PollMode.REPLACE}),
+        ("poll", {"interval": timedelta(seconds=30), "mode": PollMode.APPEND, "query": shown}),
+        ("poll", {"interval": timedelta(minutes=1), "mode": PollMode.REPLACE, "query": shown}),
     ]
+
+
+@pytest.mark.parametrize("mode", [None, PollMode.REPLACE])
+def test_a_feed_without_start_refuses_to_poll(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    mode: PollMode | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every cycle would re-read Massive's whole archive; the message names the fix.
+    message = (
+        "economy.inflation poll() needs a start: without one, every cycle re-reads the whole "
+        "archive Massive keeps. Build the query with a start, such as "
+        "m.economy.inflation(..., start=date.today()), then call poll()"
+    )
+    with (
+        pytest.raises(ValueError, match=f"^{re.escape(message)}$"),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive"),
+    ):
+        news(massive_session).poll(30, mode=mode)
+    assert rest.calls == []
+    # The error is the user's report; the log has only the decision, at DEBUG.
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+    news(massive_session).fetch()  # fetch() reads the whole range, as asked
+    assert [c[0] for c in rest.calls] == ["fetch"]
 
 
 @pytest.mark.parametrize(
@@ -278,7 +320,7 @@ def test_poll_interval_values(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
     with pytest.raises(ValueError, match=r"interval must be (positive|a positive, finite)"):
-        news(massive_session).poll(cast("float", interval))
+        feed(massive_session).poll(cast("float", interval))
 
 
 @pytest.mark.parametrize("interval", ["30", True, None])
@@ -286,14 +328,14 @@ def test_poll_interval_types(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
     with pytest.raises(TypeError, match="interval must be a number"):
-        news(massive_session).poll(cast("float", interval))
+        feed(massive_session).poll(cast("float", interval))
 
 
 def test_poll_mode_is_an_enum(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     with pytest.raises(
         TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.UPSERT$"
     ):
-        news(massive_session).poll(30, mode=cast("PollMode", "upsert"))
+        feed(massive_session).poll(30, mode=cast("PollMode", "upsert"))
 
 
 # `call 2 done: 0 rows in 0.001 s`, with the elapsed time made predictable.
@@ -852,7 +894,7 @@ def assert_described(session: dm.MassiveSession, spec: DatasetSpec, table: Table
     described = {str(e.getKey()): str(e.getValue()) for e in found.entrySet().toArray()}
     assert described == {c.name: c.description for c in schema.columns if c.description}
     assert described
-    assert table.attributes()["TableDescription"] == f"{spec.name}: {spec.summary}"
+    assert table.attributes()["TableDescription"].startswith(f"{spec.name}: {spec.summary}")
 
 
 def test_every_stream_shape_is_described(
@@ -1103,7 +1145,13 @@ class EmptyTransport(Recorder):
 
     @override
     def poll(
-        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        interval: timedelta,
+        mode: PollMode,
+        query: str,
     ) -> Table:
         empty = self._catalog.dataset_schema(spec).arrow_schema().empty_table()
         return poll.open_poll(
@@ -1112,6 +1160,7 @@ class EmptyTransport(Recorder):
             request=request,
             interval=interval,
             mode=mode,
+            query=query,
             read=lambda **_: (empty, 0),
             pollers=self.pollers,
             host="api.massive.com",
@@ -1158,9 +1207,11 @@ def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query
     symbol = SAMPLE_SYMBOLS[spec.asset_class]
     refused = Timespan.DAY if spec.asset_class is AssetClass.FUTURES else Timespan.SESSION
     spans = [span for span in Timespan if span is not refused] if spec.is_bars else [None]
+    # A feed polls only with a start.
+    bounds: dict[str, object] = {"start": "2025-01-02"} if spec.is_feed else {}
     for symbols in ((symbol,), new_table([string_col("Symbol", [symbol])])):
         for span in spans:
-            yield make(session, spec, symbols=symbols, timespan=span)
+            yield make(session, spec, symbols=symbols, timespan=span, **bounds)
 
 
 def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
@@ -1196,3 +1247,29 @@ def test_every_verb_returns_the_columns_in_the_order_columns_lists(
             if result.is_refreshing:
                 faked_session.release(result)
     assert calls  # every dataset has a verb
+
+
+def test_a_history_table_names_its_source(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    days = ("2025-03-03", "2025-03-04")
+    ticks = trades(s3_session).history(*days)
+    forced = trades(s3_session).history(*days, source=HistorySource.REST)
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    files = values.history(*days, source=HistorySource.FLAT_FILES)
+    summary = "A dataset for the tests."
+    assert [t.attributes()["TableDescription"] for t in (ticks, forced, files)] == [
+        (
+            f"stocks.trades: {summary} Read from REST: AUTO chose it (flat files cannot serve "
+            "it: stocks.trades has no flat files)."
+        ),
+        f"stocks.trades: {summary} Read from REST: requested with source=dm.HistorySource.REST.",
+        (
+            f"indices.values: {summary} Read from flat files: requested with "
+            "source=dm.HistorySource.FLAT_FILES."
+        ),
+    ]

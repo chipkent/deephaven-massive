@@ -56,11 +56,13 @@ from deephaven_massive._config import require_positive_int, require_positive_num
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.history_source import (
+    SourceChoice,
     choose_source,
     history_window,
     partition_dates,
     rest_history_problem,
 )
+from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import (
     HistorySource,
@@ -68,6 +70,7 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.liveness import entered, refuse_update_graph_thread
 from deephaven_massive._tables.watchlist import read_symbols
@@ -97,6 +100,12 @@ logger = logging.getLogger(__name__)
 
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
+
+_HISTORY_TRANSPORTS: Final = {
+    HistorySource.REST: Transport.REST,
+    HistorySource.FLAT_FILES: Transport.FLAT_FILES,
+}
+"""The transport behind each source `history()` can read."""
 
 _Q = TypeVar("_Q", bound="QueryBase")
 _P = ParamSpec("_P")
@@ -290,7 +299,7 @@ class QueryBase:
         suffix = f" {described}" if described else ""
         return f"<{type(self).__name__} {self._spec.name}{suffix}>"
 
-    def _described(self, table: Table) -> Table:
+    def _described(self, table: Table, *, note: str | None = None) -> Table:
         """Describe the static table a transport returned, as the verb's result (`describe`).
 
         Static results need no liveness scope: they never refresh. The copy is made on the
@@ -298,6 +307,8 @@ class QueryBase:
 
         Args:
             table: The static table of `fetch()` or `history()`.
+            note: A sentence for the table description after the summary (`history()`'s
+                source), or None.
 
         Returns:
             Its copy that carries the dataset's column and table descriptions.
@@ -305,7 +316,7 @@ class QueryBase:
         spec = self._spec
         schema = self._core.dataset_schema(spec)
         with entered(self._core.exec_ctx):
-            return describe(table, spec, schema)
+            return describe(table, spec, schema, note=note)
 
     def _logged_call(self, verb: str, run: Callable[[int], Table]) -> Table:
         """Run a static verb as one call: a new call id, and its start and outcome at DEBUG.
@@ -436,7 +447,10 @@ class Query(QueryBase):
         which on the Basic tier come out of the five a minute every session of the key shares.
         A
         non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
-        non-positive `interval` raises `ValueError`.
+        non-positive `interval` raises `ValueError`. A feed (a dataset whose default mode is
+        `APPEND`: the news and filings datasets) raises `ValueError` in every mode when the
+        query has no `start`, since every cycle would re-read the whole archive Massive keeps;
+        the message names the fix, a query built with `start=`.
 
         Before the table exists it raises `ValueError` if a path does not take a parameter or
         filter the query set: with static symbols any path the call reads, and with a reactive
@@ -477,14 +491,26 @@ class Query(QueryBase):
             A cycle that fails to publish appends nothing and remembers nothing. On a dataset
             with neither unique poll keys nor an update time (one keyed by the default
             `Symbol`), `APPEND` adds one row per symbol.
+
+        Raises:
+            ValueError: If the query is a feed's and has no `start`, if `interval` is not
+                positive, or if a parameter or symbol is refused as described above.
         """
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
+        if self._spec.is_feed and self._request.start is None:
+            name = self._spec.name
+            logger.debug("%r poll() refused: a feed's poll needs a start", self)
+            raise ValueError(
+                f"{name} poll() needs a start: without one, every cycle re-reads the whole "
+                f"archive Massive keeps. Build the query with a start, such as "
+                f"m.{name}(..., start=date.today()), then call poll()"
+            )
         if isinstance(self._request.symbols, SymbolTable):
             with entered(self._core.exec_ctx):
                 read_symbols(self._spec, self._request.symbols.table)
         return self._core.rest_transport().poll(
-            self._spec, self._request, interval=period, mode=chosen
+            self._spec, self._request, interval=period, mode=chosen, query=repr(self)
         )
 
 
@@ -582,6 +608,7 @@ class StreamQuery(QueryBase):
             spec,
             request,
             channel=self._channel,
+            query=repr(self),
             build=lambda blink: describe(shape(blink), spec, schema),
         )
 
@@ -809,7 +836,12 @@ class HistoryQuery(QueryBase):
         the dataset has a REST history endpoint and the symbols are explicit, or for `dm.ALL`
         daily bars with a grouped-daily endpoint. `AUTO` reads flat files when only they can,
         or when both can and the request has `flat_file_symbol_threshold` symbols or more (or
-        `dm.ALL`); otherwise it uses REST. A bar of a day or longer stamped at a time of day,
+        `dm.ALL`); otherwise it uses REST. The two sources do not always carry the same
+        columns (REST trades have `DecimalSize`, flat-file trades do not): when both could
+        serve a request and `AUTO`'s choice leaves columns null that the other fills, one
+        WARNING per session, dataset, and set of columns names them and the `source=` that
+        fills them. Every table's description (its `TableDescription` attribute) names the
+        source it was read from and why. A bar of a day or longer stamped at a time of day,
         or on a day, Massive is not known to use for its class fails loudly, whichever source
         serves it, so the source never changes which day a bar is labelled with; `source=`
         picks a source explicitly. A reactive symbol table is read once, when the verb is
@@ -908,12 +940,14 @@ class HistoryQuery(QueryBase):
             if window.empty:
                 return self._empty()
             return self._described(
-                self._core.rest_transport().history(self._spec, request, window, call=call)
+                self._core.rest_transport().history(self._spec, request, window, call=call),
+                note="Read from REST: requested with source=dm.HistorySource.REST.",
             )
         dates = partition_dates(self._spec, window)
         choice = choose_source(
             self._spec, request, dates, requested=chosen, config=self._core.config
         )
+        label = TRANSPORT_LABELS[_HISTORY_TRANSPORTS[choice.source]]
         if chosen is HistorySource.AUTO:
             logger.info(
                 "%s history: AUTO chose %s (%s)",
@@ -921,16 +955,62 @@ class HistoryQuery(QueryBase):
                 choice.source.name,
                 choice.reason,
             )
+            self._warn_unfilled(choice)
+            note = f"Read from {label}: AUTO chose it ({choice.reason})."
+        else:
+            note = f"Read from {label}: requested with source=dm.HistorySource.FLAT_FILES."
         if window.empty:
             return self._empty()
         if choice.source is HistorySource.REST:
             return self._described(
-                self._core.rest_transport().history(self._spec, request, window, call=call)
+                self._core.rest_transport().history(self._spec, request, window, call=call),
+                note=note,
             )
         return self._described(
             self._core.flat_file_transport().history(
                 self._spec, request, window, dates=dates, call=call
-            )
+            ),
+            note=note,
+        )
+
+    def _warn_unfilled(self, choice: SourceChoice) -> None:
+        """Warn when `AUTO` chose a source that leaves columns null which the other one fills.
+
+        Under `AUTO` the source changes with the symbol count and with the time of day (a
+        day's flat file is published the next morning), so the same call could fill a column
+        one hour and leave it null the next. When both sources could serve the request, the
+        columns each fills come from the generated schemas (`Catalog.history_columns`), and the
+        WARNING names the columns the chosen one leaves null, the choice and its reason, and
+        the `source=` that fills them; it is logged once per session, dataset, and set of
+        columns. When only one source could serve it, `AUTO` had no choice and nothing is
+        logged: the table description says which source it was.
+
+        Args:
+            choice: The `AUTO` choice.
+        """
+        if choice.alternative is not None:
+            return  # the other source cannot serve this request: AUTO had no choice
+        spec = self._spec
+        other = (
+            HistorySource.FLAT_FILES if choice.source is HistorySource.REST else HistorySource.REST
+        )
+        catalog = self._core.catalog
+        missing = catalog.history_columns(spec, _HISTORY_TRANSPORTS[other]) - (
+            catalog.history_columns(spec, _HISTORY_TRANSPORTS[choice.source])
+        )
+        if not missing:
+            return
+        columns = ", ".join(sorted(missing))
+        self._core.warnings.warn(
+            f"history source {spec.name} {choice.source.name}: {columns}",
+            "%s history: AUTO read %s (%s); the read leaves %s null, which %s fills: pass "
+            "source=dm.HistorySource.%s to get them (logged once per session)",
+            spec.name,
+            TRANSPORT_LABELS[_HISTORY_TRANSPORTS[choice.source]],
+            choice.reason,
+            columns,
+            TRANSPORT_LABELS[_HISTORY_TRANSPORTS[other]],
+            other.name,
         )
 
     def _empty(self) -> Table:

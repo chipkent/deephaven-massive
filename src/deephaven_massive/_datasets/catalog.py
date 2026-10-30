@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
 from deephaven_massive._datasets.row_times import RowTimes
-from deephaven_massive._datasets.schema import dataset_schema, rename
+from deephaven_massive._datasets.schema import dataset_schema, filled_columns, rename
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -479,6 +479,16 @@ class DatasetSpec:
             *((Transport.FLAT_FILES, prefix) for prefix in self.flat_file_prefixes.values()),
         ]
         return tuple(dict.fromkeys(found))
+
+    @property
+    def is_feed(self) -> bool:
+        """True for a feed: a dataset whose default `poll()` mode is `APPEND` (news, filings).
+
+        Massive keeps a feed's whole archive, and its `start` and `end` are the only bound on
+        what a cycle reads, so `poll()` on a feed refuses to start without `start`. Every feed
+        declares a `time_axis`, which the catalog's feed-axis gate checks.
+        """
+        return self.poll_mode is PollMode.APPEND
 
     @property
     def axis_params(self) -> frozenset[str]:
@@ -1038,6 +1048,32 @@ class Catalog:
         with self._lock:
             return self._schemas.setdefault((spec, raw_symbol), schema)
 
+    def history_columns(self, spec: DatasetSpec, transport: Transport) -> frozenset[str]:
+        """Return the columns a `history()` read of one transport fills, by the generated schemas.
+
+        A REST read uses the dataset's history path and its grouped-daily path; a flat-file
+        read uses its prefixes. A column outside the set is null in every row the transport
+        returns. `history()` compares the two sets to warn when its `AUTO` choice leaves
+        columns null that the other source fills. Pure, like `dataset_schema`.
+
+        Args:
+            spec: The dataset.
+            transport: `Transport.REST` or `Transport.FLAT_FILES`.
+
+        Returns:
+            The column names (`schema.filled_columns`); only the library's time columns for a
+            transport the dataset has no history source on.
+
+        An unknown source raises the `KeyError` of `source`.
+        """
+        keys: list[tuple[Transport, str]]
+        if transport is Transport.REST:
+            paths = (spec.history_path, spec.grouped_daily_path)
+            keys = [(transport, path) for path in paths if path is not None]
+        else:
+            keys = [(transport, prefix) for prefix in spec.flat_file_prefixes.values()]
+        return filled_columns(spec, keys, self.source)
+
     def check_filters(
         self,
         spec: DatasetSpec,
@@ -1207,6 +1243,8 @@ class Catalog:
         - **append keys:** a dataset whose `poll_mode` is `APPEND` declares its own
           `poll_keys`, not the default `("Symbol",)`. The gate checks only that the key is
           explicit; the dataset's tests check that it is unique per row.
+        - **feed axis:** a feed (`DatasetSpec.is_feed`) declares a `time_axis`, so the
+          `start` its `poll()` requires can be given.
         - **nullable keys:** a dataset with `poll_keys` has at least one that is not in
           `nullable_poll_keys`, so no row is identified by nulls alone.
         - **poll keys:** every `poll_keys` and `revision_keys` column is a column of the
@@ -1234,6 +1272,11 @@ class Catalog:
                 found.append(
                     f"append keys: {spec.name}: an APPEND dataset declares its own poll_keys, "
                     "unique per row, not the default ['Symbol']"
+                )
+            if spec.is_feed and spec.time_axis is None:
+                found.append(
+                    f"feed axis: {spec.name}: an APPEND dataset declares a time_axis, since its "
+                    "poll() needs start"
                 )
             if spec.poll_keys and set(spec.poll_keys) <= set(spec.nullable_poll_keys):
                 found.append(

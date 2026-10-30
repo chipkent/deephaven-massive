@@ -1171,7 +1171,7 @@ class Flusher:
         for core, dataset in dict.fromkeys((core, sink.plan.dataset) for core, sink in live):
             core.drift.report(dataset, Transport.WS, drift, where=where)
         for core, sink in live:
-            core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
+            core.record_stream_drift(sink.stream_id, Transport.WS, drift)
 
 
 def _report_updates(updates: Mapping[StreamSink, StreamUpdate]) -> None:

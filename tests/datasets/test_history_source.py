@@ -534,8 +534,8 @@ def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
         "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
         "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY); "
         "stocks.bars flat files hold only 1-minute, 1-day bars; "
-        "flat-file bars are unadjusted (as traded) and one history() never mixes adjusted and "
-        "unadjusted prices, so adjusted bars come only from REST; pass adjusted=False for the "
+        "adjusted=True needs REST, since flat-file bars are unadjusted (as traded) and one "
+        "history() never mixes adjusted and unadjusted prices; pass adjusted=False for the "
         "flat files; "
         "the file for 2025-03-03 is not yet published; flat files land ~11:00 ET next day "
         "(a day's file counts as published from 11:30 New York time after the day ends). "
@@ -546,7 +546,9 @@ def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
 def test_auto_with_only_flat_files_possible_reads_flat_files() -> None:
     # indices.values has no REST history, so even one symbol reads flat files.
     assert decide(INDEX_VALUES_SPEC, request(("I:SPX",))) == SourceChoice(
-        HistorySource.FLAT_FILES, "REST cannot serve it: indices.values has no REST history"
+        HistorySource.FLAT_FILES,
+        "REST cannot serve it: indices.values has no REST history",
+        alternative="indices.values has no REST history",
     )
 
 
@@ -555,7 +557,9 @@ def test_auto_with_only_rest_possible_uses_rest() -> None:
     assert choice.source is HistorySource.REST
     assert choice.reason.startswith("flat files cannot serve it: no S3 credentials")
     assert decide(YIELDS, request(None)) == SourceChoice(
-        HistorySource.REST, "flat files cannot serve it: economy.yields has no flat files"
+        HistorySource.REST,
+        "flat files cannot serve it: economy.yields has no flat files",
+        alternative="economy.yields has no flat files",
     )
 
 

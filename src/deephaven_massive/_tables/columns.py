@@ -287,7 +287,7 @@ def _interned(rows: pa.Table, dates: Sequence[str]) -> Table:
     return table.update([f"{name} = {name} == null ? null : {name}.intern()" for name in dates])
 
 
-def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
+def describe(table: Table, spec: DatasetSpec, schema: Schema, *, note: str | None = None) -> Table:
     """Return a copy of a result table in the dataset's column order, with its descriptions.
 
     The copy lists the schema's columns first, in schema order, which is the order `columns()`
@@ -298,7 +298,8 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
     `withColumnDescriptions` with every column of the schema whose description is not empty
     (`ColumnDescriptions`, which Barrage sends to clients and the web UI shows as the
     column-header tooltip), then `withDescription` with `"<dataset>: <summary>"`
-    (`TableDescription`), such as `"stocks.trades: Trades of US-listed stocks, tick by tick."`.
+    (`TableDescription`), such as `"stocks.trades: Trades of US-listed stocks, tick by tick."`,
+    followed by `note` when one is given (a `history()` table's source).
     The reordering checks that every schema column exists, and `withColumnDescriptions` that
     every described one does, so a schema that disagrees with the table fails here, at once;
     `Table.with_attributes`, which skips that check, is not used.
@@ -341,6 +342,9 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
         table: The table the verb would otherwise return, with every column of `schema`.
         spec: The dataset, for its name and summary.
         schema: The dataset's schema (`Catalog.dataset_schema(spec)`), for its descriptions.
+        note: A sentence to add to the table description after the summary, such as
+            `"Read from REST: AUTO chose it (2 symbols < flat_file_symbol_threshold 50)."`;
+            None adds nothing.
 
     Returns:
         A new table with the same rows, columns, and other attributes as `table`, the
@@ -361,7 +365,12 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
         described = table.j_table.moveColumnsUp(*schema.column_names)
         if descriptions:  # an empty attribute would claim descriptions the table lacks
             described = described.withColumnDescriptions(j_hashmap(descriptions))
-        described = described.withDescription(f"{spec.name}: {spec.summary}")
+        text = (
+            f"{spec.name}: {spec.summary}"
+            if note is None
+            else f"{spec.name}: {spec.summary} {note}"
+        )
+        described = described.withDescription(text)
     except RuntimeError as error:  # jpy's form of a Java exception
         raise RuntimeError(f"describing a {spec.name} result failed: {error}") from error
     return Table(j_table=described)

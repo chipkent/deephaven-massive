@@ -50,6 +50,7 @@ TIMEOUT = 30.0
 STREAM = StreamRow(
     stream_id=7,
     dataset="stocks.trades",
+    query="<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>",
     symbol_count=2,
     symbols="AAPL, MSFT",
     held_results=1,
@@ -87,6 +88,7 @@ def test_column_sets() -> None:
     assert STREAMS.column_names == (
         "StreamId",
         "Dataset",
+        "Query",
         "SymbolCount",
         "Symbols",
         "HeldResults",
@@ -203,13 +205,13 @@ def test_rows_replace_rows_by_key_in_order(
     assert diagnostics.barrier().wait(TIMEOUT)
     rows = sorted(dh_to_pylist(diagnostics.streams), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["HeldResults"], r["State"], r["Transport"]) for r in rows] == [
-        (7, 0, "RELEASED", "WS"),
-        (8, 1, "RUNNING", "WS"),
+        (7, 0, "RELEASED", "WebSocket"),
+        (8, 1, "RUNNING", "WebSocket"),
     ]
     connections = dh_to_pylist(diagnostics.connections)
     assert {(r["Transport"], r["AssetClass"], r["State"], r["Recency"]) for r in connections} == {
         ("REST", "stocks", "RESOLVING", "DELAYED"),
-        ("WS", "stocks", "CONNECTED", None),
+        ("WebSocket", "stocks", "CONNECTED", None),
     }
     diagnostics.release()
 

@@ -494,7 +494,7 @@ class _Reference(Namespace):
 
         Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
         `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range,
-        so pass `start`: a poll without it re-reads the news archive every cycle. An article
+        so `poll()` needs `start` and raises `ValueError` without one. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
         (JSON text), and
         `symbols` only selects the articles that mention one ticker. The endpoint's `ticker`
@@ -508,7 +508,8 @@ class _Reference(Namespace):
             symbols: The one ticker whose articles to read, as a `str` or a one-element
                 sequence; None for every article.
             start: The earliest publication: a date is its 00:00 in New York, a `datetime`
-                is used as is; None for no lower bound, which reads the whole archive.
+                is used as is; None for no lower bound, which reads the whole archive and
+                which `poll()` refuses.
             end: The end of the range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, a
                 `datetime` is exclusive; None for no upper bound.

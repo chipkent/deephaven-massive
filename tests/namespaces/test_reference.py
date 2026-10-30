@@ -800,6 +800,7 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
         request=Request(),
         interval=timedelta(seconds=60),
         mode=mode,
+        query="<Query test>",
         read=cast("Any", _Statuses("open", "closed")),
         pollers=pollers,
         host="api.massive.com",
