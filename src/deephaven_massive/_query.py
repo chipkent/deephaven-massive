@@ -371,7 +371,8 @@ class QueryBase:
             ::
 
                 cols = m.stocks.trades(["AAPL"]).columns()
-                stream_only = cols.where("SuppliedBy = `WebSocket`")
+                # The columns a live stream leaves null, such as Correction.
+                not_streamed = cols.where("!SuppliedBy.contains(`WebSocket`)")
         """
         refuse_update_graph_thread(self._core.exec_ctx)
         schema = self._core.dataset_schema(self._spec)
@@ -440,7 +441,7 @@ class QueryBase:
         previous day's bar; the other datasets of the same kind and asset class that serve the
         verb (a stream's one-row dataset, such as `stocks.last_trade` for `fetch()` of
         `stocks.trades`, and back); for `fetch()` or `poll()`, the class's `snapshots` dataset,
-        the current state on every plan; for `history()` of a dataset with a time axis, its
+        the current state on a paid plan; for `history()` of a dataset with a time axis, its
         `start=` and `end=` arguments; for a stream verb of bars that do not stream, the
         timespans that do.
 
@@ -617,18 +618,20 @@ class Query(QueryBase):
         later page of its pages raises `MassiveError`, since its data was cut short.
 
         Args:
-            wait: With False, `to_pandas()` before the fill returns no rows: take
-                `snapshot()` once the table is filled for a static copy. True (the default)
-                blocks until the whole result is read and returns a static table. False
-                returns at once a refreshing table with the same columns and no rows, which a
-                library thread of its own fills: when the whole download has landed, the
-                complete result appears in one update and never changes again. Its row in
-                `m.streams()` (`Kind=read`) is `LOADING`, then `DONE`, or `FAILED` with the
-                error, which also fails the table. The read holds no lock, so inside a console
-                command the command returns at once and live tables keep updating, and it
-                waits out the full 10 minutes of rate-limit pauses. Releasing the table
-                (`m.release`, garbage collection) stops the download once nothing derived
-                from it is left, and `m.close()` stops it at once.
+            wait: True (the default) blocks until the whole result is read and returns a
+                static table. False returns at once a refreshing table with the same columns
+                and no rows, which a library thread of its own fills: when the whole download
+                has landed, the complete result appears in one update and never changes again.
+                A read waits out at most 10 minutes of Massive's rate-limit pauses before it
+                fails; a blocking read inside a Deephaven console command gives up after 90 s
+                of pauses, since the command holds the update graph's lock and no table
+                updates meanwhile. A `wait=False` read holds no lock, so the command returns at
+                once, live tables keep updating, and the read gets the full 10 minutes. Until
+                the fill, `to_pandas()` returns no rows: take `snapshot()` once the table is
+                filled for a static copy. The read's row in `m.streams()` (`Kind=read`) is
+                `LOADING`, then `DONE`, or `FAILED` with the error, which also fails the table.
+                Releasing the table (`m.release`, garbage collection) stops the download once
+                nothing derived from it is left, and `m.close()` stops it at once.
 
         Returns:
             A static table; with `wait=False`, a refreshing table filled once in the
@@ -1054,7 +1057,9 @@ class StreamQuery(QueryBase):
         does not is skipped and listed in `m.streams()`, or fails the result under
         `MassiveConfig.noncanonical_symbols=OnError.RAISE` (convert such a table with
         `dm.canonicalize_symbols` first). `last_by()` never seeds
-        from REST: use `snapshots(symbols).poll(n)` for current state on every plan.
+        from REST: for current state, use `snapshots(symbols).poll(n)`, which needs a plan
+        that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
 
         A static symbol table is read once, now (see the class).
 
@@ -1185,18 +1190,20 @@ class HistoryQuery(QueryBase):
                 for a date `start`.
             source: Where to read: `AUTO` (the default) picks flat files or REST, `REST` or
                 `FLAT_FILES` forces one.
-            wait: With False, `to_pandas()` before the fill returns no rows: take
-                `snapshot()` once the table is filled for a static copy. True (the default)
-                blocks until the whole result is read and returns a static table. False
-                returns at once a refreshing table with the same columns and no rows, which a
-                library thread of its own fills: when the whole download has landed, the
-                complete result appears in one update and never changes again. Its row in
-                `m.streams()` (`Kind=read`) is `LOADING`, then `DONE`, or `FAILED` with the
-                error, which also fails the table. The read holds no lock, so inside a console
-                command the command returns at once and live tables keep updating, and it
-                waits out the full 10 minutes of rate-limit pauses. Releasing the table
-                (`m.release`, garbage collection) stops the download once nothing derived
-                from it is left, and `m.close()` stops it at once.
+            wait: True (the default) blocks until the whole result is read and returns a
+                static table. False returns at once a refreshing table with the same columns
+                and no rows, which a library thread of its own fills: when the whole download
+                has landed, the complete result appears in one update and never changes again.
+                A read waits out at most 10 minutes of Massive's rate-limit pauses before it
+                fails; a blocking read inside a Deephaven console command gives up after 90 s
+                of pauses, since the command holds the update graph's lock and no table
+                updates meanwhile. A `wait=False` read holds no lock, so the command returns at
+                once, live tables keep updating, and the read gets the full 10 minutes. Until
+                the fill, `to_pandas()` returns no rows: take `snapshot()` once the table is
+                filled for a static copy. The read's row in `m.streams()` (`Kind=read`) is
+                `LOADING`, then `DONE`, or `FAILED` with the error, which also fails the table.
+                Releasing the table (`m.release`, garbage collection) stops the download once
+                nothing derived from it is left, and `m.close()` stops it at once.
 
         Returns:
             A static table in the dataset's schema (see `columns()`), oldest first within each
@@ -1242,6 +1249,11 @@ class HistoryQuery(QueryBase):
         Example:
             ::
 
+                from datetime import UTC, datetime
+
+                import deephaven_massive as dm
+
+                m = dm.MassiveSession()
                 q = m.crypto.trades("X:BTCUSD")
                 day = q.history("2026-01-02", "2026-01-02")  # all of that UTC day
                 hour = q.history(

@@ -481,10 +481,10 @@ class _Reference(Namespace):
         `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range
         for every ticker, so `poll()` needs `start` or `limit` and raises `ValueError` without
         either; give it a recent `start`, a `limit`, or both, since a fixed `start` keeps
-        widening the window of a poll that runs for days. Massive documents no default order
-        for this endpoint, so a poll of the latest headlines asks for one:
-        `m.reference.news(["AAPL", "MSFT"], sort="published_utc", order=dm.Order.DESC,
-        limit=50).poll(60)`. An article
+        widening the window of a poll that runs for days. Massive documents `published_utc`
+        as the endpoint's default sort and descending as its default order, so each ticker's
+        newest articles come first; a poll of the latest headlines:
+        `m.reference.news(["AAPL", "MSFT"], limit=50).poll(60)`. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
         (a `String[]`: `table.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps the
         articles that name one, and `table.ungroup("Tickers")` gives a row per article and
@@ -519,9 +519,9 @@ class _Reference(Namespace):
                 `datetime` raises `ValueError`): a date includes that whole day, a
                 `datetime` is exclusive; None for no upper bound.
             sort: The field each ticker's request sorts by (`"published_utc"`); None for the
-                endpoint's default.
+                endpoint's default, `published_utc`.
             order: The sort direction of each ticker's request; None for the endpoint's
-                default.
+                default, descending (newest first).
             limit: The maximum number of articles per ticker, or in total without `symbols`;
                 None for every article. The page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written

@@ -154,23 +154,26 @@ class MassiveConfig:
 
             cfg = dm.MassiveConfig()  # MASSIVE_API_KEY from the environment
             pinned = dm.MassiveConfig(
-                ws_hosts={dm.AssetClass.STOCKS: "fullmarket-business.massive.com"},
+                ws_hosts={dm.AssetClass.STOCKS: "delayed.massive.com"},
                 max_concurrency=4,
             )
             m = dm.MassiveSession(pinned)
 
     Attributes:
-        api_key: The Massive API key. Defaults to `MASSIVE_API_KEY`.
-        s3_access_key_id: The flat-file S3 access key id. Defaults to
-            `MASSIVE_S3_ACCESS_KEY_ID`. Flat-file history needs both S3 credentials.
-        s3_secret_access_key: The flat-file S3 secret. Defaults to
-            `MASSIVE_S3_SECRET_ACCESS_KEY`.
+        api_key: The Massive API key. Defaults to the `MASSIVE_API_KEY` environment variable;
+            with neither, construction raises `AuthenticationError`.
+        s3_access_key_id: The flat-file S3 access key id. Defaults to the
+            `MASSIVE_S3_ACCESS_KEY_ID` environment variable, else None. Flat-file history
+            needs both S3 credentials; without them, `history()` cannot read flat files.
+        s3_secret_access_key: The flat-file S3 secret. Defaults to the
+            `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
         ws_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
-            for example `{dm.AssetClass.STOCKS: "fullmarket-business.massive.com"}`, instead
-            of letting the library decide from REST evidence. Hostnames only: no scheme, port,
-            or path. The FMV family is never pinned; it is always `business.massive.com`.
+            for example `{dm.AssetClass.STOCKS: "delayed.massive.com"}`, instead of letting
+            the library decide from REST evidence. Hostnames only: no scheme, port, or path.
+            The FMV family is never pinned; it is always `business.massive.com`. Defaults to
+            an empty mapping: the library decides every host.
         ack_timeout: Seconds to wait for a subscription acknowledgement before re-sending it
-            once.
+            once. Defaults to 5 seconds.
         reconnect_backoff: Seconds of the first wait before the WebSocket client tries again
             after any failure that is not fatal: a connection that opened and closed (cleanly
             or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake
@@ -184,13 +187,15 @@ class MassiveConfig:
             30-second default waits out that whole window.
         max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
             lengthens a wait, so every wait lies in `[reconnect_backoff,
-            max_reconnect_backoff]`.
-        flat_file_symbol_threshold: With `HistorySource.AUTO`, when both flat files and REST
-            can serve a request, this many symbols or more (or `dm.ALL`) read flat files.
-        flat_file_publish_cutoff: A New York wall-clock time. Before it, yesterday's flat file
-            is treated as not yet published (files land around 11:00 ET).
+            max_reconnect_backoff]`. Defaults to 120 seconds.
+        flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
+            flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
+            read flat files. Defaults to 50.
+        flat_file_publish_cutoff: A New York wall-clock time, a `datetime.time` without a
+            timezone. Before it, yesterday's flat file is treated as not yet published (files
+            land around 11:00 ET). Defaults to 11:30.
         max_concurrency: Maximum parallel REST requests of one `poll()` fan-out, and parallel
-            S3 reads.
+            S3 reads: a count of threads. Defaults to 8.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
             free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
             per subscription: Basic allows 5 requests per minute, and every paid tier has no
@@ -201,10 +206,13 @@ class MassiveConfig:
             says the per-minute maximum was exceeded, the library learns the subscription is
             Basic and paces it from then on. Forex and crypto are one subscription,
             `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
+            Defaults to an empty set: every subscription is unpaced until a refusal.
         flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
-        rest_base_url: The REST API base URL.
-        s3_endpoint_url: The flat-file S3 endpoint URL.
-        s3_bucket: The flat-file S3 bucket.
+            Defaults to 0.05 seconds (50 ms).
+        rest_base_url: The REST API base URL. Defaults to `https://api.massive.com`.
+        s3_endpoint_url: The flat-file S3 endpoint URL. Defaults to
+            `https://files.massive.com`.
+        s3_bucket: The flat-file S3 bucket. Defaults to `flatfiles`.
         noncanonical_symbols: What a row of a symbol table (a Deephaven table passed as
             `symbols`) does when it is not Massive's exact ticker, for every verb, whether the
             row is there at the call or added later. `OnError.LOG`, the default, skips the row

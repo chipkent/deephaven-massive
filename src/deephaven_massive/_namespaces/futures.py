@@ -274,13 +274,19 @@ class _Futures(Namespace):
     or `"GCJ5"` (April 2025 gold). Every streamed dataset uses the `/futures` WebSocket cluster
     path; `venues` only picks the exchanges whose flat files `history()` reads.
 
+    A contract trades only until its last trade date, so a live call needs a current one:
+    `contracts()` lists them. The tickers in the examples of this namespace's methods have
+    expired; their live calls need a current contract in their place, while their `history()`
+    calls read past dates and work as written.
+
     Example:
         ::
 
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            es = m.futures.trades("ESZ5").last_by()  # the latest trade, live
+            active = m.futures.contracts(product_code="ES", filters={"active": True}).fetch()
+            es = m.futures.trades(active.view(["Symbol = Ticker"])).last_by()  # live
             daily = m.futures.bars("ESZ5", dm.Timespan.SESSION).history("2025-01-02", "2025-03-31")
     """
 
@@ -341,6 +347,7 @@ class _Futures(Namespace):
                 import deephaven_massive as dm
 
                 m = dm.MassiveSession()
+                # ESZ5 and NQZ5 have expired: name current contracts, from m.futures.contracts()
                 live = m.futures.trades(["ESZ5", "NQZ5"]).append_only()
                 past = m.futures.trades("ESZ5", venues={dm.FuturesVenue.CME}).history(
                     "2025-10-01", "2025-10-03"
@@ -402,6 +409,7 @@ class _Futures(Namespace):
                 import deephaven_massive as dm
 
                 m = dm.MassiveSession()
+                # CLZ5 has expired: name a current contract, from m.futures.contracts()
                 book = m.futures.quotes("CLZ5").last_by()  # the current top of book, live
         """
         return cast(
@@ -442,7 +450,8 @@ class _Futures(Namespace):
         `Date` (ISO `yyyy-MM-dd` text: Massive's `session_end_date`, or on the WebSocket the
         session as for `trades`), and `TimestampInsert`, when the library received it.
         `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed bars:
+        (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table` is a
+        table a verb such as `history()` returned) to attach only closed bars:
         an intraday bar ends its length after its start (a one-second WebSocket bar at the
         later of that and Massive's `e`); a session bar at 17:00 Chicago time on its session
         date. Massive does not document whether a bar of several sessions, or of a week or
@@ -465,7 +474,8 @@ class _Futures(Namespace):
         come from the flat files `us_futures_<venue>/minute_aggs_v1` and
         `us_futures_<venue>/session_aggs_v1`. A futures trading day is a session ending at
         17:00 America/Chicago, so daily bars are `Timespan.SESSION`; there is no
-        `Timespan.DAY` and no previous-session `fetch()`.
+        `Timespan.DAY`, and unlike the other asset classes futures have no
+        `previous_day_bar()`.
 
         A date bound of `history()` is a whole trading session. Bars are requested from four
         days before the first session's regular open (a holiday can open a session early) to
@@ -517,6 +527,7 @@ class _Futures(Namespace):
                 import deephaven_massive as dm
 
                 m = dm.MassiveSession()
+                # ESZ5 has expired: name a current contract, from m.futures.contracts()
                 minute = m.futures.bars("ESZ5").ring(390)  # the latest 390 1-minute bars, live
                 five = m.futures.bars("ESZ5", dm.Timespan.MINUTE, multiplier=5).history(
                     "2025-10-01", "2025-10-03"
@@ -593,6 +604,7 @@ class _Futures(Namespace):
                 import deephaven_massive as dm
 
                 m = dm.MassiveSession()
+                # ESZ5 and NQZ5 have expired: name current contracts, from m.futures.contracts()
                 now = m.futures.snapshots(["ESZ5", "NQZ5"]).fetch()
                 es_curve = m.futures.snapshots(dm.ALL, product_code="ES").poll(5)
         """

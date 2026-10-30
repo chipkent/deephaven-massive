@@ -55,9 +55,11 @@ Read next:
     full documentation.
 
 Each public name is imported on first use (PEP 562), so `import deephaven_massive` is cheap
-and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`, and the symbol converters need a
-running Deephaven JVM: use them inside a Deephaven worker, or after starting
-`deephaven_server.Server`. The exceptions and enums do not.
+and needs no JVM. `MassiveSession`, `MassiveConfig`, `ALL`, `datasets()`, the
+`canonical_symbol*` converters, and `canonicalize_symbols` need a running Deephaven JVM: use
+them inside a Deephaven worker, or after starting `deephaven_server.Server`. The exceptions,
+the enums, `enable_debug_logging`, `disable_debug_logging`, `LogOutput`, and `__version__` do
+not.
 
 Public API:
     - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,

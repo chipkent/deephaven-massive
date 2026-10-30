@@ -459,8 +459,10 @@ class _Stocks(Namespace):
         per symbol; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
         `mode=dm.PollMode.APPEND` appends each cycle's last trade when it is new, so a trade between
         two cycles is never seen (`trades()` streams every one). Some plans lack the endpoint (HTTP
-        403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's last trade on
-        every plan. A symbol with no trade (HTTP 404) is left out, with a WARNING.
+        403 raises `EntitlementError`); `snapshots(symbols)` also carries each ticker's last
+        trade, on a plan that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A symbol with no trade (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
         since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
@@ -544,8 +546,10 @@ class _Stocks(Namespace):
         `poll()`, one request per symbol; `poll()` replaces the table each cycle, keyed by `Symbol`,
         and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so
         a quote between two cycles is never seen (`quotes()` streams every one). Some plans lack the
-        endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's
-        last quote on every plan. A symbol with no quote (HTTP 404) is left out, with a WARNING.
+        endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` also carries each
+        ticker's last quote, on a plan that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A symbol with no quote (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
         since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
@@ -621,7 +625,8 @@ class _Stocks(Namespace):
         (`/v2/aggs/grouped/locale/us/market/stocks/{date}`), one request per day.
 
         `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only bars whose
+        (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table` is a
+        table a verb such as `history()` returned) to attach only bars whose
         window had closed; it is not when Massive published the bar. An intraday bar ends
         its length after its start. A bar of a day or longer runs from 00:00 New York time
         of its window's first day to 00:00 after its last, whatever the source: the range
@@ -876,7 +881,8 @@ class _Stocks(Namespace):
         where the plan includes it. Served by REST
         (`/v2/snapshot/locale/us/markets/stocks/tickers`) through `fetch()` and `poll()`, one
         request for every symbol; `poll()` replaces the table each cycle, keyed by `Symbol`.
-        `snapshots(symbols).poll(n)` is the way to get current state on every plan.
+        Snapshots need a paid plan; which plans include them is in
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md.
 
         `fetch()` and `poll()` take no `limit`: the endpoint returns one row per ticker.
         `dm.ALL` returns the full market. Columns:
@@ -980,11 +986,12 @@ class _Stocks(Namespace):
             The query; nothing is requested until a verb runs.
 
         Raises:
-            TypeError: If `date` is not a `str`, `date`, or `datetime`, `adjusted` is not a `bool`,
-                or `symbols` is not an accepted form.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, or `date` is a
-                `datetime` or not an ISO-8601 date. Also for `symbols` of None, with a message that
-                names the forms it takes.
+            TypeError: If `symbols` or `date` is of another type, or `adjusted` is not a `bool`.
+            ValueError: If `symbols` is `dm.ALL`, a sequence is empty or an exhausted generator,
+                a symbol is not a valid ticker, a table has no `Symbol` column, or `date` is a
+                `datetime` or other time, or text that is neither an ISO-8601 date nor Deephaven
+                date text. Also for `symbols` of None, with a message that names the forms it
+                takes.
 
         Example:
             ::
@@ -1095,9 +1102,9 @@ class _Stocks(Namespace):
         its volume by it; a bar with no later split is already on today's basis. Both dates are
         ISO text, which orders as dates do, so a reverse as-of join finds that split:
         `bars.raj(splits, on=["Symbol", "Date<ExecutionDate"],
-        joins=["F=HistoricalAdjustmentFactor"])`, then `Close * F` and `Volume / F`, with a
-        null `F` meaning 1. A split takes effect overnight: on its execution date all trading,
-        the pre-market included, is already on the new basis.
+        joins=["Factor=HistoricalAdjustmentFactor"])`, then `Close * Factor` and
+        `Volume / Factor`, with a null `Factor` meaning 1. A split takes effect overnight: on
+        its execution date all trading, the pre-market included, is already on the new basis.
 
         `limit` caps the total number of rows across pages; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every ticker. Columns:
@@ -1140,9 +1147,13 @@ class _Stocks(Namespace):
                 adjusted = bars.raj(
                     splits,
                     on=["Symbol", "Date<ExecutionDate"],
-                    joins=["F=HistoricalAdjustmentFactor"],
+                    joins=["Factor=HistoricalAdjustmentFactor"],
                 ).update(
-                    ["F = isNull(F) ? 1.0 : F", "AdjClose = Close * F", "AdjVolume = Volume / F"]
+                    [
+                        "Factor = isNull(Factor) ? 1.0 : Factor",
+                        "AdjustedClose = Close * Factor",
+                        "AdjustedVolume = Volume / Factor",
+                    ]
                 )
         """
         return list_query(

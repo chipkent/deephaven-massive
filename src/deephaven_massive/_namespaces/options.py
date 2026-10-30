@@ -384,7 +384,7 @@ class _Options(Namespace):
 
             m = dm.MassiveSession()
             calls = m.options.chain("AAPL", contract_type=dm.ContractType.CALL).fetch()
-            live = m.options.trades(["O:AAPL250117C00150000"]).append_only()
+            live = m.options.trades(calls.head(10)).append_only()  # ten current contracts
     """
 
     __slots__ = ()
@@ -428,6 +428,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # For blink(), name a current contract: this one has expired (see chain())
                 q = m.options.trades("O:AAPL250117C00150000")
                 ticks = q.blink()
                 day = q.history("2025-01-02", "2025-01-02")
@@ -446,8 +447,9 @@ class _Options(Namespace):
         keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last trade
         when it is new, so a trade between two cycles is never seen (`trades()` streams every one).
         Some plans lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)`
-        carries each contract's last trade on every plan. A contract with no trade (HTTP 404) is
-        left out, with a WARNING.
+        also carries each contract's last trade, on a plan that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A contract with no trade (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each contract gives one row. `dm.ALL` is
         refused, since the endpoint takes one contract per request: use
@@ -474,6 +476,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 last = m.options.last_trade(["O:AAPL250117C00150000"]).fetch()
         """
         query = build_query(
@@ -521,6 +524,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 book = m.options.quotes(["O:AAPL250117C00150000"]).last_by()
         """
         return cast("StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols))
@@ -573,7 +577,8 @@ class _Options(Namespace):
         never appears.
 
         `TimestampEnd` is the first instant at which the bar is complete, so join on it
-        (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed
+        (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table` is a
+        table a verb such as `history()` returned) to attach only closed
         bars; it is not when Massive published the bar. An intraday bar ends its length
         after its start. A bar of a day or longer runs from 00:00 New York time of its
         window's first day to 00:00 after its last, whatever the source: the range and the
@@ -625,6 +630,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # For append_only(), name a current contract: this one has expired (see chain())
                 minute = m.options.bars("O:AAPL250117C00150000").append_only()
                 hourly = m.options.bars(
                     "O:AAPL250117C00150000", dm.Timespan.HOUR, multiplier=4
@@ -691,6 +697,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 prev = m.options.previous_day_bar("O:AAPL250117C00150000").fetch()
         """
         query = build_query(
@@ -740,6 +747,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # This contract has expired: name a current one, from m.options.chain("AAPL")
                 fair = m.options.fmv(["O:AAPL250117C00150000"]).last_by()
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
@@ -806,10 +814,13 @@ class _Options(Namespace):
         Example:
             ::
 
+                from datetime import date, timedelta
+
+                month = (date.today() + timedelta(days=30)).isoformat()
                 near = m.options.chain(
                     "AAPL",
                     contract_type=dm.ContractType.CALL,
-                    filters={"expiration_date_lte": "2025-01-17"},
+                    filters={"expiration_date_lte": month},
                 ).fetch()
                 # Keep the contracts that deliver 100 shares and nothing else.
                 terms = m.options.contracts(underlying="AAPL").fetch()
@@ -893,6 +904,7 @@ class _Options(Namespace):
         Example:
             ::
 
+                # These contracts have expired: name current ones, from m.options.chain("AAPL")
                 watch = ["O:AAPL250117C00150000", "O:AAPL250117P00150000"]
                 greeks = m.options.snapshots(watch).poll(5)
         """

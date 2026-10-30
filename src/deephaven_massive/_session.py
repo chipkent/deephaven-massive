@@ -238,11 +238,9 @@ class MassiveSession:
     def __init__(self, config: MassiveConfig | None = None) -> None:
         """Start a session.
 
-        When `config` is None, `MassiveConfig()` reads the environment and raises its own
-        `AuthenticationError` if no API key is configured (it is not repeated under Raises
-        because this method does not raise it itself). On a Deephaven update-graph thread, for
-        example inside a table listener, it raises `ValueError`; a thread that holds the update
-        graph's lock, as the Deephaven console does for every command, may create a session.
+        A thread that holds the update graph's lock, as the Deephaven console does for every
+        command, may create a session; a Deephaven update-graph thread, for example inside a
+        table listener, may not.
 
         Args:
             config: The configuration; None means `MassiveConfig()`, which reads the API key
@@ -250,6 +248,9 @@ class MassiveSession:
 
         Raises:
             TypeError: If `config` is not a `MassiveConfig`.
+            AuthenticationError: From `MassiveConfig()` when `config` is None and no API key
+                is in the environment.
+            ValueError: On a Deephaven update-graph thread.
             MassiveError: If no Deephaven `ExecutionContext` is active on this thread (the
                 session must be created inside a Deephaven worker), or if the context's query
                 scope is not the Python script session's own, as with

@@ -108,8 +108,8 @@ DateLike: TypeAlias = str | date | datetime | np.datetime64
 One of:
 
 - text, read by one of two parsers:
-  - ISO-8601, read as before: a date in any ISO form (`"2025-03-03"`, `"20250303"`,
-    `"2025-W10-1"`), or a date and time with an offset (`"2025-03-03T09:30:00-05:00"`), whose
+  - ISO-8601: a date in any ISO form (`"2025-03-03"`, `"20250303"`, `"2025-W10-1"`), or a
+    date and time with an offset (`"2025-03-03T09:30:00-05:00"`), whose
     digits below the microsecond are rounded outward like a Java instant's;
   - otherwise Deephaven's own date text, as `deephaven.time.to_j_local_date` reads it
     (`"2025-3-3"`), or its date and time text with a zone, as `to_j_zdt` reads it

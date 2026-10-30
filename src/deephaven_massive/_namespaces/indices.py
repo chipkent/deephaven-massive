@@ -278,8 +278,9 @@ class _Indices(Namespace):
         `TimestampEnd`: the current day's bar never appears, a day bar only from 01:00 New York
         time the next day, and a week bar only from a range that reaches its Saturday.
 
-        `TimestampEnd` is the first instant at which the bar is complete, so join on it (`aj(t,
-        bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to attach only closed bars. An intraday
+        `TimestampEnd` is the first instant at which the bar is complete, so join on it
+        (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`, where `bar_table` is a
+        table a verb such as `history()` returned) to attach only closed bars. An intraday
         bar ends its length after its start. A bar of a day or longer starts at 00:00 New York time
         of its window's first day, whatever the source: the range and the day files stamp a 1-day
         bar at 01:00 New York time (midnight in Chicago), which is moved to the day's start. It ends
