@@ -1481,6 +1481,13 @@ def test_a_console_close_shows_its_connections_closed(
         ]
 
     rows_when(view, lambda rows: states(rows) == [("TICK", "CONNECTED", 1, 0)])
+    # The client thread rewrites its rows whenever its state changes (a late acknowledgement,
+    # a summary), which would replace the rows set below. It writes no more rows from here on,
+    # and a write it had already begun has ended once a later call has run on its loop.
+    monkeypatch.setattr(connection, "_write_row", lambda: None)
+    drained = threading.Event()
+    connection._client.loop.call_soon_threadsafe(drained.set)
+    assert drained.wait(TIMEOUT)
     with connection._lock:
         (row,) = connection._rows.values()
         connection._rows[ChannelFamily.TICK] = dataclasses.replace(
