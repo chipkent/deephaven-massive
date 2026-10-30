@@ -4240,8 +4240,9 @@ enforced by ruff's `G` rules); a value that costs a call to compute is computed 
 `isEnabledFor`. Nothing is logged per row or per frame except a failure.
 
 **Bug reports.** `.github/ISSUE_TEMPLATE/bug_report.yml` asks for the code that was run, the
-log of a run with `DEBUG` on, `m.streams()` and `m.connections()` printed, and what was
-expected, with a recipe for a hang.
+log of a run with `DEBUG` on as an attached file (GitHub cuts an issue's text at 65,536
+characters), with its first lines and the minutes around the failure, `m.rate_limits()`,
+`m.streams()`, and `m.connections()` printed, and what was expected, with a recipe for a hang.
 
 ## 18. Concurrency model
 

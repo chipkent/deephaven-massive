@@ -157,3 +157,11 @@ dm.disable_debug_logging()
 To capture a problem from the moment the server starts, set `DEEPHAVEN_MASSIVE_LOG=DEBUG`
 before starting it, and `DEEPHAVEN_MASSIVE_LOG_FILE=/path/to/massive.log` to write to a file.
 The log never holds your API key or S3 secret, so you can attach it to a bug report as it is.
+
+A DEBUG log grows quickly: a long history read or a busy live table can write megabytes in a
+few minutes. Attach the file to the issue instead of pasting it, because GitHub cuts an issue's
+text at 65,536 characters, and accepts attached files up to 25 MB. If the file is larger, zip
+it, or keep its first lines (the library's version and each session's settings) and every line
+from a few minutes before the failure to a minute after it. The times in the log are in UTC.
+With the log, attach the output of `m.rate_limits()`, `m.streams()`, and `m.connections()`,
+printed after the failure with `to_string(num_rows=1000)`.
