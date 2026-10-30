@@ -242,7 +242,7 @@ def test_trades_merge_the_rest_stream_and_flat_file_columns() -> None:
     assert "SipTimestamp" not in names
     assert {"Price", "Size", "Exchange", "Conditions", "ParticipantTimestamp"} <= set(names)
     types = {c.name: c.type for c in CATALOG.dataset_schema(options.TRADES).columns}
-    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert types["Size"] is ColumnType.DOUBLE  # the WebSocket's integer joins the REST number
 
 
@@ -656,14 +656,20 @@ def rows(table: Table) -> list[dict[str, Any]]:
     return out
 
 
-def test_the_one_row_datasets_have_the_columns_of_their_kind(
+def test_the_one_row_datasets_share_the_columns_of_their_kind(
     massive_session: dm.MassiveSession,
 ) -> None:
+    # Each dataset has the kind's columns its own endpoints fill; the columns two of them share
+    # have one type and one order, so the tables merge on them.
     for one, kind in (
         (options.LAST_TRADE, options.TRADES),
         (options.PREVIOUS_DAY_BAR, options.BARS),
     ):
-        assert CATALOG.dataset_schema(one).column_names == CATALOG.dataset_schema(kind).column_names
+        mine = [(c.name, c.type) for c in CATALOG.dataset_schema(one).columns]
+        theirs = [(c.name, c.type) for c in CATALOG.dataset_schema(kind).columns]
+        shared = [c for c in mine if c in theirs]
+        assert shared == [c for c in theirs if c in mine]
+        assert len(shared) > 5
     assert not hasattr(massive_session.options.trades(CONTRACT), "fetch")
     assert not hasattr(massive_session.options.bars(CONTRACT, dm.Timespan.DAY), "fetch")
     assert type(massive_session.options.last_trade(CONTRACT)) is Query

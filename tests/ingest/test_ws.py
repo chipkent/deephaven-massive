@@ -189,7 +189,8 @@ def connections_of(
 ) -> list[dict[str, Any]]:
     settle(ws_session)
     assert ws_session.session._core.diagnostics.barrier().wait(TIMEOUT)
-    return [r for r in dh_to_pylist(ws_session.session.connections()) if r["Transport"] == "WS"]
+    rows = dh_to_pylist(ws_session.session.connections())
+    return [r for r in rows if r["Transport"] == "WebSocket"]
 
 
 # --- Connections and streams, end to end ------------------------------------------------------
@@ -399,7 +400,7 @@ def test_drift_is_logged_once_and_shown(
     [connection] = connections_of(ws_session, dh_to_pylist)
     assert connection["SchemaDrift"] == "T:zz+"
     [stream] = streams_of(ws_session, dh_to_pylist)
-    assert stream["SchemaDrift"] == "WS:zz+"
+    assert stream["SchemaDrift"] == "WebSocket:zz+"
     ws_session.session.release(result)
 
 
@@ -1305,7 +1306,7 @@ def test_a_closed_sessions_view_shows_its_connection_closed(
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     ws_session.close()
-    (row,) = [r for r in dh_to_pylist(view) if r["Transport"] == "WS"]
+    (row,) = [r for r in dh_to_pylist(view) if r["Transport"] == "WebSocket"]
     assert row["State"] == "CLOSED"
     del result, view
 
@@ -1418,7 +1419,7 @@ def test_a_console_close_shows_its_connections_closed(
         return [
             (r["Family"], r["State"], r["Topics"], r["BufferedRows"])
             for r in rows
-            if r["Transport"] == "WS"
+            if r["Transport"] == "WebSocket"
         ]
 
     rows_when(view, lambda rows: states(rows) == [("TICK", "CONNECTED", 1, 0)])
@@ -2067,7 +2068,7 @@ def test_sessions_with_one_key_share_one_connection(
     assert [r["StreamId"] for r in rows_of(other, dh_to_pylist)] == [2]
     for session in (ws_session.session, other):
         assert session._core.diagnostics.barrier().wait(TIMEOUT)
-        (row,) = [r for r in dh_to_pylist(session.connections()) if r["Transport"] == "WS"]
+        (row,) = [r for r in dh_to_pylist(session.connections()) if r["Transport"] == "WebSocket"]
         assert row["Host"] == "socket.test"
     # Closing one session fails its tables and leaves the connection to the other.
     other.close()
@@ -3025,6 +3026,7 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
         request=Request(symbols=("AAPL",)),
         interval=timedelta(seconds=60),
         mode=dm.PollMode.REPLACE,
+        query="<Query test>",
         read=read,
         pollers=poll.Pollers(core.label),
         host="api.test",

@@ -187,7 +187,7 @@ def test_news_keeps_its_tickers_and_is_timed_by_publication() -> None:
     assert schema.column_names[0] == "Timestamp"
     assert types["Timestamp"] is ColumnType.INSTANT
     assert "Published" not in types
-    assert types["Tickers"] is ColumnType.STRING  # the JSON list, never a Symbol
+    assert types["Tickers"] is ColumnType.STRING_ARRAY  # the list, never a Symbol
     assert spec.asset_class is ClassFromPrefix.ANY
     assert spec.time_axis == ("published.gte", "published.lt")
     assert spec.symbol_param == "tickers.any_of"
@@ -624,7 +624,9 @@ def test_fetch_returns_every_fixture_value(
     for got, row in zip(out, rows, strict=True):
         for key, value in row.items():
             column = columns[key]
-            if isinstance(value, list | dict):
+            if types[column] is ColumnType.STRING_ARRAY:
+                assert got[column] == value, column
+            elif isinstance(value, list | dict):
                 assert json.loads(got[column]) == value, column
             else:
                 assert got[column] == expected_value(value, types[column]), column

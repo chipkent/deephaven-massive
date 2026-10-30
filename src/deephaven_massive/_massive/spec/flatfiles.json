@@ -37,7 +37,7 @@
    "key": "global_crypto/trades_v1",
    "fields": [
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "int-array", "unit": null, "wire_key": "conditions"},
+    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "long-array", "unit": null, "wire_key": "conditions"},
     {"column": "Exchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Id", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "id"},
     {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"},
@@ -244,7 +244,7 @@
    "key": "us_options_opra/trades_v1",
    "fields": [
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "int-array", "unit": null, "wire_key": "conditions"},
+    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "long-array", "unit": null, "wire_key": "conditions"},
     {"column": "Correction", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "correction"},
     {"column": "Exchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Price", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "price"},
@@ -308,7 +308,7 @@
    "key": "us_stocks_sip/trades_v1",
    "fields": [
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "int-array", "unit": null, "wire_key": "conditions"},
+    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "long-array", "unit": null, "wire_key": "conditions"},
     {"column": "Correction", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "correction"},
     {"column": "Exchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Id", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "id"},
@@ -335,8 +335,8 @@
     {"column": "BidExchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "bid_exchange"},
     {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bid_price"},
     {"column": "BidSize", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bid_size"},
-    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "int-array", "unit": null, "wire_key": "conditions"},
-    {"column": "Indicators", "conversion": "code-list-text", "required": false, "type": "int-array", "unit": null, "wire_key": "indicators"},
+    {"column": "Conditions", "conversion": "code-list-text", "required": false, "type": "long-array", "unit": null, "wire_key": "conditions"},
+    {"column": "Indicators", "conversion": "code-list-text", "required": false, "type": "long-array", "unit": null, "wire_key": "indicators"},
     {"column": "ParticipantTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "participant_timestamp"},
     {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "sequence_number"},
     {"column": "SipTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "sip_timestamp"},

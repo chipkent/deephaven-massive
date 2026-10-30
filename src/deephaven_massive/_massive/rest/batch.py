@@ -17,7 +17,8 @@ form to its `wire_type`), and stored as:
 | `string`, `json-text` (compact JSON) | `string` |
 | `date` | `date32` |
 | `iso-instant` (exact integer nanoseconds; never offset-less) | `timestamp[ns, UTC]` |
-| `int-array` | `list<int32>` |
+| `long-array` | `list<int64>` |
+| `string-array` | `list<string>` |
 
 A value that does not fit raises `WireError`: values are never coerced.
 
@@ -76,7 +77,8 @@ _ARROW: dict[WireType, pa.DataType] = {
     WireType.STRING: pa.string(),
     WireType.DATE: pa.date32(),
     WireType.ISO_INSTANT: pa.timestamp("ns", tz="UTC"),
-    WireType.INT_ARRAY: pa.list_(pa.int32()),
+    WireType.LONG_ARRAY: pa.list_(pa.int64()),
+    WireType.STRING_ARRAY: pa.list_(pa.string()),
     WireType.JSON_TEXT: pa.string(),
 }
 

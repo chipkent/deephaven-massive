@@ -21,7 +21,8 @@ gate, and what to do when a refresh adds something new.
     `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`,
     `TRANSPORT_ONLY`, and `VENUES`;
   - `refresh/exclusions.py`: `EXCLUSIONS` and `SAMPLE_ERRORS`.
-- **The column reference**, `docs/datasets/<namespace>.md`, rendered by
+- **The column reference**, `docs/datasets/<namespace>.md` (and `snapshots.md` for
+  `m.snapshots`), rendered by
   `scripts/render_reference.py`, which owns the whole directory: it rewrites stale pages and
   deletes any file it did not render.
 
@@ -49,7 +50,10 @@ uv run pytest tests/datasets/test_column_reference.py -q      # the column-refer
    text, or a statement Massive's own documentation of the field contradicts) is corrected the
    same way, by a `DESCRIPTION_FIXES` entry that quotes it.
 4. Run `scripts/render_reference.py`: every page shows the snapshot's fetch date, so any refresh
-   changes the column reference.
+   changes the column reference. Before it writes the pages, the command prints one line per
+   dataset whose columns the refresh changed (`columns: m.forex.quotes: added …; removed …;
+   retyped …`): the refresh itself cannot see datasets, so this is where a refresh shows what
+   it does to each table. Put those lines in the pull request.
 5. Put the snapshot diff, the `spec/*.json` diff, the hand-input lines, and the regenerated
    `docs/datasets/` in one pull request.
 

@@ -49,6 +49,7 @@ from deephaven_massive._namespaces import (
     options,
     partners,
     reference,
+    snapshots,
     stocks,
 )
 from deephaven_massive._namespaces.base import build_query, list_params
@@ -90,12 +91,14 @@ NAMESPACE_MODULES: Final = (
     forex,
     crypto,
     reference,
+    snapshots,
     indicators,
     economy,
     partners,
 )
-"""Every namespace module, each exporting `DATASETS`, imported statically. A test asserts that
-this tuple names every module of `_namespaces/` except `base`."""
+"""Every namespace module, each exporting `DATASETS`, imported statically, and `snapshots`, the
+module of the dataset the session serves itself. A test asserts that this tuple names every
+module of `_namespaces/` except `base`."""
 
 CATALOG: Final = Catalog(spec for module in NAMESPACE_MODULES for spec in module.DATASETS)
 """Every dataset of every namespace module, built once, at import, and held by every session
@@ -368,15 +371,17 @@ class MassiveSession:
 
         One row per ticker: its latest trade, quote, minute and session bars, and, for options,
         the greeks, implied volatility, open interest, and underlying asset. Rows are the union
-        schema of the unified snapshot, so a column another class fills is null. The catalog
-        record is `reference.snapshots`, the name `m.streams()` and messages show. Served over
+        schema of the unified snapshot, so a column another class fills is null. An options
+        row also has `Underlying`, its underlying's ticker, and `OptionRoot`, the OCC root
+        read from its symbol, as `m.options.snapshots` has; both are null on other rows. The
+        dataset is named `snapshots`, the name `m.streams()` and messages show. Served over
         REST (`/v3/snapshot` with `ticker.any_of`, up to 250 tickers per request); `fetch()`
         returns one row per requested ticker and `poll()` re-fetches them, keyed by `Symbol`.
         A ticker Massive does not know or the plan does not cover keeps its row, with `Error`
         and `Message` set. `dm.ALL` is not accepted: the endpoint needs tickers, and each
         class's `snapshots(dm.ALL)` covers a whole market. Its columns, and what each means,
         are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#snapshots,
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/snapshots.md#snapshots,
         in the web UI's column tooltips, and in the query's `columns()`.
 
         Args:
@@ -401,7 +406,7 @@ class MassiveSession:
         """
         query = build_query(
             self._core,
-            reference.SNAPSHOTS,
+            snapshots.SNAPSHOTS,
             symbols=symbols,
             all_alternative=(
                 "a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "

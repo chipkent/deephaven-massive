@@ -143,8 +143,12 @@ def _schema(spec: DatasetSpec) -> dict[str, ColumnType]:
 
 def test_quotes_join_the_last_quote_through_its_projection() -> None:
     columns = _schema(forex.QUOTES)
-    # The last quote is a dataset of its own, in the same kind, so with the same columns.
-    assert _schema(forex.LAST_QUOTE) == columns
+    # The last quote is a dataset of its own in the same kind: the kind's columns its endpoint
+    # fills, in the same order, which leaves out the stream's exchange ids.
+    last = _schema(forex.LAST_QUOTE)
+    assert {name: columns[name] for name in columns if name in last} == last
+    assert list(last) == [name for name in columns if name in last]
+    assert set(columns) - set(last) == {"AskExchange", "BidExchange"}
     assert list(columns) == [
         "Symbol",
         "Date",

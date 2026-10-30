@@ -1318,16 +1318,18 @@ def option_roots(symbols: pa.Array) -> pa.Array:
 
     The root is the symbol without its `O:` prefix and its last 15 characters (expiry, type,
     strike): `SPXW` for `O:SPXW251219C06000000`, `AAPL1` for an adjusted contract. It is read
-    from the symbol, never mapped to an underlying.
+    from the symbol, never mapped to an underlying. A symbol of another class (`AAPL`,
+    `X:BTCUSD`), which a dataset of every class mixes with options contracts, has no root.
 
     Args:
-        symbols: Canonical option symbols, nulls allowed.
+        symbols: Canonical symbols, nulls allowed.
 
     Returns:
-        A string array of the roots; null where the symbol is null.
+        A string array of the roots; null where the symbol is null or not an options contract.
     """
     slicing = pc.SliceOptions(start=2, stop=-_OCC_TAIL)
-    return pc.call_function("utf8_slice_codeunits", [symbols], slicing)
+    roots = pc.call_function("utf8_slice_codeunits", [symbols], slicing)
+    return pc.if_else(pc.starts_with(symbols, "O:"), roots, pa.scalar(None, pa.string()))
 
 
 _UNKNOWN_LIMIT: Final = 100

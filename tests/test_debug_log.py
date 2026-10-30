@@ -293,3 +293,76 @@ def test_nothing_describes_the_process_when_info_is_off(
 
 def test_a_missing_distribution_is_named_not_installed() -> None:
     assert _debug_log._version("no-such-distribution-of-this-name") == "not installed"
+
+
+def test_disable_debug_logging_closes_the_handler_and_restores_the_level(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "massive.log"
+    dm.enable_debug_logging(path)
+    [handler] = [h for h in LIBRARY.handlers if isinstance(h, logging.FileHandler)]
+    dm.disable_debug_logging()
+    CHILD.debug("after the switch")
+    assert handler not in LIBRARY.handlers
+    assert handler.stream is None  # closed
+    assert LIBRARY.level == logging.NOTSET
+    text = path.read_text(encoding="utf-8")
+    # The log says where it ended, and nothing after.
+    assert _lines(text)[-1][2:] == (
+        "deephaven_massive._debug_log",
+        "logging deephaven_massive off (from disable_debug_logging())",
+    )
+    assert "after the switch" not in text
+    assert not CHILD.isEnabledFor(logging.DEBUG)
+
+
+def test_disable_debug_logging_turns_off_the_environment_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "INFO")
+    _debug_log.configure_from_environment()
+    assert LIBRARY.level == logging.INFO
+    dm.disable_debug_logging()
+    assert (LIBRARY.level, _debug_log._switch.handler) == (logging.NOTSET, None)
+
+
+def test_disable_debug_logging_before_the_first_session_keeps_the_variables_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dm.disable_debug_logging()  # nothing is on: no change, and no line
+    assert (LIBRARY.level, _debug_log._switch.handler) == (logging.NOTSET, None)
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "DEBUG")
+    _debug_log.configure_from_environment()
+    assert LIBRARY.level == logging.NOTSET
+    dm.enable_debug_logging()  # the function still turns it on
+    assert LIBRARY.level == logging.DEBUG
+
+
+def test_disable_debug_logging_loses_a_race_with_enable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The log is turned on again between the off line and the removal: the new handler stays.
+    dm.enable_debug_logging()
+    path = tmp_path / "massive.log"
+    off_line = _debug_log.logger.info
+
+    def turn_on_again(*args: object) -> None:
+        off_line(*args)
+        monkeypatch.setattr(_debug_log.logger, "info", off_line)
+        dm.enable_debug_logging(path)
+
+    monkeypatch.setattr(_debug_log.logger, "info", turn_on_again)
+    dm.disable_debug_logging()
+    [handler] = [h for h in LIBRARY.handlers if isinstance(h, logging.FileHandler)]
+    assert _debug_log._switch.handler is handler
+    assert LIBRARY.level == logging.DEBUG
+
+
+def test_disable_debug_logging_wins_over_an_environment_read_in_flight(tmp_path: Path) -> None:
+    # The first session read the variables, then disable ran before their handler went in:
+    # the handler the variables built is closed instead of installed.
+    dm.disable_debug_logging()
+    path = tmp_path / "massive.log"
+    _debug_log._install(logging.DEBUG, path, environment=True)
+    assert (LIBRARY.level, _debug_log._switch.handler) == (logging.NOTSET, None)
+    assert path.read_text(encoding="utf-8") == ""

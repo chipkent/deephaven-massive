@@ -25,6 +25,7 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
+    QUERY_SHOWN,
     RATE_LIMITS,
     SCHEMA_DRIFT_SHOWN,
     STREAMS,
@@ -40,6 +41,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     as_row,
     describe_symbols,
+    shown_query,
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._types import override
@@ -50,6 +52,7 @@ TIMEOUT = 30.0
 STREAM = StreamRow(
     stream_id=7,
     dataset="stocks.trades",
+    query="<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>",
     symbol_count=2,
     symbols="AAPL, MSFT",
     held_results=1,
@@ -87,6 +90,7 @@ def test_column_sets() -> None:
     assert STREAMS.column_names == (
         "StreamId",
         "Dataset",
+        "Query",
         "SymbolCount",
         "Symbols",
         "HeldResults",
@@ -203,13 +207,13 @@ def test_rows_replace_rows_by_key_in_order(
     assert diagnostics.barrier().wait(TIMEOUT)
     rows = sorted(dh_to_pylist(diagnostics.streams), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["HeldResults"], r["State"], r["Transport"]) for r in rows] == [
-        (7, 0, "RELEASED", "WS"),
-        (8, 1, "RUNNING", "WS"),
+        (7, 0, "RELEASED", "WebSocket"),
+        (8, 1, "RUNNING", "WebSocket"),
     ]
     connections = dh_to_pylist(diagnostics.connections)
     assert {(r["Transport"], r["AssetClass"], r["State"], r["Recency"]) for r in connections} == {
         ("REST", "stocks", "RESOLVING", "DELAYED"),
-        ("WS", "stocks", "CONNECTED", None),
+        ("WebSocket", "stocks", "CONNECTED", None),
     }
     diagnostics.release()
 
@@ -891,3 +895,13 @@ def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
     diagnostics.release()
     assert source.pulls == 2
     assert "failed to update the rate_limits table" in caplog.text
+
+
+def test_a_long_query_is_cut_like_the_symbol_list() -> None:
+    short = "<Query reference.news start=2025-01-02>"
+    assert shown_query(short) == short
+    exact = "q" * QUERY_SHOWN
+    assert shown_query(exact) == exact
+    long = "<StreamHistoryQuery stocks.trades symbols=(" + "'AAPL', " * 100 + ")>"
+    assert shown_query(long) == long[: QUERY_SHOWN - 1] + "…"
+    assert len(shown_query(long)) == QUERY_SHOWN

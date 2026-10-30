@@ -79,7 +79,8 @@ _DH_TYPES: Final[Mapping[ColumnType, object]] = {
     ColumnType.INT: dtypes.int32,
     ColumnType.STRING: dtypes.string,
     ColumnType.BOOLEAN: dtypes.bool_,
-    ColumnType.INT_ARRAY: dtypes.int32_array,
+    ColumnType.LONG_ARRAY: dtypes.long_array,
+    ColumnType.STRING_ARRAY: dtypes.string_array,
 }
 
 
@@ -138,7 +139,10 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     of rows of one date is filled by copying its shared `String` and then doubling the filled
     stretch, so a column costs a few Java calls per run. A column of more than `_MAX_RUNS`
     runs, which only interleaved dates make, is interned by a formula instead (`_interned`),
-    whose JVM-interned `String`s are shared within that table too.
+    whose JVM-interned `String`s are shared within that table too. A list-of-strings column
+    that holds no string in some record batch is converted alone and joined the same way,
+    since converted among other columns it would corrupt the columns after it
+    (`_string_lists_without_values`).
     Every transport converts its rows through here, and nothing else may build a dataset
     table: the date columns must be ISO dates, whose set is small, never other text, which
     would grow the pool without bound.
@@ -149,32 +153,108 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     (about 29 against 46 ms on 200,000 rows), all on one loaded machine.
 
     Runs on any thread inside the session's execution context; the table is static and is
-    created in the liveness scope at the top of the calling thread's stack. A schema without
-    a date column is converted as is. `rows` must hold at least one column that is not a date
-    (every dataset has `TimestampInsert`).
+    created in the liveness scope at the top of the calling thread's stack. Rows with neither
+    a date column nor such a list column are converted as is. `rows` must hold at least one
+    column of another kind (every dataset has `TimestampInsert`).
 
     Args:
         rows: The rows, an Arrow table in the dataset's schema.
         dates: The dataset's calendar-date columns (`Schema.date_columns`).
 
     Returns:
-        The static table, with every column of `rows`, in order.
+        The static table, with every column of `rows`, in order. Its row keys are the
+        positions 0 to n - 1 (`isFlat()`), as in `to_table`'s own result.
     """
-    if not dates:
+    apart = _string_lists_without_values(rows)
+    if not dates and not apart:
         return dh_arrow.to_table(rows)
-    others = dh_arrow.to_table(rows.drop_columns(list(dates))).j_table
+    if apart:
+        logger.debug(
+            "converting the list columns %s of %d rows alone: a record batch holds no string",
+            apart,
+            rows.num_rows,
+        )
     runs = {name: _DateRuns.of(rows.column(name)) for name in dates}
-    if any(len(found.starts) > _MAX_RUNS for found in runs.values()):
-        return _interned(rows, dates)
+    interned = any(len(found.starts) > _MAX_RUNS for found in runs.values())
+    if interned:
+        logger.debug(
+            "interning the date columns of %d rows by a formula: runs per column %s, over %d",
+            rows.num_rows,
+            {name: len(found.starts) for name, found in runs.items()},
+            _MAX_RUNS,
+        )
+        runs = {}
+    others = dh_arrow.to_table(rows.drop_columns([*runs, *apart])).j_table
     sources = _LinkedHashMap()
     for name in rows.column_names:
         if name in runs:
             values = runs[name].strings()
             column = _ArrayBackedColumnSource.getMemoryColumnSource(values, _JString.jclass, None)
             sources.put(name, column)
+        elif name in apart:
+            alone = dh_arrow.to_table(rows.select([name])).j_table
+            sources.put(name, alone.getColumnSource(name))
         else:
             sources.put(name, others.getColumnSource(name))
-    return Table(_QueryTable(others.getRowSet(), sources))
+    joined = _QueryTable(others.getRowSet(), sources)
+    # The rows are those of `others`, a static table whose rows are 0 to n - 1, so the joined
+    # table is flat as `to_table`'s own result is, and row positions serve as row keys.
+    joined.setFlat()
+    table = Table(joined)
+    return _interned(table, dates) if interned else table
+
+
+def _string_lists_without_values(rows: pa.Table) -> list[str]:
+    """Return the list-of-strings columns that some record batch holds no string in.
+
+    `deephaven.arrow.to_table` sends each record batch to Deephaven's Arrow reader. When a
+    list-of-strings column of a batch holds no string at all, because every row is null or an
+    empty list, that reader returns its empty values without consuming their buffers, so every
+    later column of the batch reads the wrong buffers: a later list column fails (`asserted
+    length >= 0`), and a later column of another type silently takes shifted values. As the
+    last column of a batch the column converts correctly, so `dataset_table` converts each
+    such column alone and joins it to the others, and every other column converts as before,
+    with no copy. A list of numbers is not affected.
+
+    The batches checked are those of the whole table, whose boundaries include those of any
+    subset of its columns, so a column that holds a string in every batch with rows here holds
+    one in every batch with rows of the table it is converted in. A batch without rows is
+    harmless (`_holds_no_string`).
+
+    Args:
+        rows: The rows.
+
+    Returns:
+        The names of the columns to convert alone, in the table's order; empty when none is.
+    """
+    lists = [
+        field.name
+        for field in rows.schema
+        if pa.types.is_list(field.type) and pa.types.is_string(field.type.value_type)
+    ]
+    if not lists:
+        return lists
+    batches = rows.to_batches()
+    return [name for name in lists if any(_holds_no_string(batch, name) for batch in batches)]
+
+
+def _holds_no_string(batch: pa.RecordBatch, name: str) -> bool:
+    """Say whether a list column of a record batch has rows but holds no element.
+
+    A batch with no row is harmless: Deephaven converts it correctly, whatever its list columns
+    hold. Counting it would convert a column alone just because a table's chunks include an
+    empty one, as they do when an empty page is joined to a real one.
+
+    Args:
+        batch: The record batch.
+        name: The list column.
+
+    Returns:
+        True when the batch has rows and every row of the column is null or an empty list,
+        its first and last offsets equal.
+    """
+    offsets = cast("pa.ListArray", batch.column(name)).offsets
+    return batch.num_rows > 0 and bool(offsets[0].as_py() == offsets[-1].as_py())
 
 
 _MAX_RUNS: Final = 4096
@@ -273,21 +353,20 @@ class _DateRuns:
         return out
 
 
-def _interned(rows: pa.Table, dates: Sequence[str]) -> Table:
-    """Convert rows with interleaved dates, interning their date columns by a formula.
+def _interned(table: Table, dates: Sequence[str]) -> Table:
+    """Intern the date columns of a converted table with interleaved dates, by a formula.
 
     Args:
-        rows: The rows.
+        table: The table, its date columns converted as plain strings.
         dates: The date columns.
 
     Returns:
         The static table, every date `String` the JVM's interned one.
     """
-    table = dh_arrow.to_table(rows)
     return table.update([f"{name} = {name} == null ? null : {name}.intern()" for name in dates])
 
 
-def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
+def describe(table: Table, spec: DatasetSpec, schema: Schema, *, note: str | None = None) -> Table:
     """Return a copy of a result table in the dataset's column order, with its descriptions.
 
     The copy lists the schema's columns first, in schema order, which is the order `columns()`
@@ -298,7 +377,8 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
     `withColumnDescriptions` with every column of the schema whose description is not empty
     (`ColumnDescriptions`, which Barrage sends to clients and the web UI shows as the
     column-header tooltip), then `withDescription` with `"<dataset>: <summary>"`
-    (`TableDescription`), such as `"stocks.trades: Trades of US-listed stocks, tick by tick."`.
+    (`TableDescription`), such as `"stocks.trades: Trades of US-listed stocks, tick by tick."`,
+    followed by `note` when one is given (a `history()` table's source).
     The reordering checks that every schema column exists, and `withColumnDescriptions` that
     every described one does, so a schema that disagrees with the table fails here, at once;
     `Table.with_attributes`, which skips that check, is not used.
@@ -341,6 +421,9 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
         table: The table the verb would otherwise return, with every column of `schema`.
         spec: The dataset, for its name and summary.
         schema: The dataset's schema (`Catalog.dataset_schema(spec)`), for its descriptions.
+        note: A sentence to add to the table description after the summary, such as
+            `"Read from REST: AUTO chose it (2 symbols < flat_file_symbol_threshold 50)."`;
+            None adds nothing.
 
     Returns:
         A new table with the same rows, columns, and other attributes as `table`, the
@@ -361,7 +444,12 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema) -> Table:
         described = table.j_table.moveColumnsUp(*schema.column_names)
         if descriptions:  # an empty attribute would claim descriptions the table lacks
             described = described.withColumnDescriptions(j_hashmap(descriptions))
-        described = described.withDescription(f"{spec.name}: {spec.summary}")
+        text = (
+            f"{spec.name}: {spec.summary}"
+            if note is None
+            else f"{spec.name}: {spec.summary} {note}"
+        )
+        described = described.withDescription(text)
     except RuntimeError as error:  # jpy's form of a Java exception
         raise RuntimeError(f"describing a {spec.name} result failed: {error}") from error
     return Table(j_table=described)
@@ -371,14 +459,14 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "Name": "The column name.",
         "Type": (
-            "The column's Deephaven type: long, int, double, boolean, String, Instant, or int[]; "
-            "a calendar date is ISO yyyy-MM-dd text, a String."
+            "The column's Deephaven type: long, int, double, boolean, String, Instant, long[], or "
+            "String[]; a calendar date is ISO yyyy-MM-dd text, a String."
         ),
         "Description": "What the column holds; empty when Massive gives no description.",
         "SuppliedBy": (
             "The transports whose sources fill the column for this dataset, spelled REST, flat "
-            'files, and WebSocket, in that order, joined by ", "; empty for a column that only '
-            "other datasets of the same kind supply, which this dataset always leaves null."
+            'files, and WebSocket, in that order, joined by ", "; a column the transport '
+            "serving a call does not fill is null in its result."
         ),
     }
 )
