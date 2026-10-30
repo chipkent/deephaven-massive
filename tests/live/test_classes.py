@@ -38,3 +38,25 @@ def test_the_bucket_of_a_request(template: str, params: dict[str, object], bucke
 )
 def test_the_class_of_a_sent_path(path: str, name: str | None) -> None:
     assert classes.class_of_path(path) == name
+
+
+_PAID = {"stocks": "starter", "options": "starter", "indices": "starter", "currencies": "starter"}
+
+
+@pytest.mark.parametrize(
+    ("basic", "expected"),
+    [
+        ("indices", classes.MarketLookup("indices", ("indices",), "fx")),
+        ("currencies", classes.MarketLookup("currencies", ("fx", "crypto"), "stocks")),
+        # The last class takes its control market from the first.
+        ("stocks", classes.MarketLookup("stocks", ("stocks",), "indices")),
+    ],
+)
+def test_a_market_lookup_spends_a_class_on_basic_and_controls_with_another(
+    basic: str, expected: classes.MarketLookup
+) -> None:
+    assert classes.market_lookup({**_PAID, basic: "basic", "futures": "basic"}) == expected
+
+
+def test_no_market_lookup_without_a_class_whose_tickers_a_market_lists_on_basic() -> None:
+    assert classes.market_lookup({**_PAID, "options": "basic", "futures": "basic"}) is None

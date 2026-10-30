@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._massive import RestClient, Transport, source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping, Sequence
@@ -47,12 +48,16 @@ WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
+CryptoReport: TypeAlias = "Callable[..., list[str]]"
 
 _PAIR = "X:BTCUSD"
 _RANGE = "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}"
 _PREV = "/v2/aggs/ticker/{cryptoTicker}/prev"
 _GROUPED = "/v2/aggs/grouped/locale/global/market/crypto/{date}"
 _DAY_FILE = "global_crypto/day_aggs_v1"
+_TICKERS = "/v3/reference/tickers"
+_TICKERS_PAGE = 1000
+"""Rows per page of the ticker list: its largest page, the one the library reads."""
 _MS = 1_000_000
 _DAY_NS = 86_400 * 1_000_000_000
 _STREAM_WAIT = 60.0
@@ -426,6 +431,56 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
     assert checked >= 3, f"only {checked} week bars of the four weeks"
     assert not misses, f"week bars closer to another window than the library's: {misses}"
+
+
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("49")
+@pytest.mark.requests(5)
+@pytest.mark.timeout(100)
+def test_crypto_ticker_list_currencies_join(
+    live_rest: RestClient,
+    *,
+    classes_on_basic: frozenset[str],
+    crypto_report: CryptoReport,
+    evidence: Evidence,
+) -> None:
+    """Whether every pair of Massive's crypto ticker list names currencies that join to its ticker.
+
+    The library splits a crypto ticker into its two currencies (for a stream topic and for the
+    last-trade and daily open/close paths) only from this list: it reads
+    `/v3/reference/tickers?market=crypto` once per session, every page, first with
+    `active=true`, then with `active=false` so a delisted pair splits too, and refuses a pair
+    the list lacks or whose `base_currency_symbol` and `currency_symbol` do not join to its
+    ticker (`X:` + base + quote). Reads the same two lists, in pages of 1,000 rows. With
+    Currencies on Basic, which allows 5 requests a minute, it reads at most 3 pages of
+    listed pairs and 2 of delisted ones, so the test sends 5 requests, and a read cut short
+    is marked so; on a paid plan it reads every page.
+
+    Records each list's size, the tickers in both lists, the tickers without the `X:` prefix,
+    and every row whose currencies do not join to its ticker. Reading it: no such row confirms
+    that the list splits every pair it holds; each one is a pair the library refuses on those
+    paths, which needs a split from elsewhere or stays refused; a large delisted list means
+    the session's first read of it is slow on Basic.
+    """
+    basic = "currencies" in classes_on_basic
+    limits = (3 * _TICKERS_PAGE, 2 * _TICKERS_PAGE) if basic else (None, None)
+    reads = []
+    for active, limit in zip((True, False), limits, strict=True):
+        # Paced as Currencies: whether Massive charges a lookup filtered by market to its
+        # class is an open question, so the run never risks a refusal over it.
+        pages = live_rest.pages(
+            source(Transport.REST, _TICKERS),
+            {},
+            {"market": "crypto", "active": active, "limit": _TICKERS_PAGE},
+            bucket="currencies",
+            limit=limit,
+        )
+        reads.append([row for page in pages for row in page.rows])
+    if basic:
+        evidence("Currencies on Basic: at most 3 pages of listed and 2 of delisted pairs are read")
+    for line in crypto_report(*reads, listed_limit=limits[0], delisted_limit=limits[1]):
+        evidence(line)
+    assert reads[0], "Massive listed no crypto pair"
 
 
 @pytest.mark.needs("currencies:business")
