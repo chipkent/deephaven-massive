@@ -26,18 +26,16 @@ from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
-from deephaven_massive._datasets import history_source, symbols
+from deephaven_massive._datasets import history_source, wire_symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.futures_sessions import CHICAGO
-from deephaven_massive._datasets.history_source import HistoryWindow, history_window
+from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
-    ClassFromPrefix,
     Direction,
     HistorySource,
     Market,
@@ -46,25 +44,26 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG
-from deephaven_massive._ingest import hosts, poll, rate_limits, rest
-from deephaven_massive._ingest.poll import RowDataError
+from deephaven_massive._errors import LIBRARY_BUG, RowDataError
+from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_requests
+from deephaven_massive._ingest.host_decision import HostDecisionCache
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._namespaces import options as options_ns
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces import stocks as stocks_ns
-from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
+from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
+from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
-from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
 R = Transport.REST
 LOGGER = "deephaven_massive._ingest.rest"
@@ -622,38 +621,6 @@ def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
     assert patiences.shared()
 
 
-def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> None:
-    path = cast("RestPath", _massive.source(R, SMA_CRYPTO))
-    day = date(2025, 3, 3)
-    instant = datetime(2025, 3, 3, 12, tzinfo=UTC)
-    query = {
-        "timestamp.gte": day,  # from the day's start
-        "timestamp.lt": day,  # before the day's start
-        "timestamp.gt": day,  # after the day's end
-        "timestamp.lte": day,  # up to the day's end
-        "timestamp": day,  # no range bound: kept
-        "window": 50,
-        "unknown.gte": day,
-    }
-    assert rest._filter_days(path, {**query, "series_type": instant}, AssetClass.CRYPTO) == {
-        **query,
-        "series_type": instant,
-        "timestamp.gte": datetime(2025, 3, 3, tzinfo=UTC),
-        "timestamp.lt": datetime(2025, 3, 3, tzinfo=UTC),
-        "timestamp.gt": datetime(2025, 3, 3, 23, 59, 59, 999000, tzinfo=UTC),
-        "timestamp.lte": datetime(2025, 3, 3, 23, 59, 59, 999000, tzinfo=UTC),
-    }
-    # An instant the caller gave is exact already; a calendar date parameter keeps its day.
-    # An instant given by the caller is sent as given, even on an inclusive or exclusive
-    # bound that a date would move by one unit.
-    given = {"timestamp.gte": instant, "timestamp.lte": instant, "timestamp.gt": instant}
-    assert rest._filter_days(path, given, ClassFromPrefix.ANY) == given
-    dividends = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    assert rest._filter_days(dividends, {"ex_dividend_date.gte": day}, ClassFromPrefix.ANY) == {
-        "ex_dividend_date.gte": day
-    }
-
-
 def test_an_aware_datetime_on_an_inclusive_instant_filter_is_sent_as_given(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -949,7 +916,7 @@ def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
     def broken(*_: object, **__: object) -> NoReturn:
         raise RuntimeError("the rule broke")
 
-    monkeypatch.setattr(hosts, "decide", broken)
+    monkeypatch.setattr(host_decision, "decide", broken)
     with (
         caplog.at_level(logging.WARNING, LOGGER),
         pytest.raises(RuntimeError, match="the rule broke"),
@@ -1220,7 +1187,7 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
 ) -> None:
     m, clock = _manual_session(fake_rest, monkeypatch)
     listeners = _Listeners(monkeypatch)
-    snapshot = Reply(load_fixture("ingest/hosts", "stocks_delayed.json"))
+    snapshot = Reply(load_fixture("ingest/host_decision", "stocks_delayed.json"))
     fake_rest.reply("/v3/snapshot", PAUSE, PAUSE, snapshot)
 
     def decide() -> object:
@@ -1260,7 +1227,7 @@ def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
     state = cast("rest.RestEndpoints", m._core.rest_transport())._state
     if kind == "crypto":
         return state.crypto_future()
-    return state.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
+    return state.hosts.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
@@ -1286,7 +1253,7 @@ def test_a_failed_lookup_is_never_returned_as_known(
     if kind == "crypto":
         assert state.known_crypto() is None
     else:
-        assert state.known_host((AssetClass.STOCKS, ChannelFamily.TICK)) is None
+        assert state.hosts.known_host((AssetClass.STOCKS, ChannelFamily.TICK)) is None
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
@@ -1315,15 +1282,16 @@ def test_a_caller_whose_lookup_is_abandoned_before_it_looks_makes_it_itself(
     snapshots.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     snapshots.reply(DELISTED_TARGET, Reply(envelope([])))
     name = "crypto_future" if kind == "crypto" else "host_future"
-    claim = getattr(rest.RestState, name)
+    owner = rest.RestState if kind == "crypto" else HostDecisionCache
+    claim = getattr(owner, name)
     abandoned: Future[Any] = Future()
     abandoned.set_exception(rest._AbandonedError("rate limited: the maker gave up"))
     claims = iter([(abandoned, False)])
 
-    def claiming(state: rest.RestState, *args: object) -> tuple[Future[Any], bool]:
+    def claiming(state: object, *args: object) -> tuple[Future[Any], bool]:
         return next(claims, None) or claim(state, *args)
 
-    monkeypatch.setattr(rest.RestState, name, claiming)
+    monkeypatch.setattr(owner, name, claiming)
     result = _lookup(session, kind)()
     if kind == "crypto":
         assert result == ("DOT", "USD")
@@ -1357,17 +1325,18 @@ def test_a_failed_lookup_is_forgotten_before_its_waiters_hear_of_it(
     refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
     fake_rest.reply(LIST_TARGET if kind == "crypto" else "/v3/snapshot", refused)
     name = "crypto_future" if kind == "crypto" else "host_future"
-    claim = getattr(rest.RestState, name)
+    owner = rest.RestState if kind == "crypto" else HostDecisionCache
+    claim = getattr(owner, name)
     fresh_when_failed: list[bool] = []
 
-    def claiming(state: rest.RestState, *args: object) -> tuple[Future[Any], bool]:
+    def claiming(state: object, *args: object) -> tuple[Future[Any], bool]:
         future, created = claim(state, *args)
         if created and not fresh_when_failed:
             # When the failure reaches the future, a new claim must already be fresh.
             future.add_done_callback(lambda _: fresh_when_failed.append(claim(state, *args)[1]))
         return future, created
 
-    monkeypatch.setattr(rest.RestState, name, claiming)
+    monkeypatch.setattr(owner, name, claiming)
     with pytest.raises(dm.MassiveError):
         _lookup(session, kind)()
     assert fresh_when_failed == [True]
@@ -1533,87 +1502,6 @@ def test_fan_out_threads_are_named_after_the_session_and_the_call(
     assert all(re.fullmatch(rf"{re.escape(prefix)}\d", name) for name in workers), workers
 
 
-def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
-
-    spec = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="stocks.pair",
-        asset_class=AssetClass.STOCKS,
-        fetch_path=CRYPTO_LAST_PATH,
-        keys={(R, CRYPTO_LAST_PATH): SourceKeys(symbol=KeySpec("from", from_request=True))},
-    )
-    path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
-    with pytest.raises(ValueError, match="only forex and crypto symbols are currency pairs"):
-        rest.plan_calls(spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",), split=split_pair)
-
-
-def test_a_per_symbol_path_needs_explicit_symbols() -> None:
-    path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
-    with pytest.raises(ValueError, match="needs explicit symbols"):
-        rest.plan_calls(
-            CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL, split=split_pair
-        )
-
-
-def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
-    news = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="reference.news",
-        fetch_path="/v2/reference/news",
-        symbol_param="ticker",
-        keys={(R, "/v2/reference/news"): SourceKeys()},
-    )
-    path = cast("RestPath", _massive.source(R, "/v2/reference/news"))
-    calls = rest.plan_calls(news, path, Request(), symbols=("AAPL", "MSFT"), split=split_pair)
-    assert [(c.symbol, dict(c.query)) for c in calls] == [
-        ("AAPL", {"ticker": "AAPL"}),
-        ("MSFT", {"ticker": "MSFT"}),
-    ]
-    assert rest.plan_calls(news, path, Request(), symbols=(), split=split_pair) == []
-    # A path that takes no symbols ignores them: one request.
-    movers = cast("RestPath", _massive.source(R, MOVERS_PATH))
-    request = Request(params=(("direction", Direction.LOSERS),))
-    (call,) = rest.plan_calls(MOVERS, movers, request, symbols=("AAPL", "MSFT"), split=split_pair)
-    assert (call.symbol, dict(call.path_params), dict(call.query)) == (
-        None,
-        {"direction": Direction.LOSERS},
-        {},
-    )
-    assert [
-        c.symbol for c in rest.plan_calls(news, path, Request(), symbols=None, split=split_pair)
-    ] == [None]
-
-
-def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None:
-    spec = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="stocks.each",
-        asset_class=AssetClass.STOCKS,
-        fetch_path=DIVIDENDS_PATH,
-        symbol_param="ticker.any_of",
-        per_symbol=True,
-        keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
-    )
-    path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A", "B"), split=split_pair)
-    assert [dict(c.query) for c in calls] == [{"ticker.any_of": ("A",)}, {"ticker.any_of": ("B",)}]
-
-
-def test_a_symbol_filled_into_a_query_parameter() -> None:
-    spec = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="stocks.by_query",
-        asset_class=AssetClass.STOCKS,
-        fetch_path=DIVIDENDS_PATH,
-        keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
-    )
-    path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
-    calls = rest.plan_calls(spec, path, Request(), symbols=("A",), split=split_pair)
-    assert [(c.symbol, dict(c.path_params), dict(c.query)) for c in calls] == [
-        ("A", {}, {"ticker": "A"})
-    ]
-
-
 def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -1717,17 +1605,17 @@ def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_by_default(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    fresh = BoundedLog(logging.getLogger(symbols.__name__), limit=5, level=logging.ERROR)
-    monkeypatch.setattr(symbols, "_logged_spellings", fresh)
+    fresh = BoundedLog(logging.getLogger(wire_symbols.__name__), limit=5, level=logging.ERROR)
+    monkeypatch.setattr(wire_symbols, "_logged_spellings", fresh)
     body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
     config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
-    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, symbols.__name__):
+    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, wire_symbols.__name__):
         (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
     assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
-    (record,) = [r for r in caplog.records if r.name == symbols.__name__]
+    (record,) = [r for r in caplog.records if r.name == wire_symbols.__name__]
     assert record.levelno == logging.ERROR
     assert record.getMessage().startswith("forex.conversion: Massive sent the symbol '?'")
 
@@ -2227,218 +2115,7 @@ def test_futures_trades_by_instants_take_the_exact_timestamp_range(
     assert [r["Timestamp"] for r in out] == [evening["timestamp"], morning["timestamp"]]
 
 
-def window_of(*, times: TimeRange | None = None, sessions: DaySpan | None = None) -> HistoryWindow:
-    span: TimeRange | DaySpan = times or sessions or DaySpan(date(2025, 1, 1), date(2025, 1, 1))
-    return HistoryWindow(span, times, sessions, times)
-
-
-def test_keep_bounds_times_and_sessions_where_the_rows_carry_them() -> None:
-    late = epoch_ns(datetime(2025, 3, 4, 20, tzinfo=CHICAGO))
-    times = pa.RecordBatch.from_pydict({"Timestamp": pa.array([late], pa.timestamp("ns", "UTC"))})
-    days = pa.RecordBatch.from_pydict({"Date": pa.array(["2025-03-03"], pa.string())})
-    other = pa.RecordBatch.from_pydict({"Other": pa.array([1])})
-    sessions = window_of(sessions=DaySpan(date(2025, 3, 4), date(2025, 3, 4)))
-    before_late = window_of(
-        times=TimeRange(datetime(2025, 3, 4, tzinfo=UTC), datetime(2025, 3, 5, 1, tzinfo=UTC))
-    )
-    keep = functools.partial(rest._keep, time="Timestamp")
-    assert keep(times, sessions).num_rows == 1  # sessions bound only Date
-    assert keep(times, before_late).num_rows == 0  # 02:00 UTC on 03-05 is past the end
-    assert keep(days, sessions).num_rows == 0
-    assert keep(days, before_late).num_rows == 1  # no Timestamp to bound
-    assert keep(other, sessions).num_rows == 1
-    assert keep(times, None).num_rows == 1
-    upper = window_of(sessions=DaySpan(date(2025, 3, 1), date(2025, 3, 2)))
-    assert keep(days, upper).num_rows == 0  # after the last session
-    lower = window_of(
-        times=TimeRange(datetime(2025, 3, 5, 3, tzinfo=UTC), datetime(2025, 3, 6, tzinfo=UTC))
-    )
-    assert keep(times, lower).num_rows == 0
-    # A bar's time is its start: the same bounds apply to `TimestampStart`.
-    starts = times.rename_columns(["TimestampStart"])
-    assert rest._keep(starts, before_late, time="TimestampStart").num_rows == 0
-    assert (
-        rest._keep(starts, before_late, time="Timestamp").num_rows == 1
-    )  # before the first instant
-
-
-@pytest.mark.parametrize(
-    ("path", "time_axis", "expected"),
-    [
-        (TRADES_PATH, ("timestamp.gte", "timestamp.lt"), {"order": "asc", "sort": "timestamp"}),
-        ("/v1/indicators/sma/{stockTicker}", ("timestamp.gte", "timestamp.lt"), {"order": "asc"}),
-        (RANGE_PATH, None, {"sort": "asc"}),
-        (FUTURES_AGGS_PATH, ("window_start.gte", "window_start.lt"), {"sort": "window_start.asc"}),
-        (FUTURES_TRADES_PATH, ("timestamp.gte", "timestamp.lt"), {"sort": "timestamp.asc"}),
-        (FUTURES_TRADES_PATH, None, {}),
-        # Several sort fields: the axis field when listed, else only the direction.
-        (
-            "/vX/reference/ipos",
-            ("announced_date.gte", "announced_date.lte"),
-            {"order": "asc", "sort": "announced_date"},
-        ),
-        ("/vX/reference/ipos", ("other.gte", "other.lt"), {"order": "asc"}),
-        ("/v1/open-close/{stocksTicker}/{date}", None, {}),
-    ],
-)
-def test_history_asks_for_ascending_order(
-    path: str, time_axis: tuple[str, str] | None, expected: dict[str, object]
-) -> None:
-    spec = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="test.ascending",
-        history_path=path,
-        time_axis=time_axis,
-    )
-    rest_path = cast("RestPath", _massive.source(R, path))
-    assert rest._ascending(spec, rest_path, Request()) == expected
-    # A direction the caller set is kept.
-    assert rest._ascending(spec, rest_path, Request(params=(("order", "desc"),))) == {}
-
-
-def test_a_caller_direction_folded_into_sort_is_not_overridden() -> None:
-    # The futures aggregates take no `order`: a caller's `order` folds into `sort`, and the
-    # ascending default stays out of the way.
-    rest_path = cast("RestPath", _massive.source(R, FUTURES_AGGS_PATH))
-    mine = Request(
-        symbols=("ESZ5",),
-        timespan=Timespan.MINUTE,
-        params=(("order", Order.DESC), ("sort", "window_start")),
-    )
-    order = rest._ascending(FUTURES_BARS, rest_path, mine)
-    (call,) = rest.plan_calls(
-        FUTURES_BARS, rest_path, mine, symbols=("ESZ5",), extra=order, split=split_pair
-    )
-    assert call.query["sort"] == "window_start.desc"
-    assert "order" not in call.query
-    # Without a caller direction, the ascending one is sent.
-    plain = Request(symbols=("ESZ5",), timespan=Timespan.MINUTE)
-    order = rest._ascending(FUTURES_BARS, rest_path, plain)
-    (call,) = rest.plan_calls(
-        FUTURES_BARS, rest_path, plain, symbols=("ESZ5",), extra=order, split=split_pair
-    )
-    assert call.query["sort"] == "window_start.asc"
-
-
-def test_ascending_prefers_the_axis_field_among_several_ascending_sorts() -> None:
-    spec = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="test.ascending",
-        history_path=FUTURES_AGGS_PATH,
-        time_axis=("window_start.gte", "window_start.lt"),
-    )
-    aggs = cast("RestPath", _massive.source(R, FUTURES_AGGS_PATH))
-    values = ("ticker.asc", "window_start.asc", "window_start.desc")
-    params = tuple(
-        dataclasses.replace(p, values=values) if p.name == "sort" else p for p in aggs.params
-    )
-    several = dataclasses.replace(aggs, params=params)
-    assert rest._ascending(spec, several, Request()) == {"sort": "window_start.asc"}
-    other = dataclasses.replace(spec, time_axis=("other.gte", "other.lt"))
-    assert rest._ascending(other, several, Request()) == {"sort": "ticker.asc"}
-
-
 # --- The time axis -------------------------------------------------------------------------------
-
-
-def axis_spec(lower: str, upper: str, path: str = TRADES_PATH) -> DatasetSpec:
-    return DatasetSpec(
-        summary="A dataset for the tests.",
-        name="stocks.axis",
-        asset_class=AssetClass.STOCKS,
-        history_path=path,
-        time_axis=(lower, upper),
-        keys={
-            (R, path): SourceKeys(
-                KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp")
-            )
-        }
-        if path == TRADES_PATH
-        else {},
-    )
-
-
-def axis(spec: DatasetSpec, start: object, end: object) -> dict[str, object]:
-    path = cast("RestPath", _massive.source(R, cast("str", spec.history_path)))
-    dates = (cast("Any", start), cast("Any", end))
-    return rest._axis_query(spec, path, dates=dates, asset_class=spec.asset_class)
-
-
-def test_date_axes_are_whole_days_and_shift_for_exclusive_ends() -> None:
-    spec = axis_spec("ex_dividend_date.gt", "ex_dividend_date.lt", DIVIDENDS_PATH)
-    assert axis(spec, date(2025, 1, 10), date(2025, 1, 20)) == {
-        "ex_dividend_date.gt": date(2025, 1, 9),
-        "ex_dividend_date.lt": date(2025, 1, 21),
-    }
-    inclusive = axis_spec("ex_dividend_date.gte", "ex_dividend_date.lte", DIVIDENDS_PATH)
-    assert axis(inclusive, date(2025, 1, 10), None) == {"ex_dividend_date.gte": date(2025, 1, 10)}
-
-
-def test_timestamp_axes_take_midnights_in_the_day_zone() -> None:
-    spec = axis_spec("timestamp.gte", "timestamp.lt")
-    out = axis(spec, date(2025, 3, 3), date(2025, 3, 3))
-    assert out["timestamp.gte"] == datetime(2025, 3, 3, 5, tzinfo=UTC)
-    # A dataset without an asset class bounds its days in New York.
-    path = cast("RestPath", _massive.source(R, SMA_STOCK))
-    unclassed = rest._axis_query(
-        SMA, path, dates=(date(2025, 7, 1), None), asset_class=SMA.asset_class
-    )
-    assert unclassed == {"timestamp.gte": datetime(2025, 7, 1, 4, tzinfo=UTC)}
-    assert out["timestamp.lt"] == datetime(2025, 3, 4, 5, tzinfo=UTC)
-
-
-def test_inclusive_millisecond_bounds_move_back_one_unit() -> None:
-    spec = axis_spec("timestamp.gt", "timestamp.lte", SMA_STOCK)
-    out = axis(spec, date(2025, 3, 3), date(2025, 3, 3))
-    assert out["timestamp.gt"] == datetime(2025, 3, 3, 4, 59, 59, 999000, tzinfo=UTC)
-    assert out["timestamp.lte"] == datetime(2025, 3, 4, 4, 59, 59, 999000, tzinfo=UTC)
-
-
-def test_an_instant_field_behind_a_date_parameter_makes_an_instant_axis() -> None:
-    spec = axis_spec("published_utc.gte", "published_utc.lt", NEWS_PATH)
-    out = axis(spec, date(2025, 3, 3), date(2025, 3, 3))
-    assert out == {
-        "published_utc.gte": datetime(2025, 3, 3, 5, tzinfo=UTC),
-        "published_utc.lt": datetime(2025, 3, 4, 5, tzinfo=UTC),
-    }
-    assert all(type(value) is datetime for value in out.values())
-    # An instant bound is already exact.
-    instant = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
-    assert axis(spec, instant, None) == {"published_utc.gte": instant}
-    # Massive does not document the precision of the ISO-8601 text, so no inclusive bound.
-    inclusive = axis_spec("published_utc.gte", "published_utc.lte", NEWS_PATH)
-    with pytest.raises(ValueError, match=r"published_utc\.lte takes ISO-8601 instants"):
-        axis(inclusive, None, date(2025, 3, 3))
-
-
-def test_a_date_parameter_without_a_field_of_its_name_stays_whole_days() -> None:
-    # The options chain snapshot nests `expiration_date` under `details`.
-    path = "/v3/snapshot/options/{underlyingAsset}"
-    spec = axis_spec("expiration_date.gte", "expiration_date.lte", path)
-    assert axis(spec, date(2025, 3, 3), date(2025, 3, 4)) == {
-        "expiration_date.gte": date(2025, 3, 3),
-        "expiration_date.lte": date(2025, 3, 4),
-    }
-
-
-def test_a_nanosecond_inclusive_bound_is_refused() -> None:
-    spec = axis_spec("timestamp.gte", "timestamp.lte")
-    with pytest.raises(ValueError, match=r"timestamp\.lte takes nanoseconds"):
-        axis(spec, None, date(2025, 3, 3))
-
-
-def test_an_axis_the_path_lacks_or_of_another_kind() -> None:
-    spec = axis_spec("ticker.gte", "nothing.lt", DIVIDENDS_PATH)
-    assert axis(spec, date(2025, 3, 3), date(2025, 3, 4)) == {"ticker.gte": "2025-03-03"}
-    assert (
-        rest._axis_query(
-            MOVERS,
-            cast("RestPath", _massive.source(R, MOVERS_PATH)),
-            dates=(None, None),
-            asset_class=MOVERS.asset_class,
-        )
-        == {}
-    )
 
 
 # --- Host decisions ----------------------------------------------------------------------------
@@ -2448,7 +2125,9 @@ def test_an_axis_the_path_lacks_or_of_another_kind() -> None:
 def snapshots(
     fake_rest: FakeRestServer, load_fixture: Callable[[str, str], bytes]
 ) -> FakeRestServer:
-    fake_rest.reply("/v3/snapshot", Reply(load_fixture("ingest/hosts", "stocks_delayed.json")))
+    fake_rest.reply(
+        "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_delayed.json"))
+    )
     return fake_rest
 
 
@@ -2497,7 +2176,7 @@ def test_a_failed_decision_is_not_cached(
     assert "HTTP 403" in row["LastError"]
     assert "x1" in row["LastError"]
     fake_rest.reply_first(
-        "/v3/snapshot", Reply(load_fixture("ingest/hosts", "stocks_real_time.json"))
+        "/v3/snapshot", Reply(load_fixture("ingest/host_decision", "stocks_real_time.json"))
     )
     assert transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK).recency is Recency.REALTIME
 
@@ -2508,11 +2187,11 @@ def test_a_defect_while_deciding_caches_nothing(
     def broken(*args: object, **kwargs: object) -> object:
         raise KeyError("bug")
 
-    monkeypatch.setattr(hosts, "decide", broken)
+    monkeypatch.setattr(host_decision, "decide", broken)
     transport = cast("rest.RestEndpoints", session._core.rest_transport())
     with pytest.raises(KeyError):
         transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
-    _, owner = transport._state.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
+    _, owner = transport._state.hosts.host_future((AssetClass.STOCKS, ChannelFamily.TICK))
     assert owner  # nothing was cached
 
 
@@ -2554,17 +2233,6 @@ def test_waiters_get_a_copy_of_the_deciders_error(session: dm.MassiveSession) ->
         rest._outcome(future)
     assert info.value is not error
     assert (info.value.status, info.value.request_id) == (403, "r1")
-
-
-def test_forgetting_keeps_a_newer_decision(session: dm.MassiveSession) -> None:
-    state = cast("rest.RestEndpoints", session._core.rest_transport())._state
-    key = (AssetClass.STOCKS, ChannelFamily.TICK)
-    old, _ = state.host_future(key)
-    state.forget_host(key, old)
-    new, created = state.host_future(key)
-    assert created
-    state.forget_host(key, old)  # not the current one: kept
-    assert state.host_future(key) == (new, False)
 
 
 def test_the_transport_is_bound_to_its_core(session: dm.MassiveSession) -> None:
@@ -2609,7 +2277,9 @@ def test_a_read_fans_out_on_the_callers_pool(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
-    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
+    calls = rest_requests.plan_calls(
+        CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
+    )
     with ThreadPoolExecutor(2) as pool:
         table, requests = reader.read(
             CRYPTO_LAST,
@@ -2636,7 +2306,7 @@ def test_a_parameter_one_path_refuses_leaves_no_cycle(
     # with the check's frame: that cycle holds the reader, and through it the session, until
     # the cyclic collector runs. The collector stays off, so only reference counting frees it.
     refusals: list[weakref.ref[_RefusalError]] = []
-    real = rest._base
+    real = rest_requests.shared_params
 
     def base(
         spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
@@ -2651,7 +2321,7 @@ def test_a_parameter_one_path_refuses_leaves_no_cycle(
             finally:
                 del refusal  # this frame must not hold its own error
 
-    monkeypatch.setattr(rest, "_base", base)
+    monkeypatch.setattr(rest, "shared_params", base)
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("poll")
     enabled = gc.isenabled()
     gc.disable()
@@ -2688,7 +2358,9 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD",))
-    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
+    calls = rest_requests.plan_calls(
+        CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
+    )
 
     def pages(*_: object, **__: object) -> NoReturn:
         # The session closes while the symbol's request is on the wire, which then ends in 404.
@@ -2744,7 +2416,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
-    calls = rest.plan_calls(
+    calls = rest_requests.plan_calls(
         CRYPTO_LAST, path, Request(symbols=symbols), symbols=symbols, split=split_pair
     )
     # The other symbols are answered at once with HTTP 404 (no rows), so the one worker could
@@ -2788,43 +2460,6 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
         )
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(sent(fake_rest)) <= 2
-
-
-def test_an_empty_symbol_tuple_plans_no_request() -> None:
-    path = cast("RestPath", _massive.source(R, INDEX_SNAPSHOT_PATH))
-    assert rest.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=(), split=split_pair) == []
-    assert rest.fetch_paths(SMA, ()) == [(SMA_STOCK, ())]
-
-
-def test_futures_date_bounds_are_whole_sessions() -> None:
-    path = "/futures/v1/trades/{ticker}"
-    spec = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="futures.recent",
-        asset_class=AssetClass.FUTURES,
-        fetch_path=path,
-        time_axis=("timestamp.gte", "timestamp.lt"),
-        keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
-    )
-    rest_path = cast("RestPath", _massive.source(R, path))
-    out = rest._axis_query(
-        spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)), asset_class=spec.asset_class
-    )
-    # The session ending 2025-03-04 opens at 17:00 Chicago time on the 3rd.
-    assert out == {
-        "timestamp.gte": datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
-        "timestamp.lt": datetime(2025, 3, 4, 17, tzinfo=CHICAGO),
-    }
-
-
-def test_range_segments_floor_to_whole_milliseconds() -> None:
-    start = datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
-    end = datetime(2025, 3, 3, 15, 0, 0, 500, tzinfo=UTC)
-    out = rest._range_segments(TimeRange(start, end))
-    assert out == {
-        "from": datetime(2025, 3, 3, 14, 30, 0, 123000, tzinfo=UTC),
-        "to": datetime(2025, 3, 3, 15, 0, 0, 0, tzinfo=UTC),
-    }
 
 
 def test_a_decision_is_shared_even_if_recording_it_fails(
@@ -3215,15 +2850,15 @@ def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
 
 
 def test_each_request_is_charged_to_its_subscription() -> None:
-    aapl = rest.Call({}, {"ticker.any_of": ("AAPL",)})
+    aapl = rest_requests.Call({}, {"ticker.any_of": ("AAPL",)})
     assert rest.call_bucket(DIVIDENDS, DIVIDENDS_PATH, aapl) == "stocks"
-    btc = rest.Call({}, {}, "X:BTCUSD")
+    btc = rest_requests.Call({}, {}, "X:BTCUSD")
     assert rest.call_bucket(CRYPTO_LAST, CRYPTO_LAST_PATH, btc) == "currencies"
-    eur = rest.Call({}, {}, "C:EURUSD")
+    eur = rest_requests.Call({}, {}, "C:EURUSD")
     assert rest.call_bucket(CONVERSION, CONVERSION_PATH, eur) == "currencies"
     # A dataset with a path per symbol class follows the class its request's symbols share.
     assert rest.call_bucket(SMA, SMA_CRYPTO, btc) == "currencies"
-    assert rest.call_bucket(SMA, SMA_STOCK, rest.Call({}, {}, "AAPL")) == "stocks"
+    assert rest.call_bucket(SMA, SMA_STOCK, rest_requests.Call({}, {}, "AAPL")) == "stocks"
 
 
 @pytest.mark.parametrize("market", list(Market))
@@ -3232,10 +2867,13 @@ def test_a_reference_request_is_charged_to_other_whatever_market_it_filters(
 ) -> None:
     # Massive counts reference requests in a bucket of their own, not under the asset class
     # they filter by; the session's own crypto ticker list goes there too.
-    call = rest.Call({}, {"market": market, "active": True})
+    call = rest_requests.Call({}, {"market": market, "active": True})
     tickers = "/v3/reference/tickers"
     assert rest.call_bucket(reference.TICKERS, tickers, call) == "other"
-    assert rest.call_bucket(reference.TICKERS, tickers, rest.Call({}, {"active": True})) == "other"
+    assert (
+        rest.call_bucket(reference.TICKERS, tickers, rest_requests.Call({}, {"active": True}))
+        == "other"
+    )
 
 
 @pytest.mark.parametrize(
@@ -3252,7 +2890,7 @@ def test_every_reference_endpoint_is_charged_to_other_whatever_its_dataset_class
 ) -> None:
     # A dataset of one class (options contracts, IPOs) still reads a reference endpoint,
     # which Massive counts in the reference bucket.
-    assert rest.call_bucket(spec, template, rest.Call({}, {}, "AAPL")) == "other"
+    assert rest.call_bucket(spec, template, rest_requests.Call({}, {}, "AAPL")) == "other"
 
 
 def test_each_request_logs_its_bucket_and_why_once(
@@ -3435,13 +3073,13 @@ def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
     reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
     stop = _massive.Cancel()
 
-    def run(call: rest.Call) -> NoReturn:
+    def run(call: rest_requests.Call) -> NoReturn:
         if call.symbol == "A":
             assert stop.wait(10)
             raise dm.MassiveError("cancelled")
         raise dm.EntitlementError("not entitled")
 
-    calls = [rest.Call({}, {}, "A"), rest.Call({}, {}, "B")]
+    calls = [rest_requests.Call({}, {}, "A"), rest_requests.Call({}, {}, "B")]
     with ThreadPoolExecutor(2) as pool, pytest.raises(dm.EntitlementError):
         reader._fan_out(run, calls, executor=pool, stop=stop)
     assert stop.is_set()

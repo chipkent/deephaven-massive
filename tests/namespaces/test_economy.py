@@ -16,7 +16,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._massive import Transport, source, to_batch
 from deephaven_massive._namespaces import economy
-from deephaven_massive._namespaces.base import Namespace
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
 from tests._fakes.rest import FakeRestServer, Reply

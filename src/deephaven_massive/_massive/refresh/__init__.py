@@ -26,10 +26,10 @@ Modules:
     - `openapi`: resolves references and merged schemas in the OpenAPI specifications.
     - `fields`: the field rules every generator shares: names, representation, units,
       conversions, and documented examples.
-    - `rest`: turns the OpenAPI specification into REST sources, with their result keys and
+    - `rest_sources`: turns the OpenAPI specification into REST sources, with their result keys and
       parameters.
-    - `ws`: turns the WebSocket specification into WebSocket sources.
-    - `flatfiles`: turns the flat-file pages into flat-file sources.
+    - `ws_sources`: turns the WebSocket specification into WebSocket sources.
+    - `flat_file_sources`: turns the flat-file pages into flat-file sources.
     - `kinds`: the dataset kinds across transports: memberships, the type and transport
       agreement, and the kind column order.
     - `naming`: the naming policy shared by every transport.

@@ -55,8 +55,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
-from deephaven_massive._massive.refresh import docs, fetch, generate, knowledge_base, ws
-from deephaven_massive._massive.refresh.flatfiles import venue_template
+from deephaven_massive._massive.refresh import docs, fetch, generate, knowledge_base, ws_sources
+from deephaven_massive._massive.refresh.flat_file_sources import venue_template
 from deephaven_massive._massive.refresh.gates import Gate, Problem, RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.snapshot import OPENAPI, WEBSOCKET, Snapshot
@@ -554,7 +554,7 @@ def _unaccounted(
         names; and a deprecation per committed flat-file prefix no overview names.
     """
     excluded = {kind: {e.item for e in hand.exclusions if e.kind is kind} for kind in Transport}
-    excluded_feeds = {ws.channel_key(path) for path in excluded[Transport.WS]}
+    excluded_feeds = {ws_sources.channel_key(path) for path in excluded[Transport.WS]}
     for area, documented, accounted in (
         (
             "REST",
@@ -605,7 +605,7 @@ def _not_generated(
 
     Args:
         operations: A specification's operations by path.
-        key: Maps a path to its key (`ws.channel_key` for channels).
+        key: Maps a path to its key (`ws_sources.channel_key` for channels).
 
     Returns:
         The keys.
@@ -632,7 +632,7 @@ def _event_mismatches(channels: Mapping[str, Operation | str]) -> Iterator[Drift
         A change per channel whose message lists `ev` values that leave out its channel.
     """
     for path, operation in sorted(channels.items()):
-        key = ws.channel_key(path)
+        key = ws_sources.channel_key(path)
         if key is None or not isinstance(operation, Operation) or operation.events is None:
             continue
         channel = key.rpartition("/")[2]
@@ -710,7 +710,7 @@ def compare(
             before.websocket,
             after.websocket,
             committed=committed.ws,
-            key=ws.channel_key,
+            key=ws_sources.channel_key,
             file="ws.json",
         ),
         *_page_changes(before, after),
@@ -720,7 +720,7 @@ def compare(
     found += _event_mismatches(channels)
     live = {
         Transport.REST: _not_generated(operations(after.openapi), lambda path: path),
-        Transport.WS: _not_generated(channels, ws.channel_key),
+        Transport.WS: _not_generated(channels, ws_sources.channel_key),
     }
     found += _unaccounted(after, committed=committed, hand=hand, live=live)
     return _ordered(found)

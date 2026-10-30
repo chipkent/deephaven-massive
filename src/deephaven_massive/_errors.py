@@ -40,7 +40,9 @@ one (its publisher's `publish_failure`), so the failure shows where Deephaven us
 also logged, at the level its cause gives, and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported; `LIBRARY_BUG`, the sentence that ends every message about a
+fix, which is not exported; two of its subclasses, `RowDataError` and
+`UnsupportedParameterError`, which the ingest layer raises and the tables layer names;
+`LIBRARY_BUG`, the sentence that ends every message about a
 defect of the library itself; and `raises_through`, the declaration that lets a test check
 the `Raises:` section of a function whose errors come from the helpers it calls. The
 rate-limited log helpers, `log_once` and `BoundedLog`, are in `_log_limits`.
@@ -58,6 +60,7 @@ from deephaven_massive._massive import WireAuthError, WireEntitlementError, Wire
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+
 __all__ = [
     "LIBRARY_BUG",
     "RAISES_THROUGH",
@@ -66,6 +69,8 @@ __all__ = [
     "ErrorCause",
     "MassiveError",
     "PermanentError",
+    "RowDataError",
+    "UnsupportedParameterError",
     "cause_of",
     "failure_text",
     "from_wire",
@@ -249,9 +254,11 @@ class PermanentError(MassiveError):
     (`UnsupportedParameterError`), a symbol table's row that is not Massive's ticker
     (`SymbolRowError`), and a crypto pair missing from the session's ticker list
     (`UnlistedPairError`). A `poll()` table fails with one rather than retrying it every cycle.
-    The subclasses are defined in the ingest modules (`_ingest/poll.py`, `_ingest/rest.py`),
-    and the fatal set of `poll()` names only this base, so a subclass defined in a module the
-    poll module cannot import (`rest.py` imports `poll.py`) still fails the table.
+    `RowDataError` and `UnsupportedParameterError` are defined here, since the REST transport
+    raises them and the tables layer names them; `SymbolRowError` is the poll module's
+    (`_tables/poll.py`) and `UnlistedPairError` the REST transport's (`_ingest/rest.py`). The
+    fatal set of `poll()` names only this base, so a subclass defined in a module the poll
+    module cannot import (the ingest layer) still fails the table.
 
     Example:
         ::
@@ -405,7 +412,7 @@ def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
         A dataset method lets through the errors of the factory that checks its arguments::
 
             from deephaven_massive._errors import RAISES_THROUGH, raises_through
-            from deephaven_massive._namespaces.base import build_query
+            from deephaven_massive._namespaces.query_building import build_query
 
 
             @raises_through(build_query)
@@ -421,3 +428,28 @@ def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
         return function
 
     return declare
+
+
+class RowDataError(PermanentError):
+    """A REST row that breaks its dataset's schema.
+
+    A row that lacks a key the dataset requires, a value that does not convert to its field's
+    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null or NaN value in
+    one of the dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
+    a `poll()` table fails with it, since the next cycle would fail alike. Data from Massive
+    that the library cannot read is the library's to fix, so its cause is
+    `ErrorCause.LIBRARY_DEFECT`.
+    """
+
+    default_cause = ErrorCause.LIBRARY_DEFECT
+
+
+class UnsupportedParameterError(PermanentError):
+    """A parameter the caller set that the path a `poll()` cycle chose does not take.
+
+    A reactive symbol table can route a new symbol to a path that lacks a parameter
+    (`adjusted=False` on the crypto indicators). Retrying cannot fix it, so the table fails
+    with it. The parameter is the caller's, so its cause is `ErrorCause.USER_DEFECT`.
+    """
+
+    default_cause = ErrorCause.USER_DEFECT

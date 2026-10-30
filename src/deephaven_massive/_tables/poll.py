@@ -70,8 +70,9 @@ which fails the table (`Poller.fail`) after stopping the poller. Every live poll
 registered with the session's `Pollers`, which the session's REST closer stops, and a poller can
 no longer be registered once that has run, so a `poll()` that races `close()` never starts a
 poller the session would not stop. A stopped poller finishes a request already on the wire,
-stops at once a request still waiting for the rate governor (its stop token is the cycle's
-`Cancel`), and publishes nothing more; a failed table keeps its rows. The poller holds the
+stops at once a request still waiting for the rate governor (its stop token is the `Cancel`
+the REST transport hands `open_poll`, which every cycle's requests follow), and publishes
+nothing more; a failed table keeps its rows. The poller holds the
 session core only through a weak reference; the poll's record in the session keeps the session
 alive while the poll runs (`SessionCore.register_worker`).
 """
@@ -92,8 +93,8 @@ import pyarrow.compute as pc
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 
+from deephaven_massive._datasets.column_descriptions import RAW_SYMBOL
 from deephaven_massive._datasets.row_times import INSERT
-from deephaven_massive._datasets.schema import RAW_SYMBOL
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode
 from deephaven_massive._errors import (
@@ -103,11 +104,12 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     PermanentError,
+    RowDataError,
     cause_of,
     failure_text,
 )
 from deephaven_massive._log_limits import log_failure
-from deephaven_massive._massive import Cancel, Transport
+from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import (
     StreamKind,
@@ -143,9 +145,7 @@ __all__ = [
     "PollClock",
     "Poller",
     "Pollers",
-    "RowDataError",
     "SymbolRowError",
-    "UnsupportedParameterError",
     "build_table",
     "open_poll",
 ]
@@ -163,31 +163,6 @@ LIST_KEY_COLUMN: Final = "__MassiveListKey"
 """The hidden column of a keyed (`UPSERT` or `REPLACE`) table's publisher whose poll keys hold a
 list column: the JSON text of the row's list keys, in key order, on which the `last_by` keys in
 their place. Hidden like `LIVE_COLUMN`, and dropped from the result."""
-
-
-class RowDataError(PermanentError):
-    """A REST row that breaks its dataset's schema.
-
-    A row that lacks a key the dataset requires, a value that does not convert to its field's
-    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null or NaN value in
-    one of the dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
-    a `poll()` table fails with it, since the next cycle would fail alike. Data from Massive
-    that the library cannot read is the library's to fix, so its cause is
-    `ErrorCause.LIBRARY_DEFECT`.
-    """
-
-    default_cause = ErrorCause.LIBRARY_DEFECT
-
-
-class UnsupportedParameterError(PermanentError):
-    """A parameter the caller set that the path a `poll()` cycle chose does not take.
-
-    A reactive symbol table can route a new symbol to a path that lacks a parameter
-    (`adjusted=False` on the crypto indicators). Retrying cannot fix it, so the table fails
-    with it. The parameter is the caller's, so its cause is `ErrorCause.USER_DEFECT`.
-    """
-
-    default_cause = ErrorCause.USER_DEFECT
 
 
 class SymbolRowError(PermanentError):
@@ -265,7 +240,7 @@ class CycleReader(Protocol):
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
-        cancel: Cancel,
+        cancel: threading.Event,
     ) -> tuple[pa.Table, int]:
         """Request the dataset for the symbols and return the rows and the request count.
 
@@ -399,7 +374,7 @@ class Poller:
         pollers: Pollers,
         clock: PollClock,
         publisher: BlinkPublisher,
-        stop: Cancel,
+        stop: threading.Event,
     ) -> None:
         """Prepare the poller; nothing is requested, and the thread is not started yet.
 
@@ -1026,7 +1001,7 @@ def build_table(
     return (keyed.drop_columns(hidden) if hidden else keyed), publisher
 
 
-def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel) -> None:
+def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: threading.Event) -> None:
     """A `poll()` blink table's shutdown callback: stop the poller and tell the session.
 
     Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
@@ -1050,7 +1025,7 @@ def _build(
     *,
     mode: PollMode,
     stream_id: int,
-    stop: Cancel,
+    stop: threading.Event,
 ) -> tuple[tuple[Table, BlinkPublisher], LivenessScope]:
     """Create a `poll()` table in a new result scope (`make_result`).
 
@@ -1101,6 +1076,7 @@ def open_poll(
     host: str | None,
     path: str | None,
     clock: PollClock,
+    stop: threading.Event,
 ) -> Table:
     """Create a `poll()` table and start its poller.
 
@@ -1128,6 +1104,8 @@ def open_poll(
         host: The REST host, for the row's `Host`.
         path: The fetch path, for the row's `Path`.
         clock: The time source of the waits between cycles.
+        stop: The poller's stop token, which the caller creates and every cycle's requests
+            listen to; the table's shutdown and the session's close set it.
 
     Returns:
         The live table.
@@ -1139,7 +1117,6 @@ def open_poll(
             `Pollers.add`.
     """
     stream_id = core.next_stream_id()
-    stop = Cancel()
     with entered(core.exec_ctx):
         (result, publisher), scope = _build(core, spec, mode=mode, stream_id=stream_id, stop=stop)
     poller: Poller | None = None

@@ -546,7 +546,7 @@ def load_fixture() -> Callable[[str, str], bytes]:
     """Return a function that reads a payload fixture from `tests/data/<owner>/<name>`.
 
     `owner` is the mirrored test's path under `tests/` without the `test_` prefix and `.py`
-    (`"datasets/symbols"` for `tests/datasets/test_symbols.py`), or a test package's path
+    (`"datasets/wire_symbols"` for `tests/datasets/test_wire_symbols.py`), or a test package's path
     (`"massive/rest"`), so each owner's fixtures stay together.
 
     Returns:
@@ -911,14 +911,14 @@ def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
     """
     core = importlib.import_module("deephaven_massive._tables.session_core")
     session = importlib.import_module("deephaven_massive._session")
-    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    ws_connection = importlib.import_module("deephaven_massive._ingest.ws_connection")
     with core._live_lock:
         live: set[str] = {each.label for each in core._live.values()}
     with session._keys_lock:
         cores = [ref() for ref in session._open_sessions]
     alive = {each.label for each in cores if each is not None}
-    with ws._groups_lock:
-        groups: set[object] = set(ws._groups.values())
+    with ws_connection._groups_lock:
+        groups: set[object] = set(ws_connection._groups.values())
     threads = {
         t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
     }
@@ -1788,12 +1788,13 @@ _PLANS: Final = {
     "test_forex_integration.py": "a Currencies plan that includes this data",
     "test_timestamps_integration.py": "a Currencies plan that includes this data",
     "test_stocks_integration.py": "a Stocks plan that includes this data",
+    "test_stock_filings_integration.py": "a Stocks plan that includes this data",
     "test_options_integration.py": "an Options plan that includes this data",
     "test_indices_integration.py": "an Indices plan that includes this data",
     "test_futures_integration.py": "a Futures plan that includes this data",
     "test_reference_integration.py": "a plan that includes this reference data",
     "test_flatfiles_integration.py": "flat-file access to this dataset",
-    "test_hosts_integration.py": "the plan this check names in its docstring",
+    "test_host_decision_integration.py": "the plan this check names in its docstring",
     "test_ws_integration.py": "the plan this check names in its docstring",
 }
 """The plan a live test module's data needs, named in a skip when the key lacks it."""
@@ -3333,7 +3334,7 @@ def stamped_bar() -> Callable[[Mapping[str, Any]], StampedBar]:
 
     Returns:
         A function mapping a row to its stamp in epoch milliseconds and its open, high, low,
-        close, and volume (see `_stamped`).
+        close, and volume (see `stamped`).
     """
     return _stamped
 
