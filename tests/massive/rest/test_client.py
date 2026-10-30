@@ -502,6 +502,8 @@ def test_a_proxy_reached_over_https_is_verified_like_massive(
     assert proxy_context is not None
     assert proxy_context.verify_mode is ssl.CERT_REQUIRED
     assert proxy_context.check_hostname
+    # One lookup serves both legs, so the proxy and Massive are verified against one trust store.
+    assert proxy_context is rest._pool.connection_pool_kw["ssl_context"]
     rest.close()
 
 

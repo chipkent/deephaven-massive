@@ -4,6 +4,7 @@ import os
 import ssl
 import threading
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 import certifi
@@ -24,13 +25,53 @@ of its subject (`openssl x509 -hash -noout -in tls_cert.pem`) and a sequence num
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Remove every certificate, key-log, and proxy variable, and start with no cached TLS context.
 
+    OpenSSL's built-in bundle and directory are replaced by nothing, so a test sees only the
+    locations it creates; the tests of those defaults set them explicitly.
+
     Returns:
         The monkeypatch, for further changes the test undoes on exit.
     """
     for name in (*_CERT_VARS, _KEY_LOG_VAR, *_PROXY_VARS):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(http, "_CONTEXTS", {})
+    monkeypatch.setattr(http, "_WARNED", set())
+    monkeypatch.setattr(http, "_OPENSSL_CAFILE", "")
+    monkeypatch.setattr(http, "_OPENSSL_CAPATH", "")
     return monkeypatch
+
+
+def _until_the_change_time_moves(path: Path, change: Callable[[], None]) -> None:
+    """Apply `change` to `path`, repeating it until the file's change time has moved.
+
+    Some file systems advance the change time only once per clock tick of a few milliseconds,
+    so a change made right after the previous one can leave it where it was. Repeating the
+    change keeps the test about what the cache notices, not about the clock.
+    """
+    before = path.stat().st_ctime_ns
+    change()
+    while path.stat().st_ctime_ns == before:
+        change()
+
+
+def _rewrite_keeping_size_and_mtime(path: Path) -> None:
+    """Replace `path`'s contents in place with as many bytes of junk, putting its mtime back.
+
+    What is left is the same file, by inode, size, and modification time, holding no
+    certificate.
+    """
+    status = path.stat()
+
+    def rewrite() -> None:
+        path.write_bytes(b"#" * status.st_size)
+        os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns))
+
+    _until_the_change_time_moves(path, rewrite)
+    after = path.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+    )
 
 
 def _record_cafile(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
@@ -110,9 +151,23 @@ def test_different_settings_get_different_ssl_contexts(
     clean_env.delenv("SSL_CERT_FILE")
     by_dir = http.ssl_context(REST)
     assert len({id(default), id(by_file), id(by_both), id(by_dir)}) == 4
-    clean_env.delenv("SSL_CERT_DIR")
-    assert http.ssl_context(REST) is default  # a setting seen before reuses its context
+    assert http.ssl_context(REST) is by_dir  # an unchanged setting reuses its context
     assert calls == [certifi.where(), None, None, None]
+
+
+def test_only_the_latest_context_per_consumer_is_kept(clean_env: pytest.MonkeyPatch) -> None:
+    calls = _record_cafile(clean_env)
+    default = http.ssl_context(REST)
+    websocket = http.ssl_context(WEBSOCKET)
+    clean_env.setenv("SSL_CERT_FILE", certifi.where())
+    by_file = http.ssl_context(REST)
+    assert set(http._CONTEXTS) == set(http.TlsConsumer)
+    assert http._CONTEXTS[REST][1] is by_file  # replaced, not added beside the first
+    assert http._CONTEXTS[WEBSOCKET][1] is websocket  # the other consumer keeps its own
+    clean_env.delenv("SSL_CERT_FILE")
+    rebuilt = http.ssl_context(REST)
+    assert rebuilt is not default  # a setting seen before is built again
+    assert calls == [certifi.where(), certifi.where(), None, certifi.where()]
 
 
 def test_a_cert_file_created_after_the_first_call_gets_a_new_context(
@@ -220,6 +275,88 @@ def test_a_certificate_edited_in_place_in_a_cert_directory_takes_effect(
     assert http.ssl_context(REST) is distrusting
 
 
+def test_a_same_size_rewrite_in_a_cert_directory_with_its_mtime_put_back_takes_effect(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hashed = _cert_directory(clean_env, tmp_path / "certs")
+    trusting = http.ssl_context(REST)
+    assert _verifies_the_fixture_server(trusting)
+    _rewrite_keeping_size_and_mtime(hashed)
+    distrusting = http.ssl_context(REST)
+    assert distrusting is not trusting
+    assert not _verifies_the_fixture_server(distrusting)
+
+
+def test_a_cert_file_rewritten_at_the_same_size_with_its_mtime_put_back_gets_a_new_context(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = tmp_path / "ca.pem"
+    bundle.write_bytes((_TLS / "tls_cert.pem").read_bytes())
+    clean_env.setenv("SSL_CERT_FILE", str(bundle))
+    trusting = http.ssl_context(REST)
+    assert _verifies_the_fixture_server(trusting)
+    _rewrite_keeping_size_and_mtime(bundle)
+    distrusting = http.ssl_context(REST)
+    assert distrusting is not trusting
+    assert not _verifies_the_fixture_server(distrusting)
+
+
+def test_a_certificate_made_unreadable_in_a_cert_directory_gets_a_new_context(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hashed = _cert_directory(clean_env, tmp_path / "certs")
+    trusting = http.ssl_context(REST)
+    # Only the change time moves; a process running as root could still read the file, so the
+    # test asserts the new context, not a failed handshake.
+    _until_the_change_time_moves(hashed, lambda: hashed.chmod(0))
+    try:
+        assert http.ssl_context(REST) is not trusting
+    finally:
+        hashed.chmod(0o644)
+
+
+def test_openssls_built_in_directory_is_examined_when_only_ssl_cert_file_is_set(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # OpenSSL loads its built-in directory beside `SSL_CERT_FILE`, so a change there counts.
+    hashed = _cert_directory(clean_env, tmp_path / "certs")
+    clean_env.delenv("SSL_CERT_DIR")
+    clean_env.setattr(http, "_OPENSSL_CAPATH", str(hashed.parent))
+    clean_env.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    before = http.ssl_context(REST)
+    hashed.write_bytes(b"")
+    assert http.ssl_context(REST) is not before
+
+
+def test_openssls_built_in_bundle_is_examined_when_only_ssl_cert_dir_is_set(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The bundle sits outside the certificate directory, so only its own identity can count.
+    built_in = tmp_path / "built-in"
+    built_in.mkdir()
+    bundle = built_in / "cert.pem"
+    bundle.write_bytes((_TLS / "tls_cert.pem").read_bytes())
+    clean_env.setattr(http, "_OPENSSL_CAFILE", str(bundle))
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    clean_env.setenv("SSL_CERT_DIR", str(certs))
+    before = http.ssl_context(REST)
+    _rewrite_keeping_size_and_mtime(bundle)
+    assert http.ssl_context(REST) is not before
+
+
+def test_openssls_built_in_locations_are_ignored_when_certifi_is_trusted(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hashed = _cert_directory(clean_env, tmp_path / "certs")
+    clean_env.delenv("SSL_CERT_DIR")
+    clean_env.setattr(http, "_OPENSSL_CAPATH", str(hashed.parent))
+    clean_env.setattr(http, "_OPENSSL_CAFILE", str(hashed))
+    before = http.ssl_context(REST)
+    hashed.write_bytes(b"")
+    assert http.ssl_context(REST) is before
+
+
 def test_a_certificate_linked_from_a_cert_directory_and_edited_takes_effect(
     clean_env: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -281,11 +418,26 @@ def test_a_cert_directory_that_cannot_be_listed_logs_a_warning(
     clean_env.setenv("SSL_CERT_DIR", str(missing))
     with caplog.at_level(logging.WARNING, logger=http.__name__):
         http.ssl_context(REST)
+        http.ssl_context(WEBSOCKET)  # the same directory and error: logged once
     [record] = caplog.records
     assert record.levelno == logging.WARNING
     assert repr(str(missing)) in record.getMessage()
+    assert "may still find certificates there by their hashed names" in record.getMessage()
     assert isinstance(record.args, tuple)
     assert isinstance(record.args[1], FileNotFoundError)  # the error is named, not swallowed
+
+
+def test_a_missing_built_in_cert_directory_logs_only_at_debug(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Many Python builds name a built-in directory that does not exist; that is no warning.
+    missing = tmp_path / "missing"
+    clean_env.setattr(http, "_OPENSSL_CAPATH", str(missing))
+    clean_env.setenv("SSL_CERT_FILE", certifi.where())
+    with caplog.at_level(logging.DEBUG, logger=http.__name__):
+        http.ssl_context(REST)
+    assert [record.levelno for record in caplog.records] == [logging.DEBUG, logging.DEBUG]
+    assert repr(str(missing)) in caplog.records[0].getMessage()
 
 
 def test_building_a_context_logs_its_settings_once(
@@ -298,7 +450,8 @@ def test_building_a_context_logs_its_settings_once(
         http.ssl_context(WEBSOCKET)  # cached: nothing is built, so nothing is logged
     expected = (
         "built a TLS context for websockets trusting the OpenSSL locations (SSL_CERT_FILE='', "
-        f"SSL_CERT_DIR={str(directory)!r}, certificate directory entries: 1, SSLKEYLOGFILE='')"
+        f"SSL_CERT_DIR={str(directory)!r}, bundle='', certificate directories="
+        f"[{str(directory)!r}], directory entries: 1, SSLKEYLOGFILE='')"
     )
     assert [record.getMessage() for record in caplog.records] == [expected]
     caplog.clear()
@@ -315,8 +468,7 @@ def test_a_key_log_file_gets_its_own_context(clean_env: pytest.MonkeyPatch, tmp_
     logging_keys = http.ssl_context(REST)
     assert logging_keys is not plain
     assert logging_keys.keylog_filename == str(key_log)
-    clean_env.delenv("SSLKEYLOGFILE")
-    assert http.ssl_context(REST) is plain
+    assert http.ssl_context(REST) is logging_keys
 
 
 def test_concurrent_first_calls_build_one_ssl_context(clean_env: pytest.MonkeyPatch) -> None:
