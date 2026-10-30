@@ -5,7 +5,7 @@ The WebSocket transport (`_ingest/ws.py`) owns the connections and decides which
 subscribed; this module owns everything that touches Deephaven for a stream:
 
 - `ChannelPlan`, how one dataset reads one channel: the channel's generated columns, renamed
-  for the dataset (`schema.rename`), their wire types, the dataset's merged schema, and the
+  for the dataset (`source_columns.rename`), their wire types, the dataset's merged schema, and the
   required keys and symbol column the wire client checks (`set_required`). Pure; built once
   per (dataset, channel).
 - `open_stream_tables`, which creates a stream's liveness scope and, inside it, the publisher
@@ -62,6 +62,10 @@ Deephaven. Its one lock, the flush lock, serializes flushes (the thread's own an
 calls) and is never taken under another library lock; the routing table has its own leaf lock.
 The flusher holds no session, and a routed sink holds its own only weakly. A flush thread that
 dies on something it cannot carry on after fails every stream it routes before it ends.
+
+The module is one subject although it runs past 1,000 lines: it is one stream's path from its
+publisher to the fan-out, and the flush thread, the routing, and the failures all act on the
+same sinks under the same flush lock.
 """
 
 from __future__ import annotations
@@ -80,22 +84,12 @@ import pyarrow.compute as pc
 from deephaven import new_table
 from deephaven.column import string_col
 
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.row_times import TimeRule, time_column
-from deephaven_massive._datasets.schema import (
-    OPTION_ROOT,
-    RAW_SYMBOL,
-    key_column,
-    rename,
-    required_fields,
-    widen,
-)
-from deephaven_massive._datasets.symbols import (
-    SymbolTable,
-    WireSymbols,
-    option_roots,
-    unreadable_symbol_message,
-)
+from deephaven_massive._datasets.source_columns import key_column, rename, required_fields, widen
+from deephaven_massive._datasets.symbols import SymbolTable, option_roots
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
+from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
 from deephaven_massive._enums import NotBars, OnError
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
@@ -360,7 +354,7 @@ class ChannelPlan:
                 stream routes rows by symbol, so it cannot read such a channel.
 
         An unknown source raises the `KeyError` of `Catalog.source`, and a bad key declaration
-        the `ValueError` of `schema.rename`.
+        the `ValueError` of `source_columns.rename`.
         """
         asset_class = cast("AssetClass", spec.asset_class)
         key = f"{asset_class.value}/{channel}"

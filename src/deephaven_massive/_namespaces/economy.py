@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._errors import raises_through
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.query_building import Namespace, build_query, list_params
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

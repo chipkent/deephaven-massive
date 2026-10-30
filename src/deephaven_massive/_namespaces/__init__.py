@@ -1,11 +1,12 @@
 """The dataset namespaces of a session: `m.stocks`, `m.options`, ..., `m.partners`.
 
-- `base`: `Namespace`, the base class of every namespace class, and the shared dataset factory
-  (`build_query`), which derives each dataset's query class from its spec (`query_class`,
-  `bar_query_class`);
-- `stocks`, `options`, `futures`, `indices`, `forex`, `crypto`, `reference`, `indicators`,
-  `economy`, `partners`: one namespace class each, and that namespace's `DatasetSpec`s
-  (`DATASETS`), which `_session.py` composes into the process's dataset catalog.
+- `query_building`: `Namespace`, the base class of every namespace class, and the shared
+  dataset factory (`build_query`), which returns the query class `_query.py` chooses for the
+  dataset (`query_class`, `bar_query_class`);
+- `stocks`, `stock_financials`, `stock_filings`, `options`, `futures`, `indices`, `forex`,
+  `crypto`, `reference`, `indicators`, `economy`, `partners`: one namespace class each (with
+  its sub-namespaces, for `partners`), and that namespace's `DatasetSpec`s (`DATASETS`),
+  which `_session.py` composes into the process's dataset catalog.
 - `snapshots`: the `DatasetSpec` of `m.snapshots()`, the unified snapshot the session serves
   itself rather than a namespace, composed into the catalog the same way.
 

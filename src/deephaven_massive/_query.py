@@ -1,4 +1,4 @@
-"""The four query classes and their verbs.
+"""The four query classes, their verbs, and the choice of a dataset's class.
 
 A dataset method such as `m.stocks.trades(["AAPL"])` returns a *query*: an immutable,
 hashable description of what to fetch. Nothing touches the network until a *verb* is called,
@@ -40,8 +40,16 @@ completes (`open_read` in `_tables/background_read.py`); that thread logs the ca
 Live stream results are shaped and tracked by the session (`SessionCore.stream_result`), so
 every stream verb shares one stream per (dataset, channel, symbol set).
 
+A dataset's class follows from the transports its spec declares (`query_class`), and a
+`bars()` call's from its timespan and multiplier (`bar_query_class`), so no spec names a
+class and the dataset layer never refers to the query classes.
+
 Users import the classes for type annotations from the public module
 `deephaven_massive.queries`, and never construct them.
+
+The module is one subject although it runs past 1,000 lines: the four classes build on one
+base and on each other (`StreamHistoryQuery` is a `StreamQuery` and a `HistoryQuery`), so a
+verb, and the choice of the class that offers it, read whole only beside all four.
 """
 
 from __future__ import annotations
@@ -50,7 +58,7 @@ import functools
 import logging
 import time
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 
 from deephaven import arrow as dh_arrow
@@ -60,6 +68,7 @@ from deephaven.table_factory import ring_table
 from deephaven_massive._config import require_positive_int, require_positive_number
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.dates import bounds, parse_date_like
 from deephaven_massive._datasets.history_source import (
     Alternative,
@@ -69,13 +78,8 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
-from deephaven_massive._enums import (
-    HistorySource,
-    PollMode,
-    _require_enum,
-)
+from deephaven_massive._enums import AssetClass, HistorySource, PollMode, Timespan, _require_enum
 from deephaven_massive._errors import (
     EntitlementError,
     ErrorCause,
@@ -101,7 +105,6 @@ from deephaven_massive._types import override
 if TYPE_CHECKING:
     import threading
     from collections.abc import Callable, Sequence
-    from datetime import date
 
     from deephaven.table import Table
 
@@ -116,6 +119,8 @@ __all__ = [
     "QueryBase",
     "StreamHistoryQuery",
     "StreamQuery",
+    "bar_query_class",
+    "query_class",
     "verbs",
 ]
 
@@ -212,10 +217,10 @@ def _wait(value: object) -> bool:
 def _serves(spec: DatasetSpec, verb: str) -> bool:
     """Tell whether a dataset's query has a verb, from the transports its spec declares.
 
-    The query classes follow from the same transports (`query_class` in
-    `_namespaces/base.py`): a fetch path gives `fetch()` and `poll()`, channels the stream
-    verbs, and a history source `history()`. A `bars` dataset streams at some timespans only,
-    which is enough to name it as the dataset that streams.
+    The query classes follow from the same transports (`query_class`, below): a fetch path
+    gives `fetch()` and `poll()`, channels the stream verbs, and a history source `history()`. A
+    `bars` dataset streams at some timespans only, which is enough to name it as the dataset that
+    streams.
 
     Args:
         spec: The dataset.
@@ -236,7 +241,7 @@ def verbs(spec: DatasetSpec) -> tuple[str, ...]:
 
     A `bars` dataset streams at some timespans only, and its stream verbs are listed all the
     same; the verbs of one `bars()` call follow its timespan (`bar_query_class` in
-    `_namespaces/base.py`). `dm.datasets()` shows the result.
+    `_namespaces/query_building.py`). `dm.datasets()` shows the result.
 
     Args:
         spec: The dataset.
@@ -1500,3 +1505,70 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
     """
 
     __slots__ = ()
+
+
+def query_class(spec: DatasetSpec) -> type[QueryBase]:
+    """Return the query class of a dataset, derived from the transports its spec declares.
+
+    A dataset's verbs are exactly what its transports can serve, so the class follows from the
+    spec: channels give the stream verbs, a history source (a REST history or grouped-daily
+    path, or flat-file prefixes) gives `history()`, and a fetch path gives `fetch()`. Each
+    namespace factory's return annotation is this class, which the namespace tests check.
+
+    | Channels | History | Fetch | Class                |
+    |----------|---------|-------|----------------------|
+    | no       | no      | yes   | `Query`              |
+    | yes      | no      | no    | `StreamQuery`        |
+    | no       | yes     | no    | `HistoryQuery`       |
+    | yes      | yes     | no    | `StreamHistoryQuery` |
+
+    `DatasetSpec` rejects every other combination when it is created: a fetch path is a
+    dataset of its own, such as `stocks.last_trade` beside `stocks.trades`. A `bars` dataset gives
+    `HistoryQuery`, the class of its most general overload: `bar_query_class` picks the class
+    of each call from its timespan and multiplier.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The query class its factory returns.
+    """
+    if spec.is_bars:
+        return HistoryQuery
+    if not spec.has_channels:
+        return Query if spec.has_fetch else HistoryQuery
+    return StreamHistoryQuery if spec.has_history else StreamQuery
+
+
+def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:
+    """Pick the query class of a `bars()` call from its actual timespan and multiplier.
+
+    With `multiplier=1`, a timespan that has a WebSocket channel (`SECOND`, `MINUTE`) gives a
+    `StreamHistoryQuery`. Every other combination is history only (`HistoryQuery`); the
+    previous session's bar is the `previous_day_bar` dataset, not a verb of `bars()`. A
+    `timespan` that is not a `dm.Timespan` raises `TypeError` (`_require_enum`), and a
+    `multiplier` that is not a positive `int` raises `TypeError` or `ValueError`
+    (`require_positive_int`).
+
+    Args:
+        spec: The bars dataset.
+        timespan: The `timespan` argument as passed.
+        multiplier: The `multiplier` argument as passed.
+
+    Returns:
+        The query class to instantiate.
+
+    Raises:
+        ValueError: If `Timespan.DAY` is used for futures (the futures endpoint has no day
+            unit; use `Timespan.SESSION`), or `Timespan.SESSION` is used outside futures.
+    """
+    span = _require_enum(timespan, Timespan, "timespan")
+    count = require_positive_int("multiplier", multiplier)
+    futures = spec.asset_class is AssetClass.FUTURES
+    if futures and span is Timespan.DAY:
+        raise ValueError("futures bars have no DAY timespan; use dm.Timespan.SESSION")
+    if not futures and span is Timespan.SESSION:
+        raise ValueError("Timespan.SESSION exists only for futures bars")
+    if count == 1 and span in spec.channels:
+        return StreamHistoryQuery
+    return HistoryQuery

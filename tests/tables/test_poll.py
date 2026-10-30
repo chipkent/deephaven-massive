@@ -27,31 +27,35 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode
-from deephaven_massive._errors import PermanentError
-from deephaven_massive._ingest import poll
-from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, open_poll
-from deephaven_massive._massive import Cancel, DriftReport, Patience, Transport
-from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._errors import PermanentError, RowDataError
+from deephaven_massive._massive import Cancel, DriftReport, Transport
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import Query
+from deephaven_massive._tables import poll
 from deephaven_massive._tables.liveness import (
     ResultRecord,
     ResultRegistry,
     new_scope,
     release_scope,
 )
+from deephaven_massive._tables.poll import LIVE_COLUMN, Pollers, open_poll
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
-
-# The reply and envelope builders are plain functions of the fake, which no fixture can hand
-# over; the server itself comes from the `fake_rest` fixture.
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
 
+
+# The reply and envelope builders are plain functions of the fake, which no fixture can hand
+# over; the server itself comes from the `fake_rest` fixture.
+
+
 R = Transport.REST
 TIMEOUT = 30.0
-LOGGER = "deephaven_massive._ingest.poll"
+LOGGER = "deephaven_massive._tables.poll"
+
+
 PATH = "/stocks/v1/dividends"
 DIVIDENDS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -73,7 +77,6 @@ class Script:
         self.drift: DriftReport | None = None
         self.took = 0.0  # how far each cycle's read moves the clock
         self.clock: FakeClock | None = None
-        self.patience: Patience | None = None  # the last cycle's
 
     def rows(self, *pairs: tuple[str, float]) -> None:
         data = [{"Symbol": symbol, "CashAmount": amount} for symbol, amount in pairs]
@@ -91,11 +94,9 @@ class Script:
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
         cancel: threading.Event,
-        patience: Patience,
-    ) -> tuple[pa.Table, int]:
+    ) -> tuple[pa.Table, int, float]:
         self.symbols.append(symbols)
         self.cancel = cancel
-        self.patience = patience
         if self.drift is not None:
             record(self.drift)
         outcome = self.outcomes.get(timeout=TIMEOUT)
@@ -103,7 +104,7 @@ class Script:
             self.clock.advance(self.took)
         if isinstance(outcome, BaseException):
             raise outcome
-        return cast("pa.Table", outcome), 3
+        return cast("pa.Table", outcome), 3, 600.0
 
 
 @pytest.fixture
@@ -141,6 +142,7 @@ def start(
     clock: FakeClock,
     mode: PollMode = PollMode.REPLACE,
     symbols: NormalizedSymbols | None = ("AAPL", "MSFT"),
+    stop: threading.Event | None = None,
 ) -> Table:
     return open_poll(
         m._core,
@@ -154,6 +156,7 @@ def start(
         host="api.massive.com",
         path=PATH,
         clock=clock,
+        stop=threading.Event() if stop is None else stop,
     )
 
 
@@ -458,10 +461,10 @@ def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
     names: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
     schema = massive_session._core.catalog.dataset_schema(DIVIDENDS).arrow_schema()
 
-    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int]:
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int, float]:
         pooled = executor.submit(lambda: threading.current_thread().name).result(TIMEOUT)
         names.put((threading.current_thread().name, pooled))
-        return schema.empty_table(), 1
+        return schema.empty_table(), 1, 600.0
 
     # Held until the end: a table nothing refers to may be collected, which stops its poller
     # before its first cycle.
@@ -837,21 +840,16 @@ def test_an_interrupt_before_registration_releases_the_table(
 ) -> None:
     # The table exists before the poller does: an interrupt in either step still shuts it down,
     # which sets the poller's stop token.
-    made: list[Cancel] = []
-
-    def token() -> Cancel:
-        made.append(Cancel())
-        return made[-1]
+    stop = threading.Event()
 
     def interrupted(*_: object, **__: object) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(poll, "Cancel", token)
     monkeypatch.setattr(poll, step, interrupted)
     with pytest.raises(KeyboardInterrupt):
-        start(massive_session, script=script, pollers=pollers, clock=clock)
+        start(massive_session, script=script, pollers=pollers, clock=clock, stop=stop)
     monkeypatch.undo()
-    until(made[0].is_set)
+    until(stop.is_set)
     assert pollers._live == set()
     assert massive_session._core._workers == {}
 
@@ -1057,7 +1055,7 @@ def test_a_stop_during_a_cycle_publishes_nothing(
     gate = threading.Event()
     reading = threading.Event()
 
-    def slow(**kwargs: object) -> tuple[pa.Table, int]:
+    def slow(**kwargs: object) -> tuple[pa.Table, int, float]:
         reading.set()
         gate.wait(TIMEOUT)
         return script(**cast("dict[str, Any]", kwargs))
@@ -1076,6 +1074,7 @@ def test_a_stop_during_a_cycle_publishes_nothing(
         host=None,
         path=PATH,
         clock=clock,
+        stop=threading.Event(),
     )
     poller = poller_of(pollers)
     assert reading.wait(TIMEOUT)
@@ -1101,7 +1100,7 @@ def test_an_error_after_a_stop_is_not_reported(
     reading = threading.Event()
     gate = threading.Event()
 
-    def stopped(**kwargs: object) -> tuple[pa.Table, int]:
+    def stopped(**kwargs: object) -> tuple[pa.Table, int, float]:
         reading.set()
         gate.wait(TIMEOUT)
         raise copy.copy(error)  # the parameter outlives the test; its traceback must not
@@ -1118,6 +1117,7 @@ def test_an_error_after_a_stop_is_not_reported(
         host=None,
         path=PATH,
         clock=clock,
+        stop=threading.Event(),
     )
     poller = poller_of(pollers)
     assert reading.wait(TIMEOUT)
@@ -1666,6 +1666,7 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
         host="api.massive.com",
         path=PATH,
         clock=clock,
+        stop=threading.Event(),
     )
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
@@ -1740,8 +1741,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
 
 def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:
     # A poll() table fails on a PermanentError, its fatal set names only the base.
-    for error in (poll.RowDataError, poll.UnsupportedParameterError, poll.SymbolRowError):
-        assert issubclass(error, PermanentError)
+    assert issubclass(poll.SymbolRowError, PermanentError)
     assert (dm.AuthenticationError, dm.EntitlementError, PermanentError) == poll._FATAL
 
 
@@ -1783,6 +1783,7 @@ def start_holdings(
         host="api.massive.com",
         path=HOLDINGS_PATH,
         clock=clock,
+        stop=threading.Event(),
     )
 
 

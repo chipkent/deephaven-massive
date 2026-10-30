@@ -95,7 +95,7 @@ from typing import TYPE_CHECKING, Final, TypeVar, cast
 from deephaven.dherror import DHError
 from deephaven.update_graph import shared_lock
 
-from deephaven_massive._datasets.schema import TRANSPORT_LABELS
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._log_limits import BoundedLog, bounded_list

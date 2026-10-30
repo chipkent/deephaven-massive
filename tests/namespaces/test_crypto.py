@@ -31,7 +31,7 @@ from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.schema import required_fields
+from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily
 from deephaven_massive._massive import (
@@ -41,13 +41,14 @@ from deephaven_massive._massive import (
     to_batch,
 )
 from deephaven_massive._namespaces import crypto
-from deephaven_massive._namespaces.base import Namespace, query_class
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import (
     HistoryQuery,
     Query,
     QueryBase,
     StreamHistoryQuery,
     StreamQuery,
+    query_class,
 )
 from deephaven_massive._tables.liveness import new_scope
 

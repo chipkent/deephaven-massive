@@ -16,7 +16,8 @@
 - `symbols`: `canonicalize_symbols`, the table form of the symbol converters;
 - `publisher`: `blink_publisher`, which creates every blink table the library feeds, and its
   `BlinkPublisher`, whose failure Deephaven delivers exactly once;
-- `stream`: live streams' sinks, the flush thread, and the shared-batch fan-out.
+- `stream`: live streams' sinks, the flush thread, and the shared-batch fan-out;
+- `poll`: `poll()` tables, their pollers, and how each mode applies a cycle's rows.
 
 Layer: tables, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_log_limits`, `_types`), and the datasets (`_datasets`), which it may import; it never

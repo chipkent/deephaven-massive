@@ -36,7 +36,7 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import (
+from deephaven_massive._namespaces.query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     build_query,
