@@ -4,6 +4,10 @@
   the transports to the session core through its `IngestPorts` protocol;
 - `flatfiles`: `FlatFileHistory`, which serves `history()` from the S3 flat files through the
   session's `FlatFileClient`;
+- `rest`: the REST transport, which runs a call's requests on the session's `RestClient`,
+  with `rest_requests` (the requests of a call) and `rest_rows` (page rows to batches);
+- `host_decision`: which WebSocket host serves an asset class and channel family, and the
+  session's cache of those decisions;
 - `ws`: the WebSocket transport, one connection per URL over `WsClient`, and the
   subscription protocol (the reconcile loop, acknowledgements, refusals, the options cap).
 
