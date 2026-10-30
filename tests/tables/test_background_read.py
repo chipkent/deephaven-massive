@@ -1,11 +1,13 @@
 """Tests for background reads: the one-update fill, the m.streams() row, release, close, failure."""
 
+import dataclasses
+import functools
 import gc
 import logging
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -25,6 +27,7 @@ from deephaven_massive._tables.background_read import BACKGROUND_NOTE, Backgroun
 from deephaven_massive._tables.diagnostics import StreamState
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
+from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
@@ -532,3 +535,185 @@ def test_a_billion_rows_land_in_one_cycle_without_a_copy(
     until(lambda: result.size == 1_000_000_000)
     assert time.monotonic() - published < 1.0
     massive_session.release(result)
+
+
+# --- Failure delivery: a read loading or landed, every way it ends ------------------------------
+# A table that hears of a second failure ends the process. A loading read fails once, from its
+# own download or from the session's close, whichever comes first, while the user may be
+# releasing it; a read whose rows landed is final and fails from nothing. Each case reads
+# dividends from the fake REST server with `fetch(wait=False)` (as `history(wait=False)` does,
+# through the same background read), derives the user's tables from the result, and checks
+# which end failed, that each heard of it at most once, and that the process is still running.
+
+DIVIDENDS_PATH = "/stocks/v1/dividends"
+"""The REST path of `m.stocks.dividends`."""
+
+DIVIDEND = {"ticker": "AAPL", "cash_amount": 0.25}
+"""The one dividend the fake server answers with."""
+
+
+@pytest.fixture
+def rest_session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    yield m
+    m.close()
+
+
+@dataclasses.dataclass
+class ReadCase:
+    """One case's session, its held reply, the read's result, and the user's tables on it.
+
+    Attributes:
+        m: The session, on the fake REST server.
+        reply: Set to let the fake server finish its reply to the read's request.
+        result: The read's result.
+        derived: The user's tables on the result (the `user_tables` fixture).
+        heard: The result and each derived table, with the reader of its failure count.
+        race: Runs calls at the same moment (the `race` fixture).
+        cycles_ended: Waits until every queued failure is delivered (the `cycles_ended`
+            fixture).
+    """
+
+    m: dm.MassiveSession
+    reply: threading.Event
+    result: Table
+    race: Callable[..., None]
+    cycles_ended: Callable[[], None]
+    derived: list[Table] = dataclasses.field(default_factory=list)
+    heard: list[tuple[Table, Callable[[], int]]] = dataclasses.field(default_factory=list)
+
+
+def read_state(m: dm.MassiveSession, to_pylist: Callable[[Table], list[dict[str, Any]]]) -> str:
+    # The read's state in m.streams(), once every row queued so far is applied.
+    assert m._core.diagnostics.barrier().wait(TIMEOUT)
+    (row,) = to_pylist(m.streams())
+    return cast("str", row["State"])
+
+
+def open_read_case(
+    m: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    *,
+    status: int,
+    user_tables: Callable[[Table, str, str], list[Table]],
+    failures_heard: Callable[[Table], Callable[[], int]] | None,
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+) -> ReadCase:
+    # Starts the read with its reply held after the status line: the read is loading, and its
+    # download refused (403) or landing (200) once the case sets `reply`.
+    reply = threading.Event()
+    body = envelope([DIVIDEND]) if status == 200 else envelope(status="ERROR", message="no plan")
+    fake_rest.reply(DIVIDENDS_PATH, Reply(body, status=status, hold=reply))
+    case = ReadCase(m, reply, m.stocks.dividends("AAPL").fetch(wait=False), race, cycles_ended)
+    until(lambda: len(fake_rest.requests) == 1)
+    case.derived = user_tables(case.result, "Symbol", "CashAmount")
+    if failures_heard is not None:
+        case.heard = [(t, failures_heard(t)) for t in (case.result, *case.derived)]
+    return case
+
+
+def heard_once_each(case: ReadCase) -> list[bool]:
+    # Once the cycles that delivered any failure are over, every table that failed heard of it
+    # exactly once and every other heard nothing; returns whether each derived table failed.
+    case.cycles_ended()
+    heard = [(failed(table), count()) for table, count in case.heard]
+    assert [count for _, count in heard] == [int(is_failed) for is_failed, _ in heard]
+    return [is_failed for is_failed, _ in heard[1:]]
+
+
+def refused_download(case: ReadCase) -> None:
+    case.reply.set()
+
+
+def closed(case: ReadCase) -> None:
+    case.m.close()
+    case.reply.set()
+
+
+def refused_then_closed(case: ReadCase) -> None:
+    case.reply.set()
+    until(lambda: failed(case.result))
+    case.cycles_ended()
+    case.m.close()
+
+
+def close_racing_a_refusal(case: ReadCase) -> None:
+    case.race(case.m.close, case.reply.set)
+
+
+def release_racing_a_refusal(case: ReadCase) -> None:
+    # The user's tables keep the read going after the release, so its refusal still fails them.
+    case.race(functools.partial(case.m.release, case.result), case.reply.set)
+
+
+READ_PATHS: dict[str, Callable[[ReadCase], None]] = {
+    "download refused": refused_download,
+    "session closed": closed,
+    "download refused, then session closed": refused_then_closed,
+    "close racing a refusal": close_racing_a_refusal,
+    "release racing a refusal": release_racing_a_refusal,
+}
+"""Each way a loading read fails, by test id."""
+
+
+@pytest.mark.parametrize("path", list(READ_PATHS))
+def test_a_loading_read_fails_once_by_every_path(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    user_tables: Callable[[Table, str, str], list[Table]],
+    failures_heard: Callable[[Table], Callable[[], int]],
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+    path: str,
+) -> None:
+    case = open_read_case(
+        rest_session,
+        fake_rest,
+        status=403,
+        user_tables=user_tables,
+        failures_heard=failures_heard,
+        race=race,
+        cycles_ended=cycles_ended,
+    )
+    READ_PATHS[path](case)
+    for table in case.derived:
+        until(functools.partial(failed, table))
+    assert heard_once_each(case) == [True] * len(case.derived)
+    rest_session.release(case.result)
+
+
+@pytest.mark.parametrize("release", [False, True], ids=["closed", "close racing a release"])
+def test_a_landed_read_survives_a_close_unfailed(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    user_tables: Callable[[Table, str, str], list[Table]],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    race: Callable[..., None],
+    cycles_ended: Callable[[], None],
+    release: bool,
+) -> None:
+    # Its rows are final, so neither the close nor a release racing it fails anything. No
+    # listener counts its failures: on a table that never fails, the JVM would hold the
+    # listener, and through the table the session, until it collected them.
+    case = open_read_case(
+        rest_session,
+        fake_rest,
+        status=200,
+        user_tables=user_tables,
+        failures_heard=None,
+        race=race,
+        cycles_ended=cycles_ended,
+    )
+    case.reply.set()
+    until(lambda: read_state(rest_session, dh_to_pylist) == "DONE")
+    if release:
+        race(rest_session.close, functools.partial(rest_session.release, case.result))
+    else:
+        rest_session.close()
+    cycles_ended()
+    assert not any(failed(table) for table in (case.result, *case.derived))
+    assert [row["Symbol"] for row in dh_to_pylist(case.derived[0])] == ["AAPL"]
+    rest_session.release(case.result)
