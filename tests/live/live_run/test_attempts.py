@@ -76,6 +76,7 @@ class Harness:
             script=Path("live_run.py"),
             echo=self.lines.append,
             stop_grace=1.0,
+            free_disk=lambda _folder: 1 << 40,  # a test never depends on the machine's disk
         )
         self.ctx.out.mkdir()
         self.state = RunState(commit="c")

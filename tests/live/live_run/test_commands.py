@@ -96,6 +96,7 @@ class Harness:
             echo=self.lines.append,
             read_enter=lambda: "",
             stop_grace=1.0,
+            free_disk=lambda _folder: 1 << 40,  # a test never depends on the machine's disk
         )
 
     def sleep_until(self, moment: datetime) -> None:
