@@ -1012,9 +1012,9 @@ class HistoryQuery(QueryBase):
                 ticker; futures trades or quotes named by session dates on a query that also
                 filters `session_end_date` in any form; a source that cannot serve the request
                 (`REST` without REST history, or with `dm.ALL` and no grouped-daily endpoint;
-                `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither can,
-                with every violated condition listed); or a call on a Deephaven update-graph
-                thread.
+                `FLAT_FILES` without S3 credentials, without files for the request, or with a
+                day's file not yet published; `AUTO` when neither can, with every violated
+                condition listed); or a call on a Deephaven update-graph thread.
             AuthenticationError: If Massive rejects the API key, or S3 the flat-file
                 credentials.
             EntitlementError: If the plan does not include the data (HTTP 403, or S3's 403
