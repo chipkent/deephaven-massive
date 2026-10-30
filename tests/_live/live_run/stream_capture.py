@@ -766,13 +766,17 @@ def run_throughput(
     recorder = Recorder(folder)
     try:
         _sample_until(m, folder, until=until, clock=clock, recorder=recorder)
+        failures = failed_streams(diagnostics_rows(m, m.streams()))
     finally:
         _release(m, tables)
         recorder.close()
     summary = summarize_throughput(folder, window)
     (folder / "summary.json").write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")
     for unit in units:
-        if summary["covered"]:
+        failure = failures.get(unit.split()[0], "")
+        if failure:
+            report(unit, "failed", f"a stream failed: {failure}")
+        elif summary["covered"]:
             report(unit, "passed", "")
         else:
             report(unit, "failed", "the measured hour was not sampled without a gap")

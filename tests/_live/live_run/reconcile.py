@@ -87,7 +87,10 @@ def _history(m: MassiveSession, stream: str, *, symbols: list[str], day: date) -
 def streamed_bars(
     folder: Path, stream: str, *, unreadable: list[str]
 ) -> dict[tuple[str, int], tuple[Any, ...]]:
-    """Read a stream's bars from its hourly Parquet files, the last of each minute winning.
+    """Read a stream's bars from its hourly Parquet files, the latest of each minute winning.
+
+    A bar Massive corrects arrives again for the same minute; the one with the latest
+    `TimestampInsert` wins, whatever file a restarted child wrote it to.
 
     A file a killed child left unfinished has no footer and cannot be read: it is skipped and
     named in `unreadable`, so the rest of the day still compares.
@@ -102,6 +105,7 @@ def streamed_bars(
     """
     parquet = importlib.import_module("pyarrow.parquet")
     bars: dict[tuple[str, int], tuple[Any, ...]] = {}
+    arrived: dict[tuple[str, int], int] = {}
     for path in sorted((folder / "rows").glob(f"{stream}-*.parquet")):
         try:
             table = parquet.read_table(path)
@@ -110,10 +114,12 @@ def streamed_bars(
             continue
         starts = table.column("TimestampStart").cast("int64").to_pylist()
         symbols = table.column("Symbol").to_pylist()
+        inserts = table.column("TimestampInsert").cast("int64").to_pylist()
         columns = (table.column(f).to_pylist() for f in fields_of(stream))
         values = list(zip(*columns, strict=True))
-        for symbol, start, value in zip(symbols, starts, values, strict=True):
-            bars[symbol, start] = value
+        for symbol, start, insert, value in zip(symbols, starts, inserts, values, strict=True):
+            if insert >= arrived.get((symbol, start), insert):
+                bars[symbol, start], arrived[symbol, start] = value, insert
     return bars
 
 

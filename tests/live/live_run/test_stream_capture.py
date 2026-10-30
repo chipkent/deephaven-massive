@@ -705,3 +705,35 @@ def test_an_options_unit_without_contracts_fails(
         day_start=START,
     )
     assert seen == [("options delayed", "failed", "the SPY chain gave no contract to stream")]
+
+
+@pytest.mark.jvm_held
+def test_a_throughput_stream_that_failed_fails_its_unit(
+    make_ws_session: Callable[..., WsSession], fake_ws_server: FakeMassiveServer, tmp_path: Path
+) -> None:
+    fake_ws_server.refuse["XT.*"] = "not authorized"
+    harness = make_ws_session()
+
+    def refused() -> None:
+        def failed() -> bool:
+            harness.flush()
+            assert harness.session._core.diagnostics.barrier().wait(15.0)
+            states = stream_capture.diagnostics_rows(harness.session, harness.session.streams())
+            return any(r["State"] == "FAILED" for r in states)
+
+        fake_ws_server.wait_for(lambda _: failed())
+
+    seen, report = _reports()
+    stream_capture.run_throughput(
+        harness.session,
+        units=["currencies real-time"],
+        tiers={"currencies": "starter"},
+        folder=tmp_path,
+        until=START + timedelta(seconds=50),
+        report=report,
+        clock=_Day(action=refused).clock(),
+        window=(START, START + timedelta(seconds=40)),
+    )
+    [(unit, status, reason)] = seen
+    assert (unit, status) == ("currencies real-time", "failed")
+    assert "not authorized" in reason

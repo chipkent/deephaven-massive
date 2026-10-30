@@ -35,13 +35,25 @@ def _ns(moment: datetime) -> int:
     return int(moment.timestamp()) * 10**9
 
 
-def _write_streamed(folder: Path, stream: str, bars: list[tuple[str, int, float]]) -> None:
-    """Write a stream's bars, `(symbol, start ns, close)`, as one hour's Parquet file."""
+def _write_streamed(
+    folder: Path,
+    stream: str,
+    bars: list[tuple[str, int, float]],
+    *,
+    name: str = "2026-10-28T14",
+    arrived: int = 0,
+) -> None:
+    """Write a stream's bars, `(symbol, start ns, close)`, as one hour's Parquet file.
+
+    Each row arrives `arrived` nanoseconds after the epoch, plus its position in the list.
+    """
     (folder / "rows").mkdir(parents=True, exist_ok=True)
+    inserts = [arrived + i for i in range(len(bars))]
     table = pa.table(
         {
             "Symbol": [b[0] for b in bars],
             "TimestampStart": pa.array([b[1] for b in bars], pa.timestamp("ns", tz="UTC")),
+            "TimestampInsert": pa.array(inserts, pa.timestamp("ns", tz="UTC")),
             "Open": [1.0] * len(bars),
             "High": [2.0] * len(bars),
             "Low": [0.5] * len(bars),
@@ -49,7 +61,7 @@ def _write_streamed(folder: Path, stream: str, bars: list[tuple[str, int, float]
             "Volume": [100.0] * len(bars),
         }
     )
-    pq.write_table(table, folder / "rows" / f"{stream}-2026-10-28T14.parquet")
+    pq.write_table(table, folder / "rows" / f"{stream}-{name}.parquet")
 
 
 def _rest_bar(start_ns: int, close: float) -> dict[str, object]:
@@ -173,6 +185,7 @@ def test_index_bars_are_compared_without_a_volume(
         {
             "Symbol": ["I:NDX"],
             "TimestampStart": pa.array([start], pa.timestamp("ns", tz="UTC")),
+            "TimestampInsert": pa.array([start], pa.timestamp("ns", tz="UTC")),
             "Open": [1.0],
             "High": [2.0],
             "Low": [0.5],
@@ -200,3 +213,18 @@ def test_index_bars_are_compared_without_a_volume(
     assert seen == [("indices delayed", "passed", "")]
     summary = json.loads((folder / "summary.json").read_text())
     assert summary["streams"]["indices-minute-bars"]["match_share"] == 1.0
+
+
+def test_the_latest_arrival_of_a_bar_wins_across_a_restart(tmp_path: Path) -> None:
+    start = _ns(OPEN)
+    # A restarted child's file sorts before the first child's, yet holds the later correction.
+    _write_streamed(tmp_path, "stocks-minute-bars", [("AAPL", start, 1.5)], arrived=100)
+    _write_streamed(
+        tmp_path,
+        "stocks-minute-bars",
+        [("AAPL", start, 1.6)],
+        name="2026-10-28T14-123",
+        arrived=200,
+    )
+    bars = reconcile.streamed_bars(tmp_path, "stocks-minute-bars", unreadable=[])
+    assert bars[("AAPL", start)][3] == 1.6
