@@ -79,8 +79,8 @@ _WARNED_LOCK: Final = threading.Lock()
 """Guards `_WARNED`. A leaf lock: no other lock is taken while it is held."""
 
 _WARNED: Final[set[tuple[str, str]]] = set()
-"""The `(directory, error)` pairs already logged as a certificate directory that cannot be
-listed, so each is logged once per process; guarded by `_WARNED_LOCK`."""
+"""The `(path, error)` pairs already logged as a certificate directory or entry that cannot be
+examined, so each is logged once per process; guarded by `_WARNED_LOCK`."""
 
 
 def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
@@ -123,9 +123,10 @@ def ssl_context(consumer: TlsConsumer) -> ssl.SSLContext:
     needs a new context. The setting is examined before the module lock is taken. A call whose
     setting differs from the cached one builds the context under the lock, reading the bundle
     from local disk while it is held, so concurrent first calls build exactly one; later calls
-    take the lock only to compare the setting. Building a context logs the setting at DEBUG,
-    and a certificate directory that cannot be listed logs a WARNING once per directory and
-    error, both after the lock is released.
+    take the lock only to compare the setting. Building a context logs the setting at DEBUG.
+    A configured certificate directory that cannot be listed, or an entry of one whose file
+    cannot be examined, logs a WARNING once per path and error (OpenSSL's built-in directory
+    logs such failures only at DEBUG). All of it is logged after the locks are released.
 
     Args:
         consumer: The library that will use the context. urllib3 and `websockets` never share
@@ -266,51 +267,72 @@ def _entries_identity(
         with os.scandir(directory) as scan:
             entries = sorted(scan, key=lambda entry: entry.name)
     except OSError as error:
-        if configured:
-            _warn_unlistable(directory, error)
-        else:
-            _log.debug(
-                "cannot list OpenSSL's built-in certificate directory %r: %s", directory, error
-            )
+        _report_unexaminable(_UNLISTABLE, directory, error, configured=configured)
         return ()
-    return tuple((entry.name, _entry_identity(entry)) for entry in entries)
+    return tuple((entry.name, _entry_identity(entry, configured=configured)) for entry in entries)
 
 
-def _entry_identity(entry: os.DirEntry[str]) -> tuple[int, ...]:
+def _entry_identity(entry: os.DirEntry[str], *, configured: bool) -> tuple[int, ...]:
     """Return the identity of the file a directory entry resolves to, or `()` if there is none.
 
     A directory listing hands back each entry ready to examine, which costs half as much as
     examining it again by path.
 
+    Args:
+        entry: One entry of a certificate directory.
+        configured: Whether its directory comes from `SSL_CERT_DIR`; see
+            `_directories_identity`.
+
     Returns:
-        The fields `_status_identity` returns, or `()` when the entry was removed or is a
-        symbolic link to a missing file.
+        The fields `_status_identity` returns, or `()` when the entry was removed, is a
+        symbolic link to a missing file, or resolves into a place that cannot be examined.
+        Every such failure is logged with the entry's path and the error: at WARNING, once
+        per process for each pair, when `configured`, and otherwise at DEBUG.
     """
     try:
         return _status_identity(entry.stat())
-    except OSError:
+    except OSError as error:
+        _report_unexaminable(_UNEXAMINABLE, entry.path, error, configured=configured)
         return ()
 
 
-def _warn_unlistable(directory: str, error: OSError) -> None:
-    """Log, once per process for each directory and error, that a directory cannot be listed.
+_UNLISTABLE: Final = (
+    "cannot list the certificate directory %r (%s): OpenSSL may still find certificates there "
+    "by their hashed names, but a change to them goes unnoticed, so clients created afterwards "
+    "may keep trusting a certificate that was removed"
+)
+"""The message for a certificate directory that cannot be listed."""
+
+_UNEXAMINABLE: Final = (
+    "cannot examine the certificate directory entry %r (%s): OpenSSL cannot load it either, "
+    "and the library notices when it can be examined again"
+)
+"""The message for an entry of a certificate directory whose file cannot be examined."""
+
+
+def _report_unexaminable(message: str, path: str, error: OSError, *, configured: bool) -> None:
+    """Log that a certificate directory or one of its entries cannot be examined.
+
+    A location the user configured logs a WARNING, once per process for each path and error,
+    since the setting is examined every time a client is created. OpenSSL's built-in
+    directory is often absent or partly dangling (the python.org macOS build has none), so
+    its failures log only at DEBUG, every time.
 
     Args:
-        directory: The certificate directory that could not be listed.
-        error: Why, as the listing raised it.
+        message: `_UNLISTABLE` or `_UNEXAMINABLE`, formatted with the path and the error.
+        path: The directory or entry that could not be examined.
+        error: Why, as the operating system reported it.
+        configured: Whether the location comes from `SSL_CERT_DIR`.
     """
-    warning = (directory, str(error))
+    if not configured:
+        _log.debug(message, path, error)
+        return
+    warning = (path, str(error))
     with _WARNED_LOCK:
         first = warning not in _WARNED
         _WARNED.add(warning)
     if first:
-        _log.warning(
-            "cannot list the certificate directory %r (%s): OpenSSL may still find certificates "
-            "there by their hashed names, but a change to them goes unnoticed, so clients "
-            "created afterwards may keep trusting a certificate that was removed",
-            directory,
-            error,
-        )
+        _log.warning(message, path, error)
 
 
 def ca_file() -> str:

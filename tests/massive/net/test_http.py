@@ -3,6 +3,7 @@ import logging
 import os
 import ssl
 import threading
+import time
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -45,11 +46,14 @@ def _until_the_change_time_moves(path: Path, change: Callable[[], None]) -> None
 
     Some file systems advance the change time only once per clock tick of a few milliseconds,
     so a change made right after the previous one can leave it where it was. Repeating the
-    change keeps the test about what the cache notices, not about the clock.
+    change keeps the test about what the cache notices, not about the clock; a change time
+    that has not moved within five seconds fails the test instead of hanging it.
     """
     before = path.stat().st_ctime_ns
+    deadline = time.monotonic() + 5
     change()
     while path.stat().st_ctime_ns == before:
+        assert time.monotonic() < deadline, f"the change time of {path} never moved"
         change()
 
 
@@ -425,6 +429,39 @@ def test_a_cert_directory_that_cannot_be_listed_logs_a_warning(
     assert "may still find certificates there by their hashed names" in record.getMessage()
     assert isinstance(record.args, tuple)
     assert isinstance(record.args[1], FileNotFoundError)  # the error is named, not swallowed
+
+
+def test_an_entry_that_cannot_be_examined_logs_a_warning_once(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    directory = tmp_path / "certs"
+    directory.mkdir()
+    dangling = directory / _HASHED_NAME
+    dangling.symlink_to(tmp_path / "missing.pem")
+    clean_env.setenv("SSL_CERT_DIR", str(directory))
+    with caplog.at_level(logging.WARNING, logger=http.__name__):
+        http.ssl_context(REST)
+        http.ssl_context(WEBSOCKET)  # the same entry and error: logged once
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert repr(str(dangling)) in record.getMessage()
+    assert isinstance(record.args, tuple)
+    assert isinstance(record.args[1], FileNotFoundError)
+
+
+def test_an_unexaminable_entry_of_the_built_in_directory_logs_only_at_debug(
+    clean_env: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    directory = tmp_path / "certs"
+    directory.mkdir()
+    dangling = directory / _HASHED_NAME
+    dangling.symlink_to(tmp_path / "missing.pem")
+    clean_env.setattr(http, "_OPENSSL_CAPATH", str(directory))
+    clean_env.setenv("SSL_CERT_FILE", certifi.where())
+    with caplog.at_level(logging.DEBUG, logger=http.__name__):
+        http.ssl_context(REST)
+    assert [record.levelno for record in caplog.records] == [logging.DEBUG, logging.DEBUG]
+    assert repr(str(dangling)) in caplog.records[0].getMessage()
 
 
 def test_a_missing_built_in_cert_directory_logs_only_at_debug(
