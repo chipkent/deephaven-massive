@@ -629,7 +629,7 @@ def build_query(
     if timespan is not None and spec.is_bars:
         cls = bar_query_class(spec, timespan, multiplier)
     first = None if start is None else parse_date_like(start, "start")
-    last = None if end is None else parse_date_like(end, "end")
+    last = None if end is None else parse_date_like(end, "end", upper=True)
     _check_axis(core, spec, start=first, end=last)
     given = (
         ()

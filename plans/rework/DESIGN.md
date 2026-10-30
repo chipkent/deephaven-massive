@@ -1757,7 +1757,7 @@ All return `Query`.
 | `ticker_types(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/tickers/types` |
 | `ticker_events(symbols, *, types: Sequence[str] \| None = None)` | `/vX/reference/tickers/{t}/events` per symbol |
 | `related_companies(symbols)` | `/v1/related-companies/{t}` per symbol; rows are `{"ticker": peer}`, so `Symbol` is the peer and the requested symbol is `Underlying` |
-| `news(*, symbols=None, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`). Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
+| `news(*, symbols=None, …T)`, axis `published_utc` (half-open `.gte`/`.lt`) | `/v2/reference/news`. Its `ticker` parameter takes one ticker and the path has no `ticker.any_of`, so `symbols` (one ticker, a list, or a watchlist table, followed as every symbol table is) is sent one request per ticker, and an article several tickers return is kept once, at its first copy, by `Id` (`symbols_overlap`); in `fetch()` an article without an `Id` is kept, never merged, while a `poll()` table, keyed by `Id`, fails on one. Each `poll()` cycle re-reads the whole range for every ticker, so the docstring recommends a recent `start`, a `limit`, or both. Rows come ticker by ticker; `limit`, `sort`, and `order` apply to each ticker's request, as the docstring says, and on a 5-requests-a-minute plan a 50-ticker `poll(60)` outruns its interval and logs the slow-poll WARNING. `symbols=None` reads every article |
 | `exchanges(*, asset_class: AssetClass \| None = None, locale: Locale \| None = None)` | `/v3/reference/exchanges` |
 | `conditions(*, asset_class: AssetClass \| None = None, data_type: ConditionDataType \| None = None, condition_id: int \| None = None, sip: Sip \| None = None, …F)` | `/v3/reference/conditions`; `condition_id` is sent as the wire parameter `id` |
 | `market_status()` | `/v1/marketstatus/now`; one row; nested maps flattened |
@@ -2289,14 +2289,17 @@ sides of the boundary.
 
 **Dates.** Parameters accept an ISO-8601 `str`, a `date`, a timezone-aware `datetime`, the
 Java time values Deephaven hands its users (`java.time.Instant` and `ZonedDateTime`, which are
-instants, and `LocalDate`, a date: what `dh_now()`, `dh_today()`, and the cells of an `Instant`
-column give when read as Java values), or a `numpy.datetime64` of day precision (a date). `_datasets/dates.py`
+instants, and `LocalDate`, a date: what `dh_now()` and `to_j_local_date()` return, and what
+`Instant` and `LocalDate` cells give when read as Java values, through `iter_dict` for one;
+`dh_today()` returns ISO text), or a `numpy.datetime64` of day precision (a date). `_datasets/dates.py`
 (`parse_date_like`) turns each into a `date` or an aware `datetime`, outside the wire package;
 it recognizes a Java value by its jpy class name, so it imports neither Deephaven nor jpy. A
-Java instant is cut to the microsecond, less than a microsecond earlier: unlike typed text,
-whose extra digits raise, Deephaven's instants carry nanoseconds the user never chose
-(`dh_now()` on Linux, a SIP `Timestamp`), and an earlier start still includes the row an
-instant came from. A `numpy.datetime64` finer than a day (it has no timezone; the message
+Java instant with nanoseconds below the microsecond is moved outward to a microsecond: unlike
+typed text, whose extra digits raise, Deephaven's instants carry nanoseconds the user never
+chose (`dh_now()` on Linux, a SIP `Timestamp`). A lower bound (`start`) is rounded down, so it
+still includes the row an instant came from; an upper bound (`end`) is rounded up, so the
+half-open range may include up to 999 ns more but never loses a row. Each rounding logs at
+DEBUG. A `numpy.datetime64` finer than a day (it has no timezone; the message
 names `deephaven.time.to_j_instant`), `NaT`, and a time outside years 1 to 9999 raise
 `ValueError`. Type checkers see Deephaven's Java values as `Any`, so
 `DateLike` names only `numpy.datetime64` beside the Python types. A
@@ -6240,10 +6243,11 @@ document already reflects them.
       single day) also accept Deephaven's Java `Instant`, `ZonedDateTime`, and `LocalDate`, and
       a day-precision `numpy.datetime64`. A Deephaven library takes the values Deephaven hands
       its users, rather than making them format text in a second grammar. The conversion
-      lives outside the wire package, in `_datasets/dates.py`. A Java instant is cut to the
-      microsecond, since Deephaven's instants carry nanoseconds the user never chose and an
-      earlier start by under a microsecond still includes the row an instant came from; a
-      `numpy.datetime64` finer than a day (it has no timezone) and `NaT` are refused.
+      lives outside the wire package, in `_datasets/dates.py`. A Java instant with
+      nanoseconds below the microsecond is moved outward to a microsecond (`start` down,
+      `end` up, so no row is lost and `end` may include up to 999 ns more), since
+      Deephaven's instants carry nanoseconds the user never chose; a `numpy.datetime64`
+      finer than a day (it has no timezone) and `NaT` are refused.
       `filters=` values are left to the change that settles their type.
     - `dm.datasets()`, a static table of every dataset with its summary, verbs, transports,
       and documentation link, at module level, since the catalog needs no key or session

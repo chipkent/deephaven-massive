@@ -856,17 +856,22 @@ class HistoryQuery(QueryBase):
 
         The two bounds are of one kind, never mixed:
 
-        - **Dates** (`"2025-03-03"`, a `date`, a Java `LocalDate` such as `dh_today()`, or a
-          day-precision `numpy.datetime64`) are whole days, inclusive at both ends:
+        - **Dates** (`"2025-03-03"` or `dh_today()`, which is that text; a `date`; a Java
+          `LocalDate`, such as `to_j_local_date("2025-03-03")` or a `LocalDate` cell read
+          with `iter_dict`; or a day-precision `numpy.datetime64`) are whole days, inclusive
+          at both ends:
           `history("2025-03-03", "2025-03-03")` is all of March 3. A day is a calendar day in
           the asset class's day zone: New York for stocks, options, and indices, UTC for forex
           and crypto. For futures a date names the trading session whose `Date`
           (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
           (earlier after a holiday).
         - **Instants** (an aware `datetime`, ISO text with an offset, or a Java `Instant` or
-          `ZonedDateTime` such as `dh_now()`, cut to the microsecond) are exact instants,
-          half-open: rows with `start <= Timestamp < end` (for bars,
-          `TimestampStart`). Equal instants give an empty table.
+          `ZonedDateTime`, such as `dh_now()` or an `Instant` cell read with `iter_dict`) are
+          exact instants, half-open: rows with `start <= Timestamp < end` (for bars,
+          `TimestampStart`). Equal instants give an empty table. A Java instant with
+          nanoseconds below the microsecond, which a `datetime` cannot hold, is moved outward
+          to a microsecond: `start` down, so a row it came from is still included, and `end`
+          up, so `end` may include up to 999 ns more but never loses a row.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole window
         lies inside the range and has ended: its `TimestampStart` lies in the range, and its
@@ -999,7 +1004,7 @@ class HistoryQuery(QueryBase):
         """
         chosen = _require_enum(source, HistorySource, "source")
         first = parse_date_like(start, "start")
-        last = None if end is None else parse_date_like(end, "end")
+        last = None if end is None else parse_date_like(end, "end", upper=True)
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols)

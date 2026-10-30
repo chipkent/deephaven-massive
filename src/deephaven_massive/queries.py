@@ -6,6 +6,7 @@ that takes any dataset with a live stream and keeps each symbol's latest row::
 
     from deephaven.table import Table
 
+    import deephaven_massive as dm
     from deephaven_massive.queries import StreamQuery
 
 
@@ -13,6 +14,7 @@ that takes any dataset with a live stream and keeps each symbol's latest row::
         return query.last_by()
 
 
+    m = dm.MassiveSession()
     quotes = latest(m.stocks.quotes(["AAPL", "MSFT"]))
 
 | Name | What it is |

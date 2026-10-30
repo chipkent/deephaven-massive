@@ -336,8 +336,10 @@ class DatasetSpec:
             symbols can return it more than once. It has two effects: a `fetch()` or `poll()`
             cycle keeps the first copy of each row whose `poll_keys` (and only those columns)
             are all set, and `limit` caps each request's rows rather than the total, so one
-            symbol's rows never crowd out another's. Such a dataset needs `poll_keys` and no
-            `nullable_poll_keys`. False by default.
+            symbol's rows never crowd out another's. Such a dataset needs `poll_keys` of scalar
+            columns, since rows are grouped by their values, and no `nullable_poll_keys`.
+            `fetch()` keeps every row whose key is null; a `poll()` table fails on one. False
+            by default.
         fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
             one asset class, where it differs from `fetch_path`, such as
             `{AssetClass.CRYPTO: "/v1/indicators/sma/{cryptoTicker}"}`; the symbols of every

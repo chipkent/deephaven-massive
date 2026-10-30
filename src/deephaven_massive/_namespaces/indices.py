@@ -471,9 +471,9 @@ class _Indices(Namespace):
         Args:
             symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` is refused), or
                 a Deephaven table with a `Symbol` column, re-read on every `poll()` cycle.
-            date: The day, as an ISO-8601 date (`"2025-06-02"`), a `date`, a Java `LocalDate`
-                (`dh_today()`), or a day-precision `numpy.datetime64`. It is a calendar date, so a
-                `datetime` or an instant raises `ValueError`.
+            date: The day, as an ISO-8601 date (`"2025-06-02"`), a `date`, a Java `LocalDate`,
+                or a day-precision `numpy.datetime64`. It is a calendar date, so a `datetime` or
+                an instant raises `ValueError`.
 
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.

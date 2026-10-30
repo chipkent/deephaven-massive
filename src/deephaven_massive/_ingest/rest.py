@@ -18,7 +18,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, the page
   size (`DatasetSpec.page_size`, or `Request.limit` when that is smaller, so a small cap
   fetches no more than it keeps), and for `history()` the ascending direction (`_ascending`).
-  `Request.limit` caps the total rows, and the client stops paging there.
+  `Request.limit` caps the total rows, and the client stops paging there; for a dataset whose
+  symbols overlap (`DatasetSpec.symbols_overlap`, the news of a watchlist) it caps each
+  request's rows instead, and a row several requests return is kept once (`_first_copies`).
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`_keep`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -2314,8 +2316,9 @@ class RestEndpoints:
         """Return every row the dataset's fetch path returns for the request, as a static table.
 
         Requests run on this thread, or for a per-symbol path on a pool of up to
-        `max_concurrency` threads; `Request.limit` caps the total rows. Drift is logged, once
-        per field.
+        `max_concurrency` threads; `Request.limit` caps the total rows, or each request's rows
+        for a dataset whose symbols overlap, which keeps a row several requests return once
+        (`RestReader._read_planned`). Drift is logged, once per field.
 
         Args:
             spec: The dataset, with a fetch path.

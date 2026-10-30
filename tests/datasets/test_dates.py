@@ -272,6 +272,13 @@ def test_calendar_day_refuses_a_datetime() -> None:
             calendar_day(_spec(asset_class), late, "date")
     with pytest.raises(ValueError, match="is a calendar date"):
         calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30:00Z", "date")
+    # A Java instant names no calendar day either.
+    for java in (
+        _present(to_j_instant("2025-03-03T14:30:00Z")),
+        _present(to_j_zdt("2025-03-03T09:30:00 America/New_York")),
+    ):
+        with pytest.raises(ValueError, match=r"date is a calendar date; pass a date$"):
+            calendar_day(_spec(AssetClass.STOCKS), java, "date")
 
 
 def test_calendar_day_keeps_a_date_as_given() -> None:
@@ -403,16 +410,27 @@ def test_deephaven_java_dates_and_instants_are_bounds() -> None:
         pytest.param("2025-03-03T09:30:00.123456789 America/New_York", id="zoned"),
     ],
 )
-def test_java_instants_are_cut_to_the_microsecond(
+def test_java_instants_round_outward_to_the_microsecond(
     value: str, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # Deephaven's instants carry nanoseconds the user never chose. A start rounds down, so it
+    # still includes the row it came from; an end rounds up, so the range loses no row.
     caplog.set_level(logging.DEBUG, logger="deephaven_massive._datasets.dates")
-    # Deephaven's instants carry nanoseconds the user never chose; an earlier start by under a
-    # microsecond still includes the row the instant came from.
     java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
-    moment = cast("datetime", parse_date_like(java, "start"))
-    assert moment.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
-    assert caplog.messages == [f"start={java} cut to the microsecond: 789 ns dropped"]
+    start = cast("datetime", parse_date_like(java, "start"))
+    end = cast("datetime", parse_date_like(java, "end", upper=True))
+    assert start.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    assert end.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123457, tzinfo=UTC)
+    assert caplog.messages == [
+        f"start={java} rounded down to the microsecond: 789 ns below it",
+        f"end={java} rounded up to the microsecond: 789 ns below it",
+    ]
+
+
+def test_a_java_instant_on_a_microsecond_is_not_moved() -> None:
+    java = _present(to_j_instant("2025-03-03T14:30:00.123456Z"))
+    exact = datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    assert parse_date_like(java, "end", upper=True) == exact
 
 
 def test_java_times_a_datetime_cannot_hold_are_refused() -> None:

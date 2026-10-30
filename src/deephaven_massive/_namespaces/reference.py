@@ -294,8 +294,8 @@ class _Reference(Namespace):
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            date: The day the listing is as of: a `date`, ISO-8601 date text, a Java `LocalDate`
-                (`dh_today()`), or a day-precision `numpy.datetime64` (a `datetime` or an instant
+            date: The day the listing is as of: a `date`, ISO-8601 date text, a Java
+                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
                 raises `ValueError`: it is a calendar date); None for today.
             active: True lists tickers traded on `date`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
@@ -355,8 +355,8 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
                 column.
-            date: The day the details are as of: a `date`, ISO-8601 date text, a Java `LocalDate`
-                (`dh_today()`), or a day-precision `numpy.datetime64` (a `datetime` or an instant
+            date: The day the details are as of: a `date`, ISO-8601 date text, a Java
+                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
                 raises `ValueError`: it is a calendar date); None for the latest.
 
         Returns:
@@ -473,16 +473,19 @@ class _Reference(Namespace):
         """News articles about tickers, with their publishers and sentiment insights.
 
         Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
-        `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range,
-        so pass `start`: a poll without it re-reads the news archive every cycle. An article
+        `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range
+        for every ticker, so give a `poll()` a recent `start`, a `limit`, or both: a poll
+        without `start` re-reads the news archive every cycle. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
         (a `String[]`: `table.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps the
         articles that name one, and `table.ungroup("Tickers")` gives a row per article and
         ticker), and `symbols` selects the articles that mention any of its tickers.
 
         The endpoint takes one ticker per request, so the library sends one request per
-        ticker and keeps an article that mentions several of them once, by its `Id`. Rows
-        come ticker by ticker, in ticker order. `limit`, `sort`, and `order` apply to each
+        ticker and keeps an article that mentions several of them once, by its `Id`. In
+        `fetch()`, an article without an `Id` is kept, never merged with another; a `poll()`
+        table fails on one, since `Id` is its key. Rows come ticker by ticker, the tickers in
+        alphabetical order. `limit`, `sort`, and `order` apply to each
         ticker's request, not to the whole table: `limit=10` reads up to ten articles per
         ticker, and `order` sorts within each ticker's articles. For one order across tickers,
         sort the result, such as `table.sort_descending("PublishedUtc")`. A watchlist table is

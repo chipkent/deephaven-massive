@@ -36,7 +36,8 @@ A futures date names a trading session, whose 17:00 Chicago rule is `futures_ses
 bars of a timespan that fit a range are `bar_periods`; and whether a day's flat file can exist
 yet is `history_source.flat_file_published`.
 
-Every function is pure (the current time is a parameter) and thread-safe.
+Every function is thread-safe and pure (the current time is a parameter), apart from the
+DEBUG line `parse_date_like` logs when it rounds a Java instant.
 """
 
 from __future__ import annotations
@@ -140,27 +141,30 @@ _WEEKEND_TRADING: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
 """The classes that trade at weekends, whose bar periods keep their Saturdays and Sundays."""
 
 
-def parse_date_like(value: DateLike, name: str) -> date | datetime:
+def parse_date_like(value: DateLike, name: str, *, upper: bool = False) -> date | datetime:
     """Parse one time bound into a `date` or an aware `datetime`.
 
     Args:
         value: An ISO-8601 string (`"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`), a `date`,
             a timezone-aware `datetime`, a Java `LocalDate` (a date), a Java `Instant` or
-            `ZonedDateTime` (an aware `datetime` at the same instant, cut to the
-            microsecond), or a `numpy.datetime64` of day precision (a date).
+            `ZonedDateTime` (an aware `datetime` at the same instant, to the microsecond), or
+            a `numpy.datetime64` of day precision (a date).
         name: The parameter's name, used in error messages (`"start"`, `"end"`, `"date"`).
+        upper: True for the upper bound of a range (`end`), which a Java instant with
+            nanoseconds below the microsecond is rounded up for, so the half-open range never
+            loses a row; False, the default, rounds it down, so a lower bound never does.
 
     Returns:
         A `date` for a date-only value; otherwise an aware `datetime`.
 
     Raises:
+        TypeError: If `value` is none of the accepted types.
         ValueError: For a naive `datetime` or a string with a time but no offset (the message
-            names the parameter, the value, and the fix; `require_aware`), a string that is
-            not ISO-8601, or a string with more than six fractional digits of a second, which
-            a `datetime` would silently cut to microseconds.
-
-    A Java or numpy value raises the `ValueError` of `_foreign_bound` when it cannot be a
-    bound, and a value of none of the accepted types its `TypeError`.
+            names the parameter, the value, and the fix; `require_aware`); a string that is
+            not ISO-8601, or with more than six fractional digits of a second, which a
+            `datetime` would silently cut to microseconds; a `numpy.datetime64` that is `NaT`
+            or of a precision other than a day, since it has no timezone; or a Java or numpy
+            value outside years 1 to 9999.
     """
     if isinstance(value, datetime):
         parsed = value
@@ -177,32 +181,39 @@ def parse_date_like(value: DateLike, name: str) -> date | datetime:
         except ValueError:
             raise ValueError(f"{name}={value!r} is not an ISO-8601 date or datetime") from None
     else:
-        return _foreign_bound(value, name)
+        found = _foreign_bound(value, name, upper=upper)
+        if found is None:
+            raise TypeError(
+                f"{name} must be a str, date, datetime, Java Instant, ZonedDateTime, or "
+                f"LocalDate, or a numpy.datetime64 of day precision, not {type(value).__name__}"
+            )
+        return found
     require_aware(name, value, parsed)
     return parsed
 
 
-def _foreign_bound(value: object, name: str) -> date | datetime:
+def _foreign_bound(value: object, name: str, *, upper: bool) -> date | datetime | None:
     """Parse a time bound that is a Java time value or a `numpy.datetime64`.
 
     A Java value is recognized by its class name, which jpy sets as `jclassname` on every Java
     type it wraps, so jpy is not imported. An `Instant` becomes a UTC `datetime` and a
     `ZonedDateTime` one at its own offset; only the instant matters to a bound, so the zone's
-    later rules are not needed. A Java instant's nanoseconds below the microsecond are cut,
-    moving the bound less than a microsecond earlier: unlike typed text, Deephaven's instants
-    carry nanoseconds the user never chose (`dh_now()` on Linux, a SIP `Timestamp`), and an
-    earlier start still includes the row a `Timestamp` cell came from.
+    later rules are not needed. Unlike typed text, whose extra digits raise, Deephaven's
+    instants carry nanoseconds the user never chose (`dh_now()` on Linux, a SIP `Timestamp`),
+    so an instant with nanoseconds below the microsecond is moved to a microsecond, outward:
+    down for a lower bound, so a start taken from a row's `Timestamp` still includes that row,
+    and up for an upper bound, so an `end` may include up to 999 ns more but never loses a row.
 
     Args:
         value: The bound, which is not a `str`, `date`, or `datetime`.
         name: The parameter's name, for messages.
+        upper: True for an upper bound, rounded up; False for any other, rounded down.
 
     Returns:
         A `date` for a `LocalDate` or a day-precision `numpy.datetime64`; an aware `datetime`
-        for an `Instant` or a `ZonedDateTime`.
+        for an `Instant` or a `ZonedDateTime`; None for a value of any other type.
 
     Raises:
-        TypeError: If `value` is none of the accepted types.
         ValueError: If a `numpy.datetime64` is `NaT` or has a precision other than a day,
             since it has no timezone; or if a Java or numpy value lies outside years 1 to
             9999.
@@ -215,15 +226,19 @@ def _foreign_bound(value: object, name: str) -> date | datetime:
         if java_class in _JAVA_INSTANTS:
             zoned = java_class == "java.time.ZonedDateTime"
             instant = java.toInstant() if zoned else java
-            # Deephaven's own instants carry nanoseconds (`dh_now()` on Linux, a SIP
-            # timestamp), which the user cannot choose, so they are cut to the microsecond.
             nanos = int(instant.getNano())
-            if nanos % 1_000:
+            micros, rest = divmod(nanos, 1_000)
+            if rest:
+                micros += 1 if upper else 0
                 logger.debug(
-                    "%s=%s cut to the microsecond: %d ns dropped", name, value, nanos % 1_000
+                    "%s=%s rounded %s to the microsecond: %d ns below it",
+                    name,
+                    value,
+                    "up" if upper else "down",
+                    rest,
                 )
             seconds = int(instant.getEpochSecond())
-            moment = _EPOCH + timedelta(seconds=seconds, microseconds=nanos // 1_000)
+            moment = _EPOCH + timedelta(seconds=seconds, microseconds=micros)
             if not zoned:
                 return moment
             offset = timedelta(seconds=int(java.getOffset().getTotalSeconds()))
@@ -243,10 +258,7 @@ def _foreign_bound(value: object, name: str) -> date | datetime:
             return date.fromisoformat(str(value))
         except ValueError:  # a year a `date` cannot hold
             raise ValueError(f"{name}={value!r} {_OUTSIDE_DATETIME}") from None
-    raise TypeError(
-        f"{name} must be a str, date, datetime, Java Instant, ZonedDateTime, or LocalDate, or "
-        f"a numpy.datetime64 of day precision, not {type(value).__name__}"
-    )
+    return None
 
 
 def require_aware(name: str, raw: object, moment: datetime) -> None:
@@ -448,7 +460,7 @@ def bounds(
     asset_class = day_class(spec, classes)
     last: date | datetime
     if end is not None:
-        last = parse_date_like(end, "end")
+        last = parse_date_like(end, "end", upper=True)
     elif isinstance(first, datetime):
         last = now
     elif asset_class is AssetClass.FUTURES:
