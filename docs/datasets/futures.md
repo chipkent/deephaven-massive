@@ -201,7 +201,7 @@ Futures products: the specification of every product, the family of its contract
 | `ClearingSymbol` | String | The clearing symbol assigned to this product by the exchange's clearing house. | REST | `clearing_symbol` |
 | `ClearingVenue` | String | The exchange identifier for the clearing house that clears this product's contracts. | REST | `clearing_venue` |
 | `Date` | String | The day, YYYY-MM-DD, whose point-in-time state the row describes. | REST | `date` |
-| `LastUpdated` | String | The date and time at which this product was last updated. | REST | `last_updated` |
+| `LastUpdated` | Instant | The date and time at which this product was last updated. | REST | `last_updated` |
 | `Name` | String | The full name of the product. | REST | `name` |
 | `PriceQuotation` | String | The quoted price for this product. | REST | `price_quotation` |
 | `ProductCode` | String | The identifier for the product. | REST | `product_code` |
