@@ -4201,8 +4201,10 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
                      convert_field applies a field's named conversion and raises with the
-                     shared bad-value message; missing_key_message and excerpt, so both
-                     decoders word a row failure alike and add only their own context
+                     shared bad-value message; field_converter gives a decoder each field's
+                     converter once, and unconvertible_message, missing_key_message and
+                     excerpt word a row failure alike in both decoders, which add only their
+                     own context
   values.py          encode_value(param, value, *, label): one REST parameter value's wire
                      text by ParamKind, for the REST client and the library's filter check
   rest.json  ws.json  flatfiles.json        generated, committed
@@ -4538,7 +4540,12 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   unconvertible value, never assumed to be UTC: a field that really is offset-less UTC gets a
   named `TYPE_FIXES` conversion. `DriftReport.missing` holds only the vendor-`required`
   fields that some row lacked or held as null; an extra nested object is reported by its own
-  key, not by each leaf.
+  key, not by each leaf. A page is read a column at a time: each field's values are gathered
+  into one list, the types of the whole list are checked at once, and a column of plain values
+  goes to Arrow without a Python call per value. A page that this reading cannot vouch for (a
+  bad row, a value only its converter can judge and refuses, an integer Arrow cannot hold
+  exactly as a double) is read again row by row, which gives the same batch, drift, and error
+  as before; the fallback logs its reason at DEBUG, once per page.
 - **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
   `request_id`, row count, and elapsed time. Retries log at INFO with the wait, and exhausted
   retries at ERROR. The `Authorization` header is never logged.

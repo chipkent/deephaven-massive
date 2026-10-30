@@ -22,6 +22,14 @@ form to its `wire_type`), and stored as:
 
 A value that does not fit raises `WireError`: values are never coerced.
 
+**Two readings, one result.** A page is read column by column: each field's values are gathered
+into one list, the types of the whole list are checked at once, and the list goes to Arrow in
+one call, so a column of plain numbers or text costs no Python call per value. A page that
+column reading cannot vouch for (a bad row, or a value only its converter can judge and the
+converter refuses) is read again row by row, the reference reading, which converts it the same
+way or raises the error of its first bad row. Either way the batch, the drift, and the errors
+are the same; a page read row by row logs why at DEBUG.
+
 **Drift** is reported, not raised, in the returned `DriftReport`:
 
 - `extra`: keys a row had that the path does not declare (dropped). A nested object the path
@@ -44,8 +52,10 @@ line. This module imports only the standard library, `pyarrow`, `net`, and `spec
 
 from __future__ import annotations
 
+import itertools
 import logging
-from typing import TYPE_CHECKING
+from types import MappingProxyType, NoneType
+from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
 
@@ -54,6 +64,7 @@ from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
     convert_field,
     excerpt,
+    field_converter,
     missing_key_message,
     row_excerpt,
 )
@@ -81,6 +92,34 @@ _ARROW: dict[WireType, pa.DataType] = {
     WireType.STRING_ARRAY: pa.list_(pa.string()),
     WireType.JSON_TEXT: pa.string(),
 }
+
+_AS_SENT: Final[Mapping[WireType, frozenset[type]]] = MappingProxyType(
+    {
+        WireType.LONG: frozenset({int, NoneType}),
+        WireType.EPOCH: frozenset({int, NoneType}),
+        WireType.DOUBLE: frozenset({float, int, NoneType}),
+        WireType.BOOL: frozenset({bool, NoneType}),
+        WireType.STRING: frozenset({str, NoneType}),
+        WireType.LONG_ARRAY: frozenset({list, NoneType}),
+        WireType.STRING_ARRAY: frozenset({list, NoneType}),
+    }
+)
+"""The JSON value types a whole column of each plain wire type may hold (null included) to go
+to Arrow as it is, without a call per value. Arrow refuses the rest of what the converters
+refuse: an integer outside the signed 64-bit range, and an integer that a double cannot hold
+exactly (the converter rounds it; the row-by-row path then does). A `bool` is never an `int`
+here, since the check is on exact types."""
+
+_ITEMS_AS_SENT: Final[Mapping[WireType, frozenset[type]]] = MappingProxyType(
+    {
+        WireType.LONG_ARRAY: frozenset({int, NoneType}),
+        WireType.STRING_ARRAY: frozenset({str, NoneType}),
+    }
+)
+"""The JSON value types the items of a list column may hold to go to Arrow as they are."""
+
+_NO_OBJECT: Final[Mapping[str, object]] = MappingProxyType({})
+"""Stands in for an absent or null nested object, whose fields are all absent."""
 
 
 def _prefixes(fields: Sequence[Field]) -> frozenset[str]:
@@ -181,20 +220,188 @@ def to_batch(
 
     Raises:
         ValueError: If `required` names a column the path does not have.
-        WireError: If a row lacks a `required` column or holds it as null, or a value does not
-            fit its field's type or named conversion: the message is the path's template and
-            the row's index, then the clause `spec.convert` shares with every decoder (the
-            field, the expected type, and the first 200 characters of the value's JSON text).
-            Also if an object the fields reach into is neither an object nor null, after the
-            row's index too, naming its wire key and quoting the value the same way. Its
-            `path` is the path's template and its `status` is `None`.
+
+    A bad row raises `WireError`, through the row-by-row reading (`_by_row`): if it lacks a
+    `required` column or holds it as null, or a value does not fit its field's type or named
+    conversion, the message is the path's template and the row's index, then the clause
+    `spec.convert` shares with every decoder (the field, the expected type, and the first 200
+    characters of the value's JSON text); if an object the fields reach into is neither an
+    object nor null, the message names its wire key after the row's index and quotes the value
+    the same way. Its `path` is the path's template and its `status` is `None`.
     """
     fields = rest_path.fields
     unknown = set(required) - {f.column for f in fields}
     if unknown:
         raise ValueError(f"{rest_path.template} has no columns {sorted(unknown)}")
-    keys = frozenset(f.wire_key for f in fields)
     objects = _prefixes(fields)
+    by_column = _by_column(rows, fields, objects=objects, required=required)
+    if isinstance(by_column, str):
+        _log.debug("%s: reading %d rows one by one: %s", rest_path.template, len(rows), by_column)
+        arrays, extra, missing = _by_row(rows, rest_path, objects=objects, required=required)
+    else:
+        arrays, extra, missing = by_column
+    schema = pa.schema([pa.field(f.column, _ARROW[f.wire_type]) for f in fields])
+    batch = pa.RecordBatch.from_arrays(arrays, schema=schema)
+    return batch, DriftReport(
+        extra=frozenset(extra),
+        missing=frozenset(missing),
+        samples={key: DriftSample(None, excerpt(value)) for key, value in extra.items()},
+    )
+
+
+_Columns = tuple[list[pa.Array], dict[str, object], set[str]]
+"""A page's columns, its undeclared keys with their first values, and its missing keys."""
+
+
+def _by_column(
+    rows: Sequence[Mapping[str, object]],
+    fields: Sequence[Field],
+    *,
+    objects: frozenset[str],
+    required: Collection[str],
+) -> _Columns | str:
+    """Convert a page column by column, or say why the page must be read row by row.
+
+    The fast path, taken by nearly every page: each field's values are gathered into one list
+    (through the nested objects the fields reach into), the types of a whole list are checked at
+    once, and the list goes to Arrow in one call. A column of a plain wire type whose values are
+    all of the types it accepts as sent (`_AS_SENT`) needs no call per value; any other column
+    calls the field's converter once per value. Undeclared keys are found by one subset test
+    per object, and only an object that has one is walked.
+
+    It never raises for a bad row and never decides alone what a bad row means: anything it is
+    not sure of (a nested object that is neither an object nor null, a required key that is
+    absent or null, a value of another type, a value Arrow or the converter refuses) makes it
+    return the reason instead, and `to_batch` reads the page row by row (`_by_row`), which
+    converts it, or raises the error of its first bad row, exactly as before.
+
+    Args:
+        rows: The page's rows.
+        fields: The path's fields.
+        objects: The dotted prefixes of the fields' wire keys (`_prefixes`).
+        required: The long-form columns every row must carry with a value.
+
+    Returns:
+        The columns, the undeclared keys with the first value of each, and the wire keys of
+        the vendor-required fields some row lacked; or, when the page must be read row by row,
+        why.
+    """
+    # Each object the fields reach into, one per row, by its dotted prefix; "" is the rows.
+    levels: dict[str, Sequence[Mapping[str, object]]] = {"": rows}
+    for prefix in sorted(objects, key=lambda name: name.count(".")):
+        parent, _, key = prefix.rpartition(".")
+        found = [level.get(key) for level in levels[parent]]
+        if not set(map(type, found)) <= {dict, NoneType}:
+            return f"the wire key {prefix!r} holds a value that is not an object"
+        objects_found = [_NO_OBJECT if value is None else value for value in found]
+        levels[prefix] = cast("list[Mapping[str, object]]", objects_found)
+    extra: dict[str, object] = {}
+    for prefix, level in levels.items():
+        _undeclared(level, prefix, fields, objects=objects, into=extra)
+    arrays: list[pa.Array] = []
+    missing: set[str] = set()
+    for f in fields:
+        parent, _, key = f.wire_key.rpartition(".")
+        values = [level.get(key) for level in levels[parent]]
+        if None in values:
+            if f.column in required:
+                return f"the required column {f.column} is absent or null in some row"
+            if f.required:
+                missing.add(f.wire_key)
+        array = _array(f, values)
+        if array is None:
+            return f"the column {f.column} holds a value that needs its own check"
+        arrays.append(array)
+    return arrays, extra, missing
+
+
+def _undeclared(
+    level: Sequence[Mapping[str, object]],
+    prefix: str,
+    fields: Sequence[Field],
+    *,
+    objects: frozenset[str],
+    into: dict[str, object],
+) -> None:
+    """Collect the keys that objects at one level hold and the path does not declare.
+
+    Args:
+        level: The objects at one dotted prefix, one per row (the rows themselves for `""`).
+        prefix: The dotted prefix, or `""` for the rows.
+        fields: The path's fields.
+        objects: The dotted prefixes of the fields' wire keys.
+        into: Updated with each undeclared key, as a dotted path, and its first value.
+    """
+    start = f"{prefix}." if prefix else ""
+    declared = frozenset(
+        name[len(start) :].partition(".")[0]
+        for name in itertools.chain((f.wire_key for f in fields), objects)
+        if name.startswith(start)
+    )
+    if all(map(declared.issuperset, level)):
+        return
+    for item in level:
+        for key, value in item.items():
+            if key not in declared:
+                into.setdefault(start + key, value)
+
+
+def _array(field: Field, values: list[object]) -> pa.Array | None:
+    """Convert one field's values to an Arrow array in one call, if that is certain to be right.
+
+    Args:
+        field: The field.
+        values: Its value in each row, `None` where absent.
+
+    Returns:
+        The array; or None when a value is of a type the column does not accept as sent and the
+        converter refuses it, or Arrow refuses one, so the page must be read row by row.
+    """
+    arrow_type = _ARROW[field.wire_type]
+    as_sent = None if field.conversion is not None else _AS_SENT.get(field.wire_type)
+    try:
+        if as_sent is None:
+            convert = field_converter(field)
+            return pa.array([None if v is None else convert(v) for v in values], type=arrow_type)
+        if not set(map(type, values)) <= as_sent:
+            return None
+        items = _ITEMS_AS_SENT.get(field.wire_type)
+        if items is not None:
+            lists = cast("list[list[object]]", filter(None, values))
+            if not set(map(type, itertools.chain.from_iterable(lists))) <= items:
+                return None
+        return pa.array(values, type=arrow_type)
+    except (UnconvertibleError, OverflowError, pa.ArrowException):
+        return None
+
+
+def _by_row(
+    rows: Sequence[Mapping[str, object]],
+    rest_path: RestPath,
+    *,
+    objects: frozenset[str],
+    required: Collection[str],
+) -> _Columns:
+    """Convert a page row by row, raising the error of its first bad row.
+
+    The reference reading of a page: `to_batch` takes it when `_by_column` cannot vouch for the
+    fast path. Each row is walked key by key, and each value checked and converted on its own.
+
+    Args:
+        rows: The page's rows.
+        rest_path: The path the rows came from.
+        objects: The dotted prefixes of the fields' wire keys (`_prefixes`).
+        required: The long-form columns every row must carry with a value.
+
+    Returns:
+        The columns, the undeclared keys with the first value of each, and the wire keys of the
+        vendor-required fields some row lacked.
+
+    Raises:
+        WireError: For the first bad row, as `to_batch` documents.
+    """
+    fields = rest_path.fields
+    keys = frozenset(f.wire_key for f in fields)
     columns: list[list[object]] = [[] for _ in fields]
     extra: dict[str, object] = {}
     missing: set[str] = set()
@@ -219,15 +426,8 @@ def to_batch(
             except UnconvertibleError as error:
                 message = _rejected(rest_path, index=index, row=row, problem=str(error))
                 raise WireError(message, path=rest_path.template) from None
-    types = [_ARROW[f.wire_type] for f in fields]
-    schema = pa.schema([pa.field(f.column, t) for f, t in zip(fields, types, strict=True)])
-    arrays = [pa.array(c, type=t) for c, t in zip(columns, types, strict=True)]
-    batch = pa.RecordBatch.from_arrays(arrays, schema=schema)
-    return batch, DriftReport(
-        extra=frozenset(extra),
-        missing=frozenset(missing),
-        samples={key: DriftSample(None, excerpt(value)) for key, value in extra.items()},
-    )
+    arrays = [pa.array(c, type=_ARROW[f.wire_type]) for c, f in zip(columns, fields, strict=True)]
+    return arrays, extra, missing
 
 
 def _rejected(rest_path: RestPath, *, index: int, row: Mapping[str, object], problem: str) -> str:
