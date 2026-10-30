@@ -1,6 +1,6 @@
 """Tests for the field rules every generator shares.
 
-`test_rest.py` shows each rule through the REST generator (names, representation, units,
+`test_rest_sources.py` shows each rule through the REST generator (names, representation, units,
 conversions, examples, and their gates); the tests here show the rules directly, as the
 WebSocket and flat-file generators use them, on fields built by hand.
 """

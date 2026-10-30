@@ -12,9 +12,10 @@ This module owns the vocabulary every other refresh module reports in (`Gate`, `
 entries (`stale_entries`, `unneeded_type_fixes`, `unused_description_fixes`,
 `check_exclusions`) and one concept per column within a dataset kind (`concept_collisions`).
 The checks that need one field or parameter at a time run inside the generator that meets it
-(`rest`, `ws`, `flatfiles`); the checks here read what each source consumed through `PathUse`,
-so this module depends on no generator. The checks that read the generated sources of a kind
-across transports (one type and two transports per column, the column order) are `kinds`'s.
+(`rest_sources`, `ws_sources`, `flat_file_sources`); the checks here read what each source consumed
+through `PathUse`, so this module depends on no generator. The checks that read the generated
+sources of a kind across transports (one type and two transports per column, the column order) are
+`kinds`'s.
 
 It imports the standard library, `naming`, and `spec.types` at run time, and the hand-input
 types for type checking only.

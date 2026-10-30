@@ -1773,15 +1773,15 @@ emit a second client method for one URL (the per-asset-class templates of `/v3/t
 documentation page, with its own documented fields, so it is generated like any other path.
 Likewise `x-polygon-experimental` excludes nothing: the one path that carries it
 (`/vX/reference/tickers/{id}/events`) is documented, and documented endpoints are generated.
-The generator knows every vendor extension it accepts, each with the reason in `refresh/rest.py`;
-an unknown one stops the refresh (`shape`).
+The generator knows every vendor extension it accepts, each with the reason in
+`refresh/rest_sources.py`; an unknown one stops the refresh (`shape`).
 
 **Coverage.** Everything documented is generated or excluded, and everything generated is
 used or deferred:
 
 - **documented = generated ⊎ excluded ⊎ (deprecated ∪ draft)**, tested against the
   pinned snapshot in `tests/massive/refresh/test_generate.py` (WebSocket channels and flat-file
-  prefixes) and `tests/massive/refresh/test_rest.py` (REST paths, and every path a
+  prefixes) and `tests/massive/refresh/test_rest_sources.py` (REST paths, and every path a
   documentation page names is in the OpenAPI spec);
 - **generated = used ⊎ deferred**, tested in `tests/datasets/test_catalog.py`: every generated
   item is read by a declared dataset or deferred (the coverage test, with a negative test that

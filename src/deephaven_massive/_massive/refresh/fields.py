@@ -1,10 +1,10 @@
 """The field rules every generator shares: names, representation, units, conversions, examples.
 
-A generator (`rest`, `ws`, `flatfiles`) finds a source's fields in its vendor document and
-hands each one to `SourceFields` as a `RawField`: the dotted wire key, its schema (an OpenAPI
-schema, or one built from a documentation table), and whether the vendor marks it required.
-`SourceFields` turns it into a `spec.types.Field` by the same rules on every transport, so one
-field gets one column and one type whichever transport serves it:
+A generator (`rest_sources`, `ws_sources`, `flat_file_sources`) finds a source's fields in its
+vendor document and hands each one to `SourceFields` as a `RawField`: the dotted wire key, its
+schema (an OpenAPI schema, or one built from a documentation table), and whether the vendor marks it
+required. `SourceFields` turns it into a `spec.types.Field` by the same rules on every transport, so
+one field gets one column and one type whichever transport serves it:
 
 - **Wire keys.** A field is read under the key its source declares, unless a `KEY_FIXES`
   entry gives the key every documented sample sends in its place; from then on the field is
