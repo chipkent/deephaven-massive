@@ -562,6 +562,7 @@ gone; the transports it builds hold the core itself, never the weak reference.
   one of them loads no client and no network module) and
   client names (`RestClient`, `Page`, `to_batch`, `RequestGovernor`, `BucketState`, `Patience`,
   `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`, `Cancel`,
+  `set_reply_capture`, `CapturedReply`,
   `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`,
   `ReadPlan`, `ReadColumn`, `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
   literal `getattr`, or string), nor anything that can reach one (a star import of `_massive`,
@@ -4084,6 +4085,8 @@ net/                 shared by every client; imports nothing else in _massive
   redaction.py       Redactor, redact: a client's secrets, however JSON
                      spells them, become *** in whatever it receives, before it is decoded,
                      quoted, or logged
+  capture.py         set_reply_capture, CapturedReply: the optional sink every cleaned REST
+                     body and WebSocket frame is handed to
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport), provenance(): load once under
                      a lock, and the cache that holds them
@@ -4174,7 +4177,7 @@ vendor/massive/      outside the package; Massive's published content, vendored 
   knowledge-base/  (the articles the library relies on, as Markdown extracted from HTML)
 ```
 
-**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 36
+**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 39
 names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
 websockets:
 
@@ -4185,13 +4188,18 @@ websockets:
 - WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
 - flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
 - spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
-  `WireType`, `WireUnit`, `DriftReport`, `provenance`, `Provenance`, and `encode_value` (one
-  parameter value's wire text by its `ParamKind`, in `spec.values`, which the REST client and
-  the library's filter check both run, so a filter the check accepts always encodes; it loads
-  no client, and a subprocess test checks that no vocabulary name loads a client or network
-  module);
+  `WireType`, `WireUnit`, `DriftReport`, `DriftSample`, `provenance`, `Provenance`, and
+  `encode_value` (one parameter value's wire text by its `ParamKind`, in `spec.values`, which
+  the REST client and the library's filter check both run, so a filter the check accepts
+  always encodes; it loads no client, and a subprocess test checks that no vocabulary name
+  loads a client or network module);
 - origins: `origin_of` (from `net.origins`), the vocabulary name the library uses to key a
   shared governor by REST origin.
+- reply capture: `set_reply_capture` and `CapturedReply` (from `net.capture`), an optional
+  process-wide sink that receives every reply the REST and WebSocket clients read, each REST
+  body (refusals included) and each frame after authentication, already cleaned of the
+  clients' secrets by their `Redactor`; off by default, at the cost of one `None` check per
+  reply. Only the live-run program uses it, to record Massive's real replies.
 
 `Param` is reached as an attribute of `RestPath`. `Transport` (`REST`, `WS`, `FLAT_FILES`) is
 the library's one transport enum.
