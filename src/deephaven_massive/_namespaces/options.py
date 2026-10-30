@@ -794,7 +794,7 @@ class _Options(Namespace):
             sort: The field to sort by: `"ticker"`, `"expiration_date"`, or
                 `"strike_price"`; None for the endpoint's order.
             order: The sort direction; None for the endpoint's default.
-            limit: The most rows to return, a positive `int`; None for every row.
+            limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further parameters of the endpoint, by wire name with dots written as
                 underscores: `strike_price`, `expiration_date`, and their `_gt`, `_gte`,
                 `_lt`, and `_lte` forms, such as `{"strike_price_gte": 150}`.
@@ -883,7 +883,7 @@ class _Options(Namespace):
                 cycle), or `dm.ALL`.
             sort: The field to sort by (`"ticker"`); None for the endpoint's order.
             order: The sort direction; None for the endpoint's default.
-            limit: The most rows to return, a positive `int`; None for every row.
+            limit: The most rows to return in total, a positive `int`; None for every row.
             filters: Further parameters of the endpoint, by wire name with dots written as
                 underscores: the alphabetical range forms `ticker_gt`, `ticker_gte`,
                 `ticker_lt`, and `ticker_lte`.

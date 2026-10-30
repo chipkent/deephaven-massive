@@ -40,7 +40,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._datasets.filters import param_family
-from deephaven_massive._datasets.row_times import RowTimes
+from deephaven_massive._datasets.row_times import INSERT, RowTimes
 from deephaven_massive._datasets.schema import dataset_schema, filled_columns
 from deephaven_massive._datasets.source_columns import rename
 from deephaven_massive._enums import (
@@ -413,10 +413,10 @@ class DatasetSpec:
                 the request, or makes a key optional other than a `symbol` or `fanout` key read from
                 a REST path's rows, declares an `end` key outside a bars dataset or a `date` key on
                 a dataset without row times, or, for a daily summary, leaves a source without its
-                `date` key; `poll_keys` holds the `Symbol` of an optional symbol key, is empty on an
-                `APPEND` dataset or one whose symbols overlap, is empty together with
-                `revision_keys`, or shares a column with `revision_keys`; a dataset whose symbols
-                overlap has `nullable_poll_keys`;
+                `date` key; `poll_keys` holds the `Symbol` of an optional symbol key or
+                `TimestampInsert`, is empty on an `APPEND` dataset or one whose symbols overlap,
+                is empty together with `revision_keys`, or shares a column with `revision_keys`;
+                a dataset whose symbols overlap has `nullable_poll_keys`;
                 `nullable_poll_keys` names a column that is no poll key, or gives an empty
                 reason; a flat-file prefix does not declare its `symbol` and `time` keys from
                 its own columns (and, for futures, its `date` key, the session against which
@@ -648,9 +648,9 @@ class DatasetSpec:
 
         Raises:
             ValueError: If `poll_keys` holds the `Symbol` of an optional symbol key (a row
-                without one would have a null poll key); is empty on an `APPEND` dataset, on
-                one whose symbols overlap (its repeated rows are found by them), or together
-                with `revision_keys`; shares a column with `revision_keys`; or if
+                without one would have a null poll key) or `TimestampInsert`; is empty on an
+                `APPEND` dataset, on one whose symbols overlap (its repeated rows are found by
+                them), or together with `revision_keys`; shares a column with `revision_keys`; or if
                 `nullable_poll_keys` names a column that is no poll key, gives no reason, or
                 is set on a dataset whose symbols overlap.
         """
@@ -663,6 +663,13 @@ class DatasetSpec:
                 f"{self.name}: poll_keys cannot hold Symbol when the symbol is optional: a row "
                 "without one would have a null poll key, which fails the poll() table; declare "
                 "other poll_keys"
+            )
+        if INSERT in self.poll_keys:
+            # A keyed poll() table's `last_by` aggregates every column outside the keys, and
+            # the arrival time, every schema's last column, is the one it can always rely on.
+            raise ValueError(
+                f"{self.name}: poll_keys cannot hold {INSERT}: it is when a row arrived, not "
+                "what the row is, and a keyed poll() table needs it outside its keys"
             )
         if not self.poll_keys and self.poll_mode is PollMode.APPEND:
             raise ValueError(f"{self.name}: an APPEND dataset needs poll_keys")

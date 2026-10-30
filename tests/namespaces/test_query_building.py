@@ -14,11 +14,13 @@ import dataclasses
 import datetime as dt
 import inspect
 import logging
+import re
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
 from typing import Any, ClassVar, Literal, cast, overload
 
+import numpy as np
 import pytest
 from deephaven import new_table
 from deephaven.column import string_col
@@ -26,15 +28,18 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive import _enums, _query, _types
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, Timespan
+from deephaven_massive._ingest.rest_requests import fetch_paths, plan_calls
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.query_building import (
     ADJUSTED_PRICE,
     ADJUSTED_VOLUME,
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
+    _is_default,
     accepted_values,
     adjustment_notes,
     build_query,
@@ -989,3 +994,69 @@ def test_adjustment_notes_name_the_price_and_volume_columns() -> None:
         spec = CATALOG.by_name[name]
         columns = set(CATALOG.dataset_schema(spec).column_names)
         assert set(spec.column_notes) <= columns, name
+
+
+def test_an_array_argument_is_never_its_default() -> None:
+    # A numpy array's `==` answers element by element; the repr must not ask its truth.
+    assert not _is_default(np.array([1, 1]), 1)
+    assert _is_default(1, 1)
+    assert _is_default({FuturesVenue.CME}, frozenset({FuturesVenue.CME}))
+    assert not _is_default(None, inspect.Parameter.empty)
+    assert not _is_default(2, None)
+
+
+def _dataset_methods() -> Iterator[tuple[DatasetSpec, Callable[..., object]]]:
+    # Every public dataset method that takes `limit`, with the dataset it reads: a namespace
+    # method's name is its dataset's (`stocks.dividends`), and the session's own is `snapshots`.
+    def subclasses(cls: type[Namespace]) -> Iterator[type[Namespace]]:
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    yield CATALOG.by_name["snapshots"], dm.MassiveSession.snapshots
+    for cls in subclasses(Namespace):
+        for name, method in vars(cls).items():
+            public = callable(method) and not name.startswith("_")
+            if public and "limit" in inspect.signature(method).parameters:
+                yield CATALOG.by_name[method.__qualname__], method
+
+
+def _caps_each_symbol(spec: DatasetSpec) -> bool:
+    # Whether `limit` caps each symbol's (or each request's) rows when symbols are named: the
+    # reader caps each request that names one symbol, and each request of a dataset whose
+    # symbols overlap.
+    named = ("AAA", "BBB")
+    calls = [
+        call
+        for template, own in fetch_paths(spec, named)
+        for call in plan_calls(
+            spec,
+            CATALOG.rest_path(template),
+            Request(symbols=named),
+            symbols=own,
+            split=lambda symbol: (symbol, "USD"),
+        )
+    ]
+    return spec.symbols_overlap or any(call.symbol is not None for call in calls)
+
+
+def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> None:
+    wrong = []
+    for spec, method in _dataset_methods():
+        parameters = inspect.signature(method).parameters
+        found = re.search(
+            r"^ {4}limit:(.*?)(?=^ {4}\S|\Z)",
+            inspect.getdoc(method) or "",
+            re.MULTILINE | re.DOTALL,
+        )
+        text = " ".join(found.group(1).split()) if found else ""
+        symbols = parameters.get("symbols")
+        each = symbols is not None and _caps_each_symbol(spec)
+        # `limit` caps the total on a dataset that sends its symbols together, and on one that
+        # caps each symbol when the symbols are optional and left out.
+        total = not each or symbols is None or symbols.default is not inspect.Parameter.empty
+        says_each = re.search(r"\b(each|per)\b", text) is not None
+        says_total = re.search(r"\btotal\b", text) is not None
+        if (says_each, says_total) != (each, total):
+            wrong.append(f"{spec.name}: each={each} total={total}: {text!r}")
+    assert wrong == []

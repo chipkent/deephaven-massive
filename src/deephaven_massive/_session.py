@@ -146,6 +146,8 @@ def _log_session(label: str, config: MassiveConfig) -> None:
         for field in dataclasses.fields(config)
         if field.repr and field.name != "s3_access_key_id"
     )
+    # One value serves both S3 credentials: `MassiveConfig` refuses one without the other, so
+    # the access key id being set means the secret is set too.
     s3 = "set" if config.s3_access_key_id is not None else "unset"
     logger.info(
         "%s: MassiveConfig(%s) with api_key set, s3_access_key_id %s, s3_secret_access_key %s",
