@@ -119,6 +119,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BACKLOG_WARNING_ROWS",
+    "SYMBOL_CACHE_LIMIT",
     "ChannelPlan",
     "Flusher",
     "FuturesSessionDates",
@@ -150,8 +151,9 @@ A flush thread reads each distinct wire symbol once and remembers its canonical 
 stream's steady traffic costs no symbol reading. A `dm.ALL` stream of options, crypto, or forex
 meets new spellings every day (new contracts are listed, old ones expire), so the memory would
 grow for as long as the connection lives. Past this many spellings the memory is emptied after
-the flush and refilled from the next flushes' rows: some tens of megabytes at most, and
-one extra reading of each spelling still trading.
+the flush and refilled from the next flushes' rows. A full memory of options spellings measures
+about 10 to 12 megabytes, and starting over costs one extra reading of each spelling still
+trading.
 """
 
 _SYMBOL: Final = "Symbol"
@@ -1308,9 +1310,10 @@ class Flusher:
         converted = plan.convert(rows, known, arrived=arrived, sessions=self._sessions)
         if len(known) > SYMBOL_CACHE_LIMIT:
             logger.debug(
-                "%s: the %s symbol cache passed %d spellings and starts over",
+                "%s: the %s symbol cache holds %d spellings, past its limit of %d; starts over",
                 plan.dataset,
                 plan.channel,
+                len(known),
                 SYMBOL_CACHE_LIMIT,
             )
             known.clear()

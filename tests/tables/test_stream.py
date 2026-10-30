@@ -983,12 +983,50 @@ def test_a_full_symbol_cache_starts_over_and_the_rows_still_publish(
         flusher.rows("T", [trade("IBM")])
         flusher.flush()
     assert flusher._symbols[sink.plan] == {}
-    assert "test.trades: the T symbol cache passed 2 spellings and starts over" in caplog.text
+    assert (
+        "test.trades: the T symbol cache holds 3 spellings, past its limit of 2; starts over"
+        in caplog.text
+    )
     flusher.rows("T", [trade("AAPL")])
     flusher.flush()
     assert flusher._symbols[sink.plan] == {"AAPL": "AAPL"}
     rows = rows_when(shown, lambda rows: len(rows) == 4)
     assert [row["Symbol"] for row in rows] == ["AAPL", "MSFT", "IBM", "AAPL"]
+
+
+def test_an_unreadable_spelling_is_warned_about_once_across_a_symbol_cache_reset(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger("t"), limit=5)
+    )
+    monkeypatch.setattr(stream, "SYMBOL_CACHE_LIMIT", 1)
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, FOREX, "C", unknown_symbols=UnknownSymbols.WARN)
+    opened = open_stream_tables(
+        plan,
+        core.catalog.dataset_schema(FOREX, raw_symbol=True),
+        ALL,
+        core=core,
+        stream_id=1,
+        host="socket.test",
+        path="/forex",
+        on_shutdown=lambda: None,
+        on_symbols=lambda *_: None,
+    )
+    flusher.routes.add("C", opened.sink)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            flusher.rows("C", FOREX_ROWS)
+            flusher.flush()
+            assert flusher._symbols[plan] == {}  # two spellings pass the limit of one
+    assert not opened.sink.failed
+    assert opened.sink.rows_published == 4
+    assert caplog.text.count("Massive sent the symbol 'nonsense pair'") == 1
 
 
 def test_a_sink_whose_session_is_gone_reports_nothing(
