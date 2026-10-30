@@ -451,17 +451,28 @@ def test_close_returns_promptly_during_a_backoff_wait(
 
 
 def test_a_rejected_key_fails_every_stream(
+    *,
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     q = ws_session.query(TRADES, ["AAPL"])
     result = q.blink()
     ws_session.subscribed("T.AAPL")  # attached: the failure below cannot race the open
+    other = ws_session.query(TRADES, ["MSFT"]).blink()  # a second stream the failure fails
+    ws_session.subscribed("T.MSFT")
     failed = ws_session.connection()
     fake_ws_server.auth_replies.append("auth_failed")  # for the reconnect
-    fake_ws_server.close(1011)
-    ws_session.wait(lambda s: WsState.FAILED in s.states)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        fake_ws_server.close(1011)
+        ws_session.wait(lambda s: WsState.FAILED in s.states)
+        assert failed.flusher.join(TIMEOUT)
+    # An expected failure, not a defect: one WARNING for the cause, however many streams it
+    # fails, and no ERROR.
+    rejected = [r for r in caplog.records if "rejected the API key" in r.getMessage()]
+    assert [r.levelno for r in rejected] == [logging.WARNING]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     with ws_session.connections.group.lock:
         assert failed.retired
         assert ws_session.connections.group.connections == {}  # retired: the next stream opens anew
@@ -469,11 +480,10 @@ def test_a_rejected_key_fails_every_stream(
     [row] = connections_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert "rejected the API key" in row["LastError"]
-    [stream] = streams_of(ws_session, dh_to_pylist)
-    assert stream["State"] == "FAILED"
+    assert [s["State"] for s in streams_of(ws_session, dh_to_pylist)] == ["FAILED", "FAILED"]
     again = q.blink()  # a fresh stream, on a fresh connection
     assert len(ws_session.urls) == 2
-    del result, again
+    del result, other, again
 
 
 def test_a_fatal_handshake_names_the_status_and_host(

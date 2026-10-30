@@ -46,6 +46,7 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._log_limits import BoundedWarnings
@@ -911,7 +912,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
 
 
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     reader = cast("Any", session._core.rest_transport())._reader("call-1")
     claimed: list[Future[Any]] = []
@@ -923,12 +924,40 @@ def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_wait
         raise RuntimeError("the reader broke")
 
     monkeypatch.setattr(reader.state.client, "pages", pages)
-    with pytest.raises(RuntimeError, match="the reader broke"):  # the reader's own error
+    with (
+        caplog.at_level(logging.WARNING, LOGGER),
+        pytest.raises(RuntimeError, match="the reader broke"),  # the reader's own error
+    ):
         reader.crypto_pair("X:DOTUSD")
+    # A defect of the library: one ERROR, with its trace and how to report it.
+    [record] = caplog.records
+    assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
+    assert record.getMessage().endswith(f"reading Massive's crypto tickers failed. {LIBRARY_BUG}")
     (future,) = claimed
-    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError"):
+    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError") as waited:
         future.result()  # the waiters get a MassiveError
+    assert waited.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert str(waited.value).endswith(LIBRARY_BUG)
     assert reader.state.crypto_future()[1]  # and the failure is forgotten
+
+
+def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken(*_: object, **__: object) -> NoReturn:
+        raise RuntimeError("the rule broke")
+
+    monkeypatch.setattr(hosts, "decide", broken)
+    with (
+        caplog.at_level(logging.WARNING, LOGGER),
+        pytest.raises(RuntimeError, match="the rule broke"),
+    ):
+        session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    [record] = caplog.records
+    assert (record.levelno, record.getMessage()) == (
+        logging.ERROR,
+        f"deciding the stocks WebSocket host failed: RuntimeError('the rule broke'). {LIBRARY_BUG}",
+    )
 
 
 class _WatchedFuture(Future[rest.CryptoTickers]):
@@ -1185,6 +1214,7 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     monkeypatch: pytest.MonkeyPatch,
     load_fixture: Callable[[str, str], bytes],
     console: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     m, clock = _manual_session(fake_rest, monkeypatch)
     listeners = _Listeners(monkeypatch)
@@ -1210,6 +1240,8 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     assert decision.host == "delayed.massive.com"
     assert len(sent(fake_rest)) == 3
     assert (listeners.buckets, listeners.live) == (["stocks"], [])
+    # The caller that gave up raises; its expected failure logs nothing above DEBUG.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER]
 
 
 def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:

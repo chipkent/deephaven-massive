@@ -388,7 +388,7 @@ _ingest/                 the only holder of wire clients
   host_decision.py       host resolution from REST evidence (section 13.2): the host rule, its
                          probes and constants, HostDecisionCache (single-flight)
   rate_limits.py         the process's REST governors per (API key digest, REST origin),
-                         session leases, the first-429 WARNING, rate_limits() rows, the INFO
+                         session leases, the first-429 INFO notice, rate_limits() rows, the INFO
                          download notice, the poll() pace WARNING (section 13.4)
   flatfiles.py           flat-file transport: read plans, reader pool, cancellation, conversion,
                          merge to tables, missing-file policy, drift routing (section 16)
@@ -2255,7 +2255,7 @@ free-threaded target: pyarrow, numpy, and pandas no longer publish cp313t wheels
 
 **Criterion.** Every closed set of values in a public signature is a `StrEnum` whose values are
 Massive's wire strings; an enum of a library setting that never reaches the wire
-(`HistorySource`, `SymbolConvention`, `OnError`, `UnknownSymbols`) takes its member names in
+(`HistorySource`, `SymbolConvention`, `OnError`, `UnknownSymbols`, `ErrorCause`) takes its member names in
 lower case. Signatures take only the enum. There are no string `Literal`
 categoricals and no `Enum | Literal` unions. Open sets (`sort`, `form_type`) are
 `str`. The one spelling per value gives tab completion in every IDE, including the Deephaven web
@@ -2288,6 +2288,7 @@ has the same value set as that parameter.
 | `SymbolConvention` | MASSIVE, YAHOO, NASDAQ, CMS | `massive`, `yahoo`, `nasdaq`, `cms` | `canonical_symbol`, `canonicalize_symbols` (`convention`) |
 | `OnError` | RAISE, NULL | `raise`, `null` | `canonicalize_symbols` (`on_error`) |
 | `UnknownSymbols` | FAIL, WARN | `fail`, `warn` | `MassiveConfig.unknown_symbols` and `MASSIVE_UNKNOWN_SYMBOLS` |
+| `ErrorCause` | EXPECTED, USER_DEFECT, LIBRARY_DEFECT | `expected`, `user_defect`, `library_defect` (no wire value; defined in `_errors.py`, beside the exception it describes) | `MassiveError.cause`, read only; it sets the level a failure is logged at |
 
 Internal, not exported: `Recency {REALTIME, DELAYED, UNKNOWN}`, `ChannelFamily {TICK, FMV}`,
 `ClassFromPrefix {ANY}`, and `NotBars {ANY}`, the key under which a dataset that is not bars
