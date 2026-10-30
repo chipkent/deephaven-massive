@@ -924,7 +924,12 @@ class Query(QueryBase):
                 `dm.canonicalize_symbols`); or if a path does not take a parameter or filter
                 the query set (with static symbols any path the call reads, with a reactive
                 table every fetch path of the dataset).
-            MassiveError: If the session is closed.
+            AuthenticationError: If Massive rejects the API key while the call reads its
+                crypto ticker list, to split a crypto ticker a path takes as two currencies.
+            EntitlementError: If the plan does not include that list.
+            MassiveError: If the session is closed, or a crypto ticker cannot be split into
+                its currencies (Massive's crypto ticker list cannot be read or does not hold
+                it).
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")
