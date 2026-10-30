@@ -32,7 +32,12 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, day_argument
+from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
+    Namespace,
+    build_query,
+    day_argument,
+)
 
 if TYPE_CHECKING:
     from deephaven_massive._query import (
@@ -47,7 +52,6 @@ __all__ = ["DATASETS", "_Crypto"]
 
 logger = logging.getLogger(__name__)
 
-_DOCS: Final = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.md"
 
 _R, _W, _F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 
@@ -195,10 +199,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): _keys(KeySpec("Ticker"))},
     symbol_param="tickers",
-    # The pairs travel comma-separated in the URL, so a long watchlist is split into requests
-    # of 250 pairs, as for the stocks and forex snapshots, to keep each URL well under the
-    # lengths servers refuse.
-    symbols_per_request=250,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=("Updated",),
 )
 """`m.crypto.snapshots`: the full-market snapshot, narrowed by `tickers` unless `dm.ALL`."""

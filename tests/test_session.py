@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import itertools
 import json
 import logging
 import pkgutil
@@ -276,6 +277,23 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
     assert "same API key" not in caplog.text  # the others are closed
     third.close()
     other.close()
+
+
+def test_the_same_key_warning_names_the_oldest_session_that_cannot_share(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Numbers 9 and 10: text order would put #10 first, creation order puts #9 first.
+    monkeypatch.setattr(_session, "_session_numbers", itertools.count(9))
+    config = dm.MassiveConfig(api_key="ordered-key")
+    ninth, tenth = dm.MassiveSession(config), dm.MassiveSession(config)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        apart = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5))
+    warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
+    assert [w.split(" with ")[0] for w in warnings] == [
+        "MassiveSession #11 uses the same API key as MassiveSession #9"
+    ]
+    for session in (ninth, tenth, apart):
+        session.close()
 
 
 def _open_cores() -> list[SessionCore]:

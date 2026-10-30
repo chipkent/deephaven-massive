@@ -415,6 +415,10 @@ def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSess
         bars(CONTRACT, cast("dm.Timespan", "minute"))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         bars(CONTRACT, adjusted=cast("bool", 1))
+    # None would read as a path without `adjusted`: REST would send Massive's default,
+    # adjusted, while the flat files, as traded, could serve the same call.
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        bars(CONTRACT, adjusted=cast("bool", None))
 
 
 def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.MassiveSession) -> None:
@@ -552,6 +556,8 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
     assert daily(CONTRACT, "2025-01-02", adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         daily(CONTRACT, "2025-01-02", adjusted=cast("bool", 0))
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        daily(CONTRACT, "2025-01-02", adjusted=cast("bool", None))
     with pytest.raises(ValueError, match=r"use m\.options\.snapshots\(dm\.ALL\)"):
         daily(dm.ALL, "2025-01-02")
     with pytest.raises(TypeError):
@@ -689,6 +695,8 @@ def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
     assert prev(CONTRACT, adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         prev(CONTRACT, adjusted=cast("bool", 1))
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        prev(CONTRACT, adjusted=cast("bool", None))
     with pytest.raises(
         ValueError,
         match=r"use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"

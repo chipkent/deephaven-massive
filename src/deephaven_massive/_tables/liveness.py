@@ -265,13 +265,19 @@ class QueueWorker(Generic[_T]):
     def put(self, item: _T) -> None:
         """Queue an item; it is handled after every item queued before it. Never blocks.
 
+        An item queued after `stop()` is never handled: the thread ends at the stop request,
+        and nothing reads the queue again.
+
         Args:
             item: The item.
         """
         self._queue.put(item)
 
     def stop(self) -> None:
-        """Handle what is queued, run `on_exit`, and end the thread. Does not wait; idempotent."""
+        """Handle what is queued, run `on_exit`, and end the thread. Does not wait; idempotent.
+
+        Items queued after this call are dropped unhandled (`put`).
+        """
         self._queue.put(None)
 
     def _run(self) -> None:
@@ -373,6 +379,10 @@ class Reaper:
 
     def submit(self, job: Callable[[], None]) -> None:
         """Queue a job; it runs on the reaper thread after every job queued before it.
+
+        A job submitted after `stop()` never runs. The reaper stops only once its session is
+        collected and no tracked result remains (`ResultRegistry.retire`), so every tracked
+        result's release job runs first.
 
         Args:
             job: The work to run, typically releasing one result scope.
@@ -514,10 +524,9 @@ class ResultRegistry:
         Owner callbacks hold the session core only weakly, so a tracked result can outlive the
         session: one `release()`d while its wrapper is still alive, for example. Stopping the
         reaper with the session would leave such a result unreleased when it is collected, so
-        the reaper is
-        stopped only once the registry is empty: now if it already is, otherwise by the job
-        that forgets the last collected result. Takes no lock and makes no Java call (it runs
-        in a garbage-collection finalizer): it only queues a job on the reaper.
+        the reaper is stopped only once the registry is empty: now if it already is, otherwise
+        by the job that forgets the last collected result. Takes no lock and makes no Java call
+        (it runs in a garbage-collection finalizer): it only queues a job on the reaper.
         """
         self._reaper.submit(self._retire)
 

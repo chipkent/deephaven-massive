@@ -35,7 +35,13 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, day_argument, list_params
+from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
+    Namespace,
+    build_query,
+    day_argument,
+    list_params,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,7 +69,7 @@ _MINUTE_FILES: Final = "us_indices/minute_aggs_v1"
 _DAY_FILES: Final = "us_indices/day_aggs_v1"
 
 _SNAPSHOT_PAGE: Final = 250
-"""The indices snapshot's largest `limit`, and the most tickers one request names."""
+"""The indices snapshot's largest `limit`."""
 
 _AGGREGATES_PAGE: Final = 50_000
 """The range endpoint's largest `limit`, which counts the base aggregates behind a page."""
@@ -135,7 +141,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
-    symbols_per_request=_SNAPSHOT_PAGE,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     page_size=_SNAPSHOT_PAGE,
     revision_keys=("LastUpdated",),
 )

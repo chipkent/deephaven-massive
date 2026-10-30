@@ -38,7 +38,9 @@ request of each other lane, not behind every page of a long history with eight w
 the head works out when it may start; it is woken when that may change (a request finished or
 was released, the head before it started or gave up its place, a refusal, a new limit).
 
-After a 429 the bucket pauses: for the `Retry-After` the response asked for; without one, or
+After a 429 the bucket pauses: for the `Retry-After` the response asked for, up to
+`MAX_RETRY_AFTER` (10 minutes, so a broken server's header cannot stop a subscription's
+requests for days, and every pause ends at a time a timestamp can hold); without one, or
 with one of zero or in the past, a paced bucket for a whole window and an unpaced one for 15,
 30, then 60 s by the number of refusals in the run (`net.retry.rate_limit_wait`). A pause only
 ever grows. When it ends, the bucket sends one *probe*: the first request to start, alone,
@@ -114,6 +116,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BASIC_REQUESTS_PER_MINUTE",
+    "MAX_RETRY_AFTER",
     "RATE_WINDOW",
     "UNLIMITED",
     "Admission",
@@ -131,6 +134,10 @@ BASIC_REQUESTS_PER_MINUTE: Final = 5
 
 RATE_WINDOW: Final = 61.0
 """Seconds a finished request holds its slot of a paced bucket: Massive's minute plus 1 s."""
+
+MAX_RETRY_AFTER: Final = 600.0
+"""The longest pause a 429's `Retry-After` sets, in seconds: 10 minutes. A longer one is clamped
+to it and logged at WARNING; the bucket probes again when it ends."""
 
 _BASIC_REFUSAL: Final = "exceeded the maximum requests per minute"
 """The words of Massive's 429 message that mark a subscription on the Basic tier."""
@@ -935,15 +942,16 @@ class RequestGovernor:
         bucket learned Basic, so it is paced from now on, for the governor's life. A refusal
         to an attempt that started after the latest pause counts toward the run and sets a
         new pause; one to an attempt that started before it only lengthens the pause to its
-        own `Retry-After`. A `Retry-After` of zero counts as none. A run that time has ended
-        (see the module) ends first, so this refusal starts a new one. The caller then asks
-        for a new permit, which waits out the pause, or fails if the pause ends past its own
-        read's patience. Does nothing for a permit already reported.
+        own `Retry-After`. A `Retry-After` of zero counts as none, and one longer than
+        `MAX_RETRY_AFTER` pauses that long, logged at WARNING with the value asked. A run that
+        time has ended (see the module) ends first, so this refusal starts a new one. The
+        caller then asks for a new permit, which waits out the pause, or fails if the pause
+        ends past its own read's patience. Does nothing for a permit already reported.
 
         Args:
             permit: The attempt's permit.
-            retry_after: The wait the response's `Retry-After` asked for, in seconds, or None
-                when it gave none.
+            retry_after: The wait the response's `Retry-After` asked for, in seconds (any
+                length, `math.inf` included), or None when it gave none.
             message: The refusal's text, with its request id, quoted in diagnostics and in the
                 error of a request that stops waiting.
 
@@ -953,6 +961,14 @@ class RequestGovernor:
         state = self._buckets[permit.bucket]
         basic = is_basic_refusal(message)
         asked = retry_after if retry_after is not None and retry_after > 0 else None
+        if asked is not None and asked > MAX_RETRY_AFTER:
+            logger.warning(
+                "%s: a refusal's Retry-After asks for %s s; pausing %s s, the most honoured",
+                permit.bucket,
+                asked,
+                MAX_RETRY_AFTER,
+            )
+            asked = MAX_RETRY_AFTER
         with self._lock:
             now = self._clock.monotonic()
             state.settle(now)  # before `finish`, so a slow probe still holds its run open
