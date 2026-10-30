@@ -1606,9 +1606,9 @@ def test_wait_false_reads_in_the_background(
     ]
     # Each read logs its own outcome, from its thread; the call logs no `done` line.
     assert sorted(_calls(caplog)) == [
-        "call 1 done: 0 rows in <s> s",
+        "call 1 published: 0 rows in <s> s",
         f"call 1 start: {q!r}.fetch(wait=False)",
-        "call 2 done: 0 rows in <s> s",
+        "call 2 published: 0 rows in <s> s",
         (
             f"call 2 start: {trades(massive_session)!r}.history('2025-03-03', '2025-03-04', "
             "source=<HistorySource.REST: 'rest'>, wait=False)"
