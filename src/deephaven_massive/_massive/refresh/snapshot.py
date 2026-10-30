@@ -12,6 +12,8 @@ wheel nor the sdist, so the refresh runs from a source checkout only. The layout
 - `rest/<area>/.../<page>.md`: every REST documentation page the index links;
 - `websocket/<class>/<page>.md`: every WebSocket documentation page the index links;
 - `flat-files/<class>/.../<page>.md`: every flat-file documentation page the index links;
+- `knowledge-base/<slug>.md`: the Markdown of every knowledge-base article the library relies
+  on (`knowledge_base.ARTICLES`), extracted from its HTML page;
 - `manifest.json`: the fetch date and, for each file above, its URL, the SHA-256 of the bytes
   as fetched, and the SHA-256 of the file as stored.
 
@@ -47,12 +49,14 @@ if TYPE_CHECKING:
 __all__ = [
     "AREA_DIRECTORIES",
     "DIRECTORY",
+    "KNOWLEDGE_BASE",
     "LLMS",
     "MANIFEST",
     "OPENAPI",
     "WEBSOCKET",
     "Snapshot",
     "VendorFile",
+    "article_file",
     "page_file",
     "store",
 ]
@@ -73,6 +77,9 @@ AREA_DIRECTORIES: Final[Mapping[docs.Area, str]] = MappingProxyType(
     {docs.REST: "rest", docs.WEBSOCKET: "websocket", docs.FLAT_FILES: "flat-files"}
 )
 """The snapshot directory of each documentation area's pages."""
+
+KNOWLEDGE_BASE: Final = "knowledge-base"
+"""The snapshot directory of the knowledge-base articles."""
 
 MANIFEST: Final = "manifest.json"
 """The snapshot file that records where every other file came from."""
@@ -98,6 +105,18 @@ def page_file(url: str, area: docs.Area) -> str:
         `rest/<area>/.../<page>.md`.
     """
     return f"{AREA_DIRECTORIES[area]}/{docs.page_file(url, area)}"
+
+
+def article_file(slug: str) -> str:
+    """Return where the snapshot stores a knowledge-base article.
+
+    Args:
+        slug: The article's slug, one of `knowledge_base.ARTICLES`.
+
+    Returns:
+        The article's name relative to the snapshot directory, `knowledge-base/<slug>.md`.
+    """
+    return f"{KNOWLEDGE_BASE}/{slug}.md"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -226,6 +245,9 @@ class Snapshot:
         flat_file_pages: Each flat-file page the index links, by its name below the
             snapshot's `flat-files/` directory (`"stocks/trades.md"`), as text.
         flat_file_page_urls: Each flat-file page, by the same name, mapped to its URL.
+        articles: Each knowledge-base article the snapshot holds, by its slug, as the
+            Markdown `fetch` extracted from its page.
+        article_urls: Each article of `articles`, by its slug, mapped to its URL.
     """
 
     openapi: JsonObject
@@ -239,6 +261,8 @@ class Snapshot:
     websocket_page_urls: Mapping[str, str] = field(default_factory=dict)
     flat_file_pages: Mapping[str, str] = field(default_factory=dict)
     flat_file_page_urls: Mapping[str, str] = field(default_factory=dict)
+    articles: Mapping[str, str] = field(default_factory=dict)
+    article_urls: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def origin(self) -> str:
@@ -319,6 +343,12 @@ class Snapshot:
             area: {name: urls[f"{AREA_DIRECTORIES[area]}/{name}"] for name in pages[area]}
             for area in AREA_DIRECTORIES
         }
+        # The articles are whichever the manifest lists: the fetch decides which there are.
+        slugs = {
+            name.removeprefix(f"{KNOWLEDGE_BASE}/").removesuffix(".md"): name
+            for name in urls
+            if name.startswith(f"{KNOWLEDGE_BASE}/")
+        }
         return cls(
             openapi=openapi,
             llms=llms,
@@ -331,6 +361,10 @@ class Snapshot:
             websocket_page_urls=located[docs.WEBSOCKET],
             flat_file_pages=pages[docs.FLAT_FILES],
             flat_file_page_urls=located[docs.FLAT_FILES],
+            articles={
+                slug: (directory / name).read_text(encoding="utf-8") for slug, name in slugs.items()
+            },
+            article_urls={slug: urls[name] for slug, name in slugs.items()},
         )
 
 

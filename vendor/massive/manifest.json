@@ -1,5 +1,5 @@
 {
- "fetched": "2026-10-28",
+ "fetched": "2026-10-30",
  "files": {
   "flat-files/crypto/day-aggregates.md": {
    "fetched_sha256": "1c0293db35f8951550d720f51da23b8599c62925f66c91278ab6ca2e80b2f053",
@@ -200,6 +200,11 @@
    "fetched_sha256": "965e19fbb1b63f4c4eebf1fdb1708ef66f3a050e7f486ab5bc58e420266fca8a",
    "stored_sha256": "965e19fbb1b63f4c4eebf1fdb1708ef66f3a050e7f486ab5bc58e420266fca8a",
    "url": "https://massive.com/docs/flat-files/stocks/trades.md"
+  },
+  "knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md": {
+   "fetched_sha256": "5228dfde9150c184f51408a1b73ceb6e0f5d5da3b9a6871b7d19461265e62142",
+   "stored_sha256": "8cbae53cbe54e4c2f5fd71fd4fed5848ff428c6d110e649207fa2f2703b4e08f",
+   "url": "https://massive.com/knowledge-base/article/what-is-the-request-limit-for-massives-restful-apis"
   },
   "llms.txt": {
    "fetched_sha256": "65322b2f3609f8ef46337b4654486a3505cdf31939f673697ef93ddd6fabb4e6",
