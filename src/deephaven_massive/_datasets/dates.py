@@ -41,6 +41,7 @@ Every function is pure (the current time is a parameter) and thread-safe.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
@@ -85,6 +86,8 @@ __all__ = [
     "require_aware",
     "trades_at_weekends",
 ]
+
+logger = logging.getLogger(__name__)
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
 """The day zone of stocks, options, and indices, and the zone of the flat-file cutoff."""
@@ -215,6 +218,10 @@ def _foreign_bound(value: object, name: str) -> date | datetime:
             # Deephaven's own instants carry nanoseconds (`dh_now()` on Linux, a SIP
             # timestamp), which the user cannot choose, so they are cut to the microsecond.
             nanos = int(instant.getNano())
+            if nanos % 1_000:
+                logger.debug(
+                    "%s=%s cut to the microsecond: %d ns dropped", name, value, nanos % 1_000
+                )
             seconds = int(instant.getEpochSecond())
             moment = _EPOCH + timedelta(seconds=seconds, microseconds=nanos // 1_000)
             if not zoned:

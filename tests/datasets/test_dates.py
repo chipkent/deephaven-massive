@@ -1,6 +1,7 @@
 """Tests for date parsing, the kinds of bounds, and the day rules."""
 
 import importlib
+import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from typing import TypeVar, cast
@@ -402,12 +403,16 @@ def test_deephaven_java_dates_and_instants_are_bounds() -> None:
         pytest.param("2025-03-03T09:30:00.123456789 America/New_York", id="zoned"),
     ],
 )
-def test_java_instants_are_cut_to_the_microsecond(value: str) -> None:
+def test_java_instants_are_cut_to_the_microsecond(
+    value: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive._datasets.dates")
     # Deephaven's instants carry nanoseconds the user never chose; an earlier start by under a
     # microsecond still includes the row the instant came from.
     java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
     moment = cast("datetime", parse_date_like(java, "start"))
     assert moment.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    assert caplog.messages == [f"start={java} cut to the microsecond: 789 ns dropped"]
 
 
 def test_java_times_a_datetime_cannot_hold_are_refused() -> None:

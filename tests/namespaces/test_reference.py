@@ -1,6 +1,7 @@
 """Tests for the `m.reference` namespace and the record of the unified snapshot."""
 
 import json
+import logging
 import re
 import threading
 from collections.abc import Callable, Iterator
@@ -701,8 +702,13 @@ def _news_target(ticker: str, **params: object) -> str:
 
 
 def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToRows
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToRows,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest")
     shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
     # An article without an id cannot be told from another, so neither copy is dropped.
     unnamed = {
@@ -724,6 +730,10 @@ def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
     # Ticker by ticker, in ticker order; the shared article once, where AAPL's request had it,
     # and `limit` caps each ticker's articles, not the table.
     assert [row["Id"] for row in out] == ["both", "a1", None, "m1", None]
+    assert (
+        "reference.news: kept 5 of 6 rows from 2 requests, each row once by Id; limit=3 per "
+        "request" in caplog.messages
+    )
 
 
 def test_news_polls_follow_a_live_watchlist(

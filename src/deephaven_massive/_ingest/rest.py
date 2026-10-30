@@ -2068,7 +2068,18 @@ class RestReader:
         rows = pa.concat_tables(tables)
         if spec.symbols_overlap:
             # Each request was capped on its own, so one symbol's rows never crowd out another's.
-            return _first_copies(rows, spec.poll_keys), requests
+            kept = _first_copies(rows, spec.poll_keys)
+            logger.debug(
+                "%s: kept %d of %d rows from %d requests, each row once by %s; limit=%s per "
+                "request",
+                spec.name,
+                kept.num_rows,
+                rows.num_rows,
+                requests,
+                ", ".join(spec.poll_keys),
+                request.limit,
+            )
+            return kept, requests
         if request.limit is not None:
             rows = rows.slice(0, request.limit)
         return rows, requests
