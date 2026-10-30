@@ -659,12 +659,27 @@ class RestClient:
         Returns:
             What `_attempt` returns.
 
-        A failure that is not retryable raises `WireError`, as `_attempt` describes.
+        Raises:
+            WireError: For a failure that is not retryable, as `_attempt` describes, including a
+                200 whose page cannot be read, which is logged at DEBUG with its body first.
         """
         data = self._redactor.received(body)
         if response.status == HTTPStatus.OK:
             self._governor.done(permit, answered=True)
-            page = decode_page(data, job.rest_path, request)
+            try:
+                page = decode_page(data, job.rest_path, request)
+            except WireError as unreadable:
+                # The attempt's line still names it, with the body the page could not be read
+                # from; the call that fails logs the error itself.
+                if _log.isEnabledFor(logging.DEBUG):
+                    _log.debug(
+                        "GET %s -> 200 in %.3f s, but the page cannot be read (%s); body: %s",
+                        self._base + request.target,
+                        elapsed,
+                        unreadable,
+                        body_excerpt(data),
+                    )
+                raise
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
                 self._base + request.target,

@@ -182,15 +182,22 @@ def test_each_object_request_is_logged_at_debug(
 ) -> None:
     fake_s3.put(KEY, b"data")
     missing = KEY.replace("03-03", "03-04")
+    refused = KEY.replace("03-03", "03-05")
+    fake_s3.refuse(refused, status=403, code="AccessDenied", message="Access Denied")
     with caplog.at_level(logging.DEBUG, logger=client_module.__name__):
         file = client.open(KEY)
         assert client.open(missing) is None
+        with pytest.raises(WireError):
+            client.open(refused)
     assert file is not None
     file.close()
     at = "at https://files.massive.com"
+    request_id = fake_s3.request_id
+    # A refused request is logged too, with its status, S3's code, and its request id.
     assert caplog.messages == [
-        f"GET s3://flatfiles/{KEY} {at} -> 200, 4 bytes (request_id {fake_s3.request_id})",
-        f"GET s3://flatfiles/{missing} {at} -> 404 NoSuchKey (request_id {fake_s3.request_id})",
+        f"GET s3://flatfiles/{KEY} {at} -> 200, 4 bytes (request_id {request_id})",
+        f"GET s3://flatfiles/{missing} {at} -> 404 NoSuchKey (request_id {request_id})",
+        f"GET s3://flatfiles/{refused} {at} -> 403 AccessDenied (request_id {request_id})",
     ]
 
 

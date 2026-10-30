@@ -1294,6 +1294,20 @@ def test_a_request_interrupted_on_the_wire_hands_its_slot_back(
 # Logging.
 
 
+def test_a_200_whose_page_cannot_be_read_is_logged_with_its_body(
+    client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"<html>not json</html>"))
+    with (
+        caplog.at_level(logging.DEBUG, logger=client_module.__name__),
+        pytest.raises(WireError) as info,
+    ):
+        client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    [line] = [m for m in caplog.messages if " -> 200 " in m]
+    assert line.startswith(f"GET {fake_rest.url}/v3/trades/AAPL -> 200 in 0.000 s, but the page ")
+    assert line.endswith(f"cannot be read ({info.value}); body: <html>not json</html>")
+
+
 def test_requests_retries_and_failures_are_logged_without_the_key(
     client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:

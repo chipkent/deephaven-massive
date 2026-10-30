@@ -406,6 +406,13 @@ class FlatFileClient:
                         "GET %s -> 404 NoSuchKey (request_id %s)", location, _request_id(error)
                     )
                     return None
+                _log.debug(
+                    "GET %s -> %s %s (request_id %s)",
+                    location,
+                    _status(error),
+                    code,
+                    _request_id(error),
+                )
                 raise
             _log.debug(
                 "GET %s -> 200, %s bytes (request_id %s)",

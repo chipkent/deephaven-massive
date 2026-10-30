@@ -140,8 +140,33 @@ def test_dotted_wire_keys_reach_into_nested_objects() -> None:
 
 
 def test_a_nested_object_that_is_not_an_object_is_unconvertible() -> None:
-    with pytest.raises(WireError, match=r"^/v3/x: wire key 'day' expects an object, got 5$"):
+    with pytest.raises(WireError, match=r"^/v3/x: row 0: wire key 'day' expects an object, got 5$"):
         to_batch([{"day": 5}], _path(_field("day.c", WireType.DOUBLE)), required=())
+
+
+def test_a_row_whose_nested_object_is_not_one_is_logged_whole_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rows: list[dict[str, object]] = [{"day": {"c": 1.0}}, {"day": 5, "note": "x"}]
+    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__), pytest.raises(WireError):
+        to_batch(rows, _path(_field("day.c", WireType.DOUBLE)), required=())
+    assert caplog.messages == [
+        ('/v3/x: row 1: wire key \'day\' expects an object, got 5; the row: {"day":5,"note":"x"}')
+    ]
+
+
+def test_a_rejected_row_is_not_serialized_with_debug_off(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def refuse(_row: object) -> str:
+        raise AssertionError("the row was serialized with DEBUG off")
+
+    monkeypatch.setattr(batch_module, "row_excerpt", refuse)
+    with (
+        caplog.at_level(logging.INFO, logger=batch_module.__name__),
+        pytest.raises(WireError, match="row 0"),
+    ):
+        to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
 
 
 def test_a_json_text_field_keeps_its_object_whole() -> None:
