@@ -778,11 +778,13 @@ update cycle to finish: the diagnostics writer, a poller, or another caller's st
 diagnostics rows, a poll's first cycle) therefore shows once the command is over, which is
 Deephaven's normal behavior for anything done in a console command. A long blocking call in a
 command, such as a `history()` of many requests on a rate-limited key, holds every live table
-of the worker still for its duration, as any long console command does. The first verb of a
-session that runs 5 seconds or longer there logs one WARNING after it returns, "MassiveSession
-#1: stocks.bars history() ran for 12 s inside a Deephaven console command, which holds the
-update graph's lock: live tables do not update until the command ends; pass wait=False to
-fetch() or history() to read in the background (logged once per session)", and a paced REST
+of the worker still for its duration, as any long console command does. A verb that runs 5
+seconds or longer there logs one WARNING after it returns, "MassiveSession #1: stocks.bars
+history() ran for 12 s inside a Deephaven console command, which holds the update graph's lock:
+live tables do not update until the command ends; pass wait=False to fetch() or history() to
+read in the background", once per pause: a later long verb in the same pause (no update cycle
+has run since the warning) logs it at DEBUG, so a command of several long verbs warns once and
+the next command that pauses the tables warns again, and a paced REST
 read warns before its first request how long it will pause them
 ([section 13.4](#134-rest)). An application script runs under the lock too, so the remedy is
 `wait=False`, a read on a library thread of its own ([section 7](#7-query-classes-and-verbs)),

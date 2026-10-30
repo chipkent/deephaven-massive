@@ -51,7 +51,11 @@ parameter the caller set), `SymbolRowError` (a symbol table's row that is not Ma
 ticker, under `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and the
 cycle's `Error` lists it), and `_ingest/rest.py`'s `UnlistedPairError` (a crypto pair whose
 currencies Massive's reference data does not give). The failure is logged at the level its
-cause gives (`log_failure`): ERROR for a defect, naming whose it is, and WARNING otherwise. Any
+cause gives (`log_failure`): ERROR for a defect, naming whose it is, and WARNING otherwise.
+A refusal (`AuthenticationError` or `EntitlementError`) logs one WARNING per session, dataset,
+and kind of refusal, and each later `poll()` table refused the same way logs at DEBUG: every
+poll makes its own requests and gets its own error, so twenty polls of a dataset the plan
+does not include would otherwise log twenty WARNINGs for one cause. Any
 other error, also one while publishing, is shown in the row's `Error`; the table keeps its rows
 and the next cycle runs as scheduled, and clears the `Error` once it succeeds. The first failing
 cycle of a run of failures logs one WARNING (an expected cause) or ERROR (a defect, with its
@@ -852,6 +856,39 @@ class Poller:
         tombstones = pa.Table.from_arrays(columns, schema=rows.schema)
         return pa.concat_tables([rows, tombstones]), keys
 
+    def _log_failure(self, core: SessionCore, error: MassiveError) -> None:
+        """Log the failure that fails the table, at the level its cause gives (`log_failure`).
+
+        A refusal is logged at WARNING only for the session's first `poll()` table of the
+        dataset refused with that kind of error and status (`SessionCore.warnings`), and at
+        DEBUG for every later one; every refusal is also logged at DEBUG with its stream.
+
+        Args:
+            core: The session's core.
+            error: The failure.
+        """
+        name, stream_id = self._spec.name, self._stream_id
+        if not isinstance(error, AuthenticationError | EntitlementError):
+            log_failure(logger, error, "%s poll() stream %d failed: %s", name, stream_id)
+            return
+        log_failure(
+            logger,
+            error,
+            "%s poll() stream %d failed: %s",
+            name,
+            stream_id,
+            expected=logging.DEBUG,
+        )
+        core.warnings.log(
+            f"poll refused\0{name}\0{type(error).__name__}\0{error.status}",
+            "%s poll() stream %d failed: %s (each later poll() table of %s refused this way "
+            "logs at DEBUG)",
+            name,
+            stream_id,
+            failure_text(error),
+            name,
+        )
+
     def _fail_once(self, core: SessionCore, error: MassiveError) -> bool:
         """Mark the row `FAILED`, then fail the table, once; log it at the level its cause gives.
 
@@ -874,13 +911,7 @@ class Poller:
                 return False
             closed = core.fail_stream(self._stream_id, str(error))
             if closed is None:
-                log_failure(
-                    logger,
-                    error,
-                    "%s poll() stream %d failed: %s",
-                    self._spec.name,
-                    self._stream_id,
-                )
+                self._log_failure(core, error)
             try:
                 self._publisher.publish_failure(
                     error if closed in (None, str(error)) else MassiveError(closed)

@@ -496,6 +496,50 @@ def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
     assert stream_rows()[0]["State"] == "FAILED"  # a failed row keeps its state
 
 
+def test_polls_refused_for_one_entitlement_log_one_warning(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Each poll makes its own requests and gets its own refusal: the session's first poll of
+    # the dataset refused this way logs a WARNING, the later ones only DEBUG. A refusal of
+    # another kind is a cause of its own and warns again.
+    refusals = [
+        dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends", status=403),
+        dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends", status=403),
+        dm.AuthenticationError("HTTP 401 from GET /stocks/v1/dividends", status=401),
+    ]
+    tables = []
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        for refusal in refusals:
+            script.fail(refusal)
+            tables.append(start(massive_session, script=script, pollers=pollers, clock=clock))
+            poller = poller_of(pollers)
+            poller.thread.join(TIMEOUT)
+            assert not poller.thread.is_alive()
+    failed = [(r.levelno, r.getMessage()) for r in caplog.records if "failed: HTTP" in r.message]
+    assert [level for level, _ in failed if level >= logging.WARNING] == [
+        logging.WARNING,
+        logging.WARNING,
+    ]
+    warned = [message for level, message in failed if level == logging.WARNING]
+    assert warned[0] == (
+        "stocks.dividends poll() stream 1 failed: HTTP 403 from GET /stocks/v1/dividends (each "
+        "later poll() table of stocks.dividends refused this way logs at DEBUG)"
+    )
+    assert warned[1].startswith("stocks.dividends poll() stream 3 failed: HTTP 401")
+    # Every refusal still logs at DEBUG with its own stream.
+    debug = [message for level, message in failed if level == logging.DEBUG]
+    assert [m.split(" failed")[0] for m in debug] == [
+        f"stocks.dividends poll() stream {n}" for n in (1, 2, 3)
+    ]
+    for table in tables:
+        massive_session.release(table)
+
+
 def test_a_failure_is_recorded_before_the_table_fails(
     *,
     massive_session: dm.MassiveSession,

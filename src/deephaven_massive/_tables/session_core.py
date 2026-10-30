@@ -114,6 +114,7 @@ from deephaven_massive._tables.execution_context import (
     entered,
     holds_update_graph_lock,
     refuse_update_graph_thread,
+    update_cycle,
 )
 from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, release_scope
 
@@ -421,8 +422,9 @@ class SessionCore:
         # Shared with the finalizer, which runs the closers of a session collected unclosed.
         self._closers: list[Callable[[], None]] = []
         self._closed = False
-        # Whether a long verb under the update graph's lock has been reported.
-        self._warned_paused_tables = False
+        # The update cycle during which a long verb under the update graph's lock was last
+        # reported, so each pause of the live tables is reported once; None before any.
+        self._paused_cycle_warned: int | None = None
         # The session's once-per-session warnings, such as history()'s unfilled columns.
         self.warnings: Final = BoundedLog(logger, limit=SESSION_WARNINGS, level=logging.WARNING)
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
@@ -491,8 +493,9 @@ class SessionCore:
         update graph's lock, such as a console command's, passes, and the body is timed there:
         while it runs no live table of the worker updates, so a verb that ran
         `PAUSED_TABLES_WARNING_SECONDS` or longer, such as a `history()` of many requests on a
-        rate-limited key, logs one WARNING saying so, the first time only, whether it returned
-        or raised.
+        rate-limited key, logs one WARNING saying so, whether it returned or raised: once per
+        pause, so one console command of several long verbs warns once, and the next command
+        that pauses the tables again warns again.
 
         Args:
             call: The verb, as the warning names it, such as
@@ -517,7 +520,12 @@ class SessionCore:
             self._warn_paused_tables(call, time.monotonic() - began)
 
     def _warn_paused_tables(self, call: str, seconds: float) -> None:
-        """Warn, once per session, that a verb held the update graph's lock for a long time.
+        """Warn, once per pause of the live tables, that a verb held the update graph's lock long.
+
+        A pause lasts while no update cycle runs: a console command holds the lock from its
+        first line to its last, so its verbs share one pause, and two commands with no cycle
+        between them share one too. The update cycle's number (`update_cycle`) tells them
+        apart. A later verb of the same pause logs at DEBUG.
 
         Args:
             call: The verb, as the warning names it.
@@ -525,19 +533,19 @@ class SessionCore:
         """
         if seconds < PAUSED_TABLES_WARNING_SECONDS:
             return
+        cycle = update_cycle(self.exec_ctx)  # a Java call: before the lock
         with self.registry_lock:
-            first = not self._warned_paused_tables
-            self._warned_paused_tables = True
-        if first:
-            logger.warning(
-                "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "
-                "update graph's lock: live tables do not update until the command ends; pass "
-                "wait=False to fetch() or history() to read in the background (logged once per "
-                "session)",
-                self.label,
-                call,
-                seconds,
-            )
+            first = self._paused_cycle_warned != cycle
+            self._paused_cycle_warned = cycle
+        logger.log(
+            logging.WARNING if first else logging.DEBUG,
+            "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "
+            "update graph's lock: live tables do not update until the command ends; pass "
+            "wait=False to fetch() or history() to read in the background",
+            self.label,
+            call,
+            seconds,
+        )
 
     # --- Transport factory hooks: one per transport, served by the attached ingest ports. ---
 

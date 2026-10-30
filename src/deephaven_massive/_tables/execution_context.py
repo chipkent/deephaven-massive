@@ -10,7 +10,9 @@ enters a context, `entered`, and the probes that tell whether a call can work wh
 - `refuse_update_graph_thread`: refuses a call on one of the update graph's own threads, such
   as inside a table listener;
 - `holds_update_graph_lock`: the calling thread holds the update graph's lock, as every
-  Deephaven console command does, so it must wait for nothing that needs the lock.
+  Deephaven console command does, so it must wait for nothing that needs the lock;
+- `update_cycle`: the number of the update graph's current cycle, which stays the same for as
+  long as a thread holds the lock, so it tells one pause of the live tables from the next.
 
 `MassiveSession()` runs the first two when it captures the caller's context, the one place a
 context is captured. `refuse_update_graph_thread` runs at every entry point (`MassiveSession()`,
@@ -33,6 +35,7 @@ __all__ = [
     "has_script_query_scope",
     "holds_update_graph_lock",
     "refuse_update_graph_thread",
+    "update_cycle",
 ]
 
 
@@ -142,3 +145,19 @@ def holds_update_graph_lock(exec_ctx: ExecutionContext) -> bool:
     """
     update_graph = exec_ctx.update_graph
     return has_exclusive_lock(update_graph) or has_shared_lock(update_graph)
+
+
+def update_cycle(exec_ctx: ExecutionContext) -> int:
+    """Return the number of the update graph's current cycle (its logical clock's step).
+
+    The number grows by one with each update cycle and never changes while a thread holds the
+    update graph's lock, so two calls that see one number ran within one pause of the live
+    tables. A Java call: never make it under `registry_lock`.
+
+    Args:
+        exec_ctx: The session's execution context.
+
+    Returns:
+        The cycle's number.
+    """
+    return int(exec_ctx.update_graph.j_update_graph.clock().currentStep())
