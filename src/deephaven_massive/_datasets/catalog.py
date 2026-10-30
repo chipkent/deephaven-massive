@@ -489,7 +489,7 @@ class DatasetSpec:
 
         Every `bars()` dataset (`is_bars`) holds them, and so does every other dataset of the
         `bars` kind, such as `stocks.previous_day_bar`; their bars are stamped by the day rules
-        (`history_source.stamp_rule`) and, where the request sends `adjusted`, checked against
+        (`row_times.stamp_rule`) and, where the request sends `adjusted`, checked against
         Massive's echo of it. The indicators carry bar times too (`RowTimes.BAR`) but hold
         indicator values, not bars.
         """

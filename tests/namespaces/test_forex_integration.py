@@ -8,8 +8,8 @@ library's own answer to the same request is recorded beside them. How to run the
 `docs/live-tests.md`.
 
 The library's rule under test: a forex 1-day bar stamped at 00:00 UTC or at its UTC day's last
-millisecond is moved to 00:00 UTC of that day, whatever the source, and any other stamp fails
-the call with `MassiveError`.
+millisecond is moved to 00:00 UTC of that day, whatever the source; any other stamp is moved the
+same way and logs a WARNING that the bar may cover other days.
 """
 
 from __future__ import annotations

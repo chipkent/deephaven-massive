@@ -13,6 +13,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import logging
 from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -846,9 +847,19 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
     ]
 
 
-def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_fails(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+    ]
+
+
+def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.WARNING)
     # The 13:00 close of a short day means its day; 14:30 is neither a start nor a close.
     early = int(datetime(2024, 11, 29, 18, tzinfo=UTC).timestamp()) * 1000
     afternoon = early + 90 * 60_000
@@ -861,14 +872,18 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_fails(
     assert [(r["Date"], r["TimestampStart"]) for r in prev] == [
         ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
     ]
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^options\.previous_day_bar: a 1-day bar from "
-        r"/v2/aggs/ticker/\{optionsTicker\}/prev is "
-        r"stamped 2024-11-29T19:30:00\+00:00 \(2024-11-29T14:30:00-05:00 in America/New_York\)"
-        r".*; use bars\(symbols, dm\.Timespan\.DAY\)\.history\(\) for that day, and report",
-    ):
-        rest_session.options.previous_day_bar(TSLA).fetch()
+    assert not stamp_warnings(caplog)
+    # 14:30 is served too, labelled by its New York day, with one WARNING.
+    odd = rows(rest_session.options.previous_day_bar(TSLA).fetch())
+    assert [(r["Date"], r["TimestampStart"]) for r in odd] == [
+        ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert warning.startswith(
+        "options.previous_day_bar: a 1-day bar from /v2/aggs/ticker/{optionsTicker}/prev is "
+        "stamped 2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York), "
+        "which is not a stamp Massive is known to use"
+    )
 
 
 def test_chain_reads_one_underlying(

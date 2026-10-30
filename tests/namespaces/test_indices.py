@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -680,9 +681,19 @@ def bars_reply(*stamps: int) -> Reply:
     return Reply({"status": "OK", "results": [{"T": "I:SPX", "t": t, "c": 1.0} for t in stamps]})
 
 
+def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+    ]
+
+
 def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.WARNING)
     # The range stamps a day at midnight in Chicago (01:00 New York time), `/prev` at the
     # 16:00 close; both mean the New York day, stamped at its start.
     day = date(2025, 6, 2)
@@ -715,20 +726,26 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     ]
     # A range from the Monday holds no whole week, so it asks for none.
     assert rows(week.history(day, last, source=dm.HistorySource.REST)) == []
-    # A week bar at the close, or a day bar at 02:00, is another cut: each fails loudly.
-    with pytest.raises(
-        dm.MassiveError, match=r"^indices\.bars: a bar from .* is stamped 2025-06-01T20:00:00"
-    ):
-        week.history(first, last, source=dm.HistorySource.REST)
+    assert not stamp_warnings(caplog)
+    # A week bar at the close, or a day bar at 02:00, may be another cut: each is served,
+    # labelled by the day its stamp falls on, with one WARNING per timespan.
+    odd_week = rows(week.history(first, last, source=dm.HistorySource.REST))
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in odd_week] == [
+        (None, sunday * MS, (MIDNIGHT_MS + 6 * DAY_MS + HOUR_MS) * MS)
+    ]
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^indices\.bars: a 1-day bar from /v2/aggs/ticker/\{indicesTicker\}/range/.* is "
-        r"stamped 2025-06-02T06:00:00\+00:00 \(2025-06-02T02:00:00-04:00 in America/New_York\)"
-        r".*; read the 1-day flat files with source=dm\.HistorySource\.FLAT_FILES if S3 "
-        r"credentials are configured, and report",
-    ):
-        q.history(day, day, source=dm.HistorySource.REST)
+    odd_day = rows(q.history(day, day, source=dm.HistorySource.REST))
+    assert [(r["Date"], r["TimestampStart"]) for r in odd_day] == [("2025-06-02", MIDNIGHT_MS * MS)]
+    week_warning, day_warning = stamp_warnings(caplog)
+    assert week_warning.startswith("indices.bars: a bar from ")
+    assert " is stamped 2025-06-01T20:00:00+00:00 " in week_warning
+    assert day_warning.startswith(
+        "indices.bars: a 1-day bar from /v2/aggs/ticker/{indicesTicker}/range/"
+    )
+    assert (
+        " is stamped 2025-06-02T06:00:00+00:00 (2025-06-02T02:00:00-04:00 in America/New_York), "
+        "which is not a stamp Massive is known to use"
+    ) in day_warning
 
 
 @pytest.mark.parametrize(("minutes", "kept"), [(30, 0), (60, 1)], ids=["00:30", "01:00"])
@@ -982,24 +999,27 @@ def test_one_flat_file_round_trips(
     ] == expected
 
 
-def test_every_index_from_a_day_file_names_explicit_symbols_as_the_way_out(
+def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_served_with_a_warning(
     *,
     s3_session: dm.MassiveSession,
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # REST has no grouped daily for indices, so `dm.ALL` cannot simply switch to REST.
+    caplog.set_level(logging.WARNING)
     odd = (MIDNIGHT_MS + 2 * 3_600_000) * MS  # 02:00 New York time
     text = f"ticker,open,close,high,low,window_start\nI:SPX,1,2,3,0.5,{odd}\n"
     fake_s3.put("us_indices/day_aggs_v1/2025/06/2025-06-02.csv.gz", make_csv_gz(text))
     q = s3_session.indices.bars(dm.ALL, dm.Timespan.DAY)
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^indices\.bars: a 1-day bar from the flat files us_indices/day_aggs_v1 is "
-        r"stamped .*; pass explicit symbols to read REST with source=dm\.HistorySource\.REST, "
-        r"and report",
-    ):
-        q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES)
+    out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["Close"]) for r in out] == [
+        ("I:SPX", "2025-06-02", MIDNIGHT_MS * MS, 2.0)
+    ]
+    [warning] = stamp_warnings(caplog)
+    assert warning.startswith(
+        "indices.bars: a 1-day bar from the flat files us_indices/day_aggs_v1 is stamped "
+        "2025-06-02T06:00:00+00:00"
+    )
 
 
 def test_the_current_state_datasets_revise_on_their_update_time() -> None:
