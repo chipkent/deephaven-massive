@@ -413,7 +413,7 @@ def test_daily_open_close_refuses_a_time(
     massive_session: dm.MassiveSession, moment: datetime | str
 ) -> None:
     # The day is a calendar date: which UTC day an instant names is left to no guess.
-    with pytest.raises(ValueError, match=r"^crypto\.daily_open_close: date is a calendar date"):
+    with pytest.raises(ValueError, match=r"^crypto\.daily_open_close: date=.* is a calendar date"):
         massive_session.crypto.daily_open_close("X:BTCUSD", moment)
     q = massive_session.crypto.daily_open_close("X:BTCUSD", "2026-01-03")
     assert request_of(q).params == (("date", date(2026, 1, 3)),)
