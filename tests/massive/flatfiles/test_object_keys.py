@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from deephaven_massive._massive.flatfiles.layout import object_key
+from deephaven_massive._massive.flatfiles.object_keys import object_key
 
 
 @pytest.mark.parametrize(

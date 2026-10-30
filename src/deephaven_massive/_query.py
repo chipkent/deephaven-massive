@@ -25,7 +25,7 @@ take the session's registry lock. A thread that only holds the update graph's lo
 Deephaven console runs every command holding it, and every verb works there.
 
 The verbs delegate the transport work to three interfaces, one per transport, defined in
-`_tables/core.py` and provided by the session core's factory hooks: `RestTransport` (`fetch`,
+`_tables/transports.py` and provided by the session core's factory hooks: `RestTransport` (`fetch`,
 `poll`, REST `history`), `StreamTransport` (opening a WebSocket stream), and
 `FlatFileTransport` (flat-file `history`).
 `history()` chooses its source itself (`choose_source` in `_datasets/history_source.py`) and
@@ -71,7 +71,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import column_table, describe
-from deephaven_massive._tables.liveness import entered, refuse_update_graph_thread
+from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import override
 
@@ -82,7 +82,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike
 
 __all__ = [

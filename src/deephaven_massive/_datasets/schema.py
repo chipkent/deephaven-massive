@@ -29,8 +29,8 @@ the dataset's table shape:
 - `dataset_schema`, the merge: the ordered union by column name of the renamed columns of
   every source of every member of the dataset's kind (`Catalog.members`), with the library's
   own time columns (`row_times`): `Symbol`, `Date`, and `Timestamp` or `TimestampStart` and
-  `TimestampEnd` first, `TimestampInsert` last, each column's wire type the lattice join
-  (`join`) of every contribution. Every member of a kind therefore has the
+  `TimestampEnd` first, `TimestampInsert` last, each column's wire type the common type
+  (`WireType.common_type`) of every contribution. Every member of a kind therefore has the
   same columns: crypto trades carry the stocks-only `Tape`, always null. Each column also gets
   one description chosen for the dataset, the transports that fill it, and the wire keys behind
   it (`Column`); every result's column descriptions and the queries' `columns()` tables read
@@ -90,7 +90,6 @@ __all__ = [
     "Schema",
     "SourceColumn",
     "dataset_schema",
-    "join",
     "key_column",
     "pascal_case",
     "rename",
@@ -621,32 +620,6 @@ def _by_position(
     return [entry for _, entry in sorted(enumerate(found), key=rank)]
 
 
-_JOINS: Final[Mapping[frozenset[WireType], WireType]] = {
-    frozenset({WireType.LONG, WireType.DOUBLE}): WireType.DOUBLE,
-    frozenset({WireType.LONG, WireType.INT_ARRAY}): WireType.INT_ARRAY,
-}
-"""The widening joins of two different wire types; every other pair is a type conflict."""
-
-
-def join(first: WireType, second: WireType) -> WireType | None:
-    """Return the lattice join of two wire types of one column, or None for a conflict.
-
-    Equal types join to themselves (two `epoch`s each keep their own unit, so they join too);
-    `long` with `double` gives `double`, and `long` with `int-array` gives `int-array` (a
-    scalar becomes a one-element list). Any other pair is a type conflict.
-
-    Args:
-        first: One contribution's type.
-        second: Another contribution's type.
-
-    Returns:
-        The joined type, or None when the two conflict.
-    """
-    if first is second:
-        return first
-    return _JOINS.get(frozenset({first, second}))
-
-
 _TRANSPORT_ORDER: Final = (Transport.REST, Transport.FLAT_FILES, Transport.WS)
 """The order in which a column's transports are listed and its descriptions are tried: REST
 first, because its descriptions are the most complete."""
@@ -1093,9 +1066,10 @@ def widen(values: pa.Array, target: pa.DataType) -> pa.Array:
     """Widen one source column to its dataset column's Arrow type, by the lattice joins.
 
     A source joins its kind with its own wire type, which the merged column may widen
-    (`join`): a `long` in a `double` column is cast, and a `long` in an `int[]` column becomes
-    a one-element list (a null stays null). A column already of its type is cast to itself, at
-    no cost. Every transport converts its decoded columns with it, so they all widen alike.
+    (`WireType.common_type`): a `long` in a `double` column is cast, and a `long` in an
+    `int[]` column becomes a one-element list (a null stays null). A column already of its
+    type is cast to itself, at no cost. Every transport converts its decoded columns with it,
+    so they all widen alike.
     A `long` beyond 2**53 in a `double` column takes the nearest `double`, as the lattice join
     means it to, rather than failing the whole column.
 
@@ -1177,10 +1151,10 @@ def dataset_schema(
     every dataset. `Symbol`, `Date`, `Timestamp`, `TimestampStart`, and `TimestampEnd` come
     first, in that order, where the dataset declares them as keys or the library fills them;
     `TimestampInsert` comes last; every other column, `Underlying` included, takes its place
-    by first appearance. Each column's type is the `join` of every contribution, mapped
-    through `COLUMN_TYPES` (a library `Date` is a date, so ISO text, and the other library
-    columns instants). `Catalog.dataset_schema` calls it once per dataset and caches the
-    result.
+    by first appearance. Each column's type is the `WireType.common_type` of every
+    contribution, mapped through `COLUMN_TYPES` (a library `Date` is a date, so ISO text,
+    and the other library columns instants). `Catalog.dataset_schema` calls it once per
+    dataset and caches the result.
 
     Each column also gets its transports and wire keys from the dataset's own sources
     (`Column.supplied_by`, `Column.wire_keys`; a library time column lists every transport of
@@ -1242,7 +1216,9 @@ def dataset_schema(
         for contribution in rename(member, found):
             prior = types.get(contribution.column)
             joined = (
-                contribution.wire_type if prior is None else join(prior, contribution.wire_type)
+                contribution.wire_type
+                if prior is None
+                else prior.common_type(contribution.wire_type)
             )
             if joined is None:
                 raise ValueError(
@@ -1257,7 +1233,7 @@ def dataset_schema(
     library = _library_names(spec)
     for name in library:
         prior = types.get(name)
-        joined = _LIBRARY_TYPES[name] if prior is None else join(prior, _LIBRARY_TYPES[name])
+        joined = _LIBRARY_TYPES[name] if prior is None else prior.common_type(_LIBRARY_TYPES[name])
         if joined is None:
             raise ValueError(
                 f"member types: {spec.name}: column {name!r} is {prior} in a source but "

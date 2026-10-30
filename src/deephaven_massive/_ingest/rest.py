@@ -25,7 +25,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
   (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
   are stamped at 00:00 of their day in the class day zone, and a stamp Massive is not known to
-  use raises (`history_source.stamp_rule`, `_stamped`).
+  use raises (`row_times.stamp_rule`, `_stamped`).
 - **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`):
   `Date`, a bar's `TimestampStart` and `TimestampEnd`, and `TimestampInsert`, the instant the
   page arrived. The day zone of each call follows its own symbols' class (`dates.day_class`),
@@ -96,10 +96,12 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.catalog import filter_key, takes_instants
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
-from deephaven_massive._datasets.history_source import StampRule, partition_dates, stamp_rule
+from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import (
     DATE,
     RowTimes,
+    StampRule,
+    stamp_rule,
     time_column,
     time_rule,
     within,
@@ -151,7 +153,7 @@ from deephaven_massive._massive import (
 )
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
-from deephaven_massive._tables.liveness import entered, holds_update_graph_lock
+from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -163,13 +165,14 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.dates import DaySpan, TimeRange
     from deephaven_massive._datasets.history_source import HistoryWindow
-    from deephaven_massive._datasets.request import HostDecision, Request
+    from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._massive import DriftSample, Patience, RestClient, RestPath
-    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.diagnostics import DriftRegistry
+    from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._tables.transports import HostDecision
 
 __all__ = [
     "Call",
@@ -198,8 +201,6 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
-_SESSION_DATE: Final = "session_end_date"
-"""The futures date parameter that names a trading session, not a calendar day."""
 
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
@@ -1260,7 +1261,7 @@ class RestReader:
             remedy: What the caller can do instead when a bar's stamp is refused, which the
                 verb supplies; bars of a day or longer move to 00:00 of their day in the class
                 day zone, and a stamp Massive is not known to use raises `MassiveError`
-                (`history_source.stamp_rule`).
+                (`row_times.stamp_rule`).
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
@@ -1443,7 +1444,11 @@ class RestReader:
                         request_id=error.request_id,
                     ) from error
                 # A futures session is requested on its own: a 404 there is that session's.
-                session = call.query.get(_SESSION_DATE)
+                session = (
+                    call.query.get(session_date_param(spec))
+                    if window is not None and window.requested is None
+                    else None
+                )
                 scope = "" if session is None else f" for the session {session}"
                 if self.state.first("missing", spec.name, call.symbol, scope):
                     logger.warning(
@@ -2083,7 +2088,7 @@ class RestEndpoints:
         dataset's time axis, or as the aggregates' `{from}/{to}` millisecond epochs, one
         request series per symbol where the path takes one. Rows outside the window are
         dropped (`_keep`), bars of a day or longer are stamped at 00:00 of their day in the
-        class day zone (`_stamped`, `timestamps.day_starts`), and every row gets the library's
+        class day zone (`_stamped`, `row_times.day_starts`), and every row gets the library's
         time columns. A symbol with no data adds no rows. Before the first request, one INFO
         line announces a long download (`rate_limits.announce`): a grouped-daily or
         per-session download of more than five requests, and any read whose paced requests
@@ -2384,6 +2389,7 @@ def _history_calls(
     requested = window.requested
     if requested is None:
         sessions = cast("DaySpan", window.sessions)
+        session = session_date_param(spec)
         return [
             call
             for day in sessions.days()
@@ -2393,7 +2399,7 @@ def _history_calls(
                 rest_path,
                 request,
                 symbols=request.symbols,
-                extra={**order, _SESSION_DATE: day},
+                extra={**order, session: day},
                 split=split,
             )
         ]
@@ -2490,7 +2496,7 @@ def _with_remedy(rule: StampRule | None, remedy: str) -> StampRule | None:
     """Give a stamp rule the remedy of the verb that applies it.
 
     Args:
-        rule: The request's rule (`history_source.stamp_rule`), or None.
+        rule: The request's rule (`row_times.stamp_rule`), or None.
         remedy: What the caller can do instead when a stamp is refused.
 
     Returns:
@@ -2502,7 +2508,7 @@ def _with_remedy(rule: StampRule | None, remedy: str) -> StampRule | None:
 def _stamped(
     spec: DatasetSpec, source: str, batch: pa.RecordBatch, *, rule: StampRule
 ) -> pa.RecordBatch:
-    """Apply a stamp rule to a batch of bars (`history_source.stamp_rule`).
+    """Apply a stamp rule to a batch of bars (`row_times.stamp_rule`).
 
     Args:
         spec: The dataset, for the message.
@@ -2515,7 +2521,7 @@ def _stamped(
         The batch, with its `TimestampStart` at 00:00 of each bar's day in the class day zone.
 
     A stamp at another time or on another day raises the `MassiveError` of
-    `timestamps.day_starts`, which ends with the rule's remedy.
+    `row_times.day_starts`, which ends with the rule's remedy.
     """
     name = time_column(spec.times)
     index = batch.schema.get_field_index(name)

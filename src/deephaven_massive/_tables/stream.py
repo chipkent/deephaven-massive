@@ -92,8 +92,10 @@ from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
-from deephaven_massive._tables.liveness import StreamHandle, entered, new_scope
+from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._tables.watchlist import SymbolWatch
 from deephaven_massive._types import _All
 
@@ -109,7 +111,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._enums import AssetClass
     from deephaven_massive._massive import DriftReport
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
     "BACKLOG_WARNING_ROWS",

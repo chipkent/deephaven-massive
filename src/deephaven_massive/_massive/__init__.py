@@ -144,7 +144,7 @@ _EXPORTS: dict[str, str] = {
     "Transport": "deephaven_massive._massive.spec.types",
     "WireType": "deephaven_massive._massive.spec.types",
     "WireUnit": "deephaven_massive._massive.spec.types",
-    "object_key": "deephaven_massive._massive.flatfiles.layout",
+    "object_key": "deephaven_massive._massive.flatfiles.object_keys",
     "origin_of": "deephaven_massive._massive.net.origins",
     "to_batch": "deephaven_massive._massive.rest.batch",
     "encode_value": "deephaven_massive._massive.spec.values",
@@ -154,7 +154,7 @@ _EXPORTS: dict[str, str] = {
 # the interface; at run time `__getattr__` resolves the names instead.
 if TYPE_CHECKING:
     from deephaven_massive._massive.flatfiles.client import FlatFileClient
-    from deephaven_massive._massive.flatfiles.layout import object_key
+    from deephaven_massive._massive.flatfiles.object_keys import object_key
     from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
     from deephaven_massive._massive.net.cancel import Cancel
     from deephaven_massive._massive.net.errors import (

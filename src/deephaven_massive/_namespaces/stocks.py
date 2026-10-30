@@ -60,7 +60,7 @@ if TYPE_CHECKING:
         StreamHistoryQuery,
         StreamQuery,
     )
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
 
 __all__ = ["DATASETS", "_StockFilings", "_StockFinancials", "_Stocks"]

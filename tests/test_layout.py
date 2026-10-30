@@ -1964,7 +1964,7 @@ def _layer_check(module: str, source: str) -> list[str]:
         ("_config.py", "vocabulary"),
         ("_types.py", "vocabulary"),
         ("_datasets/catalog.py", "datasets"),
-        ("_tables/core.py", "tables"),
+        ("_tables/session_core.py", "tables"),
         ("_ingest/clients.py", "ingest"),
         ("__init__.py", "api"),
         ("_session.py", "api"),
@@ -1989,9 +1989,15 @@ def test_a_module_in_no_known_layer_is_reported(module: str) -> None:
     [
         ("_errors.py", "from deephaven_massive._massive import WireError\n"),
         ("_datasets/catalog.py", "from deephaven_massive._enums import Timespan\n"),
-        ("_tables/core.py", "from deephaven_massive._datasets.catalog import DatasetSpec\n"),
-        ("_ingest/flatfiles.py", "from deephaven_massive._tables.core import SessionCore\n"),
-        ("_query.py", "from deephaven_massive._tables.liveness import entered\n"),
+        (
+            "_tables/session_core.py",
+            "from deephaven_massive._datasets.catalog import DatasetSpec\n",
+        ),
+        (
+            "_ingest/flatfiles.py",
+            "from deephaven_massive._tables.session_core import SessionCore\n",
+        ),
+        ("_query.py", "from deephaven_massive._tables.execution_context import entered\n"),
         ("_namespaces/base.py", "from deephaven_massive._query import Query\n"),
         ("_tables/liveness.py", "from . import diagnostics\n"),
         ("__init__.py", "_EXPORTS = {'MassiveSession': 'deephaven_massive._session'}\n"),
@@ -2010,7 +2016,7 @@ def test_a_module_may_import_its_own_layer_and_lower_ones(module: str, source: s
             "2: the datasets layer must not import the api layer: deephaven_massive._query",
         ),
         (
-            "_tables/core.py",
+            "_tables/session_core.py",
             "from deephaven_massive._ingest.flatfiles import FlatFileHistory\n",
             "1: the tables layer must not import the ingest layer: deephaven_massive._ingest",
         ),
@@ -2041,7 +2047,7 @@ def test_a_module_may_import_its_own_layer_and_lower_ones(module: str, source: s
         ),
         (
             "_datasets/dates.py",
-            "importlib.import_module('deephaven_massive._tables.core')\n",
+            "importlib.import_module('deephaven_massive._tables.session_core')\n",
             "1: the datasets layer must not import the tables layer",
         ),
     ],
@@ -2159,7 +2165,7 @@ def test_deephaven_where_the_layer_allows_it(module: str, source: str) -> None:
             "1: nothing imports deephaven_server: deephaven_server.Server",
         ),
         (
-            "_tables/core.py",
+            "_tables/session_core.py",
             "if TYPE_CHECKING:\n    import deephaven_server\n",
             "2: nothing imports deephaven_server: deephaven_server",
         ),
@@ -2250,7 +2256,7 @@ def test_the_upper_layers_may_do_io_and_start_threads() -> None:
         "from deephaven_massive import _massive\nx = getattr(_massive, 'Flat' + 'FileClient')\n",
     ],
 )
-@pytest.mark.parametrize("module", ["_tables/core.py", "_query.py", "_datasets/request.py"])
+@pytest.mark.parametrize("module", ["_tables/session_core.py", "_query.py", "_datasets/request.py"])
 def test_only_ingest_uses_a_wire_client(module: str, source: str) -> None:
     [found] = _layer_check(module, source)
     assert "only the ingest layer uses the wire client" in found
@@ -2320,7 +2326,7 @@ def test_only_the_session_imports_ingest(module: str, source: str, message: str)
     "source",
     [
         "",
-        "from deephaven_massive._tables.core import SessionCore\n",
+        "from deephaven_massive._tables.session_core import SessionCore\n",
         '"""The package."""\n\nfrom .core import SessionCore\n',
         '"""The package."""\n\n__all__ = []\n',
     ],

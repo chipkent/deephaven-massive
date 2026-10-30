@@ -38,7 +38,8 @@ from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import DriftReport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
-from deephaven_massive._tables import core as _core
+from deephaven_massive._tables import session_core as _core
+from deephaven_massive._tables import transports as _transports
 from deephaven_massive._tables.columns import describe
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
@@ -46,14 +47,9 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamUpdate,
 )
-from deephaven_massive._tables.liveness import (
-    Reaper,
-    ResultRegistry,
-    StreamHandle,
-    entered,
-    make_result,
-    new_scope,
-)
+from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, new_scope
+from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._types import override
 from tests._fakes.stream import transport_of
 
@@ -68,8 +64,8 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.request import StreamKey
-    from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.liveness import ResultRecord
+    from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0
@@ -227,7 +223,7 @@ def test_a_console_command_never_waits_for_another_threads_open(
     helper = _when_waiting(core, monkeypatch, waiting.set)
     waiter.start()
     assert waiting.wait(TIMEOUT)
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.session_core"):
         console_command(command)
     # The second row of the key in m.streams() is explained.
     assert caplog.messages == [
@@ -416,15 +412,15 @@ def test_an_interrupt_before_the_record_is_stored_is_not_masked(
     # stored: the cleanup must find nothing to release, so the interrupt itself propagates
     # (not a KeyError from releasing a record that was never stored).
     core = massive_session._core
-    state_class = _core._StreamState
+    state_class = _core._StreamEntry
 
     def interrupted(*_args: object, **_kwargs: object) -> object:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(_core, "_StreamState", interrupted)
+    monkeypatch.setattr(_core, "_StreamEntry", interrupted)
     with pytest.raises(KeyboardInterrupt):
         stream_query(massive_session).blink()
-    monkeypatch.setattr(_core, "_StreamState", state_class)
+    monkeypatch.setattr(_core, "_StreamEntry", state_class)
     assert core._streams == {}
     assert core._stream_ids == {}
 
@@ -901,7 +897,7 @@ def test_a_session_collected_unclosed_runs_its_closers(
     m._core.on_close(broken)
     m._core.on_close(lambda: ran.append("closed"))
     reaper = m._core._reaper.thread
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)
@@ -924,7 +920,7 @@ def test_a_closed_session_does_not_run_its_closers_again_when_collected(
     m._core.on_close(lambda: ran.append("closed"))
     reaper = m._core._reaper.thread
     m.close()
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)
@@ -943,7 +939,7 @@ def test_closers_run_and_failures_are_logged(
 
     massive_session._core.on_close(failing)
     massive_session._core.on_close(lambda: ran.append("second"))
-    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
     assert ran == ["second"]
     assert "a transport failed to close" in caplog.text
@@ -1139,7 +1135,7 @@ def test_a_long_verb_in_a_console_command_is_reported_once(
         made.append(q.append_only())
         made.append(q.ring(5))
 
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         console_command(command)
     (message,) = caplog.messages
     assert message.startswith(f"{label(massive_session)}: test.trades append_only() ran for ")
@@ -1158,7 +1154,7 @@ def test_a_short_verb_in_a_console_command_is_not_reported(
 ) -> None:
     q = stream_query(massive_session)
     made: list[Table] = []
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         console_command(lambda: made.append(q.blink()))
     assert caplog.messages == []
     massive_session.release(made.pop())
@@ -1348,7 +1344,7 @@ def test_a_closer_registered_after_close_never_runs_again(
     reaper = m._core._reaper.thread
     m.close()
     m._core.on_close(lambda: ran.append("late"))
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)
@@ -1363,7 +1359,7 @@ def test_a_failure_after_the_stream_left_the_registry_is_logged(
 ) -> None:
     core = massive_session._core
     result = stream_query(massive_session).blink()
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.session_core"):
         core.fail_stream(1, "shown")  # in the registry: shown in m.streams(), not logged
         core.fail_stream(42, "late")  # never registered: only logged
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
@@ -1463,9 +1459,9 @@ def test_a_deephaven_error_of_a_live_stream_is_not_wrapped(
 # --- The ingest ports and the catalog --------------------------------------------------------
 
 
-_REST = cast("_core.RestTransport", object())
-_STREAMS = cast("_core.StreamTransport", object())
-_FLAT_FILES = cast("_core.FlatFileTransport", object())
+_REST = cast("_transports.RestTransport", object())
+_STREAMS = cast("_transports.StreamTransport", object())
+_FLAT_FILES = cast("_transports.FlatFileTransport", object())
 
 
 class _Ports:
@@ -1473,15 +1469,15 @@ class _Ports:
     def __init__(self) -> None:
         self.asked: list[str] = []
 
-    def rest(self) -> _core.RestTransport:
+    def rest(self) -> _transports.RestTransport:
         self.asked.append("rest")
         return _REST
 
-    def streams(self) -> _core.StreamTransport:
+    def streams(self) -> _transports.StreamTransport:
         self.asked.append("streams")
         return _STREAMS
 
-    def flat_files(self) -> _core.FlatFileTransport:
+    def flat_files(self) -> _transports.FlatFileTransport:
         self.asked.append("flat_files")
         return _FLAT_FILES
 
@@ -1732,7 +1728,7 @@ def test_a_table_that_cannot_be_failed_does_not_spare_the_others(
     monkeypatch.setattr(fake_streams, "_fail", stubborn)  # before the opens bind it
     first = stream_query(massive_session).append_only()
     second = stream_query(massive_session, ["MSFT"]).append_only()
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.core"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
     assert f"{label(massive_session)}: could not fail a live table" in caplog.text
     assert f"{label(massive_session)} closed; 1 live tables failed" in caplog.text

@@ -24,7 +24,7 @@ Every market-data row answers three questions, whichever transport served it:
 `RowTimes` says which of these a dataset has, and `TimeRule.fill` computes them for one batch
 of rows already in the dataset's schema, after the transports have converted the vendor's
 fields and, for bars of a day or longer, checked and moved their stamps
-(`history_source.stamp_rule`). The vendor's own time fields feed these columns through the
+(`stamp_rule`). The vendor's own time fields feed these columns through the
 dataset's declared keys and are not kept beside them: the bar start (`t`, `s`,
 `window_start`) becomes `TimestampStart`, the WebSocket bar end `e` becomes `TimestampEnd`
 (recomputed, see below), and the futures `session_end_date` and the open-close `from` and `day`
@@ -45,11 +45,11 @@ become `Date`.
   Monday; for stocks, options, and indices a period's first weekday) to 00:00 after its last
   day (last weekday for stocks and options; for indices, which can update around the clock,
   the period's last calendar day and one hour more); stock, option, and index days count as
-  trading days with a holiday allowance (`dates.last_trading_day`); `Date` is null.
+  trading days with a holiday allowance (`bar_periods.last_trading_day`); `Date` is null.
 - **Futures session bar.** Massive's `window_start` to 17:00 Chicago time on its session date;
   `Date` is that date.
 - **Futures bar of several sessions.** `window_start` to 17:00 Chicago time on the latest day
-  its sessions can end on, counted with the same holiday allowance (`dates.last_trading_day`)
+  its sessions can end on, counted with the same holiday allowance (`bar_periods.last_trading_day`)
   from the session date of its start plus one more session (a folded first session opens on
   the evening before its holiday), or on its label if that is later; `Date` is null.
 - **Futures week or longer.** `window_start` to 17:00 Chicago time on the last weekday of the
@@ -64,9 +64,22 @@ last session, so the end is the later of the two readings. The next midnight is 
 calendar's next midnight in the zone, never 24 hours later, so a day across a daylight-saving
 change keeps its true length.
 
+**Bar stamps.** Bars of a day or longer are stamped at 00:00 of the day they start on, in the
+class day zone, whichever source serves them, before their time columns are filled. Massive
+stamps the same bar differently by source (the day's start on the aggregates range, the 16:00
+New York session close on the stock grouped daily and `/prev`, the day's last millisecond in
+the forex and crypto day files), so each stamp at a time of day Massive is known to use moves
+to that day's 00:00 (`day_starts`), and any other raises `MassiveError`, so a bar of another
+day cut is never returned under a label it may not match. `stamp_rule` decides which times
+each class accepts, and the transports apply it through `StampRule.stamp`.
+
 **Zones.** Day boundaries are computed with `zoneinfo`, once per distinct UTC day of a batch
 (and once more on a day that changes its clock), and applied to the whole column with Arrow;
 Arrow's own time-zone database is not used, so nothing depends on one being installed.
+
+The module is long but has one subject, a row's time columns: the bar-stamp rule is the first
+step of filling a bar's window, and every other rule here fills one of those columns or keeps
+rows by them.
 
 The module is pure: no I/O, no Deephaven call, and its only state is the once-only log line of
 a futures WebSocket bar whose end disagrees with its length.
@@ -74,35 +87,41 @@ a futures WebSocket bar whose end disagrees with its length.
 
 from __future__ import annotations
 
-import calendar
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._datasets.dates import (
-    CHICAGO,
-    FUTURES_SESSION_ROLL,
+from deephaven_massive._datasets.bar_periods import (
     bar_days,
-    day_end,
-    day_zone,
     futures_period_last,
-    futures_session,
-    futures_session_end,
     intraday,
     last_trading_day,
     unit_ns,
 )
-from deephaven_massive._datasets.timestamps import ISSUES_URL
+from deephaven_massive._datasets.dates import (
+    DAY_ZONES,
+    day_end,
+    day_zone,
+    trades_at_weekends,
+)
+from deephaven_massive._datasets.futures_sessions import (
+    CHICAGO,
+    futures_session,
+    futures_session_end,
+    session_days,
+    weekday_sessions,
+)
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
     from datetime import tzinfo
 
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -112,15 +131,19 @@ __all__ = [
     "DATE",
     "END",
     "INSERT",
+    "ISSUES_URL",
     "LIBRARY_COLUMNS",
     "START",
     "TIMESTAMP",
     "BarBounds",
     "RowTimes",
     "SessionDates",
+    "StampRule",
     "StartRule",
     "TimeRule",
+    "day_starts",
     "local_dates",
+    "stamp_rule",
     "time_column",
     "time_rule",
     "within",
@@ -148,10 +171,6 @@ coin one."""
 
 _DAY_NS: Final = 86_400 * 10**9
 _SECOND_NS: Final = 10**9
-_ROLL_NS: Final = FUTURES_SESSION_ROLL // timedelta(microseconds=1) * 1000
-"""`dates.FUTURES_SESSION_ROLL` in nanoseconds, for the column form of the session rule."""
-_EPOCH_WEEKDAY: Final = calendar.THURSDAY
-"""The weekday (Monday is 0) of 1970-01-01, day 0 of the epoch."""
 _NEVER: Final = 2**62
 """An instant later than any bounded timestamp: a day whose clock never changes."""
 _INSTANT: Final = pa.timestamp("ns", tz="UTC")
@@ -361,41 +380,6 @@ def local_dates(ns: pa.Array, zone: tzinfo) -> pa.Array:
         The dates, `string`; nulls stay null.
     """
     return _iso(_days(ns, zone))
-
-
-def _session_days(ns: pa.Array) -> pa.Array:
-    """Return the futures session of each instant by the 17:00 Chicago rule, as epoch days.
-
-    The column form of `dates.futures_session`, from the same constant: the session ends on the
-    Chicago date of the instant plus `FUTURES_SESSION_ROLL`, so an instant from 17:00 Chicago
-    time on belongs to the next day's session.
-
-    Args:
-        ns: Epoch nanoseconds, `int64`.
-
-    Returns:
-        The session dates, days since the epoch, `int64`.
-    """
-    return pc.divide(pc.add(_local_ns(ns, CHICAGO), _ROLL_NS), _DAY_NS)
-
-
-def _weekday_sessions(days: pa.Array) -> pa.Array:
-    """Move session dates that fall on a weekend to the Monday after.
-
-    The column form of `dates.weekday_on_or_after`: no futures session ends on a Saturday or
-    Sunday.
-
-    Args:
-        days: Session dates, days since the epoch, `int64`.
-
-    Returns:
-        The dates, every one a weekday.
-    """
-    shifted = pc.add(days, _EPOCH_WEEKDAY)
-    weekday = pc.subtract(shifted, pc.multiply(pc.divide(shifted, 7), 7))
-    saturday, sunday = pc.equal(weekday, calendar.SATURDAY), pc.equal(weekday, calendar.SUNDAY)
-    move = pc.if_else(saturday, 2, pc.if_else(sunday, 1, 0))
-    return pc.add(days, move)
 
 
 def _instant(ns: int) -> datetime:
@@ -636,7 +620,7 @@ class TimeRule:
         sent = _column(rows, DATE)
         if sent.null_count == 0:
             return sent
-        ruled = _iso(_weekday_sessions(_session_days(ns)))
+        ruled = _iso(weekday_sessions(session_days(_local_ns(ns, CHICAGO))))
         if session_dates is not None:
             ruled = session_dates(_column(rows, "Symbol"), ns, ruled)
         return pc.coalesce(sent, ruled)
@@ -714,7 +698,9 @@ class TimeRule:
         last = pc.subtract(end, 1)
         if self._futures:
             dates = self._sessions(rows, start, session_dates)
-            same = pc.equal(_session_days(start), _session_days(last))
+            same = pc.equal(
+                session_days(_local_ns(start, CHICAGO)), session_days(_local_ns(last, CHICAGO))
+            )
         else:
             zone = self._zone()
             first_day = _days(start, zone)
@@ -757,8 +743,8 @@ class TimeRule:
         """Fill a bar of a day or longer of a class with a day zone.
 
         Its start is moved to 00:00 of its window's first day and its end is 00:00 after its
-        window's last day (`dates.bar_days`), plus an hour for indices; a 1-day bar's `Date` is
-        its day, and every longer bar's is null.
+        window's last day (`bar_periods.bar_days`), plus an hour for indices; a 1-day bar's
+        `Date` is its day, and every longer bar's is null.
 
         Args:
             rows: The batch, whose starts the stamp check already moved to 00:00 of their day.
@@ -802,10 +788,10 @@ class TimeRule:
         One session: it ends at 17:00 Chicago time on its date, which is its `Date`. Several
         sessions: 17:00 Chicago on the latest day its sessions can end on, or on its label when
         that is later. The sessions are counted with the holiday allowance
-        (`dates.last_trading_day`) from the session date of its start, plus one: a bar whose
+        (`bar_periods.last_trading_day`) from the session date of its start, plus one: a bar whose
         first session a holiday folded opens on the evening before the holiday, whose date is
         the holiday itself. A week or longer: 17:00 Chicago on the last weekday of the
-        latest period its label allows (`dates.futures_period_last`). Only a one-session bar
+        latest period its label allows (`bar_periods.futures_period_last`). Only a one-session bar
         keeps its `Date`.
 
         Args:
@@ -895,3 +881,366 @@ def time_rule(
     if times is RowTimes.DAY:
         return TimeRule(spec.name, times, asset_class, Timespan.DAY)
     return TimeRule(spec.name, times, asset_class)
+
+
+@dataclass(frozen=True, slots=True)
+class StampRule:
+    """How the transports stamp the bars of a request of a day or longer (`stamp_rule`).
+
+    Made per request on the calling thread and only read afterwards, so reader threads may
+    share it. A transport sets `remedy` for its own verb (`dataclasses.replace`) before
+    stamping.
+
+    Attributes:
+        zone: The class day zone; every bar is stamped at 00:00 there of the day it starts on.
+        known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
+            the class's bars of this length on some source; each moves to 00:00 of its day.
+        what: The kind of row, for messages: `"1-day bar"`, `"bar"`, or `"indicator value"`.
+        weekdays: For week bars, the weekdays (Monday is 0) a bar may be stamped on in `zone`;
+            empty for every other timespan.
+        months: For month, quarter, and year bars, the months whose 1st a bar may be stamped
+            on in `zone`; empty for every other timespan.
+        remedy: What the caller can do instead when a stamp is refused, for the message.
+    """
+
+    zone: tzinfo
+    known: frozenset[time]
+    what: str
+    weekdays: frozenset[int] = frozenset()
+    months: frozenset[int] = frozenset()
+    remedy: str = ""
+
+    def stamp(self, label: str, values: pa.Array, *, source: str) -> pa.Array:
+        """Stamp a column of bars at 00:00 of their days (`day_starts`).
+
+        Args:
+            label: The dataset, for the message.
+            values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
+            source: Where the bars came from, for the message: a REST path template or a
+                flat-file prefix.
+
+        Returns:
+            The stamps at the start of their days, in the same type; nulls stay null.
+
+        A stamp at another time of day than 00:00 or one of `known`, or on a day `weekdays`
+        or `months` rules out, raises the `MassiveError` of `day_starts`, which
+        ends with `remedy`.
+        """
+        return day_starts(
+            label,
+            values,
+            zone=self.zone,
+            known=self.known,
+            weekdays=self.weekdays,
+            months=self.months,
+            source=source,
+            what=self.what,
+            remedy=self.remedy,
+        )
+
+
+_SESSION_CLOSE: Final = time(16)
+"""The 16:00 New York session close: grouped daily, `/prev`, and the stock day files stamp a
+stock, option, or index 1-day bar there."""
+
+_EARLY_CLOSE: Final = time(13)
+"""The 13:00 New York close of a short trading day (the day after Thanksgiving, Christmas Eve,
+July 3), presumed to be where a source that stamps a 1-day bar at its close stamps such a
+day. It lies inside its own New York day, so accepting it on any date never changes which day
+a bar is labelled with."""
+
+_INDEX_OPTION_CLOSES: Final = frozenset({time(13, 15), time(16, 15)})
+"""The closes of index options such as SPX and SPXW, 15 minutes after the stock market's on
+full and short days, presumed to be where `/prev` may stamp such a contract's 1-day bar."""
+
+_CHICAGO_MIDNIGHT: Final = time(1)
+"""Midnight in Chicago, as New York time (the two zones change clocks together): the indices
+range and day files stamp their 1-day bars there."""
+
+_LAST_MILLISECOND: Final = time(23, 59, 59, 999_000)
+"""The last millisecond of a UTC day: forex grouped daily and `/prev` and the forex and crypto
+day files stamp their 1-day bars there."""
+
+_ONE_DAY_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
+    AssetClass.STOCKS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE}),
+    AssetClass.OPTIONS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE, *_INDEX_OPTION_CLOSES}),
+    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT, _EARLY_CLOSE, _SESSION_CLOSE}),
+    AssetClass.FOREX: frozenset({_LAST_MILLISECOND}),
+    AssetClass.CRYPTO: frozenset({_LAST_MILLISECOND}),
+}
+"""Per class with a day zone (`dates.DAY_ZONES`), the times of day besides 00:00 at which some
+source stamps a 1-day bar: those of Massive's documented samples, and the closes of a short
+trading day and of index options, each of which lies inside its own New York day."""
+
+_LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
+    AssetClass.STOCKS: frozenset(),
+    AssetClass.OPTIONS: frozenset(),
+    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT}),
+    AssetClass.FOREX: frozenset(),
+    AssetClass.CRYPTO: frozenset(),
+}
+"""Per class with a day zone, the times of day besides 00:00 at which the aggregates range
+stamps its bars: accepted for a bar of several days, a week, or longer, which only the range
+serves, and for an indicator value of a day or longer, which is computed over the range's
+bars. The indices range's midnight in Chicago is that of its 1-day bars and of the index
+indicator samples' underlying aggregates."""
+
+_WEEK_STAMP_DAYS: Final = frozenset({5, 6, 0})
+"""The days a week bar of a class that does not trade at weekends may be stamped on: the
+Saturday or Sunday before its Monday-to-Friday week, which belong to it, or that Monday."""
+
+_MONDAY: Final = frozenset({0})
+"""The day a forex or crypto week bar must be stamped on: the Monday its calendar week starts."""
+
+_PERIOD_MONTHS: Final[Mapping[Timespan, frozenset[int]]] = {
+    Timespan.MONTH: frozenset(range(1, 13)),
+    Timespan.QUARTER: frozenset({1, 4, 7, 10}),
+    Timespan.YEAR: frozenset({1}),
+}
+"""The months whose 1st a month, quarter, or year bar may be stamped on."""
+
+_DAYS_OR_LONGER: Final = frozenset(
+    {Timespan.DAY, Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR}
+)
+
+
+def stamp_rule(
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    asset_class: AssetClass | ClassFromPrefix = ClassFromPrefix.ANY,
+) -> StampRule | None:
+    """Return how the transports stamp a request's bars, or None to keep the stamps as sent.
+
+    One `history()` call returns the same rows whichever source answers it, so every bar of a
+    day or longer of a class with a day zone (`dates.DAY_ZONES`: every class but futures) is
+    stamped at 00:00 of the day it starts on in that zone (New York for stocks, options, and
+    indices; UTC for forex and crypto). Massive stamps a 1-day bar at the day's start on the
+    aggregates range but at the session close (stocks, options, indices) or the day's last
+    millisecond (forex, crypto) on other sources, and the indices range and day files at
+    midnight in Chicago; those stamps move to the day's start, and any other stamp fails,
+    since such a bar may cover other days than its label (the documented crypto REST samples
+    sit at midnight New York time, another day cut). A week, month, quarter, or year bar must
+    also be stamped on the day its period starts, or the whole-window rule would place it in
+    another period.
+
+    The indicators' values are computed over the aggregates range's bars and carry those
+    bars' stamps (Massive's samples show the underlying aggregates at 00:00 New York time for
+    stocks and 01:00 for indices), so an indicator value of a day or longer is checked by the
+    range's rule for its symbols' class: 00:00 of its day, or the indices' midnight in
+    Chicago, on its period's first day. A value stamped otherwise fails like a bar.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments.
+        asset_class: For a dataset of every class whose rows are bars (the indicators), the
+            class of the request's symbols (`dates.day_class`); ignored for every other
+            dataset.
+
+    Returns:
+        The rule, with no `remedy` yet, for bars and indicator values of a day or longer of
+        stocks, options, indices, forex, and crypto; None for intraday bars, futures bars,
+        and every dataset whose rows are not bars.
+    """
+    indicator = not spec.holds_bars and spec.times is RowTimes.BAR
+    cls = asset_class if indicator else spec.asset_class
+    if (
+        not (spec.holds_bars or indicator)
+        or request.timespan not in _DAYS_OR_LONGER
+        or not isinstance(cls, AssetClass)
+        or cls not in DAY_ZONES
+    ):
+        return None
+    zone = DAY_ZONES[cls]
+    timespan = request.timespan
+    single = timespan is Timespan.DAY and request.multiplier == 1
+    if single and not indicator:
+        return StampRule(zone, _ONE_DAY_STAMPS[cls], "1-day bar")
+    known = _LONGER_STAMPS[cls]
+    what = "indicator value" if indicator else "bar"
+    if timespan is Timespan.WEEK:
+        weekdays = _MONDAY if trades_at_weekends(cls) else _WEEK_STAMP_DAYS
+        return StampRule(zone, known, what, weekdays=weekdays)
+    return StampRule(zone, known, what, months=_PERIOD_MONTHS.get(timespan, frozenset()))
+
+
+ISSUES_URL: Final = "https://github.com/chipkent/deephaven-massive/issues"
+"""Where a refused bar stamp is reported, so its day cut can be settled."""
+
+_WEEKDAY_NAMES: Final = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+
+_MONTH_NAMES: Final = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
+def day_starts(
+    label: str,
+    values: pa.Array,
+    *,
+    zone: tzinfo,
+    known: Collection[time],
+    source: str,
+    what: str,
+    remedy: str,
+    weekdays: Collection[int] = (),
+    months: Collection[int] = (),
+) -> pa.Array:
+    """Stamp each bar at 00:00 of the day it falls on, refusing a stamp of an unknown form.
+
+    Massive stamps the same bar of a day or longer differently by source: at the start of the
+    day on the aggregates range, at the session close (16:00 New York time) on the stock
+    grouped daily and `/prev`, at the day's last millisecond in the forex day files. Each
+    stamp whose wall-clock time of day in `zone`, to the millisecond, is 00:00 or one of
+    `known`, on a day `weekdays` and `months` allow, moves to 00:00 of its date there, so
+    every source labels a bar alike. Any other stamp raises: the bar may cover other days
+    than the one it would be labelled with, so it is never relabelled.
+
+    The zone's offsets come from `zoneinfo`, one conversion per distinct stamp (a batch of
+    daily bars holds about one per day), applied to the column with Arrow's `take`; Arrow's
+    own time-zone database is not used.
+
+    Args:
+        label: The dataset, for the message, such as `"stocks.bars"`.
+        values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
+        zone: The class day zone: New York for stocks, options, and indices; UTC for forex and
+            crypto. Its midnights start the bars' days, daylight saving time included.
+        known: The other wall-clock times of day, in `zone`, at which Massive is known to
+            stamp these bars; empty when only 00:00 is accepted.
+        source: Where the bars came from, for the message, such as a REST path template or a
+            flat-file prefix.
+        what: The kind of bar, for the message, such as `"1-day bar"`.
+        remedy: What the caller can do instead, for the message, such as reading the other
+            source.
+        weekdays: The weekdays (Monday is 0) a stamp's date in `zone` may fall on; empty for
+            any day.
+        months: The months whose 1st a stamp's date in `zone` must be; empty for any day.
+
+    Returns:
+        The stamps at 00:00 of their day in `zone`, in the type of `values`; nulls stay null.
+
+    A stamp at any other time of day or on any other day raises the `MassiveError` of
+    `_refuse`, naming the dataset, the source, the stamp, the accepted stamps, and `remedy`.
+    """
+    ns = values.cast(pa.int64())
+    distinct = pc.unique(ns)
+    accepted = {0, *(_millisecond_of_day(moment) for moment in known)}
+    starts: list[int | None] = []
+    refused: list[bool] = []
+    for value in distinct.to_pylist():
+        if value is None:
+            starts.append(None)
+            refused.append(False)
+            continue
+        local = _instant(value).astimezone(zone)
+        day = local.date()
+        on_day = (not weekdays or day.weekday() in weekdays) and (
+            not months or (day.day == 1 and day.month in months)
+        )
+        refused.append(not on_day or _millisecond_of_day(local.time()) not in accepted)
+        starts.append(_ns(datetime.combine(day, time(), zone)))
+    index = pc.index_in(ns, value_set=distinct)
+    odd = pa.array(refused, pa.bool_()).take(index)
+    expected = _expected(zone, known, weekdays=weekdays, months=months)
+    _refuse(
+        label, values, odd, zone=zone, expected=expected, source=source, what=what, remedy=remedy
+    )
+    return pa.array(starts, pa.int64()).take(index).cast(values.type)
+
+
+def _millisecond_of_day(moment: time) -> int:
+    """Return a wall-clock time of day as whole milliseconds since midnight.
+
+    Args:
+        moment: The time of day, naive.
+
+    Returns:
+        The milliseconds; a fraction of a millisecond is dropped.
+    """
+    return ((moment.hour * 60 + moment.minute) * 60 + moment.second) * 1000 + (
+        moment.microsecond // 1000
+    )
+
+
+def _expected(
+    zone: tzinfo, known: Collection[time], *, weekdays: Collection[int], months: Collection[int]
+) -> str:
+    """Describe the stamps a check accepts, for its message.
+
+    Args:
+        zone: The day zone.
+        known: The accepted times of day besides 00:00.
+        weekdays: The accepted weekdays, or empty for any.
+        months: The months whose 1st is accepted, or empty for any day.
+
+    Returns:
+        Such as `"00:00:00.000, 16:00:00.000 in America/New_York"` or
+        `"00:00:00.000 in UTC, on a Monday"`.
+    """
+    times = ", ".join(t.isoformat("milliseconds") for t in sorted({time(0), *known}))
+    text = f"{times} in {zone}"
+    if weekdays:
+        text += ", on a " + " or ".join(_WEEKDAY_NAMES[day] for day in sorted(weekdays))
+    if months:
+        every = len(months) == len(_MONTH_NAMES)
+        named = "a month" if every else " or ".join(_MONTH_NAMES[m - 1] for m in sorted(months))
+        text += f", on the 1st of {named}"
+    return text
+
+
+def _refuse(
+    label: str,
+    values: pa.Array,
+    odd: pa.Array,
+    *,
+    zone: tzinfo,
+    expected: str,
+    source: str,
+    what: str,
+    remedy: str,
+) -> None:
+    """Raise for the first bar a mask marks as stamped at an unknown time or day, if any.
+
+    Args:
+        label: The dataset, for the message.
+        values: The stamps, an Arrow `timestamp("ns", "UTC")` array.
+        odd: True for each refused stamp; False for an accepted or null one.
+        zone: The class day zone.
+        expected: The accepted stamps, described (`_expected`).
+        source: Where the bars came from, for the message.
+        what: The kind of bar, for the message, such as `"1-day bar"`.
+        remedy: What the caller can do instead, for the message.
+
+    Raises:
+        MassiveError: If `odd` holds a True, naming the first such stamp.
+    """
+    if not pc.any(odd).as_py():
+        return
+    bad = _instant(pc.filter(values.cast(pa.int64()), odd)[0].as_py())
+    local = "" if zone is UTC else f" ({bad.astimezone(zone).isoformat()} in {zone})"
+    article = "an" if what[:1] in "aeiou" else "a"
+    raise MassiveError(
+        f"{label}: {article} {what} from {source} is stamped {bad.isoformat()}{local}, which is "
+        f"not a stamp Massive is known to use for such a bar ({expected}), so it may cover "
+        f"other days than the one it would be labelled with; {remedy}, and report the stamp at "
+        f"{ISSUES_URL} so the day cut can be settled"
+    )
