@@ -7,9 +7,9 @@ from deephaven import new_table
 from deephaven.column import string_col
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.request import HostDecision, Request
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import Recency, Timespan
+from deephaven_massive._enums import Timespan
 
 
 def test_symbol_keys(dh_exec_ctx: object) -> None:
@@ -44,9 +44,6 @@ def test_describe_renders_all_and_a_reactive_table(dh_exec_ctx: object) -> None:
     assert Request(symbols=SymbolTable(table)).describe() == "symbols=<symbol table>"
 
 
-def test_requests_and_host_decisions_are_hashable_values() -> None:
+def test_requests_are_hashable_values() -> None:
     assert Request(symbols=("A",)) == Request(symbols=("A",))
     assert hash(Request(symbols=("A",))) == hash(Request(symbols=("A",)))
-    decision = HostDecision("delayed.massive.com", Recency.DELAYED, "snapshot")
-    assert decision == HostDecision("delayed.massive.com", Recency.DELAYED, "snapshot")
-    assert {decision: 1}[HostDecision("delayed.massive.com", Recency.DELAYED, "snapshot")] == 1

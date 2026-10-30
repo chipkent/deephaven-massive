@@ -1,4 +1,4 @@
-"""Tests for the `history()` source choice: partition dates, REST capability, and AUTO."""
+"""Tests for the `history()` source choice: partition dates, publication, REST, and AUTO."""
 
 from collections.abc import Mapping
 from dataclasses import replace
@@ -6,37 +6,38 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
-import pyarrow as pa
 import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets.bar_periods import futures_bar_request
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import (
-    CHICAGO,
-    DAY_ZONES,
     DaySpan,
     TimeRange,
-    futures_bar_request,
 )
+from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import (
     HistoryWindow,
     SourceChoice,
-    StampRule,
     choose_source,
     flat_file_prefix,
+    flat_file_published,
     history_window,
     partition_dates,
+    publish_time,
     published,
     rest_history_problem,
-    stamp_rule,
     within_publication_grace,
 )
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, NotBars, Timespan
+from deephaven_massive._datasets.row_times import (
+    BarBounds,
+    RowTimes,
+    StartRule,
+)
+from deephaven_massive._enums import AssetClass, HistorySource, NotBars, Timespan
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces import indicators
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -294,6 +295,10 @@ def test_futures_trades_by_date_are_whole_sessions_requested_one_at_a_time() -> 
     assert partition_dates(FUTURES_TRADES, sessions) == span.days()
 
 
+def test_the_session_date_parameter_is_read_from_the_history_path() -> None:
+    assert history_source.session_date_param(FUTURES_TRADES) == "session_end_date"
+
+
 def test_futures_bars_by_date() -> None:
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 7))
     minute = window(FUTURES_BARS, "2025-03-03", "2025-03-07", timespan=Timespan.MINUTE)
@@ -324,85 +329,6 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
     assert bars_window.requested == exact
     assert bars_window.times == exact
     assert partition_dates(FUTURES_BARS, bars_window) == (date(2025, 3, 4),)
-
-
-def test_stamp_rule() -> None:
-    # 1-day bars accept each class's known closes; longer bars only their period's start.
-    day = request(timespan=Timespan.DAY)
-    close, early, chicago = time(16), time(13), time(1)
-    last_ms = time(23, 59, 59, 999_000)
-    options_bars = replace(STOCK_BARS, asset_class=AssetClass.OPTIONS)
-    stock_closes = frozenset({early, close})
-    option_closes = frozenset({early, close, time(13, 15), time(16, 15)})
-    assert stamp_rule(STOCK_BARS, day) == StampRule(NEW_YORK, stock_closes, "1-day bar")
-    assert stamp_rule(options_bars, day) == StampRule(NEW_YORK, option_closes, "1-day bar")
-    assert stamp_rule(INDEX_BARS, day) == StampRule(
-        NEW_YORK, frozenset({chicago, early, close}), "1-day bar"
-    )
-    assert stamp_rule(FOREX_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
-    assert stamp_rule(CRYPTO_BARS, day) == StampRule(UTC, frozenset({last_ms}), "1-day bar")
-    # Several days: only 00:00 (01:00 for indices), on any day.
-    two_days = request(timespan=Timespan.DAY, multiplier=2)
-    assert stamp_rule(STOCK_BARS, two_days) == StampRule(NEW_YORK, frozenset(), "bar")
-    assert stamp_rule(options_bars, two_days) == StampRule(NEW_YORK, frozenset(), "bar")
-    assert stamp_rule(INDEX_BARS, two_days) == StampRule(NEW_YORK, frozenset({chicago}), "bar")
-    assert stamp_rule(FOREX_BARS, two_days) == StampRule(UTC, frozenset(), "bar")
-    # A week on its Monday, or for the classes closed at weekends the Saturday or Sunday before.
-    for multiplier in (1, 2):
-        week = request(timespan=Timespan.WEEK, multiplier=multiplier)
-        weekend = frozenset({5, 6, 0})
-        assert stamp_rule(STOCK_BARS, week) == StampRule(
-            NEW_YORK, frozenset(), "bar", weekdays=weekend
-        )
-        assert stamp_rule(INDEX_BARS, week) == StampRule(
-            NEW_YORK, frozenset({chicago}), "bar", weekdays=weekend
-        )
-        monday = frozenset({0})
-        assert stamp_rule(FOREX_BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
-        assert stamp_rule(CRYPTO_BARS, week) == StampRule(UTC, frozenset(), "bar", weekdays=monday)
-    # A month, quarter, or year on its 1st.
-    for timespan, months in (
-        (Timespan.MONTH, frozenset(range(1, 13))),
-        (Timespan.QUARTER, frozenset({1, 4, 7, 10})),
-        (Timespan.YEAR, frozenset({1})),
-    ):
-        longer = request(timespan=timespan, multiplier=3)
-        assert stamp_rule(options_bars, longer) == StampRule(
-            NEW_YORK, frozenset(), "bar", months=months
-        )
-        assert stamp_rule(CRYPTO_BARS, longer) == StampRule(UTC, frozenset(), "bar", months=months)
-    # Intraday bars, futures bars, and datasets that are not bars keep their stamps.
-    assert stamp_rule(CRYPTO_BARS, request(timespan=Timespan.HOUR)) is None
-    assert stamp_rule(STOCK_BARS, request(timespan=Timespan.MINUTE, multiplier=5)) is None
-    assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.SESSION)) is None
-    assert stamp_rule(FUTURES_BARS, request(timespan=Timespan.WEEK)) is None
-    # A dataset of every class has no day zone of its own: the indicators pass their symbols'.
-    assert stamp_rule(indicators.SMA, day) is None
-    assert stamp_rule(indicators.SMA, day, asset_class=ClassFromPrefix.ANY) is None
-    assert stamp_rule(replace(STOCK_TRADES, asset_class=AssetClass.FOREX), day) is None
-
-
-def test_every_class_with_a_day_zone_has_its_stamps() -> None:
-    # The column descriptions call a class stamped when it has a day zone; so does the rule.
-    tables = (history_source._ONE_DAY_STAMPS, history_source._LONGER_STAMPS)
-    assert all(set(table) == set(DAY_ZONES) for table in tables)
-
-
-def test_a_stamp_rule_stamps_through_the_timestamp_routine() -> None:
-    rule = stamp_rule(STOCK_BARS, request(timespan=Timespan.DAY))
-    assert rule is not None
-    rule = replace(rule, remedy="try the other source")
-    # The 16:00 close, and the 13:00 close of a short day (July 3), move to the day's start.
-    close = datetime(2025, 7, 1, 16, tzinfo=NEW_YORK)
-    early = datetime(2025, 7, 3, 13, tzinfo=NEW_YORK)
-    values = pa.array([close, early], pa.timestamp("ns", "UTC"))
-    moved = rule.stamp("stocks.bars", values, source="s").to_pylist()
-    assert moved == [datetime(2025, 7, 1, tzinfo=NEW_YORK), datetime(2025, 7, 3, tzinfo=NEW_YORK)]
-    afternoon = close.replace(hour=14, minute=30)
-    with pytest.raises(
-        dm.MassiveError, match=r"^stocks\.bars: a 1-day bar from s is stamped .*; try the other"
-    ):
-        rule.stamp("stocks.bars", pa.array([afternoon], values.type), source="s")
 
 
 def test_published_reads_the_class_zone_and_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -775,3 +701,84 @@ def test_a_session_end_date_filter_needs_datetimes(key: str) -> None:
         window(FUTURES_TRADES, "2025-03-04", "2025-03-04", filters=filters)
     start = datetime(2025, 3, 4, 8, tzinfo=CHICAGO)
     assert window(FUTURES_TRADES, start, start + timedelta(hours=1), filters=filters).times
+
+
+# --- Publication ----------------------------------------------------------------------------
+
+
+CUTOFF = time(11, 30)
+
+
+def test_publish_time_in_new_york() -> None:
+    assert publish_time(date(2025, 3, 3), zone=NEW_YORK, cutoff=CUTOFF) == datetime(
+        2025, 3, 4, 11, 30, tzinfo=NEW_YORK
+    )
+
+
+def test_publish_time_in_utc() -> None:
+    # March 4 00:00 UTC is March 3 19:00 in New York; the first 11:30 after it is March 4.
+    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=CUTOFF) == datetime(
+        2025, 3, 4, 11, 30, tzinfo=NEW_YORK
+    )
+    # A cutoff later than 19:00 New York time falls on the same New York evening.
+    late = time(20, 0)
+    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=late) == datetime(
+        2025, 3, 3, 20, 0, tzinfo=NEW_YORK
+    )
+    early = time(18, 0)
+    assert publish_time(date(2025, 3, 3), zone=UTC, cutoff=early) == datetime(
+        2025, 3, 4, 18, 0, tzinfo=NEW_YORK
+    )
+
+
+def test_publish_time_is_strictly_after_the_day_starts() -> None:
+    # A cutoff at exactly the New York midnight that starts the next day is not "after" it.
+    assert publish_time(date(2025, 3, 3), zone=NEW_YORK, cutoff=time(0, 0)) == datetime(
+        2025, 3, 5, 0, 0, tzinfo=NEW_YORK
+    )
+
+
+def _published(partition: date, now: datetime) -> bool:
+    return flat_file_published(partition, now=now, zone=NEW_YORK, cutoff=CUTOFF)
+
+
+def test_flat_file_publish_cutoff() -> None:
+    today = date(2025, 3, 4)
+    yesterday = date(2025, 3, 3)
+    before = datetime(2025, 3, 4, 11, 29, tzinfo=NEW_YORK)
+    after = datetime(2025, 3, 4, 11, 31, tzinfo=NEW_YORK)
+    assert not _published(yesterday, before)
+    assert _published(yesterday, after)
+    assert _published(date(2025, 3, 2), before)
+    assert not _published(today, after)
+    assert not _published(date(2025, 3, 5), after)
+
+
+def test_flat_file_day_zone_is_the_class_zone() -> None:
+    # 01:00 UTC on March 4 is 20:00 New York time on March 3. For a UTC class, March 3's file
+    # lands at 11:30 New York time on March 4, so it is not published yet.
+    now = datetime(2025, 3, 4, 1, tzinfo=UTC)
+    march_3 = date(2025, 3, 3)
+    assert not flat_file_published(march_3, now=now, zone=NEW_YORK, cutoff=CUTOFF)
+    assert not flat_file_published(march_3, now=now, zone=UTC, cutoff=CUTOFF)
+    assert flat_file_published(date(2025, 3, 2), now=now, zone=UTC, cutoff=CUTOFF)
+    later = datetime(2025, 3, 4, 11, 30, tzinfo=NEW_YORK)
+    assert flat_file_published(march_3, now=later, zone=UTC, cutoff=CUTOFF)
+
+
+def test_publish_time_across_the_spring_dst_change() -> None:
+    published = publish_time(date(2025, 3, 8), zone=UTC, cutoff=time(11, 30))
+    assert published == datetime(2025, 3, 9, 11, 30, tzinfo=NEW_YORK)
+    assert published.astimezone(UTC) == datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
+
+
+def test_publication_compares_instants_across_the_fall_back_hour() -> None:
+    cutoff = time(1, 30)
+    published = publish_time(date(2025, 11, 1), zone=NEW_YORK, cutoff=cutoff)
+    assert published.astimezone(UTC) == datetime(2025, 11, 2, 5, 30, tzinfo=UTC)  # 01:30 EDT
+    # 01:15 EST (fold=1) is 06:15Z, 45 minutes after publication, though its wall clock reads
+    # earlier than 01:30.
+    later = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=1)
+    assert flat_file_published(date(2025, 11, 1), now=later, zone=NEW_YORK, cutoff=cutoff)
+    earlier = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=0)
+    assert not flat_file_published(date(2025, 11, 1), now=earlier, zone=NEW_YORK, cutoff=cutoff)

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 
+import deephaven_massive as dm
 from deephaven_massive._massive.net.errors import WireEntitlementError
 from deephaven_massive._massive.refresh import drift, fetch, knowledge_base, snapshot, spec_diff
 from deephaven_massive._massive.refresh.drift import Committed, Drift, Report, Section
@@ -1209,3 +1210,11 @@ def test_the_script_stops_when_gh_fails(tmp_path: Path, command: tuple[str, ...]
     assert result.returncode != 0
     assert fake.calls[-1][:2] == list(command)
     assert fake.issues[0]["state"] == "CLOSED"
+
+
+def test_the_drift_check_lists_the_bucket_a_session_reads_by_default() -> None:
+    # The refresh imports nothing outside the wire package, so it keeps its own copy of the
+    # flat-file endpoint and bucket that `MassiveConfig` defaults to.
+    defaults = {f.name: f.default for f in dataclasses.fields(dm.MassiveConfig)}
+    assert defaults["s3_endpoint_url"] == drift.S3_ENDPOINT
+    assert defaults["s3_bucket"] == drift.S3_BUCKET

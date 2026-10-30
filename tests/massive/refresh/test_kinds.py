@@ -177,26 +177,6 @@ def test_gate_stale_entry_kinds_and_projections_naming_nothing() -> None:
 # --- The type lattice and type-agreement -----------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("first", "second", "joined"),
-    [
-        (WireType.LONG, WireType.DOUBLE, WireType.DOUBLE),
-        (WireType.DOUBLE, WireType.LONG, WireType.DOUBLE),
-        (WireType.LONG, WireType.INT_ARRAY, WireType.INT_ARRAY),
-        (WireType.EPOCH, WireType.EPOCH, WireType.EPOCH),
-        (WireType.STRING, WireType.STRING, WireType.STRING),
-        (WireType.STRING, WireType.LONG, None),
-        (WireType.DOUBLE, WireType.INT_ARRAY, None),
-        (WireType.EPOCH, WireType.LONG, None),
-        (WireType.ISO_INSTANT, WireType.EPOCH, None),
-    ],
-)
-def test_join_is_the_type_lattice(
-    first: WireType, second: WireType, joined: WireType | None
-) -> None:
-    assert kinds.join(first, second) is joined
-
-
 def test_type_agreement_passes_a_widening_and_epochs_in_two_units() -> None:
     file = dataclasses.replace(
         _FILE, fields=(*_FILE.fields[:2], _field("price", "Price", WireType.LONG))

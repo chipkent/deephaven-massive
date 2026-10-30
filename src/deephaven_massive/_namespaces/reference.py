@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._massive import RestPath
     from deephaven_massive._query import Query
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
 __all__ = ["DATASETS", "SNAPSHOTS", "_Reference"]

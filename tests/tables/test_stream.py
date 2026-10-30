@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
 
 
 RowsWhen: TypeAlias = (

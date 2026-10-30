@@ -20,11 +20,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
+from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:

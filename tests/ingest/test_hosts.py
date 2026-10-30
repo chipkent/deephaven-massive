@@ -7,7 +7,6 @@ from collections.abc import Callable, Mapping, Sequence
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._ingest.hosts import (
     BUSINESS_HOST,
@@ -19,6 +18,7 @@ from deephaven_massive._ingest.hosts import (
     is_error_row,
 )
 from deephaven_massive._massive import Transport, source
+from deephaven_massive._tables.transports import HostDecision
 
 TICK, FMV = ChannelFamily.TICK, ChannelFamily.FMV
 LOGGER = "deephaven_massive._ingest.hosts"

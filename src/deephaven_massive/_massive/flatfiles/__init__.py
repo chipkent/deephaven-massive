@@ -3,7 +3,7 @@
 Massive publishes one gzip CSV file per dataset and day in an S3 bucket. This package reads
 them, and knows nothing of datasets, sessions, or Deephaven:
 
-- `layout`: `object_key`, where a dataset's file for a day lives in the bucket.
+- `object_keys`: `object_key`, where a dataset's file for a day lives in the bucket.
 - `client`: `FlatFileClient`, the bucket's boto3 client, its S3 error mapping to the wire errors,
   and its close.
 - `reader`: `FlatFile`, one object's body decoded block by block into Arrow batches, filtered
