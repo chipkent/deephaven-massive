@@ -94,9 +94,9 @@ from deephaven.dherror import DHError
 from deephaven.update_graph import shared_lock
 
 from deephaven_massive._datasets.schema import TRANSPORT_LABELS
-from deephaven_massive._enums import UnknownSymbols
+from deephaven_massive._enums import OnError
 from deephaven_massive._errors import MassiveError
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
@@ -407,7 +407,7 @@ class SessionCore:
         # Whether a long verb under the update graph's lock has been reported.
         self._warned_paused_tables = False
         # The session's once-per-session warnings, such as history()'s unfilled columns.
-        self.warnings: Final = BoundedWarnings(logger, limit=SESSION_WARNINGS)
+        self.warnings: Final = BoundedLog(logger, limit=SESSION_WARNINGS, level=logging.WARNING)
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
         finalizer = weakref.finalize(
@@ -426,7 +426,8 @@ class SessionCore:
 
         Every result, `columns()` table, and transport plan of the session reads its columns
         here, so they agree on whether the `RawSymbol` column exists: it does when the
-        session's `unknown_symbols` is `WARN` and the dataset reads its symbol from rows.
+        session's `unreadable_symbols` is `LOG` (the default) or `IGNORE` and the dataset reads
+        its symbol from rows.
 
         Args:
             spec: The dataset.
@@ -435,7 +436,7 @@ class SessionCore:
             The cached schema. A bad dataset raises what `Catalog.dataset_schema` raises.
         """
         return self.catalog.dataset_schema(
-            spec, raw_symbol=self.config.unknown_symbols is UnknownSymbols.WARN
+            spec, raw_symbol=self.config.unreadable_symbols is not OnError.RAISE
         )
 
     @property

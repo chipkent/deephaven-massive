@@ -150,6 +150,21 @@ def test_stream_updates_can_clear_a_warning() -> None:
     assert StreamUpdate(error="new", clear_error=True).apply(row).error is None
 
 
+def test_skipped_symbols_and_the_transport_warning_neither_hide_nor_clear_each_other() -> None:
+    row = _stream(deferred=2, error="over capacity: 1002/1000; 2 deferred")
+    both = StreamUpdate(skipped="skipping 1 value").apply(row)
+    assert as_row(both)["Error"] == "over capacity: 1002/1000; 2 deferred; skipping 1 value"
+    alone = StreamUpdate(deferred=0, clear_error=True).apply(both)  # the cap frees up
+    assert as_row(alone)["Error"] == "skipping 1 value"
+    assert StreamUpdate(rows_published=1).apply(alone).skipped == "skipping 1 value"
+    back = StreamUpdate(error="waiting for a slot").apply(alone)
+    fixed = StreamUpdate(clear_skipped=True, skipped="ignored").apply(back)  # the row is fixed
+    assert as_row(fixed)["Error"] == "waiting for a slot"
+    assert as_row(StreamUpdate(clear_error=True).apply(fixed))["Error"] is None
+    stopped = dataclasses.replace(both, state=StreamState.FAILED, error="the cause")
+    assert as_row(stopped)["Error"] == "the cause"  # a stop shows only its cause
+
+
 @pytest.mark.parametrize("state", [StreamState.FAILED, StreamState.CLOSED])
 def test_stream_updates_keep_the_cause_of_a_stop(state: StreamState) -> None:
     # A flush or a poll cycle that races a failure or the close never replaces its cause.

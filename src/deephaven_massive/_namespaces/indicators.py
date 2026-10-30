@@ -9,10 +9,12 @@ selects its class (`X:` crypto, `C:` forex, `I:` indices, `O:` options, none for
 URL serves every class, but Massive documents the crypto form apart, without the `adjusted`
 parameter, so each dataset reads two generated paths: the `{stockTicker}` template for every
 class but crypto, and the `{cryptoTicker}` template for crypto (`fetch_paths_by_class`).
-`adjusted` defaults to None, which sends nothing, so Massive's own default applies: the bars
-behind the values are adjusted for splits (never for dividends). An explicit value goes only
-to a path that declares it, so it raises `ValueError` for a crypto symbol; Massive does not
-echo the basis of an indicator, so it cannot be checked. Each row is one indicator value of
+Every default of a signature is the default Massive's specification gives the parameter (the
+windows, `timespan` day, `series_type` close, and `adjusted=True`, bars adjusted for splits,
+never for dividends). `adjusted` is sent to a path that declares it; the crypto path does
+not, since a pair has no splits, so `True` is left out there and `False` raises `ValueError`
+for a crypto symbol. Massive does not echo the basis of an indicator, so it cannot be
+checked. Each row is one indicator value of
 one bar of the requested `Symbol`: the bar's window, `TimestampStart` to the exclusive
 `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class (UTC for
 crypto and forex, New York otherwise), as for that class's bars. A value of a day or longer
@@ -37,13 +39,12 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import Namespace, accepted_values, build_query, list_params
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._massive import RestPath
     from deephaven_massive._query import Query
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
@@ -131,8 +132,7 @@ def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> T
     A `timespan` that is not a `dm.Timespan` raises the `TypeError` of `_require_enum`.
     """
     span = _require_enum(timespan, Timespan, "timespan")
-    path = cast("RestPath", core.catalog.source(Transport.REST, cast("str", spec.fetch_path)))
-    accepted = next(param.values for param in path.params if param.name == "timespan")
+    accepted = accepted_values(core, spec, "timespan")
     if span.value not in accepted:
         names = [member.name for member in Timespan if member.value in accepted]
         raise ValueError(f"indicators do not accept Timespan.{span.name}; they accept {names}")
@@ -151,7 +151,8 @@ class _Indicators(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            sma = m.indicators.sma(["AAPL", "X:BTCUSD"], 50, start="2025-01-01").fetch()
+            sma = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2025-01-01").fetch()
+            macd = m.indicators.macd("AAPL", timespan=dm.Timespan.HOUR, limit=100).fetch()
     """
 
     __slots__ = ()
@@ -165,7 +166,7 @@ class _Indicators(Namespace):
         *,
         timespan: Timespan,
         series_type: SeriesType,
-        adjusted: bool | None,
+        adjusted: bool,
         start: DateLike | None,
         end: DateLike | None,
         order: Order | None,
@@ -181,8 +182,7 @@ class _Indicators(Namespace):
                 windows), each a positive `int`.
             timespan: The bar timespan.
             series_type: The bar price the indicator is computed from.
-            adjusted: Whether the bars are adjusted for splits, or None for Massive's default,
-                which is adjusted.
+            adjusted: Whether the bars are adjusted for splits; True is Massive's default.
             start: The lower bound of `TimestampStart`, or None.
             end: The upper bound of `TimestampStart`, or None.
             order: The timestamp order, or None.
@@ -220,11 +220,11 @@ class _Indicators(Namespace):
     def sma(
         self,
         symbols: Symbols,
-        window: int,
+        window: int = 50,
         *,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool | None = None,
+        adjusted: bool = True,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -245,13 +245,14 @@ class _Indicators(Namespace):
         Args:
             symbols: The tickers, of any asset classes (each prefix selects the class), or a
                 Deephaven table with a `Symbol` column.
-            window: The number of bars averaged, a positive `int`.
-            timespan: The bar size the average is computed over; `MINUTE` or longer.
-            series_type: The bar price averaged.
-            adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default, which is adjusted for splits (never for dividends).
-                The crypto endpoint has no such parameter, so an explicit value fails the verb
-                with `ValueError` for a crypto symbol.
+            window: The number of bars averaged, a positive `int`; 50 by default, as Massive's.
+            timespan: The bar size the average is computed over; `MINUTE` or longer, `DAY`
+                by default, as Massive's.
+            series_type: The bar price averaged; `CLOSE` by default, as Massive's.
+            adjusted: True, the default (Massive's), computes from bars adjusted for splits
+                (never for dividends); False from bars as traded. The crypto endpoint has no
+                such parameter, since a pair has no splits: True is left out there, and False
+                fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,
@@ -292,11 +293,11 @@ class _Indicators(Namespace):
     def ema(
         self,
         symbols: Symbols,
-        window: int,
+        window: int = 50,
         *,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool | None = None,
+        adjusted: bool = True,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -317,13 +318,15 @@ class _Indicators(Namespace):
         Args:
             symbols: The tickers, of any asset classes (each prefix selects the class), or a
                 Deephaven table with a `Symbol` column.
-            window: The number of bars the average spans, a positive `int`.
-            timespan: The bar size the average is computed over; `MINUTE` or longer.
-            series_type: The bar price averaged.
-            adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default, which is adjusted for splits (never for dividends).
-                The crypto endpoint has no such parameter, so an explicit value fails the verb
-                with `ValueError` for a crypto symbol.
+            window: The number of bars the average spans, a positive `int`; 50 by default, as
+                Massive's.
+            timespan: The bar size the average is computed over; `MINUTE` or longer, `DAY`
+                by default, as Massive's.
+            series_type: The bar price averaged; `CLOSE` by default, as Massive's.
+            adjusted: True, the default (Massive's), computes from bars adjusted for splits
+                (never for dividends); False from bars as traded. The crypto endpoint has no
+                such parameter, since a pair has no splits: True is left out there, and False
+                fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,
@@ -364,11 +367,11 @@ class _Indicators(Namespace):
     def rsi(
         self,
         symbols: Symbols,
-        window: int,
+        window: int = 14,
         *,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool | None = None,
+        adjusted: bool = True,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -389,13 +392,15 @@ class _Indicators(Namespace):
         Args:
             symbols: The tickers, of any asset classes (each prefix selects the class), or a
                 Deephaven table with a `Symbol` column.
-            window: The number of bars the index looks back over, a positive `int`.
-            timespan: The bar size the index is computed over; `MINUTE` or longer.
-            series_type: The bar price the index is computed from.
-            adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default, which is adjusted for splits (never for dividends).
-                The crypto endpoint has no such parameter, so an explicit value fails the verb
-                with `ValueError` for a crypto symbol.
+            window: The number of bars the index looks back over, a positive `int`; 14 by
+                default, as Massive's.
+            timespan: The bar size the index is computed over; `MINUTE` or longer, `DAY` by
+                default, as Massive's.
+            series_type: The bar price the index is computed from; `CLOSE` by default.
+            adjusted: True, the default (Massive's), computes from bars adjusted for splits
+                (never for dividends); False from bars as traded. The crypto endpoint has no
+                such parameter, since a pair has no splits: True is left out there, and False
+                fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,
@@ -437,12 +442,12 @@ class _Indicators(Namespace):
         self,
         symbols: Symbols,
         *,
-        short_window: int,
-        long_window: int,
-        signal_window: int,
+        short_window: int = 12,
+        long_window: int = 26,
+        signal_window: int = 9,
         timespan: Timespan = Timespan.DAY,
         series_type: SeriesType = SeriesType.CLOSE,
-        adjusted: bool | None = None,
+        adjusted: bool = True,
         start: DateLike | None = None,
         end: DateLike | None = None,
         order: Order | None = None,
@@ -464,15 +469,19 @@ class _Indicators(Namespace):
         Args:
             symbols: The tickers, of any asset classes (each prefix selects the class), or a
                 Deephaven table with a `Symbol` column.
-            short_window: The bars of the fast exponential average, a positive `int`.
-            long_window: The bars of the slow exponential average, a positive `int`.
-            signal_window: The bars of the signal line's average, a positive `int`.
-            timespan: The bar size the averages are computed over; `MINUTE` or longer.
-            series_type: The bar price the averages are computed from.
-            adjusted: Whether the bars are adjusted for splits; None sends nothing and
-                leaves Massive's default, which is adjusted for splits (never for dividends).
-                The crypto endpoint has no such parameter, so an explicit value fails the verb
-                with `ValueError` for a crypto symbol.
+            short_window: The bars of the fast exponential average, a positive `int`; 12 by
+                default, as Massive's.
+            long_window: The bars of the slow exponential average, a positive `int`; 26 by
+                default, as Massive's.
+            signal_window: The bars of the signal line's average, a positive `int`; 9 by
+                default, as Massive's.
+            timespan: The bar size the averages are computed over; `MINUTE` or longer, `DAY`
+                by default, as Massive's.
+            series_type: The bar price the averages are computed from; `CLOSE` by default.
+            adjusted: True, the default (Massive's), computes from bars adjusted for splits
+                (never for dividends); False from bars as traded. The crypto endpoint has no
+                such parameter, since a pair has no splits: True is left out there, and False
+                fails the verb with `ValueError` for a crypto symbol.
             start: The first bar start: a date is its 00:00 in the symbols' day zone (UTC
                 for crypto and forex, New York otherwise), a `datetime` is used as is.
                 None sets no lower bound: every value back to the start of the series,

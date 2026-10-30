@@ -82,7 +82,7 @@ def test_futures_files_hold_only_the_session_of_their_key(
         evidence(f"{prefix} {venue} {recent_monday}: session_end_date counts {dict(counts)}")
     try:
         bars = live_session.futures.bars(
-            dm.ALL, dm.Timespan.SESSION, venue=dm.FuturesVenue.CME
+            dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CME}
         ).history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES)
         evidence(f"library CME session bars of {recent_monday}: {len(table_rows(bars))} rows")
     except dm.EntitlementError:

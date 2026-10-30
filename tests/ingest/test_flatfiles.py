@@ -419,6 +419,7 @@ def test_trades_are_renamed_typed_and_converted(
     assert first == {
         "Symbol": "AAPL",
         "Timestamp": 1741012200000000123,
+        "RawSymbol": None,  # the default session keeps the column; null on a readable row
         "Conditions": [12, 37],
         "Correction": None,
         "Exchange": 4,
@@ -501,7 +502,7 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         prefix="us_stocks_sip/day_aggs_v1",
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
-        unknown_symbols=dm.UnknownSymbols.FAIL,
+        unreadable_symbols=dm.OnError.RAISE,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -526,7 +527,7 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=window,
-        unknown_symbols=dm.UnknownSymbols.FAIL,
+        unreadable_symbols=dm.OnError.RAISE,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -597,7 +598,7 @@ def test_epoch_zero_is_null_except_in_timestamp(
         FUTURES_0304.format("cme"),
         make_csv_gz(FUTURES_HEADER + ",0,0,1,1,1,2025-03-04,ESH5,0\n"),
     )
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
         dm.MassiveError,
         match=r"futures\.trades\.Timestamp: 0 ns is outside 1990 to 2100 \(in s3://flatfiles/us_futures_cme/",
@@ -628,24 +629,25 @@ def test_symbol_pushdown_keeps_only_the_requested_symbols(
     assert pick(t, "Symbol", "Id") == [("AAPL", "1"), ("AAPL", "3")]
 
 
-def test_a_ticker_the_library_cannot_read_fails_the_read(
-    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
-) -> None:
-    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
-    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    every = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(
-        dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
-    ):
-        every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
-
-
-def test_a_ticker_the_library_cannot_read_is_kept_under_warn(
+def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
     *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with dm.MassiveSession(config(unknown_symbols=dm.UnknownSymbols.WARN)) as m:
+    with dm.MassiveSession(config(unreadable_symbols=dm.OnError.RAISE)) as m:
+        every = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(
+            dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
+        ):
+            every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+
+
+def test_a_ticker_the_library_cannot_read_is_kept_by_default(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with dm.MassiveSession(config()) as m:
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
             "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES
         )
@@ -1126,7 +1128,7 @@ def test_futures_read_every_venue_by_default_in_venue_order(
     for sequence, venue in enumerate(VENUES):
         row = f",1.0,1,1,1,{sequence},2025-03-04,ESH5,1741042800000000000\n"
         fake_s3.put(FUTURES_0304.format(venue), make_csv_gz(FUTURES_HEADER + row))
-    q = query(session, FUTURES_TRADES, symbols=["ESH5"])
+    q = session.futures.trades(["ESH5"])  # every venue by default
     t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
     assert sorted(fake_s3.keys()) == sorted(FUTURES_0304.format(v) for v in VENUES)
     # Venue order within a date: CME, CBOT, NYMEX, COMEX.
@@ -1138,11 +1140,23 @@ def test_futures_read_every_venue_by_default_in_venue_order(
     ]
 
 
+def test_futures_read_the_venues_asked_for_in_venue_order(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    for sequence, venue in enumerate(VENUES):
+        row = f",1.0,1,1,1,{sequence},2025-03-04,ESH5,1741042800000000000\n"
+        fake_s3.put(FUTURES_0304.format(venue), make_csv_gz(FUTURES_HEADER + row))
+    q = session.futures.trades(["ESH5"], venues={FuturesVenue.COMEX, FuturesVenue.CME})
+    t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
+    assert sorted(fake_s3.keys()) == sorted(FUTURES_0304.format(v) for v in ("cme", "comex"))
+    assert pick(t, "ReportSequence", "Date") == [(0, "2025-03-04"), (3, "2025-03-04")]
+
+
 def test_futures_read_one_venue_when_asked(
     *, session: dm.MassiveSession, put: Callable[[str, str], None], fake_s3: FakeS3
 ) -> None:
     put(FUTURES_0304.format("cme"), "us_futures_trades_v1_2025-03-04.csv")
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history("2025-03-04", "2025-03-04")
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
     assert pick(t, "Symbol", "Timestamp", "Date", "ReportSequence") == [
@@ -1156,7 +1170,7 @@ def test_futures_evening_instants_read_only_the_next_session(
     *, session: dm.MassiveSession, put: Callable[[str, str], None], fake_s3: FakeS3
 ) -> None:
     put(FUTURES_0304.format("cme"), "us_futures_trades_v1_2025-03-04.csv")
-    q = query(session, FUTURES_TRADES, symbols=["ESH5"], venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=["ESH5"], venues={FuturesVenue.CME})
     # 17:00 Chicago on March 3 already trades in the session that ends on March 4.
     t = q.history(
         datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
@@ -1178,7 +1192,7 @@ def test_futures_instants_inside_one_session_need_only_its_file(
     moment = epoch_ns(datetime(2025, 3, 3, 10, 30, tzinfo=CHICAGO))
     key = FUTURES_KEY.format("cme", date(2025, 3, 3))
     fake_s3.put(key, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2025-03-03,ESH5,{moment}\n"))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history(
         datetime(2025, 3, 3, 10, tzinfo=CHICAGO),
         datetime(2025, 3, 3, 11, tzinfo=CHICAGO),
@@ -1200,7 +1214,7 @@ def test_futures_instants_before_a_holiday_do_not_raise(
     moment = epoch_ns(datetime(2024, 12, 24, 10, 30, tzinfo=CHICAGO))
     key = FUTURES_KEY.format("cme", date(2024, 12, 24))
     fake_s3.put(key, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2024-12-24,ESH5,{moment}\n"))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history(
         datetime(2024, 12, 24, 10, tzinfo=CHICAGO), datetime(2024, 12, 24, 11, tzinfo=CHICAGO)
     )
@@ -1224,7 +1238,7 @@ def test_futures_instants_on_a_holiday_read_the_next_session(
     rows = "".join(f",1.0,1,1,1,1,2025-01-21,ESH5,{moment}\n" for moment in (sunday, tuesday))
     key = FUTURES_KEY.format("cme", date(2025, 1, 21))
     fake_s3.put(key, make_csv_gz(FUTURES_HEADER + rows))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with caplog.at_level(logging.INFO, "deephaven_massive._ingest.flatfiles"):
         t = q.history(
             datetime(2025, 1, 19, 17, tzinfo=CHICAGO),
@@ -1243,7 +1257,7 @@ def test_a_roll_forward_gives_up_loudly_after_a_week(
     clock: Callable[[datetime], None],
 ) -> None:
     clock(datetime(2025, 2, 10, tzinfo=UTC))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
         dm.MassiveError,
         # The message names the run's first missing weekday, Monday 01-20.
@@ -1270,7 +1284,7 @@ def test_a_roll_forward_to_an_unpublished_session_raises(
     # Good Friday 2024, asked for on Easter Monday morning: the files of 03-29 and 03-30 count
     # as published (and do not exist), but the next session's are not out yet.
     clock(datetime(2024, 4, 1, 12, tzinfo=UTC))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
         dm.MassiveError,
         match=r"the range's last hours may lie in the next session's file, "
@@ -1294,7 +1308,7 @@ def test_a_roll_forward_to_a_late_session_raises(
     # Martin Luther King Day: the 01-21 file is past its publication time but within a day
     # of it, so its absence may only mean it is late.
     clock(datetime(2025, 1, 22, 18, tzinfo=UTC))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
         dm.MassiveError,
         match=r"2025-01-21\.csv\.gz, does not exist either: 2025-01-21 is not yet published",
@@ -1322,7 +1336,7 @@ def test_a_holiday_before_a_weekend_end_rolls_forward(
     rows = "".join(f",1.0,1,1,1,1,2024-04-01,ESM4,{m}\n" for m in (friday, monday))
     key = FUTURES_KEY.format("cme", date(2024, 4, 1))
     fake_s3.put(key, make_csv_gz(FUTURES_HEADER + rows))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history(
         datetime(2024, 3, 29, 8, tzinfo=CHICAGO),
         datetime(2024, 3, 30, tzinfo=CHICAGO),
@@ -1345,7 +1359,7 @@ def test_an_ordinary_weekend_end_does_not_roll_forward(
     friday = epoch_ns(datetime(2025, 1, 24, 9, tzinfo=CHICAGO))
     key = FUTURES_KEY.format("cme", date(2025, 1, 24))
     fake_s3.put(key, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2025-01-24,ESH5,{friday}\n"))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history(
         datetime(2025, 1, 24, 8, tzinfo=CHICAGO),
         datetime(2025, 1, 25, tzinfo=CHICAGO),
@@ -1363,7 +1377,7 @@ def test_futures_dates_do_not_roll_forward(
 ) -> None:
     # A date names its own session exactly: a holiday's hours belong to another session.
     clock(datetime(2025, 2, 10, tzinfo=UTC))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
     assert t.size == 0
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
@@ -1372,7 +1386,7 @@ def test_futures_dates_do_not_roll_forward(
 def test_mixed_futures_bounds_are_refused_before_any_read(
     *, session: dm.MassiveSession, fake_s3: FakeS3
 ) -> None:
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
         q.history(
             "2024-12-17",
@@ -1392,7 +1406,7 @@ def test_futures_session_keys_are_checked(
         + ",1.0,1,1,1,2,2025-03-03,ESH5,1741042800000000000\n"
     )
     fake_s3.put(FUTURES_0304.format("cme"), make_csv_gz(body))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(
@@ -1407,7 +1421,7 @@ def test_the_futures_session_check_covers_every_symbol(
     *, session: dm.MassiveSession, put: Callable[[str, str], None]
 ) -> None:
     put(FUTURES_0304.format("cme"), "us_futures_trades_v1_wrong_session.csv")  # an ESH5 row
-    q = query(session, FUTURES_TRADES, symbols=["NQH5"], venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=["NQH5"], venues={FuturesVenue.CME})
     with pytest.raises(dm.MassiveError, match="holds session_end_date 2025-03-03, not 2025-03-04"):
         q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
 
@@ -1417,7 +1431,7 @@ def test_a_missing_session_date_fails_the_session_check(
 ) -> None:
     row = ",1.0,1,1,1,1,,ESH5,1741042800000000000\n"
     fake_s3.put(FUTURES_0304.format("cme"), make_csv_gz(FUTURES_HEADER + row))
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(dm.MassiveError, match="holds session_end_date empty, not 2025-03-04"):
         q.history("2025-03-04", "2025-03-04")
 
@@ -1432,14 +1446,15 @@ def test_a_refused_futures_venue_names_the_venue(
         fake_s3.refuse(
             "us_futures_nymex/", status=403, code="AccessDenied", message="Access Denied"
         )
-        q = query(m, FUTURES_TRADES, symbols=dm.ALL)
+        q = m.futures.trades(dm.ALL)
         with pytest.raises(
             dm.EntitlementError,
             match=(
                 r"the plan does not include NYMEX futures flat files: HTTP 403 for "
                 r"s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv\.gz at "
                 r"https://files\.massive\.com \(AccessDenied: Access Denied\); pass "
-                r"venue=dm\.FuturesVenue\.<VENUE> for a venue the plan includes"
+                r"venues={dm\.FuturesVenue\.<VENUE>, \.\.\.} with only the venues the plan "
+                "includes"
             ),
         ):
             q.history("2025-03-04", "2025-03-04")
@@ -1481,7 +1496,7 @@ def test_rejected_credentials_are_an_authentication_error(
     venue: FuturesVenue | None,
 ) -> None:
     fake_s3.refuse("us_", status=403, code=code, message="Rejected")
-    q = query(session, spec, symbols=dm.ALL, venue=venue)
+    q = query(session, spec, symbols=dm.ALL, venues=None if venue is None else {venue})
     with pytest.raises(
         dm.AuthenticationError,
         match=re.escape(
@@ -2031,7 +2046,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         prefix="us_stocks_sip/trades_v1",
         request=request(dm.ALL),
         window=window,
-        unknown_symbols=dm.UnknownSymbols.FAIL,
+        unreadable_symbols=dm.OnError.RAISE,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = threading.Event()
@@ -2611,7 +2626,7 @@ def test_a_futures_file_without_its_session_header_is_a_massive_error(
     names, data = csv_rows(load_fixture, "us_futures_trades_v1_2025-03-04.csv")
     lacking = [name for name in names if name != "session_end_date"]
     fake_s3.put_csv(FUTURES_0304.format("cme"), lacking, data)
-    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venue=FuturesVenue.CME)
+    q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(dm.MassiveError, match=r"the header lacks the key column session_end_date$"):
         q.history("2025-03-04", "2025-03-04")
 
@@ -2707,7 +2722,7 @@ def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
         session,
         FUTURES_TRADES,
         symbols=dm.ALL,
-        venue=FuturesVenue.CME,
+        venues={FuturesVenue.CME},
         filters={"session_end_date": "2025-01-21"},
     )
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
