@@ -139,7 +139,7 @@ def test_bars_schema() -> None:
     # Index bars come from index values: no volume, no VWAP, no trade count.
     columns = {c.name: c for c in CATALOG.dataset_schema(indices.BARS).columns}
     for name in ("Volume", "Vwap", "Transactions"):
-        assert columns[name].supplied_by == ()
+        assert name not in columns
     # The stream's window end `e` is the declared end key, so it is `TimestampEnd`.
     assert _schema(indices.BARS) == [
         ("Symbol", "String"),

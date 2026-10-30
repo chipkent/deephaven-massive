@@ -226,7 +226,7 @@ def test_trades_merge_the_rest_stream_and_flat_file_columns() -> None:
     assert "SipTimestamp" not in names
     assert {"Price", "Size", "Exchange", "Conditions", "ParticipantTimestamp"} <= set(names)
     types = {c.name: c.type for c in CATALOG.dataset_schema(options.TRADES).columns}
-    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert types["Size"] is ColumnType.DOUBLE  # the WebSocket's integer joins the REST number
 
 

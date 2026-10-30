@@ -8,8 +8,8 @@ source order. Once every transport is generated, this module:
 1. resolves `KINDS` and `PROJECTIONS` into `Member`s, one per source and group, reporting an
    entry that names a source the snapshot does not generate (`stale-entry`);
 2. checks that one column joins to one `WireType` within a kind (`type-agreement`), by the
-   type lattice: `long` with `double` gives `double`, `long` with `int-array` gives
-   `int-array`, two `epoch`s give an `epoch` (each source keeping its unit), and any other
+   type lattice: `long` with `double` gives `double`, `long` with `long-array` gives
+   `long-array`, two `epoch`s give an `epoch` (each source keeping its unit), and any other
    pair is a conflict, printed with both fields' descriptions since it is first a possible
    naming error;
 3. checks that, within a group whose sources span two or more transports, every column is on
@@ -226,7 +226,7 @@ def join(first: WireType, second: WireType) -> WireType | None:
 
     Returns:
         The joined type: either type when both are the same (two `epoch`s keep their units);
-        `double` for `long` and `double`; `int-array` for `long` and `int-array` (a scalar
+        `double` for `long` and `double`; `long-array` for `long` and `long-array` (a scalar
         becomes a one-element list); `None` for any other pair, a conflict.
     """
     if first is second:
@@ -234,8 +234,8 @@ def join(first: WireType, second: WireType) -> WireType | None:
     pair = {first, second}
     if pair == {WireType.LONG, WireType.DOUBLE}:
         return WireType.DOUBLE
-    if pair == {WireType.LONG, WireType.INT_ARRAY}:
-        return WireType.INT_ARRAY
+    if pair == {WireType.LONG, WireType.LONG_ARRAY}:
+        return WireType.LONG_ARRAY
     return None
 
 

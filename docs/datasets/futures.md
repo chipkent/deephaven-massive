@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
+
 In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.futures.trades`, `m.futures.quotes`, `m.futures.bars`, and `m.futures.snapshots` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
 
 <a id="trades"></a>
@@ -17,21 +19,13 @@ Trades of futures contracts, tick by tick.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
 | `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session that ends at the next 17:00 Chicago time (a Saturday's or Sunday's moves to Monday), corrected to the session Massive's futures schedules place the row in; a row the schedules do not cover keeps that date, and the stream's m.streams() row shows the error. From REST `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format."; flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket | `session_end_date` | `session_end_date` |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision."; flat files `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
-| `Conditions` | int[] | Always null for `futures.trades`; supplied by `stocks.trades`, `options.trades`, `crypto.trades`. |  |  |  |  |
 | `Correction` | long | The trade correction indicator. | flat files |  | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
-| `Id` | String | Always null for `futures.trades`; supplied by `stocks.trades`, `options.trades`, `crypto.trades`. |  |  |  |  |
-| `ParticipantTimestamp` | Instant | Always null for `futures.trades`; supplied by `stocks.trades`, `options.trades`. |  |  |  |  |
 | `Price` | double | The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier. | REST, flat files, WebSocket | `price` | `price` | `p` |
 | `SequenceNumber` | long | The unique sequence number assigned to this trade. | REST, flat files, WebSocket | `sequence_number` | `sequence_number` | `q` |
 | `Size` | double | The total number of contracts exchanged between buyers and sellers on a given trade. | REST, flat files, WebSocket | `size` | `size` | `s` |
-| `Tape` | long | Always null for `futures.trades`; supplied by `stocks.trades`, `options.trades`. |  |  |  |  |
-| `TrfId` | long | Always null for `futures.trades`; supplied by `stocks.trades`, `options.trades`. |  |  |  |  |
-| `TrfTimestamp` | Instant | Always null for `futures.trades`; supplied by `stocks.trades`, `options.trades`. |  |  |  |  |
-| `DecimalSize` | String | Always null for `futures.trades`; supplied by `stocks.trades`. |  |  |  |  |
 | `ReportSequence` | long | The reporting sequence number. | REST, flat files | `report_sequence` | `report_sequence` |  |
 | `Channel` | long | The CME multicast channel this event was sourced from. | REST | `channel` |  |  |
-| `ReceivedTimestamp` | Instant | Always null for `futures.trades`; supplied by `crypto.trades`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -54,24 +48,16 @@ Quotes of futures contracts: every change of the best bid and offer.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket | `ticker` | `ticker` | `sym` |
 | `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session that ends at the next 17:00 Chicago time (a Saturday's or Sunday's moves to Monday), corrected to the session Massive's futures schedules place the row in; a row the schedules do not cover keeps that date, and the stream's m.streams() row shows the error. From REST `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format."; flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket | `session_end_date` | `session_end_date` |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; flat files `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp` | `timestamp` | `t` |
-| `AskExchange` | long | Always null for `futures.quotes`; supplied by `stocks.quotes`, `options.quotes`, `forex.quotes`. |  |  |  |  |
 | `AskPrice` | double | The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
 | `AskSize` | double | The quote size represents the number of futures contracts available at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
-| `BidExchange` | long | Always null for `futures.quotes`; supplied by `stocks.quotes`, `options.quotes`, `forex.quotes`. |  |  |  |  |
 | `BidPrice` | double | The bid price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket | `bid_price` | `bid_price` | `bp` |
 | `BidSize` | double | The quote size represents the number of futures contracts available at the given bid price. | REST, flat files, WebSocket | `bid_size` | `bid_size` | `bs` |
-| `Conditions` | int[] | Always null for `futures.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `Indicators` | int[] | Always null for `futures.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `ParticipantTimestamp` | Instant | Always null for `futures.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
 | `SequenceNumber` | long | The unique sequence number assigned to this quote by the exchange. | REST, flat files | `sequence_number` | `sequence_number` |  |
-| `Tape` | long | Always null for `futures.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `TrfTimestamp` | Instant | Always null for `futures.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
 | `ReportSequence` | long | The reporting sequence number. | REST, flat files | `report_sequence` | `report_sequence` |  |
 | `AskTimestamp` | Instant | The time when the ask price was submitted to the exchange. | REST, flat files, WebSocket | `ask_timestamp` | `ask_timestamp` | `at` |
 | `BidTimestamp` | Instant | The time when the bid price was submitted to the exchange. | REST, flat files, WebSocket | `bid_timestamp` | `bid_timestamp` | `bt` |
 | `Channel` | long | The CME multicast channel this event was sourced from. | REST | `channel` |  |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
-| `ReceivedTimestamp` | Instant | Always null for `futures.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -101,14 +87,6 @@ Open, high, low, close, and volume bars of futures contracts.
 | `High` | double | The highest price within the timeframe. | REST, flat files, WebSocket | `high` | `high` | `h` |
 | `Low` | double | The lowest price within the timeframe. | REST, flat files, WebSocket | `low` | `low` | `l` |
 | `Transactions` | long | The number of transactions that occurred within the timeframe. | REST, flat files, WebSocket | `transactions` | `transactions` | `n` |
-| `Vwap` | double | Always null for `futures.bars`; supplied by `stocks.bars`, `options.bars`, `forex.bars`, `crypto.bars`. |  |  |  |  |
-| `Otc` | boolean | Always null for `futures.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `DecimalVolume` | String | Always null for `futures.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `AccumulatedVolume` | long | Always null for `futures.bars`; supplied by `stocks.bars`, `options.bars`. |  |  |  |  |
-| `AccumulatedDecimalVolume` | String | Always null for `futures.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `OfficialOpen` | double | Always null for `futures.bars`; supplied by `stocks.bars`, `options.bars`, `indices.bars`. |  |  |  |  |
-| `DayVwap` | double | Always null for `futures.bars`; supplied by `stocks.bars`, `options.bars`. |  |  |  |  |
-| `AverageTradeSize` | long | Always null for `futures.bars`; supplied by `stocks.bars`, `options.bars`, `crypto.bars`. |  |  |  |  |
 | `DollarVolume` | double | The sum of price × size across all trades in the window, expressed in the contract's quoted price units, which are the same units as the bar's open, high, low, and close. Despite the field name, no contract multiplier is applied, so this is not a notional dollar value. See the Products endpoint (https://massive.com/docs/rest/futures/products) for contract multiplier details. Because dollar_volume is a raw sum, you can use it to compute a volume-weighted average price (VWAP) over any span of bars: sum dollar_volume across the bars in the window and divide by the summed volume. | REST, flat files, WebSocket | `dollar_volume` | `dollar_volume` | `dv` |
 | `SettlementPrice` | double | The price the contract settled at for this session. Included for session, week, month, quarter, and year candles; for multi-session candles it is the settlement of the final session in the period. Not returned for intraday candles (sec, min, hour). | REST, flat files | `settlement_price` | `settlement_price` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/futures/market-operations/exchanges) for Massive's mapping of exchange IDs. | flat files |  | `exchange` |  |
@@ -305,4 +283,4 @@ Massive's documentation of this dataset:
 
 ---
 
-Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
+Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and the columns it computes.

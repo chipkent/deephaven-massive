@@ -264,9 +264,11 @@ def test_a_summary_keeps_its_text() -> None:
 
 
 def test_spec_validation() -> None:
-    for name in ("trades", "trades.", ".trades"):  # no dot, or an empty half on either side
-        with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>'"):
+    for name in ("", "trades.", ".trades", "a..b"):  # an empty part anywhere
+        with pytest.raises(ValueError, match=r"must be '<namespace>\.<dataset>', or one name"):
             change(EXCHANGES, name=name)
+    # One plain name is a dataset the session serves itself, such as `m.snapshots()`.
+    assert change(EXCHANGES, name="snapshots").name == "snapshots"
     with pytest.raises(ValueError, match=r"test\.x: a WebSocket dataset .* needs a class"):
         DatasetSpec(name="test.x", summary="A dataset for the tests.", channels={NotBars.ANY: "T"})
     with pytest.raises(ValueError, match=r"^test\.x: a flat-file dataset needs a class$"):
@@ -276,6 +278,9 @@ def test_spec_validation() -> None:
             summary="A dataset for the tests.",
             flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
         )
+    with pytest.raises(ValueError, match=r"^stocks\.trades: option_rows is for a dataset of every"):
+        change(STOCK_TRADES, option_rows=True)
+    assert change(EXCHANGES, option_rows=True).option_rows
     for transports in (
         {"channels": {NotBars.ANY: "T"}},
         {"flat_file_prefixes": {NotBars.ANY: "us/x"}},
@@ -335,14 +340,25 @@ def test_only_a_fanout_key_can_be_no_instrument(role: str) -> None:
     [
         ("time", KeySpec("Id", required=False)),
         ("end", KeySpec("Id", required=False)),
-        ("fanout", KeySpec("Id", required=False)),
         ("date", KeySpec("Id", required=False)),
         ("symbol", KeySpec("stocksTicker", from_request=True, required=False)),
+        ("fanout", KeySpec("stocksTicker", from_request=True, required=False)),
     ],
 )
-def test_only_a_symbol_from_rest_rows_can_be_optional(role: str, spec: KeySpec) -> None:
-    with pytest.raises(ValueError, match=r"only a symbol key read from a REST path's rows"):
+def test_only_a_symbol_or_fanout_key_from_rest_rows_can_be_optional(
+    role: str, spec: KeySpec
+) -> None:
+    with pytest.raises(
+        ValueError, match=r"only a symbol or fanout key read from a REST path's rows"
+    ):
         with_role(role, spec)
+
+
+def test_a_rest_fanout_key_can_be_optional() -> None:
+    # The unified snapshot's underlying: only its options rows carry one.
+    spec = with_role("fanout", KeySpec("Id", required=False))
+    found = spec.keys_for(R, "/v3/reference/exchanges").fanout
+    assert found == KeySpec("Id", required=False)
 
 
 def test_an_end_key_needs_bars_and_a_date_key_a_dated_dataset() -> None:
@@ -383,7 +399,7 @@ def test_row_times_follow_the_kind_unless_declared() -> None:
 
 def test_a_stream_symbol_cannot_be_optional() -> None:
     optional = keys(KeySpec("Ticker", required=False), "SipTimestamp")
-    with pytest.raises(ValueError, match=r"only a symbol key read from a REST path's rows"):
+    with pytest.raises(ValueError, match=r"only a symbol or fanout key read from a REST path's"):
         change(STOCK_TRADES, keys={**STOCK_TRADES.keys, (W, "stocks/T"): optional})
 
 
@@ -590,7 +606,7 @@ def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
     assert problems(change(sheets, keys={(R, path): keys("Tickers")})) == (
         (
             "declared keys: stocks.balance_sheets: REST /stocks/financials/v1/balance-sheets: the "
-            "symbol key 'Tickers' is json-text, not a string"
+            "symbol key 'Tickers' is string-array, not a string"
         ),
     )
 
@@ -670,24 +686,27 @@ def test_members_of_one_group_follow_their_positions() -> None:
     assert Catalog((last, history)).members("trades") == (history, last)
 
 
-def test_the_trades_pair_has_identical_columns_with_one_timestamp() -> None:
+def test_the_trades_pair_shares_its_columns_in_one_order_with_one_timestamp() -> None:
     catalog = Catalog((STOCK_TRADES, CRYPTO_TRADES))
     stocks, crypto = catalog.dataset_schema(STOCK_TRADES), catalog.dataset_schema(CRYPTO_TRADES)
-    # The same names and types; the descriptions are each dataset's own.
-    assert [(c.name, c.type) for c in stocks.columns] == [(c.name, c.type) for c in crypto.columns]
+    # The shared columns have the same names, types, and order; each keeps only its own.
+    shared = [(c.name, c.type) for c in stocks.columns if c.name in crypto.column_names]
+    assert shared == [(c.name, c.type) for c in crypto.columns if c.name in stocks.column_names]
     assert (stocks.name, crypto.name) == ("stocks.trades", "crypto.trades")
     names = stocks.column_names
-    assert names[:3] == ("Symbol", "Date", "Timestamp")
-    assert names[-1] == "TimestampInsert"
-    assert names.count("Timestamp") == 1
+    for each in (names, crypto.column_names):
+        assert each[:3] == ("Symbol", "Date", "Timestamp")
+        assert each[-1] == "TimestampInsert"
+        assert each.count("Timestamp") == 1
     # Crypto's participant time is its Timestamp; stocks keeps its own ParticipantTimestamp,
-    # which crypto rows hold null. Every source's own symbol key became Symbol.
+    # which crypto trades do not have. Every source's own symbol key became Symbol.
     assert "ParticipantTimestamp" in names
+    assert {"ParticipantTimestamp", "Tape"}.isdisjoint(crypto.column_names)
     assert {"SipTimestamp", "Ticker", "Pair"}.isdisjoint(names)
     types = {c.name: c.type for c in stocks.columns}
     assert types["Timestamp"] is ColumnType.INSTANT
     assert types["Size"] is ColumnType.DOUBLE  # the WebSocket's long joins REST's double
-    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert catalog.problems() == ()
 
 

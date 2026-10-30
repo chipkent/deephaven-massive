@@ -55,7 +55,8 @@ def test_wire_type_values_are_the_generated_spellings() -> None:
         "date",
         "epoch",
         "iso-instant",
-        "int-array",
+        "long-array",
+        "string-array",
         "json-text",
     ]
 

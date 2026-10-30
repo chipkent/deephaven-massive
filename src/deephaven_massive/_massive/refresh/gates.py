@@ -73,7 +73,7 @@ class Gate(StrEnum):
     `DESCRIPTION_FIXES` entry quoting a description the vendor no longer gives, among them)."""
     TYPE_AGREEMENT = "type-agreement"
     """Within one of `overrides.KINDS`, one column whose `WireType`s do not join: the type
-    lattice joins `long` with `double` to `double`, `long` with `int-array` to `int-array`,
+    lattice joins `long` with `double` to `double`, `long` with `long-array` to `long-array`,
     and an `epoch` with an `epoch` (each source keeping its unit), and nothing else. A
     conflict is first a possible naming error (one name for two fields), so the problem
     prints both fields' descriptions."""

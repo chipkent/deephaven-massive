@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
+
 In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.forex.quotes`, `m.forex.bars`, `m.forex.fmv`, `m.forex.snapshots`, `m.forex.movers`, and `m.forex.conversion` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
 
 <a id="quotes"></a>
@@ -19,22 +21,9 @@ Foreign exchange quotes: the best bid and ask of each currency pair, tick by tic
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp."; REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the quote was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `timestamp`, `participant_timestamp` | `participant_timestamp` | `t` |
 | `AskExchange` | long | The ask exchange ID | REST, flat files | `ask_exchange` | `ask_exchange` |  |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask`, `ask_price` | `ask_price` | `a` |
-| `AskSize` | double | Always null for `forex.quotes`; supplied by `stocks.quotes`, `options.quotes`, `futures.quotes`, `crypto.quotes`. |  |  |  |  |
 | `BidExchange` | long | The bid exchange ID | REST, flat files | `bid_exchange` | `bid_exchange` |  |
 | `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `bid`, `bid_price` | `bid_price` | `b` |
-| `BidSize` | double | Always null for `forex.quotes`; supplied by `stocks.quotes`, `options.quotes`, `futures.quotes`, `crypto.quotes`. |  |  |  |  |
-| `Conditions` | int[] | Always null for `forex.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `Indicators` | int[] | Always null for `forex.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `ParticipantTimestamp` | Instant | Always null for `forex.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `SequenceNumber` | long | Always null for `forex.quotes`; supplied by `stocks.quotes`, `options.quotes`, `futures.quotes`. |  |  |  |  |
-| `Tape` | long | Always null for `forex.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `TrfTimestamp` | Instant | Always null for `forex.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `ReportSequence` | long | Always null for `forex.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `AskTimestamp` | Instant | Always null for `forex.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `BidTimestamp` | Instant | Always null for `forex.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `Channel` | long | Always null for `forex.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, WebSocket | `exchange` |  | `x` |
-| `ReceivedTimestamp` | Instant | Always null for `forex.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -63,16 +52,6 @@ Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 | `Low` | double | The lowest price for the symbol in the given time period. | REST, flat files, WebSocket | `l` | `low` | `l` |
 | `Transactions` | long | The number of transactions in the aggregate window. | REST, flat files | `n` | `transactions` |  |
 | `Vwap` | double | The volume weighted average price. | REST | `vw` |  |  |
-| `Otc` | boolean | Always null for `forex.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `DecimalVolume` | String | Always null for `forex.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `AccumulatedVolume` | long | Always null for `forex.bars`; supplied by `stocks.bars`, `options.bars`. |  |  |  |  |
-| `AccumulatedDecimalVolume` | String | Always null for `forex.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `OfficialOpen` | double | Always null for `forex.bars`; supplied by `stocks.bars`, `options.bars`, `indices.bars`. |  |  |  |  |
-| `DayVwap` | double | Always null for `forex.bars`; supplied by `stocks.bars`, `options.bars`. |  |  |  |  |
-| `AverageTradeSize` | long | Always null for `forex.bars`; supplied by `stocks.bars`, `options.bars`, `crypto.bars`. |  |  |  |  |
-| `DollarVolume` | double | Always null for `forex.bars`; supplied by `futures.bars`. |  |  |  |  |
-| `SettlementPrice` | double | Always null for `forex.bars`; supplied by `futures.bars`. |  |  |  |  |
-| `Exchange` | long | Always null for `forex.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -210,4 +189,4 @@ Massive's documentation of this dataset:
 
 ---
 
-Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
+Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and the columns it computes.

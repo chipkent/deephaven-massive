@@ -180,7 +180,7 @@ def test_trades_schema() -> None:
         ("Symbol", "String"),
         ("Date", "String"),
         ("Timestamp", "Instant"),
-        ("Conditions", "int[]"),
+        ("Conditions", "long[]"),
         ("Exchange", "long"),
         ("Id", "String"),
         ("Price", "double"),

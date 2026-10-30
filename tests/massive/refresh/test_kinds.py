@@ -182,11 +182,11 @@ def test_gate_stale_entry_kinds_and_projections_naming_nothing() -> None:
     [
         (WireType.LONG, WireType.DOUBLE, WireType.DOUBLE),
         (WireType.DOUBLE, WireType.LONG, WireType.DOUBLE),
-        (WireType.LONG, WireType.INT_ARRAY, WireType.INT_ARRAY),
+        (WireType.LONG, WireType.LONG_ARRAY, WireType.LONG_ARRAY),
         (WireType.EPOCH, WireType.EPOCH, WireType.EPOCH),
         (WireType.STRING, WireType.STRING, WireType.STRING),
         (WireType.STRING, WireType.LONG, None),
-        (WireType.DOUBLE, WireType.INT_ARRAY, None),
+        (WireType.DOUBLE, WireType.LONG_ARRAY, None),
         (WireType.EPOCH, WireType.LONG, None),
         (WireType.ISO_INSTANT, WireType.EPOCH, None),
     ],

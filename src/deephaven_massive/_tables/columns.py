@@ -79,7 +79,8 @@ _DH_TYPES: Final[Mapping[ColumnType, object]] = {
     ColumnType.INT: dtypes.int32,
     ColumnType.STRING: dtypes.string,
     ColumnType.BOOLEAN: dtypes.bool_,
-    ColumnType.INT_ARRAY: dtypes.int32_array,
+    ColumnType.LONG_ARRAY: dtypes.long_array,
+    ColumnType.STRING_ARRAY: dtypes.string_array,
 }
 
 
@@ -371,14 +372,14 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "Name": "The column name.",
         "Type": (
-            "The column's Deephaven type: long, int, double, boolean, String, Instant, or int[]; "
-            "a calendar date is ISO yyyy-MM-dd text, a String."
+            "The column's Deephaven type: long, int, double, boolean, String, Instant, long[], or "
+            "String[]; a calendar date is ISO yyyy-MM-dd text, a String."
         ),
         "Description": "What the column holds; empty when Massive gives no description.",
         "SuppliedBy": (
             "The transports whose sources fill the column for this dataset, spelled REST, flat "
-            'files, and WebSocket, in that order, joined by ", "; empty for a column that only '
-            "other datasets of the same kind supply, which this dataset always leaves null."
+            'files, and WebSocket, in that order, joined by ", "; a column the transport '
+            "serving a call does not fill is null in its result."
         ),
     }
 )

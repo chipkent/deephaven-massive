@@ -68,12 +68,17 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 ### 2.1 Principles
 
 1. **Datasets are named by what they are, not how they travel.** One method per dataset. One
-   schema per dataset kind: the union of the fields Massive documents for the kind's sources
-   across asset classes and transports, merged at run time from the generated tables
-   ([section 19.4](#194-generated-schemas)). Column names come from the generated tables
+   column order and one type per column for each dataset kind, merged at run time from the
+   generated tables ([section 19.4](#194-generated-schemas)): the union of the fields Massive
+   documents for the kind's sources across asset classes and transports. A dataset keeps only
+   the kind's columns that some source of its own fills, on any transport and for any
+   arguments, in the kind's order (crypto trades have no `Tape`; stock bars have no
+   `SettlementPrice`), so the columns two datasets of a kind share have one name and one type
+   and their tables merge on them. A column only another transport of the same dataset fills
+   stays, and is null in a table the other transport serves, so a history table and a live
+   table of one dataset have the same columns. Column names come from the generated tables
    (the lexicons and `NAMES`) and from each dataset's declared key columns, never from a field
-   description. A column a class or transport does not supply is null (crypto trades have no
-   `Tape`; stock bars have no `SettlementPrice`). Every tick, bar, and value row says when it
+   description. Every tick, bar, and value row says when it
    happened (a tick's `Timestamp`, a bar's `TimestampStart` and exclusive `TimestampEnd`), its
    trading day (`Date`, ISO `yyyy-MM-dd` text), and when the library received it
    (`TimestampInsert`, the last column of every dataset;
@@ -116,8 +121,8 @@ deprecation path, and no rule that rests on the chance of breaking someone.
     and one rule picks each dataset column's description from them; fixed library text
     covers only the cases [section 19.4](#194-generated-schemas) defines (the key columns
     `Symbol`, `Timestamp`, and `Underlying`, the library's time columns `Date`,
-    `TimestampStart`, `TimestampEnd`, and `TimestampInsert`, a column that only other members
-    of its kind supply, and a dataset's note on a column whose meaning depends on the query,
+    `TimestampStart`, `TimestampEnd`, and `TimestampInsert`, the derived `OptionRoot`, and a
+    dataset's note on a column whose meaning depends on the query,
     such as the split adjustment of a bar's prices). The same text reaches users three ways: the column-header tooltip of every result
     in the Deephaven web UI, `columns()` in the console, and the generated pages under
     `docs/datasets/` ([section 7.4](#74-column-descriptions)). Nobody writes a column list by hand.
@@ -140,8 +145,8 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 | kind | A dataset kind: the datasets whose sources share one merged schema (trades, quotes, bars, …), defined in `KINDS` and recorded on each generated source as a `Membership`. |
 | shape | An object shape in a payload (an aggregate row, a snapshot `day` object, a WebSocket channel), which selects a lexicon. |
 | drift | A difference between a payload on the wire and its committed generated schema. |
-| column description | The plain-text meaning of one dataset column: the description of the wire field behind it (the vendor's, or the refresh's correction where the vendor's is clearly wrong), or fixed library text for a key column or a column only other members of the kind supply ([section 19.4](#194-generated-schemas)). |
-| column reference | The generated, committed pages `docs/datasets/<namespace>.md`, one section per dataset ([section 7.4](#74-column-descriptions)). |
+| column description | The plain-text meaning of one dataset column: the description of the wire field behind it (the vendor's, or the refresh's correction where the vendor's is clearly wrong), or fixed library text for a key column or a column the library computes ([section 19.4](#194-generated-schemas)). |
+| column reference | The generated, committed pages `docs/datasets/<namespace>.md` (and `snapshots.md` for `m.snapshots`), one section per dataset ([section 7.4](#74-column-descriptions)). |
 | UG thread | A thread of Deephaven's update graph (UG), which refreshes live tables while holding the UG lock. |
 | blink table | A Deephaven table whose rows exist for exactly one update cycle. `TablePublisher` produces one. |
 | result scope | A library-owned `LivenessScope` that holds exactly one result. |
@@ -299,6 +304,8 @@ _namespaces/
   options.py futures.py indices.py forex.py crypto.py
   reference.py indicators.py economy.py                   namespace class + DATASETS
   partners.py            m.partners and its four partner sub-namespaces
+  snapshots.py           the DatasetSpec of m.snapshots(), the unified snapshot the session
+                         serves itself, and its DATASETS
 _datasets/               dataset semantics: no network I/O, no threads, no Deephaven calls;
                          only column_reference.sync writes files
   __init__.py            docstring only
@@ -1095,14 +1102,14 @@ def columns(self) -> Table:
     Returns:
         A static table with one row per column, in result column order:
         `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
-        `int`, `double`, `boolean`, `String`, `Instant`, or `int[]`; every calendar date,
+        `int`, `double`, `boolean`, `String`, `Instant`, `long[]`, or `String[]`; every calendar date,
         such as `Date`, is ISO `yyyy-MM-dd` text, a `String`);
         `Description` (String), what the column holds, empty when Massive gives no
         description; and `SuppliedBy` (String), the transports whose sources fill the
         column for this dataset, spelled `REST`, `flat files`, and `WebSocket`, in that
         order, joined by ", " (`fetch()` and `poll()` are served by REST, the stream verbs
-        by WebSocket, and `history()` by REST or flat files); empty for a column that only
-        other datasets of the same kind supply, which this dataset always leaves null.
+        by WebSocket, and `history()` by REST or flat files). A dataset has only the columns
+        some transport of its own fills, so `SuppliedBy` is never empty.
 
     Raises:
         ValueError: If called on an update-graph thread, for example from a table listener.
@@ -1372,11 +1379,15 @@ table built from the dataset schema with no network call. The tooltip only exist
 UI; `columns()` serves a notebook, an IDE, or a script.
 
 **3. The column reference documents them on GitHub.** `docs/datasets/<namespace>.md` holds
-one generated page per namespace module (`stocks.md`, …, `partners.md`; `m.snapshots` is on
-`reference.md`, beside its record `reference.snapshots`), with one section per dataset in
-declaration order. Each section starts with an explicit anchor, `<a id="<dataset>"></a>`,
-where `<dataset>` is the dataset's name below its namespace with dots written as hyphens
-(`trades`, `financials-ratios`, `benzinga-news`); a heading naming the dataset
+one generated page per namespace module (`stocks.md`, …, `partners.md`), and one page of its
+own for `m.snapshots`, a dataset of the session itself with no namespace (`snapshots.md`), with
+one section per dataset in declaration order. Under each page's guide, one paragraph gives the
+recipe that merges tables of two asset classes on the columns they share:
+`merge([t.view(common) for t in tables])`, or, to keep every column, a typed null added for
+each missing one first (`update("Tape = NULL_LONG")`). Each section starts with an explicit
+anchor, `<a id="<dataset>"></a>`, where `<dataset>` is the dataset's name below its namespace
+with dots written as hyphens (`trades`, `financials-ratios`, `benzinga-news`), or the whole
+name of a dataset with no namespace (`snapshots`); a heading naming the dataset
 (`m.stocks.trades`); its `DatasetSpec.summary`; and one table with one row per column, in
 result order. The table's columns are **Column**, **Deephaven type**, **Description**,
 **Supplied by** (the transports of `columns()`'s `SuppliedBy`, in the same spelling), and one
@@ -1392,7 +1403,7 @@ with an `asset_class`, only the pages whose URL path has a segment equal to that
 (`/docs/rest/options/snapshots/unified-snapshot.md` for `options.snapshots`) are listed, and all
 of the source's pages when none matches, so a dataset never loses its links to a change in the
 vendor's URL layout. A dataset that spans classes (`asset_class` None, such as
-`reference.snapshots` or `reference.tickers`) lists every class's page. The page ends with a
+`snapshots` or `reference.tickers`) lists every class's page. The page ends with a
 footer naming the generator command and the snapshot's fetch date. Units and nullability get no columns: every
 timestamp is an `Instant`, and **Supplied by** with the description already says when a
 column is null. Readers can see what each table holds before they install.
@@ -1416,8 +1427,10 @@ column is null. Readers can see what each table holds before they install.
   reference and nothing else. The script starts the embedded Deephaven server (the API imports
   Deephaven, and the library never imports `deephaven_server`), imports the library, takes the
   catalog the session module builds from every namespace module, calls
-  `render(catalog, _massive.provenance())` and then `sync()` on `docs/datasets/`, and prints
-  what it wrote and deleted. It holds no logic of its own. A renamed or removed namespace or dataset therefore never leaves an
+  `render(catalog, _massive.provenance())`, prints which columns each dataset gained or lost
+  against the committed pages (`column_changes`), then calls `sync()` on `docs/datasets/` and
+  prints what it wrote and deleted. Run after every refresh, the column report is how a refresh
+  shows what it does to each dataset's table (the wire package cannot see datasets). It holds no logic of its own. A renamed or removed namespace or dataset therefore never leaves an
   orphaned page: the one command that writes the directory also empties it of everything it
   did not render.
 - **The parity test**, `tests/datasets/test_column_reference.py`, renders the pages in the test
@@ -1718,11 +1731,14 @@ columns that is unique per row, checked against the generated fields of its path
 
 `m.snapshots(symbols, *, …F) -> Query` calls the unified `/v3/snapshot` with `ticker.any_of`,
 250 tickers per request, any mix of asset classes. Rows are the union schema of the unified
-snapshot. `ALL` is not accepted here (the endpoint requires tickers). Its catalog record is
-named `reference.snapshots` and is declared in `_namespaces/reference.py` with
-`asset_class=ClassFromPrefix.ANY` (each ticker's prefix selects its class,
-§ 10), so it is in the catalog (`CATALOG` in `_session.py`); `m.streams()` and messages show
-that name.
+snapshot. An options row also has `Underlying` (its `underlying_asset.ticker`, an optional
+`fanout` key, since other classes' rows have none) and `OptionRoot` (`option_rows=True`), as
+`m.options.snapshots` has; both are null on the rows of other classes. `ALL` is not accepted
+here (the endpoint requires tickers). The dataset is named `snapshots`, the session method's
+own name with no namespace (`DatasetSpec` takes one plain name for a dataset of the session
+itself), and is declared in `_namespaces/snapshots.py` with `asset_class=ClassFromPrefix.ANY`
+(each ticker's prefix selects its class, § 10), so it is in the catalog (`CATALOG` in
+`_session.py`); `m.streams()`, messages, and the column reference show that name.
 
 ### 8.12 Excluded endpoints
 
@@ -2102,7 +2118,7 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   (`reference.exchanges`, `economy.*`) has no `Symbol` column. Nor does a dataset whose rows
   each list several tickers, because no single instrument is the row's: the three financial
   statements, Forms 3 and 4, the 8-K disclosures, `reference.news`, and
-  `partners.benzinga.news` keep their `Tickers` column (JSON text), and `symbols` there only
+  `partners.benzinga.news` keep their `Tickers` column (`String[]`), and `symbols` there only
   filters the request (`tickers.any_of` or `ticker`). `Symbol` is never a list.
 
 ## 11. Enums and types
@@ -2175,10 +2191,15 @@ representation rules ([section 19.4](#194-generated-schemas)) decide which field
 **Column types.** Every column's type comes from the type lattice of
 [section 19.4](#194-generated-schemas): each generated field has a `WireType`, the merge joins
 the `WireType`s of one column across a kind's sources, and `_datasets/schema.py` maps the result to a
-Deephaven column type (`long`, `double`, `boolean`, `String`, `Instant`, `int[]`; a calendar
-date is ISO `yyyy-MM-dd` text, a `String`).
-Sizes come out as `double` wherever any source says `number`; condition codes come out as
-`int[]`; exchange and tape ids come out as `long`.
+Deephaven column type (`long`, `double`, `boolean`, `String`, `Instant`, `long[]`,
+`String[]`; a calendar date is ISO `yyyy-MM-dd` text, a `String`).
+Sizes come out as `double` wherever any source says `number`. Every numeric id or code is a
+`long`, alone or in a list: condition codes and indicators are `long[]`, and exchange and tape
+ids `long`, so codes join `m.reference.conditions` `Id` and ids `m.reference.exchanges` `Id`
+with no cast. A list of text (an article's tickers, a filing's roles) is a `String[]`, which
+`ungroup` splits and the query language's `inObj` tests
+(`where("Tickers != null && inObj(`AAPL`, Tickers)")`, since `inObj` refuses a null list); any
+other nested value (an object, a list of objects) is JSON text, and its description says so.
 
 ## 12. Timestamp units and day boundaries
 
@@ -3333,7 +3354,11 @@ How a request is built from a `DatasetSpec` and a `Request`:
   dataset keys on it (so `reference.related_companies`, keyed on every vendor column, keeps
   each distinct row with the time of the latest poll that returned it); `REPLACE`
   is that `last_by` filtered on a hidden boolean column, to which each cycle adds one tombstone
-  row for every key the previous cycle had and this one lacks, then dropped. A cycle is one `add`,
+  row for every key the previous cycle had and this one lacks, then dropped. Deephaven keys no
+  aggregation on an array column, so when a poll key is a list (`long[]` or `String[]`, the
+  13-F `OtherManagers`), the `last_by` keys on a hidden text column in its place, the JSON text
+  of the row's list keys, which the poller writes beside every row and tombstone and the result
+  drops; the poller's identities hold a list as a tuple. A cycle is one `add`,
   so its rows and its removals land in one update. The `last_by` state keeps a hidden row for
   every key ever seen, the trade-off `last_by()` streams already accept: a `REPLACE` poll over a
   churning key set (an options chain, the day's movers) grows with the keys it has held. The
@@ -4336,7 +4361,8 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   `float64`, `bool` → `bool`, `string` and `json-text` (compact JSON) → `string`, `date` →
   `date32` (strict `YYYY-MM-DD`), `iso-instant` → `timestamp[ns, UTC]` built from exact
   integer nanoseconds (up to nine fractional digits, integer arithmetic only, never through a
-  float or a microsecond `datetime`), `int-array` → `list<int32>`. Values are checked and
+  float or a microsecond `datetime`), `long-array` → `list<int64>`, `string-array` →
+  `list<string>`. Values are checked and
   converted by `spec.convert`, which the WebSocket decoder shares. ISO date-time text **without** an offset is an
   unconvertible value, never assumed to be UTC: a field that really is offset-less UTC gets a
   named `TYPE_FIXES` conversion. `DriftReport.missing` holds only the vendor-`required`
@@ -4599,9 +4625,10 @@ verification, never a column list.
   it (an empty cell is null; a cell of a text or date column is text; any other cell is a
   number when it reads as one, else text). A dataset page with no overview row is reported as
   unaccounted by `--check`.
-- **Representation rules** (generator rules, not hand entries): an array of strings or objects,
-  a free-form object, and `oneOf`/`anyOf` become `json-text`; an array of integers becomes
-  `int-array`; the WebSocket envelope key `ev` is dropped; a field with a `UNITS` entry becomes
+- **Representation rules** (generator rules, not hand entries): an array whose items the
+  scalar rules make a `long` becomes `long-array`, and one whose items are plain `string`
+  becomes `string-array`; an array of anything else (objects, other numbers, instants, dates,
+  arrays), a free-form object, and `oneOf`/`anyOf` become `json-text`; the WebSocket envelope key `ev` is dropped; a field with a `UNITS` entry becomes
   an `epoch` in that unit; a string with `format: date-time`, or no format and a name ending in
   `_utc`, becomes an `iso-instant`; a string with `format: date`, or named `date` or `*_date`,
   becomes a `date`.
@@ -4629,21 +4656,23 @@ verification, never a column list.
   are never reported as drift.
 
 **The type lattice.** `WireType` is one of `long`, `double`, `bool`, `string`, `date`, `epoch`
-(an integer with a unit), `iso-instant`, `int-array`, and `json-text`. OpenAPI `integer`, and
-`number` with `format: integer`, map to `long`, and `number` to `double`. Doc pages map
+(an integer with a unit), `iso-instant`, `long-array`, `string-array`, and `json-text`. OpenAPI
+`integer`, and `number` with `format: integer`, `int32`, or `int64` (the option chain's quote
+exchange ids), map to `long`, and `number` to `double`. Doc pages map
 `integer` to `long`, `number` to `double`, `string` to `string`, and `timestamp - integer` to
 `epoch` (with its `UNITS` entry). Two types meet for one column name within one kind by these
-joins: `long ⊔ double = double`; `long ⊔ int-array = int-array` (a scalar becomes a
+joins: `long ⊔ double = double`; `long ⊔ long-array = long-array` (a scalar becomes a
 one-element list); `epoch ⊔ epoch = epoch`, each source keeping its own unit. Any other pair is a
 **type conflict** (the `type-agreement` gate). `_datasets/schema.py` maps `long` to `long`, `double` to
 `double`, `bool` to `boolean`, `string`, `json-text`, and `date` to `String` (a date as ISO
 `yyyy-MM-dd` text), `epoch` and
-`iso-instant` to `Instant`, and `int-array` to `int[]`. An `iso-instant` is ISO-8601
+`iso-instant` to `Instant`, `long-array` to `long[]`, and `string-array` to `String[]`. An `iso-instant` is ISO-8601
 date-time text with seconds and an offset (`Z` or `±HH:MM`), decoded to exact integer
 nanoseconds since the epoch; text without an offset, or an instant outside the signed
 64-bit nanosecond range (1677 to 2262), is an unconvertible value, never assumed UTC or
-clamped. An `int-array` element outside the
-`int32` range is an unconvertible value.
+clamped. A `long-array` element outside the
+`int64` range, and a `string-array` element that is not text, is an unconvertible value; a
+null element is kept, as Deephaven's null in the array.
 
 **Hand input.** All of it lives in `refresh/`, every entry carries a reason, and an entry that
 names a source or field the snapshot lacks fails the refresh as stale (`stale-entry`).
@@ -4921,10 +4950,12 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
                                              # (any other fanout and session keep their
                                              # columns); a key filled from the request adds
                                              # a constant column; nothing else changes
-  schema = ordered union by column name of every cols(m, s):
+  order  = ordered union by column name of every cols(m, s):
            Symbol, then Timestamp, first where the dataset declares them; then first
            appearance in member, then source, then field order
-  each column's WireType = the lattice join over every contribution
+  schema = the columns of order that some cols(spec, s) of the dataset's own sources holds,
+           or that the library fills (its key and time columns), in that order
+  each column's WireType = the lattice join over every contribution of the kind
 ```
 
 **Named conversions.** A `TYPE_FIXES` entry names one field of one source and one
@@ -4948,7 +4979,7 @@ entry declares is coercion, which never happens. The conversions:
 | `quoted-integer` | `long` → `long` | an integer, or decimal digits in text | WebSocket forex `C` `x` (sample `"44"`) |
 | `text-or-integer-id` | `long` or `string` → `string` | text or an integer | the crypto trade ID, one decision: the full-market and movers snapshots `lastTrade.i`, declared text (samples `413131` and `"517478762"`), and WebSocket `XT` `i`, declared an integer (sample `14272084`); TMX `tmx_company_id`, declared an integer (sample `"2208"`) |
 | `number-label` | `double` → `string` | text, or a finite number as float text (`1` gives `"1.0"`) | risk-factor `taxonomy` (sample `"1.0"`) |
-| `code-list-text` | `long` → `int-array` | one integer, or integers separated by commas in text | flat-file `conditions` and stocks quotes `indicators`, one decision (sample `"12,37"`) |
+| `code-list-text` | `long` → `long-array` | one integer, or integers separated by commas in text | flat-file `conditions` and stocks quotes `indicators`, one decision (sample `"12,37"`) |
 | `midnight-utc-date` | `date` → `date` | `YYYY-MM-DD`, or midnight with offset `Z` or `+00:00`, giving the written date; any other clock or offset fails | indices open-close `from`, crypto open-close `day` (samples `"…T00:00:00.000Z"`); the column stays a date so the open-close sources agree |
 | `date-as-epoch` | `date` → `epoch` | an integer count; its unit comes from `UNITS` | futures snapshot `details.settlement_date` (sample `1753851600000000000`, an instant in ns; `/futures/v1/contracts` sends the field as a date) |
 | `integer-as-number` | `long` → `double` | any number | WebSocket crypto `XA`/`XAS` `v` (sample `951.6112`), futures `A`/`AM` `dv` (sample `1353.1`) |
@@ -4979,7 +5010,7 @@ per source in a
   dataset when it takes symbols: it has channels, flat files, `per_symbol`, a symbol
   filled from the request, or a `symbol_param` that filters a single-ticker field. A
   `symbol_param` over a list-valued field (the generated `tickers` field of a filing or an
-  article is `json-text`) does not make one: those rows have no `Symbol`
+  article is `string-array`) does not make one: those rows have no `Symbol`
   ([section 10](#10-symbols-and-all)). The field is the row field of the parameter's base
   name, singular or plural, read from the generated path, never from a hand list. Its asset
   class alone does not make a dataset one either: `futures.exchanges` and
@@ -5009,9 +5040,11 @@ per source in a
   the stocks `filings.index`, the TMX corporate events, and the Benzinga `analyst_insights`,
   `ratings`, `bulls_bears_say`, `guidance`, and `earnings` (whose only documented
   analyst-insights row has no `ticker`): a row without it keeps a null `Symbol` instead of
-  failing the request as a missing required key. Only a `symbol` key read from a REST path's rows may set it
-  False; flat files and streams filter and route rows by symbol, and the `time`, `end`,
-  `fanout`, and `date` keys are always required. A dataset with an optional symbol key cannot put
+  failing the request as a missing required key. It is also for an underlying only some rows
+  carry: the unified snapshot's `fanout` key `UnderlyingAssetTicker`, which only its options
+  rows have. Only a `symbol` or `fanout` key read from a REST path's rows may set it False;
+  flat files and streams filter and route rows by symbol, and the `time`, `end`, and `date`
+  keys are always required. A dataset with an optional symbol key cannot put
   `Symbol` in its `poll_keys`, whatever its mode (`DatasetSpec` refuses it): a row without a
   symbol would have a null poll key, which fails the `poll()` table in every mode, so such a
   dataset declares other `poll_keys`.
@@ -5023,17 +5056,18 @@ that takes it as a path parameter or holds it outside the result key
 (per request) and `WsClient.set_required(channel, keys, *, symbol)` (per channel, before its first
 subscription, [section 13.3](#133-connection-and-subscription-protocol)) receive exactly the
 source's required keys (declared, not `from_request`, and not marked `required=False`), so a futures WebSocket row without
-`session_end_date` is not a missing key, while a futures flat file without it is. Every member
-of a kind gets the identical
-column set: crypto's `ParticipantTimestamp` is renamed to `Timestamp`, while stocks keeps its
-`ParticipantTimestamp` column, so crypto rows hold `ParticipantTimestamp` null. A non-tick
+`session_end_date` is not a missing key, while a futures flat file without it is. A member of
+a kind keeps only the columns its own sources fill: crypto's `ParticipantTimestamp` is renamed
+to `Timestamp`, so crypto trades have no `ParticipantTimestamp`, while stocks keeps its
+`ParticipantTimestamp` column. The columns the members share keep the kind's type and order,
+so their tables merge on them. A non-tick
 dataset with several role paths (`options.contracts` list and per-contract) is the union of its
 role paths under the same join.
 
 **Column descriptions.** Each column of a dataset schema is a
 `Column(name, type, description, supplied_by, wire_keys)`: `supplied_by` is the transports of
 the dataset's own sources that fill the column (a key filled from the request counts), in the
-order `REST`, `FLAT_FILES`, `WS`; `wire_keys` maps each of those transports to the distinct wire
+order `REST`, `FLAT_FILES`, `WS`, never empty (a generated test checks every dataset); `wire_keys` maps each of those transports to the distinct wire
 keys behind the column, before any projection, in source order. `dataset_schema` picks one
 description per column of each **dataset**, never per kind: a kind's union spans asset classes,
 and one class's text is wrong for another (the stocks trades' `price`, "dollar value per whole
@@ -5051,11 +5085,7 @@ a dataset of `ClassFromPrefix.ANY` takes the field's own description.
    them, trying the transports in the order REST, flat files, WebSocket and, within one
    transport, the dataset's sources in their declared order (role paths, then channels, then
    prefixes). REST comes first because its text is the most complete.
-2. **A column that exists only through the kind's union**, which no source of the dataset
-   supplies, gets generated library text naming the members that do, in member order:
-   `` Always null for `crypto.trades`; supplied by `stocks.trades`. `` (crypto's
-   `ParticipantTimestamp` and `Tape`, for example).
-3. **The library's own columns**: `Symbol`, `Timestamp`, and `Underlying` when they are
+2. **The library's own columns**: `Symbol`, `Timestamp`, and `Underlying` when they are
    declared key columns of the dataset, and the time columns the library fills (`Date`,
    `TimestampStart`, `TimestampEnd`, `TimestampInsert`), get a library sentence ("The
    instrument, in the library's canonical symbol form.", "The row's primary time, as an
@@ -5083,15 +5113,19 @@ description chosen by these rules: the split-adjustment note of every price and 
 of `stocks.bars`, `options.bars`, and both daily open-close datasets
 ([section 12](#12-timestamp-units-and-day-boundaries), "Price adjustment"), since the same column
 holds either basis depending on the query and no vendor text says so. A column whose sources
-carry no description gets `""`, and nothing fails. The sentences of rules 2 and 3 and the notes
+carry no description gets `""`, and nothing fails. A column of nested values kept as JSON text
+(`json-text`) ends its description with "The column holds Massive's nested value as JSON text."
+The sentences of rule 2 and the notes
 are the library's statements about its own columns, not hand input about Massive,
 so they live in `_datasets/schema.py`, not in `refresh/`.
 
 **Derived columns.** Two columns no source carries are computed by every transport from the
 symbols it reads, and follow the leading key columns with the library's own description and
 the transports and wire keys of `Symbol`: `OptionRoot`, on every options dataset with a
-`Symbol`, is the symbol without `O:` and its last 15 characters (`symbols.option_roots`, after
-the OCC grammar check); `RawSymbol`, only in a session whose `unknown_symbols` is `WARN` and
+`Symbol` and on a dataset of every class whose rows include options contracts
+(`DatasetSpec.option_rows`, the unified snapshot), is the symbol without `O:` and its last 15
+characters (`symbols.option_roots`, after the OCC grammar check), null for a symbol that is no
+options contract; `RawSymbol`, only in a session whose `unknown_symbols` is `WARN` and
 only on a dataset that reads its symbol from rows, holds the text of a symbol the library could
 not read and is null elsewhere. `Catalog.dataset_schema(spec, raw_symbol=...)` caches each
 shape, and `SessionCore.dataset_schema` picks the session's, so a result, its `columns()`, and
@@ -5155,7 +5189,7 @@ routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/strea
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
 | **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
-| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, an `int-array` element, `int32` for `int[]`) | `WireError` naming the field, the expected type, and the value (first 200 characters), the whole row logged at DEBUG (first 2,000 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
+| **Unconvertible value** (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text) | `WireError` naming the field, the expected type, and the value (first 200 characters), the whole row logged at DEBUG (first 2,000 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
 | **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 | **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `UnknownSymbols.FAIL`, the default, a loud failure whose message names the switch; under `WARN`, the row is kept with a null `Symbol` and the text in `RawSymbol`, WARNING once per spelling (at most 100). |
@@ -6003,6 +6037,43 @@ document already reflects them.
     - A read that joins a lookup another read started bounds its own wait with its own
       patience and keeps sharing the lookup (once console commands can read, issue #206).
     ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
+63. **Columns join, merge, and show only what a dataset fills** (2026-10-29, from the API
+    review). The owner decided one part, the coordinator the rest after an adversarial review,
+    each named below.
+    *The owner decided:*
+    - A dataset keeps only the columns of its kind that some source of its own (REST,
+      WebSocket, or flat files, across all its overloads) can fill, in the kind's order; a
+      column only another transport of the same dataset fills stays, so a history table and a
+      live table of one dataset still merge for a backfill, and a dataset's columns never
+      depend on a call's arguments. The library's own columns stay wherever their inputs exist,
+      and a dataset that spans classes (`m.snapshots()`, `m.indicators.*`) keeps the union of
+      its classes. There is no merge helper: every page of the column reference whose datasets
+      share a kind gives the recipe `merge([t.view(common) for t in tables])`. A generated test
+      checks that every column of every dataset names a transport in `SuppliedBy`, and the
+      column-reference command reports each dataset's added, removed, and retyped columns.
+      This replaces principle 1's union rule ("a column a class does not supply is null") and
+      removes principle 12's "a column only other members of its kind supply" text, and its
+      "Always null" description, from the merge.
+    *The coordinator decided (the owner may object):*
+    - Every numeric id or code is a `long`, alone or in a list: `int-array` becomes
+      `long-array` (`long[]`, 64-bit elements), so condition codes and indicators join
+      `m.reference.conditions` `Id` with no cast; a `number` of format `int32` or `int64` maps
+      to `long`, which makes the option chain's quote exchange ids `long`.
+    - A list of plain text is `string-array` (`String[]`), by one generator rule; any other
+      nested value stays JSON text, and its description ends with "The column holds Massive's
+      value as JSON text." A null list element is kept rather than failing the page.
+    - A poll key may be a list (the 13-F `OtherManagers`): the keyed `poll()` tables key their
+      `last_by` on a hidden JSON-text column of the list keys, since Deephaven keys no
+      aggregation on an array.
+    - The unified snapshot is named `snapshots` everywhere (a dataset the session serves itself
+      has one plain name), is declared in its own module, `_namespaces/snapshots.py`, and has
+      its own column-reference page, `snapshots.md`. Its options rows gain `Underlying` (an
+      optional `fanout` key, a new allowance for a REST key only some rows carry) and
+      `OptionRoot` (`DatasetSpec.option_rows`), as `m.options.snapshots` has.
+    - The per-dataset column report runs in the column-reference command, not in the refresh:
+      the wire package cannot see datasets, and the command is run after every refresh.
+    ([section 7.4](#74-column-descriptions), [section 8.11](#811-msnapshots),
+    [section 11](#11-enums-and-types), [section 19.4](#194-generated-schemas)).
 
 ## 23. Open verification items
 

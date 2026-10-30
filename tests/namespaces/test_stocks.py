@@ -293,7 +293,7 @@ def test_single_ticker_rows_lead_with_symbol(name: str) -> None:
 def test_rows_that_list_several_tickers_keep_tickers_and_have_no_symbol(name: str) -> None:
     found = columns(name)
     assert "Symbol" not in found
-    assert found["Tickers"] is ColumnType.STRING
+    assert found["Tickers"] is ColumnType.STRING_ARRAY
     assert not CATALOG.takes_symbols(spec_of(name))
 
 
@@ -1117,7 +1117,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         {"symbols": ["AAPL"]},
         "/stocks/filings/8-K/vX/disclosures",
         {"tickers.any_of": "AAPL", "limit": "1000"},
-        ("Tickers", '["AAPL"]'),
+        ("Tickers", ["AAPL"]),
     ),
     (
         "filings.risk_factors",
@@ -1254,7 +1254,7 @@ INSIDER_ROWS = {
         "SaleShares": 34918.0,
         "SaleValue": 7648632.45,
         "SellerCount": 1,
-        "Tickers": '["NVDA"]',
+        "Tickers": ["NVDA"],
         "TransactionDate": "2026-09-17",
     },
     "filings.insider_holdings": {
@@ -1269,11 +1269,11 @@ INSIDER_ROWS = {
         "OwnerName": "Kress Colette",
         "OwnershipPct": 0.0198,
         "PositionCount": 11,
-        "Roles": '["officer"]',
+        "Roles": ["officer"],
         "SharesOwned": 4776533.0,
         "SharesOwnedDirect": 765103.0,
         "SharesOwnedIndirect": 4011430.0,
-        "Tickers": '["NVDA"]',
+        "Tickers": ["NVDA"],
     },
 }
 
@@ -1749,7 +1749,7 @@ KEYED_CALLS: dict[str, tuple[Callable[[dm.MassiveSession], QueryBase], str]] = {
 
 def _other(value: object, wire_type: WireType) -> object:
     # A wire value that differs from `value` and still converts to the field's type.
-    if wire_type is WireType.JSON_TEXT:
+    if wire_type in {WireType.JSON_TEXT, WireType.STRING_ARRAY}:
         return [*cast("list[object]", value or []), "other"]
     if wire_type is WireType.DATE:
         base = date(2020, 1, 1) if value is None else date.fromisoformat(cast("str", value))
@@ -1786,7 +1786,11 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
     body[result_key] = rows
     fake_rest.reply(path, Reply(body=body))
     out = table_rows(cast("Query", make(rest_session)).fetch())
-    keyed = [tuple(row[k] for k in spec.poll_keys) for row in out]
+    # A list key (`OtherManagers`) is compared as a tuple, so a set can hold it.
+    keyed = [
+        tuple(tuple(v) if isinstance(v := row[k], list) else v for k in spec.poll_keys)
+        for row in out
+    ]
     assert len(set(keyed)) == len(rows)
     for index in range(len(spec.poll_keys)):
         fewer = {key[:index] + key[index + 1 :] for key in keyed}

@@ -67,6 +67,10 @@ logger = logging.getLogger(__name__)
 _FROM_REQUEST_ROLES: Final = frozenset({"symbol", "fanout"})
 """The key roles a source may leave out of its rows, filled from the request instead."""
 
+_OPTIONAL_ROLES: Final = frozenset({"symbol", "fanout"})
+"""The key roles a REST path's rows may lack (`KeySpec.required` False): a ticker Massive sends
+only "if available", and the underlying that only the options rows of a mixed snapshot carry."""
+
 _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})
 """Query parameters the library sets from typed arguments, never through `filters`."""
 
@@ -82,7 +86,7 @@ _EQUALITY_SUFFIXES: Final = ("any_of", "all_of")
 _INSTANT_TYPES: Final = frozenset({WireType.ISO_INSTANT, WireType.EPOCH})
 """Wire types of a row field that holds an instant rather than a calendar date."""
 
-_LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.INT_ARRAY})
+_LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.LONG_ARRAY, WireType.STRING_ARRAY})
 """Wire types of a field that holds several values, such as a filing's list of tickers."""
 
 _SOURCE_GONE: Final = "deprecated or removed in the snapshot"
@@ -124,10 +128,12 @@ class KeySpec:
         required: Whether every row must carry the key. True, the default, makes a row
             without it a loud failure (`RowDataError`), never a null key. False lets such a
             row through with a null key column; it is for a symbol Massive documents as
-            present only "if available", such as a filing's `ticker`. Only a `symbol` key read
-            from a REST path's rows may set it False: a flat file and a stream filter and
-            route rows by their symbol, and the `time`, `end`, `fanout`, and `date` keys are
-            always required (`DatasetSpec` rejects the rest, when it is created).
+            present only "if available", such as a filing's `ticker`, and for an underlying
+            only some rows have, such as the options rows of the unified snapshot. Only a
+            `symbol` or `fanout` key read from a REST path's rows may set it False: a flat
+            file and a stream filter and route rows by their symbol, and the `time`, `end`, and
+            `date` keys are always required (`DatasetSpec` rejects the rest, when it is
+            created).
     """
 
     column: str
@@ -243,7 +249,9 @@ class DatasetSpec:
             )
 
     Attributes:
-        name: The dataset's dotted name, `"<namespace>.<dataset>"`, such as `"stocks.trades"`.
+        name: The dataset's dotted name, `"<namespace>.<dataset>"`, such as `"stocks.trades"`;
+            a dataset the session serves itself, which belongs to no namespace, has one plain
+            name, the session method's (`"snapshots"`).
         summary: What the dataset holds, in one sentence ending in a period, such as
             `"Trades of US-listed stocks, tick by tick."`. The dataset method's docstring
             starts with the same sentence; the library keeps it here so it never reads
@@ -336,6 +344,10 @@ class DatasetSpec:
             taken exactly as Massive writes them (`symbols.is_canonical`), not through the
             asset class's grammar. Only a REST dataset may set it: a stream's topics and a
             flat file's filter follow the class's spellings.
+        option_rows: True for a dataset of every class (`ClassFromPrefix.ANY`) whose rows
+            include options contracts beside other classes' tickers (the unified snapshot): it
+            gets the derived `OptionRoot` column every options dataset has, null on a row
+            whose `Symbol` is not an options contract. Only such a dataset may set it.
     """
 
     name: str
@@ -366,33 +378,37 @@ class DatasetSpec:
     row_times: RowTimes = RowTimes.BY_KIND
     column_notes: Mapping[str, str] = field(default_factory=dict)
     symbols_as_written: bool = False
+    option_rows: bool = False
 
     def __post_init__(self) -> None:
         """Check the spec's internal consistency; nothing here reads the generated files.
 
         Raises:
-            ValueError: If the name is not `"<namespace>.<dataset>"`; the summary is not one
-                line of text ending in a period (`_check_summary`); the keys of `channels` or
-                `flat_file_prefixes` do not match `is_bars`; a dataset with channels, flat
-                files, or a kind has no `asset_class` (`ClassFromPrefix.ANY`); `keys` names a
-                source the dataset does not use, fills a `time`, `end`, or `date` key from the
-                request, marks a key other than `fanout` as no instrument, or fills a
-                non-instrument fan-out key from the request, or makes a key optional other than
-                a `symbol` key read from a REST path's rows, declares an `end` key outside a
-                bars dataset or a `date` key on a dataset without row times, or, for a daily
-                summary, leaves a source without its `date` key; `poll_keys` holds the `Symbol`
-                of an optional symbol key, is empty on an `APPEND` dataset, is empty together
-                with `revision_keys`, or shares a column with `revision_keys`;
+            ValueError: If the name has an empty part (`"stocks."`, `".trades"`); the summary is not
+                one line of text ending in a period (`_check_summary`); the keys of `channels` or
+                `flat_file_prefixes` do not match `is_bars`; a dataset with channels, flat files, or
+                a kind has no `asset_class` (`ClassFromPrefix.ANY`); `keys` names a source the
+                dataset does not use, fills a `time`, `end`, or `date` key from the request, marks a
+                key other than `fanout` as no instrument, or fills a non-instrument fan-out key from
+                the request, or makes a key optional other than a `symbol` or `fanout` key read from
+                a REST path's rows, declares an `end` key outside a bars dataset or a `date` key on
+                a dataset without row times, or, for a daily summary, leaves a source without its
+                `date` key; `poll_keys` holds the `Symbol` of an optional symbol key, is empty on an
+                `APPEND` dataset, is empty together with `revision_keys`, or shares a column with
+                `revision_keys`;
                 `nullable_poll_keys` names a column that is no poll key, or gives an empty
                 reason; a flat-file prefix does not declare its `symbol` and `time` keys from
                 its own columns (and, for futures, its `date` key, the session against which
                 every futures file is checked); a dataset that keeps its symbols as written has
-                channels or flat-file prefixes; or the transports match no query class (see the
+                channels or flat-file prefixes; a dataset of one class sets `option_rows`; or
+                the transports match no query class (see the
                 class docstring and `_check_verbs`).
         """
-        namespace, _, dataset = self.name.partition(".")
-        if not namespace or not dataset:
-            raise ValueError(f"dataset name {self.name!r} must be '<namespace>.<dataset>'")
+        if not all(self.name.split(".")):
+            raise ValueError(
+                f"dataset name {self.name!r} must be '<namespace>.<dataset>', or one name for a "
+                "dataset the session serves itself"
+            )
         self._check_summary()
         keys = {*self.channels, *self.flat_file_prefixes}
         if any((key is NotBars.ANY) == self.is_bars for key in keys):
@@ -410,6 +426,9 @@ class DatasetSpec:
         if self.symbols_as_written and (self.channels or self.flat_file_prefixes):
             # A stream subscribes and a flat file filters by the class's spellings.
             raise ValueError(f"{self.name}: symbols kept as written are for REST datasets only")
+        if self.option_rows and self.asset_class is not ClassFromPrefix.ANY:
+            # A dataset of one class either is the options class or has no options rows.
+            raise ValueError(f"{self.name}: option_rows is for a dataset of every class")
         self._check_keys()
         self._check_poll_keys()
         self._check_flat_files()
@@ -533,15 +552,14 @@ class DatasetSpec:
         Raises:
             ValueError: If `keys` names a source the dataset does not read; a `time`, `end`, or
                 `date` key is filled from the request; an `end` key is declared outside a bars
-                dataset, or a `date` key on a dataset whose rows have no `Date` (`times` is
-                `NONE`); a daily summary (`DAY`) leaves a source without its `date` key; or a
-                key other than `fanout` is
-                marked as no instrument, a fan-out key that is no instrument is filled from
-                the request (it would have no column to keep), or a key other than a `symbol`
-                key read from a REST path's rows is optional (`KeySpec.required` False), or a
-                keyed (`REPLACE` or `UPSERT`) `poll()` keys on the `Symbol` of an optional
-                symbol key, where every row without a symbol would share the null key. The
-                message names the dataset.
+                dataset, or a `date` key on a dataset whose rows have no `Date` (`times` is `NONE`);
+                a daily summary (`DAY`) leaves a source without its `date` key; or a key other than
+                `fanout` is marked as no instrument, a fan-out key that is no instrument is filled
+                from the request (it would have no column to keep), or a key other than a `symbol`
+                or `fanout` key read from a REST path's rows is optional (`KeySpec.required` False),
+                or a keyed (`REPLACE` or `UPSERT`) `poll()` keys on the `Symbol` of an optional
+                symbol key, where every row without a symbol would share the null key. The message
+                names the dataset.
         """
         unused = sorted(f"{t.value} {k}" for t, k in set(self.keys) - set(self.sources))
         if unused:
@@ -572,11 +590,14 @@ class DatasetSpec:
                         "rows, so it cannot come from the request"
                     )
                 optional_ok = (
-                    role == "symbol" and transport is Transport.REST and not spec.from_request
+                    role in _OPTIONAL_ROLES
+                    and transport is Transport.REST
+                    and not spec.from_request
                 )
                 if not spec.required and not optional_ok:
                     raise ValueError(
-                        f"{where}: only a symbol key read from a REST path's rows can be optional"
+                        f"{where}: only a symbol or fanout key read from a REST path's rows can "
+                        "be optional"
                     )
 
     def _check_poll_keys(self) -> None:
@@ -1288,7 +1309,7 @@ class Catalog:
         A dataset takes symbols when it has channels or flat files (both are read per
         instrument), `per_symbol` requests, a symbol filled from the request, or a
         `symbol_param` that selects rows by one ticker each. A symbol parameter that filters a
-        field holding several tickers (a filing's or an article's `tickers`, a JSON list) does
+        field holding several tickers (a filing's or an article's `tickers`, a list) does
         not make one: such a row describes no single instrument, so the dataset has no
         `Symbol` and keeps its `Tickers` column. The filtered field is the row field of the
         parameter's base name, singular or plural (`tickers.any_of` filters `tickers`, and

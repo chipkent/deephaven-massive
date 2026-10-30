@@ -7,11 +7,13 @@ from typing import cast
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import merge
 
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.schema import (
     COLUMN_TYPES,
+    JSON_TEXT_NOTE,
     KEY_COLUMNS,
     TRANSPORT_LABELS,
     Column,
@@ -60,7 +62,8 @@ def test_pascal_case(path: str, expected: str) -> None:
 def test_column_types_map_to_arrow() -> None:
     assert ColumnType.INSTANT.arrow_type == pa.timestamp("ns", tz="UTC")
     assert ColumnType.INT.arrow_type == pa.int32()
-    assert ColumnType.INT_ARRAY.arrow_type == pa.list_(pa.int32())
+    assert ColumnType.LONG_ARRAY.arrow_type == pa.list_(pa.int64())
+    assert ColumnType.STRING_ARRAY.arrow_type == pa.list_(pa.string())
     assert {t.value for t in ColumnType} == {
         "Instant",
         "double",
@@ -68,7 +71,8 @@ def test_column_types_map_to_arrow() -> None:
         "int",
         "String",
         "boolean",
-        "int[]",
+        "long[]",
+        "String[]",
     }
 
 
@@ -79,7 +83,8 @@ def test_every_wire_type_has_a_column_type() -> None:
     assert COLUMN_TYPES[WireType.BOOL] is ColumnType.BOOLEAN
     # Every calendar date is ISO yyyy-MM-dd text.
     assert COLUMN_TYPES[WireType.DATE] is ColumnType.STRING
-    assert COLUMN_TYPES[WireType.INT_ARRAY] is ColumnType.INT_ARRAY
+    assert COLUMN_TYPES[WireType.LONG_ARRAY] is ColumnType.LONG_ARRAY
+    assert COLUMN_TYPES[WireType.STRING_ARRAY] is ColumnType.STRING_ARRAY
     # A dataset column is never a 32-bit int: exchange and tape ids are long.
     assert ColumnType.INT not in COLUMN_TYPES.values()
 
@@ -98,10 +103,11 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
             "Int": 3,
             "String": {"b": 1, "a": [2]},
             "Boolean": True,
-            "IntArray": 7,
+            "LongArray": 7,
+            "StringArray": ["AAPL", "BRK.B"],
             "Ignored": "extra keys are ignored",
         },
-        {"IntArray": [1, 2]},
+        {"LongArray": [1, 2**40], "StringArray": []},
     ]
     batch = ALL_TYPES.to_arrow(rows)
     assert batch.schema == ALL_TYPES.arrow_schema()
@@ -109,9 +115,11 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
     assert {c.name: c.data_type for c in table.columns} == col_defs(ALL_TYPES)
     values = dh_arrow.to_arrow(table).to_pylist()
     assert values[0]["String"] == '{"a": [2], "b": 1}'
-    assert values[0]["IntArray"] == [7]
+    assert values[0]["LongArray"] == [7]
+    assert values[0]["StringArray"] == ["AAPL", "BRK.B"]
     assert values[1]["Double"] is None
-    assert values[1]["IntArray"] == [1, 2]
+    assert values[1]["LongArray"] == [1, 2**40]
+    assert values[1]["StringArray"] == []
     assert ALL_TYPES.column_names[0] == "Instant"
 
 
@@ -139,9 +147,9 @@ def test_to_arrow_reports_integers_beyond_the_column_range() -> None:
 
 
 def test_to_arrow_never_truncates_floats_in_integer_lists() -> None:
-    with pytest.raises(MassiveError, match=r"schema mismatch in all\.IntArray.*7140\.08"):
-        ALL_TYPES.to_arrow([{"IntArray": [7140.08]}])
-    values = ALL_TYPES.to_arrow([{"IntArray": [1.0, None, 3]}]).column("IntArray")
+    with pytest.raises(MassiveError, match=r"schema mismatch in all\.LongArray.*7140\.08"):
+        ALL_TYPES.to_arrow([{"LongArray": [7140.08]}])
+    values = ALL_TYPES.to_arrow([{"LongArray": [1.0, None, 3]}]).column("LongArray")
     assert values.to_pylist() == [[1, None, 3]]
 
 
@@ -193,9 +201,9 @@ def test_widening_gives_each_column_its_merged_arrow_type() -> None:
 
 
 def test_join_widens_only_by_the_lattice() -> None:
-    long, double, ints = WireType.LONG, WireType.DOUBLE, WireType.INT_ARRAY
+    long, double, ints = WireType.LONG, WireType.DOUBLE, WireType.LONG_ARRAY
     assert join(long, double) is join(double, long) is WireType.DOUBLE
-    assert join(long, ints) is join(ints, long) is WireType.INT_ARRAY
+    assert join(long, ints) is join(ints, long) is WireType.LONG_ARRAY
     assert join(WireType.EPOCH, WireType.EPOCH) is WireType.EPOCH
     for same in WireType:
         assert join(same, same) is same
@@ -662,7 +670,7 @@ def test_the_merge_joins_types_across_sources() -> None:
     )
     schema = dataset_schema(quotes, (quotes,), lookup)
     types = {c.name: c.type for c in schema.columns}
-    assert types["Conditions"] is ColumnType.INT_ARRAY
+    assert types["Conditions"] is ColumnType.LONG_ARRAY
     assert types["AskSize"] is ColumnType.DOUBLE  # long on the stream, double on /v3/quotes
     assert schema.column_names[:2] == ("Symbol", "Timestamp")
 
@@ -881,18 +889,58 @@ def wire(transport: Transport, key: str, column: str) -> Field:
     return source(transport, key).field(column)
 
 
-def test_a_column_only_other_members_supply_names_them() -> None:
-    columns = {c.name: c for c in TRADES.dataset_schema(CRYPTO_TRADES).columns}
-    tape = columns["Tape"]
-    assert tape.description == "Always null for `crypto.trades`; supplied by `stocks.trades`."
-    assert (tape.supplied_by, dict(tape.wire_keys)) == ((), {})
-    # Crypto renames its own participant time to Timestamp, so the stocks column is union-only.
-    assert columns["ParticipantTimestamp"].description == (
-        "Always null for `crypto.trades`; supplied by `stocks.trades`."
-    )
+def test_a_dataset_keeps_only_the_columns_its_own_sources_fill() -> None:
+    crypto_columns = {c.name: c for c in TRADES.dataset_schema(CRYPTO_TRADES).columns}
+    stock_columns = {c.name: c for c in TRADES.dataset_schema(STOCK_TRADES).columns}
+    # Only stocks fill `Tape`; crypto renames its own participant time to `Timestamp`.
+    assert "Tape" not in crypto_columns
+    assert "ParticipantTimestamp" not in crypto_columns
+    assert {"Tape", "ParticipantTimestamp"} <= set(stock_columns)
+    # The shared columns keep the kind's order and type, so the tables merge on them.
+    shared = [name for name in stock_columns if name in crypto_columns]
+    assert shared == [name for name in crypto_columns if name in stock_columns]
+    assert all(stock_columns[n].type is crypto_columns[n].type for n in shared)
     # Each dataset gets its own text, never the kind's: the stocks Tape is the vendor's.
-    stocks_tape = next(c for c in TRADES.dataset_schema(STOCK_TRADES).columns if c.name == "Tape")
-    assert stocks_tape.description == wire(R, "/v2/last/trade/{stocksTicker}", "Tape").description
+    assert stock_columns["Tape"].description == (
+        wire(R, "/v2/last/trade/{stocksTicker}", "Tape").description
+    )
+
+
+@pytest.mark.parametrize("name", sorted(CATALOG.by_name))
+def test_every_dataset_column_is_supplied_by_some_transport(name: str) -> None:
+    # A dataset has only the columns some transport of its own fills, library columns included.
+    spec = CATALOG.by_name[name]
+    for raw_symbol in (False, True):
+        empty = [
+            c.name
+            for c in CATALOG.dataset_schema(spec, raw_symbol=raw_symbol).columns
+            if not c.supplied_by
+        ]
+        assert empty == [], name
+
+
+def test_tables_of_two_classes_merge_on_their_shared_columns(dh_exec_ctx: object) -> None:
+    # The recipe the column reference gives for a cross-class merge.
+    stock = CATALOG.dataset_schema(CATALOG.by_name["stocks.quotes"])
+    fx = CATALOG.dataset_schema(CATALOG.by_name["forex.quotes"])
+    assert stock.column_names != fx.column_names
+    a = dh_arrow.to_table(stock.to_arrow([{"Symbol": "SPY", "BidPrice": 1.0}]))
+    b = dh_arrow.to_table(fx.to_arrow([{"Symbol": "C:EURUSD", "BidPrice": 2.0}]))
+    common = [c for c in a.column_names if c in b.column_names]
+    both = merge([t.view(common) for t in (a, b)])
+    assert both.column_names == common
+    assert both.size == 2
+
+
+def test_a_json_text_column_says_so_and_a_list_column_is_an_array() -> None:
+    contracts_spec = CATALOG.by_name["options.contracts"]
+    contracts = {c.name: c for c in CATALOG.dataset_schema(contracts_spec).columns}
+    assert contracts["AdditionalUnderlyings"].type is ColumnType.STRING
+    assert contracts["AdditionalUnderlyings"].description.endswith(JSON_TEXT_NOTE)
+    news = {c.name: c for c in CATALOG.dataset_schema(CATALOG.by_name["reference.news"]).columns}
+    assert news["Tickers"].type is ColumnType.STRING_ARRAY
+    assert JSON_TEXT_NOTE not in news["Tickers"].description
+    assert news["Insights"].description.endswith(JSON_TEXT_NOTE)
 
 
 def test_every_transport_has_one_user_facing_spelling() -> None:

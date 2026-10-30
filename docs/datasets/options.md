@@ -4,6 +4,8 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
+A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
+
 In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.options.trades`, `m.options.quotes`, `m.options.bars`, `m.options.fmv`, `m.options.chain`, `m.options.snapshots`, `m.options.contracts`, and `m.options.daily_open_close` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
 
 <a id="trades"></a>
@@ -18,7 +20,7 @@ Trades of US-listed options contracts (OPRA), tick by tick.
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
-| `Conditions` | int[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
+| `Conditions` | long[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
 | `Correction` | long | The trade correction indicator. | REST, flat files | `e`, `correction` | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `x`, `exchange` | `exchange` | `x` |
 | `Id` | String | The trade ID. Options trades do not have a trade ID, so this field is returned as an empty string. | REST | `i`, `id` |  |  |
@@ -29,10 +31,6 @@ Trades of US-listed options contracts (OPRA), tick by tick.
 | `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST | `z` |  |  |
 | `TrfId` | long | The ID for the Trade Reporting Facility where the trade took place. | REST | `r` |  |  |
 | `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST | `f` |  |  |
-| `DecimalSize` | String | Always null for `options.trades`; supplied by `stocks.trades`. |  |  |  |  |
-| `ReportSequence` | long | Always null for `options.trades`; supplied by `futures.trades`. |  |  |  |  |
-| `Channel` | long | Always null for `options.trades`; supplied by `futures.trades`. |  |  |  |  |
-| `ReceivedTimestamp` | Instant | Always null for `options.trades`; supplied by `crypto.trades`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -60,18 +58,7 @@ Quotes of US-listed options contracts (OPRA), tick by tick.
 | `BidExchange` | long | The bid exchange ID | REST, flat files, WebSocket | `bid_exchange` | `bid_exchange` | `bx` |
 | `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `bid_price` | `bid_price` | `bp` |
 | `BidSize` | double | The bid size. This represents the number of contracts buyers are bidding for at the given bid price. | REST, flat files, WebSocket | `bid_size` | `bid_size` | `bs` |
-| `Conditions` | int[] | Always null for `options.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `Indicators` | int[] | Always null for `options.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `ParticipantTimestamp` | Instant | Always null for `options.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
 | `SequenceNumber` | long | The sequence number represents the sequence in which quote events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | REST, flat files, WebSocket | `sequence_number` | `sequence_number` | `q` |
-| `Tape` | long | Always null for `options.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `TrfTimestamp` | Instant | Always null for `options.quotes`; supplied by `stocks.quotes`. |  |  |  |  |
-| `ReportSequence` | long | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `AskTimestamp` | Instant | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `BidTimestamp` | Instant | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `Channel` | long | Always null for `options.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `Exchange` | long | Always null for `options.quotes`; supplied by `futures.quotes`, `forex.quotes`, `crypto.quotes`. |  |  |  |  |
-| `ReceivedTimestamp` | Instant | Always null for `options.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -100,16 +87,10 @@ Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 | `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `l` | `low` | `l` |
 | `Transactions` | long | The number of transactions in the aggregate window. | REST, flat files | `n` | `transactions` |  |
 | `Vwap` | double | The volume weighted average price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, WebSocket | `vw` |  | `vw` |
-| `Otc` | boolean | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
-| `DecimalVolume` | String | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
 | `AccumulatedVolume` | long | Today's accumulated volume. | WebSocket |  |  | `av` |
-| `AccumulatedDecimalVolume` | String | Always null for `options.bars`; supplied by `stocks.bars`. |  |  |  |  |
 | `OfficialOpen` | double | Today's official opening price. | WebSocket |  |  | `op` |
 | `DayVwap` | double | Today's volume weighted average price. | WebSocket |  |  | `a` |
 | `AverageTradeSize` | long | The average trade size for this aggregate window. | WebSocket |  |  | `z` |
-| `DollarVolume` | double | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
-| `SettlementPrice` | double | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
-| `Exchange` | long | Always null for `options.bars`; supplied by `futures.bars`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -174,15 +155,15 @@ The snapshot of every contract in one underlying's option chain.
 | `GreeksVega` | double | The change in the option's price per 1% increment in volatility. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. | REST | `greeks.vega` |
 | `ImpliedVolatility` | double | The market's forecast for the volatility of the underlying asset, based on this option's current price. | REST | `implied_volatility` |
 | `LastQuoteAsk` | double | The ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.ask` |
-| `LastQuoteAskExchange` | double | The ask side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.ask_exchange` |
+| `LastQuoteAskExchange` | long | The ask side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.ask_exchange` |
 | `LastQuoteAskSize` | double | The ask size. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.ask_size` |
 | `LastQuoteBid` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.bid` |
-| `LastQuoteBidExchange` | double | The bid side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.bid_exchange` |
+| `LastQuoteBidExchange` | long | The bid side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.bid_exchange` |
 | `LastQuoteBidSize` | double | The bid size. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.bid_size` |
 | `LastQuoteLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.last_updated` |
 | `LastQuoteMidpoint` | double | The average of the bid and ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.midpoint` |
 | `LastQuoteTimeframe` | String | The time relevance of the data. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.timeframe` |
-| `LastTradeConditions` | int[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.conditions` |
+| `LastTradeConditions` | long[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.conditions` |
 | `LastTradeExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.exchange` |
 | `LastTradePrice` | double | The price of the trade. This is the price per share of the underlying, so the total dollar value of a trade is the price multiplied by the size and by the contract multiplier, which is typically 100 shares per contract. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.price` |
 | `LastTradeSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.sip_timestamp` |
@@ -242,7 +223,7 @@ The current snapshot of each requested options contract, with its greeks.
 | `LastQuoteLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.last_updated` |
 | `LastQuoteMidpoint` | double | The average of the bid and ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.midpoint` |
 | `LastQuoteTimeframe` | String | The time relevance of the data. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. | REST | `last_quote.timeframe` |
-| `LastTradeConditions` | int[] | A list of condition codes. The codes depend on the asset type; see the condition codes for stocks (https://massive.com/docs/rest/stocks/market-operations/condition-codes), options (https://massive.com/docs/rest/options/market-operations/condition-codes), or crypto (https://massive.com/docs/rest/crypto/market-operations/condition-codes). From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.conditions` |
+| `LastTradeConditions` | long[] | A list of condition codes. The codes depend on the asset type; see the condition codes for stocks (https://massive.com/docs/rest/stocks/market-operations/condition-codes), options (https://massive.com/docs/rest/options/market-operations/condition-codes), or crypto (https://massive.com/docs/rest/crypto/market-operations/condition-codes). From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.conditions` |
 | `LastTradeDecimalSize` | String | The size of a trade, including fractional shares, represented as a decimal string where the fractional part is expressed in millionths. This field is only returned for stocks snapshots. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.decimal_size` |
 | `LastTradeExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.exchange` |
 | `LastTradeId` | String | The trade ID. Options trades do not have a trade ID, so this field is returned as an empty string. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. | REST | `last_trade.id` |
@@ -298,7 +279,7 @@ Reference data on options contracts: type, exercise style, expiration, and strik
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker for the option contract." | REST | `ticker` |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. | REST | `ticker` |
-| `AdditionalUnderlyings` | String | If an option contract has additional underlyings or deliverables associated with it, they will appear here. See here (https://www.optionseducation.org/referencelibrary/faq/splits-mergers-spinoffs-bankruptcies) for some examples of what might cause a contract to have additional underlyings. | REST | `additional_underlyings` |
+| `AdditionalUnderlyings` | String | If an option contract has additional underlyings or deliverables associated with it, they will appear here. See here (https://www.optionseducation.org/referencelibrary/faq/splits-mergers-spinoffs-bankruptcies) for some examples of what might cause a contract to have additional underlyings. The column holds Massive's value as JSON text. | REST | `additional_underlyings` |
 | `Cfi` | String | The 6 letter CFI code of the contract (defined in ISO 10962 (https://en.wikipedia.org/wiki/ISO_10962)) | REST | `cfi` |
 | `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". | REST | `contract_type` |
 | `Correction` | long | The correction number for this option contract. | REST | `correction` |
@@ -344,4 +325,4 @@ Massive's documentation of this dataset:
 
 ---
 
-Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and for columns that only other datasets of the same kind fill.
+Generated by `uv run python scripts/render_reference.py` from Massive's documentation as fetched on 2026-10-30. The descriptions are Massive's, corrected where they are clearly wrong; the library writes its own for the key columns and the columns it computes.
