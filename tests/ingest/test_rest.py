@@ -26,7 +26,8 @@ import deephaven_massive as dm
 from deephaven_massive import _massive, _session
 from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import CHICAGO, DaySpan, TimeRange
+from deephaven_massive._datasets.dates import DaySpan, TimeRange
+from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import HostDecision, Request
 from deephaven_massive._datasets.row_times import RowTimes
