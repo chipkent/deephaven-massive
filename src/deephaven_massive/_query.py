@@ -57,7 +57,7 @@ from deephaven.table_factory import ring_table
 from deephaven_massive._config import require_positive_int, require_positive_number
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
-from deephaven_massive._datasets.dates import parse_date_like
+from deephaven_massive._datasets.dates import bounds, parse_date_like
 from deephaven_massive._datasets.history_source import (
     Alternative,
     SourceChoice,
@@ -73,10 +73,12 @@ from deephaven_massive._enums import (
     PollMode,
     _require_enum,
 )
-from deephaven_massive._errors import EntitlementError, MassiveError
+from deephaven_massive._errors import EntitlementError, MassiveError, raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
+from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.transports import FlatFileTransport, RestTransport, StreamTransport
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import override
 
@@ -87,7 +89,6 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike
 
 __all__ = [
@@ -143,6 +144,7 @@ def _verb(method: Callable[Concatenate[_Q, _P], _R]) -> Callable[Concatenate[_Q,
     return verb
 
 
+@raises_through(require_positive_number)
 def _interval(value: object) -> timedelta:
     """Validate a `poll()` interval.
 
@@ -152,12 +154,10 @@ def _interval(value: object) -> timedelta:
     Returns:
         The interval as a `timedelta`.
 
-    A number that is not finite and positive, or not a number at all, raises the `ValueError`
-    or `TypeError` of `require_positive_number`.
-
     Raises:
-        ValueError: If the interval overflows `timedelta`, or is not positive once rounded to
-            microseconds.
+        TypeError: If the value is neither a number nor a `timedelta`.
+        ValueError: If the number is not finite and positive, or the interval overflows
+            `timedelta`, or is not positive once rounded to microseconds.
     """
     if isinstance(value, timedelta):
         period = value
@@ -266,6 +266,7 @@ class QueryBase:
     _spec: DatasetSpec
     _request: Request
 
+    @raises_through(refuse_update_graph_thread)
     def columns(self) -> Table:
         """List this dataset's columns, their types, and what each one means.
 
@@ -286,8 +287,9 @@ class QueryBase:
             by WebSocket, and `history()` by REST or flat files). A dataset has only the
             columns some transport of its own fills, so every `SuppliedBy` names one.
 
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread, for example
-        from a table listener.
+        Raises:
+            ValueError: On a Deephaven update-graph thread, for example inside a table
+                listener, like every verb.
 
         Example:
             ::
@@ -477,6 +479,9 @@ class Query(QueryBase):
     __slots__ = ()
 
     @_verb
+    @raises_through(
+        SessionCore.run_verb, refuse_update_graph_thread, _read_symbol_table, RestTransport.fetch
+    )
     def fetch(self) -> Table:
         """Return every row the dataset's endpoint returns, fully paginated, as a static table.
 
@@ -490,18 +495,19 @@ class Query(QueryBase):
         with a WARNING, while HTTP 404 on a later page of its pages raises `MassiveError`,
         since its data was cut short.
 
-        Before any request it raises `ValueError` if a path the call reads does not take a
-        parameter or filter the query set (an explicit `adjusted` on a path without it), or a
-        symbol table holds no symbol or a row that is not canonical. A failed request raises
-        `AuthenticationError` on HTTP 401, `EntitlementError` on HTTP 403, and `MassiveError`
-        for a rate limit that outlived the retries, a row that breaks the dataset's schema, or
-        any other failure.
-
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
-
         Returns:
             A static table.
+
+        Raises:
+            ValueError: Before any request: on a Deephaven update-graph thread (for example
+                inside a table listener); if a path the call reads does not take a parameter
+                or filter the query set (an explicit `adjusted` on a path without it); or if a
+                symbol table holds no symbol or a row that is not Massive's exact ticker.
+            AuthenticationError: If Massive rejects the API key (HTTP 401).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            MassiveError: If the session is closed, a rate limit outlives the retries, a row
+                breaks the dataset's schema, a symbol's later page answers HTTP 404 (its data
+                cut short), or a request fails in any other way.
         """
         return self._logged_call("fetch()", self._fetch)
 
@@ -519,6 +525,14 @@ class Query(QueryBase):
         )
 
     @_verb
+    @raises_through(
+        SessionCore.run_verb,
+        refuse_update_graph_thread,
+        _interval,
+        _require_enum,
+        read_symbols,
+        RestTransport.poll,
+    )
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table:
         """Return a live table that re-runs `fetch()` every `interval`.
 
@@ -531,17 +545,12 @@ class Query(QueryBase):
         left, and `m.close()` stops it at once. A table derived in the console stays in use
         until the JVM next collects it, and until then the poll keeps making its requests,
         which on the Basic tier come out of the five a minute every session of the key shares.
-        A
-        non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
-        non-positive `interval` raises `ValueError`. A feed (a dataset whose default mode is
-        `APPEND`: the news and filings datasets) raises `ValueError` in every mode when the
-        query has neither `start` nor `limit`, since every cycle would re-read the whole archive
-        Massive keeps; the message names the fix. A fixed `start` keeps widening the window on
-        a poll that runs for days, since every cycle reads everything since it.
+        A feed (a dataset whose default mode is `APPEND`: the news and filings datasets) needs
+        a `start` or a `limit`, since every cycle would otherwise re-read the whole archive
+        Massive keeps. A fixed `start` keeps widening the window on a poll that runs for days,
+        since every cycle reads everything since it.
 
-        Before the table exists it raises `ValueError` if a path does not take a parameter or
-        filter the query set: with static symbols any path the call reads, and with a reactive
-        table every fetch path of the dataset. Later, a cycle that fails with
+        Once the table exists, errors fail it rather than raise. A cycle that fails with
         `AuthenticationError`, `EntitlementError`, a row that breaks the dataset's schema, a row
         with a null or NaN value in one of the dataset's poll keys (in every mode: such a key
         would merge unrelated rows; the error names the column and shows the row), or a
@@ -549,9 +558,6 @@ class Query(QueryBase):
         table (its `m.streams()` row shows `FAILED`) and ends the poller. Any other failure is
         logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next
         cycle runs.
-
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
 
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
@@ -580,9 +586,16 @@ class Query(QueryBase):
             `Symbol`), `APPEND` adds one row per symbol.
 
         Raises:
-            ValueError: If the query is a feed's and has neither `start` nor `limit`, if
-                `interval` is not positive, or if a parameter or symbol is refused as described
-                above.
+            TypeError: If `interval` is not a number or a `timedelta`, or `mode` is not a
+                `dm.PollMode`.
+            ValueError: Before the table exists: on a Deephaven update-graph thread (for
+                example inside a table listener); if `interval` is not positive; if the query
+                is a feed's and has neither `start` nor `limit` (the message names the fix); if
+                a symbol table holds a row that is not Massive's exact ticker (it names
+                `dm.canonicalize_symbols`); or if a path does not take a parameter or filter
+                the query set (with static symbols any path the call reads, with a reactive
+                table every fetch path of the dataset).
+            MassiveError: If the session is closed.
         """
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")
@@ -704,108 +717,109 @@ class StreamQuery(QueryBase):
         )
 
     @_verb
+    @raises_through(
+        SessionCore.run_verb,
+        refuse_update_graph_thread,
+        _read_symbol_table,
+        read_symbols,
+        SessionCore.stream_result,
+        StreamTransport.open_stream,
+    )
     def blink(self) -> Table:
         """Return the stream as a blink table: each update cycle holds only that cycle's rows.
 
         Each call returns a new table, a described copy of the stream's blink table, with its
         own liveness scope, so two `blink()` results are released independently.
 
-        A static symbol table is read once, now (see the class); one that holds no symbol, or a
-        row that is not Massive's exact ticker, raises `ValueError`.
-
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
+        A static symbol table is read once, now (see the class).
 
         Returns:
             A live blink table in the dataset's schema.
+
+        Raises:
+            ValueError: On a Deephaven update-graph thread (for example inside a table
+                listener); if a static symbol table holds no symbol, or a symbol table a row
+                that is not Massive's exact ticker; or if explicit options contracts would put
+                more than 1,000 topics on the session's `/options` connection.
+            AuthenticationError: If Massive rejects the API key on the request that decides
+                the WebSocket host.
+            EntitlementError: If the plan has no WebSocket access for the asset class.
+            MassiveError: If the session is closed; if the stream fails while the verb opens
+                it, naming the failure; or if Massive's crypto ticker list cannot be read or
+                does not hold a crypto pair.
         """
         return self._stream(lambda blink: blink, self._stream_request())
 
     @_verb
+    @raises_through(
+        SessionCore.run_verb,
+        refuse_update_graph_thread,
+        _read_symbol_table,
+        read_symbols,
+        SessionCore.stream_result,
+        StreamTransport.open_stream,
+    )
     def append_only(self) -> Table:
         """Return every row received since the call, in arrival order.
 
         Memory grows with the stream; use `ring()` to bound it.
 
-        A static symbol table is read once, now (see the class); one that holds no symbol, or a
-        row that is not Massive's exact ticker, raises `ValueError`.
-
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
+        A static symbol table is read once, now (see the class).
 
         Returns:
             A live append-only table in the dataset's schema.
+
+        Raises:
+            ValueError: On a Deephaven update-graph thread (for example inside a table
+                listener); if a static symbol table holds no symbol, or a symbol table a row
+                that is not Massive's exact ticker; or if explicit options contracts would put
+                more than 1,000 topics on the session's `/options` connection.
+            AuthenticationError: If Massive rejects the API key on the request that decides
+                the WebSocket host.
+            EntitlementError: If the plan has no WebSocket access for the asset class.
+            MassiveError: If the session is closed; if the stream fails while the verb opens
+                it, naming the failure; or if Massive's crypto ticker list cannot be read or
+                does not hold a crypto pair.
         """
         return self._stream(blink_to_append_only, self._stream_request())
 
     @_verb
+    @raises_through(
+        SessionCore.run_verb,
+        refuse_update_graph_thread,
+        _read_symbol_table,
+        read_symbols,
+        SessionCore.stream_result,
+        StreamTransport.open_stream,
+        require_positive_int,
+    )
     def ring(self, capacity: int) -> Table:
         """Return the most recent `capacity` rows received.
 
-        A `capacity` that is not an `int` raises `TypeError`, and one outside 1 to 2**31 - 1
-        raises `ValueError` (`require_positive_int`).
-
-        A static symbol table is read once, now (see the class); one that holds no symbol, or a
-        row that is not Massive's exact ticker, raises `ValueError`.
-
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
+        A static symbol table is read once, now (see the class).
 
         Args:
             capacity: How many rows to keep, from 1 to 2**31 - 1.
 
         Returns:
             A live ring table in the dataset's schema.
+
+        Raises:
+            TypeError: If `capacity` is not an `int`.
+            ValueError: On a Deephaven update-graph thread (for example inside a table
+                listener); if a static symbol table holds no symbol, or a symbol table a row
+                that is not Massive's exact ticker; or if explicit options contracts would put
+                more than 1,000 topics on the session's `/options` connection.
+                Also if `capacity` is outside 1 to 2**31 - 1.
+            AuthenticationError: If Massive rejects the API key on the request that decides
+                the WebSocket host.
+            EntitlementError: If the plan has no WebSocket access for the asset class.
+            MassiveError: If the session is closed; if the stream fails while the verb opens
+                it, naming the failure; or if Massive's crypto ticker list cannot be read or
+                does not hold a crypto pair.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(lambda blink: ring_table(blink, rows), self._stream_request())
-
-    @_verb
-    def last_by(self, by: str | Sequence[str] | None = None) -> Table:
-        """Return the latest row per key, by default one row per `Symbol`.
-
-        The underlying state keeps every key ever seen. With a reactive symbol table and
-        `Symbol` among the keys, rows of symbols removed from it are filtered out; a symbol
-        removed and re-added shows its last row until it ticks again. With keys that span
-        symbols (`by="Exchange"`), rows are filtered before the aggregation, so each group's
-        row is the latest from a symbol that was watched when it arrived; a group keeps that
-        row after the symbol is removed, until a watched symbol ticks in the group. Every row
-        of the table must hold Massive's exact ticker (`C:EURUSD`, not `EUR/USD`); a later row
-        that does not fails the result (convert such a table with `dm.canonicalize_symbols`
-        first). `last_by()` never seeds
-        from REST: use `snapshots(symbols).poll(n)` for current state on every plan. A `by`
-        that is not a `str` or a sequence of `str` raises `TypeError`; an empty `by` or an
-        unknown column raises `ValueError`.
-
-        A static symbol table is read once, now (see the class); one that holds no symbol, or a
-        row that is not Massive's exact ticker, raises `ValueError`.
-
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
-
-        Args:
-            by: The key column or columns, positionally or by keyword as in Deephaven's
-                `Table.last_by` (`q.last_by("Exchange")`); None means `"Symbol"`. Each column
-                may appear once.
-
-        Returns:
-            A live table with one row per key, in the dataset's schema.
-        """
-        keys = self._last_by_keys(by)
-        request = self._stream_request()
-        symbols = request.symbols
-        if not isinstance(symbols, SymbolTable):
-            return self._stream(lambda blink: blink.last_by(list(keys)), request)
-        watch = symbols.table
-        if "Symbol" in keys:
-            # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
-            return self._stream(
-                lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"), request
-            )
-        # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
-        return self._stream(
-            lambda blink: blink.where_in(watch, "Symbol").last_by(list(keys)), request
-        )
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:
         """Validate the `by` argument of `last_by`.
@@ -843,6 +857,71 @@ class StreamQuery(QueryBase):
             )
         return tuple(str(key) for key in keys)
 
+    @_verb
+    @raises_through(
+        SessionCore.run_verb,
+        refuse_update_graph_thread,
+        _read_symbol_table,
+        read_symbols,
+        SessionCore.stream_result,
+        StreamTransport.open_stream,
+        _last_by_keys,
+    )
+    def last_by(self, by: str | Sequence[str] | None = None) -> Table:
+        """Return the latest row per key, by default one row per `Symbol`.
+
+        The underlying state keeps every key ever seen. With a reactive symbol table and
+        `Symbol` among the keys, rows of symbols removed from it are filtered out; a symbol
+        removed and re-added shows its last row until it ticks again. With keys that span
+        symbols (`by="Exchange"`), rows are filtered before the aggregation, so each group's
+        row is the latest from a symbol that was watched when it arrived; a group keeps that
+        row after the symbol is removed, until a watched symbol ticks in the group. Every row
+        of the table must hold Massive's exact ticker (`C:EURUSD`, not `EUR/USD`); a later row
+        that does not fails the result (convert such a table with `dm.canonicalize_symbols`
+        first). `last_by()` never seeds
+        from REST: use `snapshots(symbols).poll(n)` for current state on every plan.
+
+        A static symbol table is read once, now (see the class).
+
+        Args:
+            by: The key column or columns, positionally or by keyword as in Deephaven's
+                `Table.last_by` (`q.last_by("Exchange")`); None means `"Symbol"`. Each column
+                may appear once.
+
+        Returns:
+            A live table with one row per key, in the dataset's schema.
+
+        Raises:
+            TypeError: If `by` is not a `str` or a sequence of `str`.
+            ValueError: On a Deephaven update-graph thread (for example inside a table
+                listener); if a static symbol table holds no symbol, or a symbol table a row
+                that is not Massive's exact ticker; or if explicit options contracts would put
+                more than 1,000 topics on the session's `/options` connection.
+                Also if `by` is empty, repeats a column, or names a column the dataset does
+                not have.
+            AuthenticationError: If Massive rejects the API key on the request that decides
+                the WebSocket host.
+            EntitlementError: If the plan has no WebSocket access for the asset class.
+            MassiveError: If the session is closed; if the stream fails while the verb opens
+                it, naming the failure; or if Massive's crypto ticker list cannot be read or
+                does not hold a crypto pair.
+        """
+        keys = self._last_by_keys(by)
+        request = self._stream_request()
+        symbols = request.symbols
+        if not isinstance(symbols, SymbolTable):
+            return self._stream(lambda blink: blink.last_by(list(keys)), request)
+        watch = symbols.table
+        if "Symbol" in keys:
+            # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
+            return self._stream(
+                lambda blink: blink.last_by(list(keys)).where_in(watch, "Symbol"), request
+            )
+        # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
+        return self._stream(
+            lambda blink: blink.where_in(watch, "Symbol").last_by(list(keys)), request
+        )
+
 
 class HistoryQuery(QueryBase):
     """A dataset with a historical retrieval path: `history(start, end=None)`.
@@ -859,7 +938,31 @@ class HistoryQuery(QueryBase):
 
     __slots__ = ()
 
+    def _check_rest_history(self) -> None:
+        """Reject `history(source=REST)` where REST cannot serve the request.
+
+        Raises:
+            ValueError: If the dataset has no REST history endpoint, or the symbols are
+                `dm.ALL` and the request is not daily bars with a grouped-daily endpoint
+                (`rest_history_problem`); the message names `HistorySource.FLAT_FILES`.
+        """
+        problem = rest_history_problem(self._spec, self._request)
+        if problem is not None:
+            raise ValueError(f"{problem}; use source=dm.HistorySource.FLAT_FILES")
+
     @_verb
+    @raises_through(
+        SessionCore.run_verb,
+        refuse_update_graph_thread,
+        _require_enum,
+        parse_date_like,
+        _read_symbol_table,
+        bounds,
+        choose_source,
+        _check_rest_history,
+        RestTransport.history,
+        FlatFileTransport.history,
+    )
     def history(
         self,
         start: DateLike,
@@ -900,28 +1003,37 @@ class HistoryQuery(QueryBase):
             symbol over REST, in file order over flat files; empty, with every column, when
             no row lies in the range.
 
-        Errors. `TypeError` if `source` is not a `HistorySource` or a bound is not a `str`,
-        `date`, or `datetime`. `ValueError`, synchronously, before any request: a naive or
-        unparseable bound; a date mixed with a datetime; `start` after `end` (or after now when
-        `end` is None); a symbol table without a symbol, or with a row that is not canonical;
-        futures trades or quotes named by session dates on a query that also filters
-        `session_end_date` in any form; a source that cannot serve the request (`REST` without
-        REST history or with `dm.ALL` and no grouped-daily endpoint; `FLAT_FILES` when a
-        flat-file condition above fails; `AUTO` when neither can, with every violated condition
-        listed); or a call on a Deephaven update-graph thread. `MassiveError` when a request
-        fails (`EntitlementError` on HTTP 403, which for futures flat files names the venue and
-        the `venue=` parameter; `AuthenticationError` when S3 rejects the flat-file
-        credentials); when a page of adjusted bars echoes another basis than the request; when a
-        symbol's later page answers HTTP 404, its data cut short (a symbol with no data at all
-        simply returns no rows); when the flat file of the last requested day is missing within
-        a day after its publication time ("... is not yet published (flat files land ~11:00 ET
-        next day), or was a market holiday"; after that the day is skipped with a WARNING, as a
-        holiday); when a futures range named by instants ends on a holiday and the next
-        session's file, which holds the holiday's hours, is not published yet or does not exist
-        within 7 days; when a bar of a day or longer is stamped at a time of day, or on a day,
-        Massive is not known to use for its class (a crypto 1-day bar at midnight New York time,
-        or a crypto week bar on a Sunday), naming the dataset, the source, and what to do
-        instead; or once the session is closed.
+        Raises:
+            TypeError: If `source` is not a `dm.HistorySource`, or a bound is not a `str`,
+                `date`, or `datetime`.
+            ValueError: Synchronously, before any request: a naive or unparseable bound; a date
+                mixed with a datetime; `start` after `end` (or after now when `end` is None); a
+                symbol table without a symbol, or with a row that is not Massive's exact
+                ticker; futures trades or quotes named by session dates on a query that also
+                filters `session_end_date` in any form; a source that cannot serve the request
+                (`REST` without REST history, or with `dm.ALL` and no grouped-daily endpoint;
+                `FLAT_FILES` when a flat-file condition above fails; `AUTO` when neither can,
+                with every violated condition listed); or a call on a Deephaven update-graph
+                thread.
+            AuthenticationError: If Massive rejects the API key, or S3 the flat-file
+                credentials.
+            EntitlementError: If the plan does not include the data (HTTP 403, or S3's 403
+                for flat files). For futures flat files the message names the venue and the
+                `venue=` parameter; for a refused flat-file read that REST could serve, it
+                names `source=dm.HistorySource.REST`, also under `AUTO`, which never switches
+                source silently.
+            MassiveError: If the session is closed; a request fails otherwise; a page of
+                adjusted bars echoes another basis than the request; a symbol's later page
+                answers HTTP 404, its data cut short (a symbol with no data at all simply
+                returns no rows); the flat file of the last requested day is missing within a
+                day after its publication time ("... is not yet published (flat files land
+                ~11:00 ET next day), or was a market holiday"; after that the day is skipped
+                with a WARNING, as a holiday); a futures range named by instants ends on a
+                holiday and the next session's file, which holds the holiday's hours, is not
+                published yet or does not exist within 7 days; or a bar of a day or longer is
+                stamped at a time of day, or on a day, Massive is not known to use for its
+                class (a crypto 1-day bar at midnight New York time, or a crypto week bar on a
+                Sunday), naming the dataset, the source, and what to do instead.
 
         Example:
             ::
@@ -1088,18 +1200,6 @@ class HistoryQuery(QueryBase):
         with entered(self._core.exec_ctx):
             table = dh_arrow.to_table(schema.arrow_schema().empty_table())
         return self._described(table)
-
-    def _check_rest_history(self) -> None:
-        """Reject `history(source=REST)` where REST cannot serve the request.
-
-        Raises:
-            ValueError: If the dataset has no REST history endpoint, or the symbols are
-                `dm.ALL` and the request is not daily bars with a grouped-daily endpoint
-                (`rest_history_problem`); the message names `HistorySource.FLAT_FILES`.
-        """
-        problem = rest_history_problem(self._spec, self._request)
-        if problem is not None:
-            raise ValueError(f"{problem}; use source=dm.HistorySource.FLAT_FILES")
 
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery):

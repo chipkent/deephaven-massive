@@ -148,6 +148,48 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# DOC502 is off in the modules of the public API: their public functions raise through shared
+# helpers, which DOC502 cannot follow. Each declares its helpers with `raises_through`, and
+# tests/test_errors.py checks that its Raises section lists exactly what it and they raise.
+"src/deephaven_massive/_datasets/symbols.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/crypto.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/economy.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/forex.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/futures.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/indicators.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/indices.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/options.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/partners.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/reference.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_namespaces/stocks.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_query.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
+"src/deephaven_massive/_session.py" = [
+    "DOC502",  # raises through shared helpers; tests/test_errors.py checks Raises instead
+]
 "tests/**" = [
     "S101",  # pytest uses bare assert statements
     "PLR2004",  # literal expected values in assertions are the point of a test

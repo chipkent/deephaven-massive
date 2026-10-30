@@ -26,23 +26,36 @@ through `TablePublisher.publish_failure`, so the table fails where Deephaven use
 failure is also logged at ERROR and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported. The rate-limited log helpers, `log_once` and `BoundedWarnings`,
-are in `_log_limits`.
+fix, which is not exported, and `raises_through`, the declaration that lets a test check the
+`Raises:` section of a function whose errors come from the helpers it calls. The rate-limited
+log helpers, `log_once` and `BoundedWarnings`, are in `_log_limits`.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Final, TypeVar
+
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 __all__ = [
+    "RAISES_THROUGH",
     "AuthenticationError",
     "EntitlementError",
     "MassiveError",
     "PermanentError",
     "from_wire",
+    "raises_through",
 ]
+
+RAISES_THROUGH: Final = "raises_through"
+"""The attribute in which `raises_through` records a function's helpers."""
+
+_F = TypeVar("_F", bound="Callable[..., object]")
 
 
 class MassiveError(Exception):
@@ -188,3 +201,50 @@ def from_wire(error: WireError) -> MassiveError:
     else:
         public = MassiveError
     return public(error.message, status=error.status, request_id=error.request_id)
+
+
+def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
+    """Declare the helpers whose errors a function lets through, so its `Raises:` can be checked.
+
+    Most public functions of the library check nothing themselves: a dataset method passes its
+    arguments to `build_query`, and a verb runs through the session's guard and a transport.
+    Their `Raises:` sections document the errors of those helpers, which a linter that reads
+    only the function's own `raise` statements cannot check. This decorator names the helpers,
+    and `tests/test_errors.py` requires each declared function's `Raises:` section to list
+    exactly the exceptions it raises itself and those its helpers' `Raises:` sections list: a
+    helper's error the function leaves out fails the test, and so does a listed error that
+    nothing raises.
+
+    The decorator stores the helpers in the function's `raises_through` attribute
+    (`RAISES_THROUGH`) and returns the same function, so it costs nothing at call time.
+    `functools.wraps` copies the attribute to a wrapper, so a decorated verb keeps it. Apply it
+    beneath any wrapping decorator. It runs once, at import, and is thread-safe.
+
+    Args:
+        *helpers: The functions or methods the decorated function calls whose exceptions it
+            lets through, such as `build_query` or `SessionCore.run_verb`. A helper's own
+            `Raises:` section is what counts.
+
+    Returns:
+        A decorator that records `helpers` on a function and returns it unchanged.
+
+    Example:
+        A dataset method lets through the errors of the factory that checks its arguments::
+
+            from deephaven_massive._errors import RAISES_THROUGH, raises_through
+            from deephaven_massive._namespaces.base import build_query
+
+
+            @raises_through(build_query)
+            def trades(self, symbols):
+                return build_query(self._core, TRADES, symbols=symbols)
+
+
+            assert getattr(trades, RAISES_THROUGH) == (build_query,)
+    """
+
+    def declare(function: _F) -> _F:
+        vars(function)[RAISES_THROUGH] = helpers
+        return function
+
+    return declare
