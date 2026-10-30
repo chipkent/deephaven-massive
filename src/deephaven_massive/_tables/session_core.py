@@ -1303,8 +1303,11 @@ class SessionCore:
     def finish_read(self, stream_id: int, rows: int) -> None:
         """Record that a background read's rows have landed: its row becomes `DONE`.
 
-        The read's thread calls it right after it published the one row that holds the
-        complete result, outside every lock. `DONE` replaces `LOADING`, `RELEASED` (a derived
+        The listener on the read's result calls it in the update cycle that adds the rows, on
+        an update-graph thread holding the update graph's lock, so `DONE` reaches `m.streams()`
+        only after the rows are in the result; the read's thread calls it for an empty result,
+        which adds no rows, and a close's hook for a read that has published, outside every
+        lock. `DONE` replaces `LOADING`, `RELEASED` (a derived
         table kept the read going after its result was released), and `CLOSED` (a close that
         raced the publish, which then failed nothing: the table has its rows). The read's
         publish lock fails a read only before its rows land, so no row is `FAILED` here. `DONE`

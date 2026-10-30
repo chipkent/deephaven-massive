@@ -6,6 +6,7 @@ see threads wait before it lets them go.
 
 from __future__ import annotations
 
+import collections
 import logging
 import math
 import threading
@@ -1332,7 +1333,10 @@ class _GrantClock(FakeClock):
 
 def test_concurrent_paced_requests_on_the_automatic_clock_do_not_race_virtual_time() -> None:
     # No wait without a deadline moves virtual time: only a slot's release does, so time
-    # advances by windows.
+    # advances by whole windows, one at a time, and every window grants at most the limit.
+    # How many windows the 20 requests take depends on the threads' timing: a thread granted
+    # a slot may report its answer only after another thread's wait has moved time a window
+    # on, and its slot then stays held into the window after that.
     clock = _GrantClock()
     governor = _governor(clock, basic={"stocks"})
     lane = object()
@@ -1355,8 +1359,12 @@ def test_concurrent_paced_requests_on_the_automatic_clock_do_not_race_virtual_ti
     assert sorted(starts)[:5] == [0.0] * 5
     assert len(starts) == 20
     assert all(wait == math.inf or 0 < wait <= RATE_WINDOW for wait in clock.waits)
-    # 20 requests at 5 a window need three more windows; a slot answered late may need one more.
-    assert clock.monotonic() <= 4 * RATE_WINDOW
+    per_window = collections.Counter(starts)
+    windows = len(per_window)
+    assert sorted(per_window) == [k * RATE_WINDOW for k in range(windows)]
+    assert max(per_window.values()) <= 5
+    # Time moved only to grant a request: it stopped at the last grant.
+    assert clock.monotonic() == max(starts)
 
 
 def test_refusals_without_the_basic_words_never_pace_a_bucket_however_many() -> None:

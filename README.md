@@ -74,6 +74,8 @@ its verbs, and works before you set a key. `help(dm)` lists the whole API.
   [joining across asset classes](docs/guides/cross-asset.md).
 - [Column references](docs/datasets/), one page per namespace: every dataset's columns, their
   types, and what each one means.
+- [Tester guide](docs/tester-guide.md): every step for an outside tester, from installing a
+  pinned version to the console exercises, the live run, and bug reports.
 
 ## Split adjustment
 

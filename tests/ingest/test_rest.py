@@ -68,6 +68,7 @@ from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 R = Transport.REST
 LOGGER = "deephaven_massive._ingest.rest"
 ToPylist = Callable[[Table], list[dict[str, Any]]]
+RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
 NS = 10**9
 TIMEOUT = 10.0
 """Seconds of real time a test waits for an event before it fails."""
@@ -3540,22 +3541,17 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
 
 
 def test_a_background_fetch_lands_the_rows_the_read_requested(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, rows_when: RowsWhen
 ) -> None:
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
     q = query(session, DIVIDENDS, symbols=["AAPL"])
     assert isinstance(q, Query)
     table = q.fetch(wait=False)
     _join_reads(session)
-    # The read's own row says how it ended; a failure shows its error here.
-    assert session._core.diagnostics.barrier().wait(30.0)
-    (row,) = dh_arrow.to_arrow(session.streams()).to_pylist()
+    # The read's own row says how it ended; a failure shows its error here. It shows DONE
+    # only after the update cycle that added the rows, so the table holds them from then on.
+    (row,) = rows_when(session.streams(), lambda rows: rows[0]["State"] != "LOADING")
     assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 1)
-    pause = threading.Event()
-    for _ in range(3000):  # the rows land on the next update cycle
-        if table.size:
-            break
-        pause.wait(0.01)
     assert [(r["Symbol"], r["CashAmount"]) for r in rows(table)] == [("AAPL", 0.25)]
     session.release(table)
 

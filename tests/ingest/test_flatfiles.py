@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from deephaven_massive._ingest.clients import SessionClients
 
 TIMEOUT = 30.0
+RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
 NEW_YORK = ZoneInfo("America/New_York")
 R, FF = Transport.REST, Transport.FLAT_FILES
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
@@ -2795,18 +2796,17 @@ def test_every_row_of_a_day_shares_one_stored_date(
 
 
 def test_a_background_history_lands_the_files_rows(
-    *, session: dm.MassiveSession, put: Callable[[str, str], None]
+    *, session: dm.MassiveSession, put: Callable[[str, str], None], rows_when: RowsWhen
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     table = q.history("2025-03-03", "2025-03-03", wait=False)
     for state in list(session._core._workers.values()):
-        cast("Any", state.fail).__self__.thread.join(30.0)
-    pause = threading.Event()
-    for _ in range(3000):
-        if table.size:
-            break
-        pause.wait(0.01)
+        cast("Any", state.fail).__self__.thread.join(TIMEOUT)
+    # The read's row shows DONE only after the update cycle that added the rows, so the
+    # table holds them from then on.
+    (row,) = rows_when(session.streams(), lambda rows: rows[0]["State"] != "LOADING")
+    assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 4)
     assert [r["Symbol"] for r in rows(table)] == ["AAPL", "MSFT", "AAPL", "SPY"]
     session.release(table)
 

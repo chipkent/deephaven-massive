@@ -25,7 +25,11 @@ billion rows lands as fast as one of ten, and the cycle that adds it freezes not
 
 **Its row in `m.streams()`.** `Kind=read`, keyed by the call's id: `LOADING` from the call,
 then `DONE` with `RowsPublished` once the rows have landed (`SessionCore.finish_read`), or
-`FAILED` with the error. The read is a *worker table* of the session core
+`FAILED` with the error. The rows land on the update cycle after the publish, so `DONE` is
+recorded by a listener on the merged table (`_RowsLanded`), in the cycle that adds the rows:
+the row reaches `m.streams()` on a later cycle, so whoever sees `DONE` there sees the rows in the
+result. An empty result adds no rows and has nothing to wait for; the read records it `DONE`
+as soon as it is published. The read is a *worker table* of the session core
 (`SessionCore.register_worker`), as a `poll()` table is, so its record keeps the session alive
 while the result is held or still in use, and `m.close()` fails it while it is loading.
 
@@ -43,7 +47,8 @@ partitioned tables), after marking the row `FAILED` and logging `call 7 failed a
 ...` once, at WARNING for an expected failure and at ERROR for a defect, naming whose. An error
 that is not a `MassiveError` is a defect of the library, logged with its traceback and how to
 report it, and the table fails with a `MassiveError` that names it. A close or a failure that
-comes after the rows have landed changes nothing: the table has its complete result.
+comes after the read published its rows fails nothing: the rows land on the next cycle, and
+the row is marked `DONE` at once (`BackgroundRead.fail`), while the session still shows it.
 
 **Threads and locks.** `open_read` runs on the caller thread, which may hold the update graph's
 lock (a console command): it creates tables, registers the row, and starts the thread, and
@@ -68,6 +73,7 @@ from deephaven import dtypes, new_table
 from deephaven.column import InputColumn
 from deephaven.stream import blink_to_append_only
 from deephaven.table import PartitionedTable
+from deephaven.table_listener import TableListener, TableListenerHandle
 
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
@@ -82,12 +88,14 @@ from deephaven_massive._tables.diagnostics import (
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
+    from deephaven.table_listener import TableUpdate
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.symbols import NormalizedSymbols
@@ -132,9 +140,9 @@ class BackgroundRead:
         "_core",
         "_exec_ctx",
         "_failed",
-        "_landed",
         "_name",
         "_publish_lock",
+        "_published",
         "_publisher",
         "_run",
         "_started",
@@ -176,7 +184,7 @@ class BackgroundRead:
         self._run = run
         self._publish_lock = threading.Lock()
         self._failed = False
-        self._landed = False
+        self._published: int | None = None
         self._started = time.monotonic()
         self._thread = threading.Thread(
             target=self._read, name=f"{core.thread_prefix} read-{call}", daemon=True
@@ -214,11 +222,30 @@ class BackgroundRead:
         Args:
             error: The error the table fails with.
 
+        A read that has published its rows is not failed: they land on the next update cycle
+        whatever happens now. It is marked `DONE` at once instead, while a closing session
+        still shows its rows. A close inside a console command holds the update graph's lock,
+        so the cycle that adds the rows, where the result's listener would mark it, runs only
+        after the session's diagnostics are released, and the read would stay `CLOSED`. The
+        `DONE` row reaches `m.streams()` no earlier than the rows reach the result: both were
+        handed to Deephaven before that cycle, the rows first.
+
+        Args:
+            error: The error the table fails with.
+
         Returns:
             False when the table had already failed or already has its rows.
         """
         self._stop.set()
-        return self._fail_once(cast("SessionCore", self._core()), error)
+        core = cast("SessionCore", self._core())
+        if self._fail_once(core, error):
+            return True
+        with self._publish_lock:
+            published = self._published
+        if published is not None:
+            logger.debug("call %d done at the close: its %d rows land next", self._call, published)
+            core.finish_read(self._call, published)
+        return False
 
     def _read(self) -> None:
         """The thread: run the transport call, then publish its result or fail the table.
@@ -293,11 +320,13 @@ class BackgroundRead:
         return True
 
     def _publish(self, core: SessionCore, table: Table) -> None:
-        """Publish the static result as the blink table's one row, and mark the row `DONE`.
+        """Publish the static result as the blink table's one row.
 
         The result is viewed as the dataset's columns, in schema order (a view copies no
         data), so it matches the merged table's definition. A read stopped meanwhile
-        publishes nothing.
+        publishes nothing. The rows land on the next update cycle, where the result's
+        listener (`_RowsLanded`) marks the row `DONE`; an empty result adds no rows, so its
+        row is marked `DONE` here.
 
         Args:
             core: The session's core.
@@ -312,9 +341,10 @@ class BackgroundRead:
             if self._stopped_by(f"{rows} rows"):
                 return
             self._publisher.add(row)
-            self._landed = True
-        core.finish_read(self._call, rows)
-        logger.debug("call %d done: %d rows in %.3f s", self._call, rows, self._took)
+            self._published = rows
+        logger.debug("call %d published: %d rows in %.3f s", self._call, rows, self._took)
+        if not rows:  # no rows to land: the empty result is already what the table shows
+            core.finish_read(self._call, 0)
 
     def _fail_once(self, core: SessionCore, error: MassiveError) -> bool:
         """Mark the row `FAILED`, then fail the table, once; never after the rows landed.
@@ -333,7 +363,7 @@ class BackgroundRead:
             False when the table had already failed or already has its rows.
         """
         with self._publish_lock:
-            if self._failed or self._landed:
+            if self._failed or self._published is not None:
                 return False
             closed = core.fail_stream(self._call, str(error))
             self._publisher.publish_failure(
@@ -341,6 +371,52 @@ class BackgroundRead:
             )
             self._failed = True
             return True
+
+
+class _RowsLanded(TableListener):
+    """The listener on a background read's result that marks its row `DONE` once rows land.
+
+    Created by `_build`, listening to the merged table; the result keeps it alive. The merged
+    table changes once, in the cycle that adds the read's complete result, and never again,
+    so its one update marks the row `DONE` with the number of rows it added. An empty result
+    never changes, and the read marks it `DONE` itself. It runs on an update-graph thread,
+    holding the update graph's lock: it only reads the update's row count and records the
+    state under `registry_lock` (`SessionCore.finish_read`), which never blocks.
+    """
+
+    def __init__(self, core_ref: weakref.ref[SessionCore], call: int) -> None:
+        """Wait for the read's rows.
+
+        Args:
+            core_ref: The session's core, weakly. The session is alive whenever the listener
+                runs: the read's record keeps it in the live set until the blink table shuts
+                down, and the merged table that updates keeps the blink table alive.
+            call: The read's `StreamId`.
+        """
+        self._core_ref = core_ref
+        self._call = call
+
+    @override
+    def on_update(self, update: TableUpdate, is_replay: object) -> None:
+        """Mark the row `DONE` with the number of rows the update added.
+
+        Args:
+            update: The merged table's one update; only its count of added rows is read.
+            is_replay: Always False: the listener starts without a replay.
+        """
+        del is_replay  # never a replay
+        rows = update.j_table_update.added().size()
+        logger.debug("call %d done: its %d rows landed in the result", self._call, rows)
+        cast("SessionCore", self._core_ref()).finish_read(self._call, rows)
+
+    @override
+    def on_error(self, e: Exception) -> None:
+        """Do nothing more for a failed result: the read marked its row `FAILED` already.
+
+        Args:
+            e: The failure, logged at DEBUG.
+        """
+        logger.debug("call %d: its result failed: %s", self._call, e)
 
 
 def _shut_down(core_ref: weakref.ref[SessionCore], call: int, stop: threading.Event) -> None:
@@ -397,7 +473,19 @@ def _build(
             constituent_table_columns=col_defs(schema),
             constituent_changes_permitted=True,
         )
-        return describe(parts.merge(), spec, schema, note=text)
+        merged = parts.merge()
+        described = describe(merged, spec, schema, note=text)
+        # The listener hears the merged table and the result keeps it, so it lives exactly as
+        # long as the result: a table derived from a released result still sees `DONE`. It
+        # cannot listen to the result itself, which would then keep itself alive.
+        landed = TableListenerHandle(
+            merged,
+            _RowsLanded(weakref.ref(core), call),
+            description=f"deephaven_massive read {call} landed",
+        )
+        landed.start()
+        described.j_table.manage(landed.j_object)
+        return described
 
     result, scope = make_result(core.exec_ctx, shape)
     return (result, built[0]), scope
