@@ -1269,6 +1269,47 @@ def test_a_caller_whose_lookup_is_abandoned_before_it_looks_makes_it_itself(
         assert result.host == "delayed.massive.com"
 
 
+def test_an_interrupt_as_the_crypto_read_starts_leaves_nothing_claimed(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(*_: object) -> NoReturn:  # Ctrl-C as the claimed read begins
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rest.RestReader, "_read_crypto_tickers", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _split_dot(session)()
+    assert _claim(session, "crypto")[1]  # the claim was given up, so a new one is made
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
+def test_a_failed_lookup_is_forgotten_before_its_waiters_hear_of_it(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    # A waiter that tries again must claim a fresh lookup, never find the failed one, so the
+    # claim is removed before its future completes.
+    refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    fake_rest.reply(LIST_TARGET if kind == "crypto" else "/v3/snapshot", refused)
+    name = "crypto_future" if kind == "crypto" else "host_future"
+    claim = getattr(rest.RestState, name)
+    fresh_when_failed: list[bool] = []
+
+    def claiming(state: rest.RestState, *args: object) -> tuple[Future[Any], bool]:
+        future, created = claim(state, *args)
+        if created and not fresh_when_failed:
+            # When the failure reaches the future, a new claim must already be fresh.
+            future.add_done_callback(lambda _: fresh_when_failed.append(claim(state, *args)[1]))
+        return future, created
+
+    monkeypatch.setattr(rest.RestState, name, claiming)
+    with pytest.raises(dm.MassiveError):
+        _lookup(session, kind)()
+    assert fresh_when_failed == [True]
+
+
 def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

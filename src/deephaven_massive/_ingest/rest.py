@@ -1304,45 +1304,11 @@ class RestReader:
             ):
                 return _outcome(future)
             future, created = self.state.crypto_future()
-        return self._read_crypto_tickers(future, patience)
-
-    def _read_crypto_tickers(
-        self, future: Future[CryptoTickers], patience: Patience
-    ) -> CryptoTickers:
-        """Read the crypto ticker list for the session, completing the future others wait on.
-
-        Args:
-            future: The list's future, which this caller claimed.
-            patience: This caller's patience, for every page.
-
-        Returns:
-            The list.
-
-        A failed read is forgotten, so the next caller tries again, and raises as
-        `_crypto_tickers` describes; the future gets what its waiters need (`_shared_failure`).
-        """
-        tickers: dict[str, tuple[str, str] | str] = {}
+        # The claim is completed whatever stops the read, an interrupt (as by Ctrl-C) as it
+        # starts included: a claim left open would hang every later caller. The claim is
+        # forgotten before its future fails, so a waiter that tries again never finds it.
         try:
-            # The list is reference data, which Massive counts in a bucket of its own. Its
-            # pages share one lane of their own, so they wait their turn with other reads
-            # instead of queueing behind them; closing the client still ends their waits.
-            with Cancel() as lane:
-                # Listed pairs first, then delisted ones, so that a past date of a delisted
-                # pair still splits; a ticker in both keeps its listed entry.
-                for active in (True, False):
-                    query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
-                    for page in self.state.client.pages(
-                        self.rest_path(_TICKERS_PATH),
-                        {},
-                        query,
-                        bucket=OTHER,
-                        cancel=lane,
-                        patience=patience,
-                    ):
-                        for row in page.rows:
-                            ticker = row.get("ticker")
-                            if isinstance(ticker, str):
-                                tickers.setdefault(ticker, _crypto_entry(ticker, row))
+            tickers = self._read_crypto_tickers(patience)
         except WireError as error:
             public = self._public(error)
             self.state.forget_crypto()
@@ -1354,6 +1320,41 @@ class RestReader:
             future.set_exception(_shared_failure(error, "the read failed"))
             raise
         future.set_result(tickers)
+        return tickers
+
+    def _read_crypto_tickers(self, patience: Patience) -> CryptoTickers:
+        """Read Massive's whole crypto ticker list, every page of both lists.
+
+        Args:
+            patience: The reading caller's patience, for every page.
+
+        Returns:
+            The list.
+
+        A failed request raises its `WireError`; `_crypto_tickers` completes the shared
+        claim either way.
+        """
+        tickers: dict[str, tuple[str, str] | str] = {}
+        # The list is reference data, which Massive counts in a bucket of its own. Its pages
+        # share one lane of their own, so they wait their turn with other reads instead of
+        # queueing behind them; closing the client still ends their waits.
+        with Cancel() as lane:
+            # Listed pairs first, then delisted ones, so that a past date of a delisted pair
+            # still splits; a ticker in both keeps its listed entry.
+            for active in (True, False):
+                query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
+                for page in self.state.client.pages(
+                    self.rest_path(_TICKERS_PATH),
+                    {},
+                    query,
+                    bucket=OTHER,
+                    cancel=lane,
+                    patience=patience,
+                ):
+                    for row in page.rows:
+                        ticker = row.get("ticker")
+                        if isinstance(ticker, str):
+                            tickers.setdefault(ticker, _crypto_entry(ticker, row))
         return tickers
 
     def wait_for_shared(
@@ -2160,6 +2161,7 @@ class RestEndpoints:
                 fetch=functools.partial(reader.probe, asset_class=asset_class, patience=patience),
             )
         except BaseException as error:
+            # Forgotten before its future fails, so a waiter that tries again never finds it.
             self._state.forget_host(key, future)
             failure = (
                 error
