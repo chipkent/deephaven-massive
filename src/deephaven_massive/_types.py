@@ -109,9 +109,13 @@ the parameter and the fix ("needs a timezone: pass an aware datetime or a date")
 is a whole day in the asset class's day zone.
 """
 
-FilterValue: TypeAlias = str | int | float | bool | date | datetime | Sequence[str]
+FilterValue: TypeAlias = (
+    str | int | float | bool | date | datetime | Sequence[str | int | float | date]
+)
 """A value in the `filters` mapping, keyed by a wire parameter name with its dots written as
-underscores, such as `strike_price_gte` or `ticker_any_of`."""
+underscores, such as `strike_price_gte` or `ticker_any_of`. A sequence is the value of an
+`_any_of` key: text items, numbers for a list of numbers (`strike_price_any_of`), or dates for
+a list of dates (`date_any_of`)."""
 
 StreamSpan: TypeAlias = Literal[Timespan.SECOND, Timespan.MINUTE]
 """Bar timespans that have a WebSocket channel (with `multiplier=1`)."""

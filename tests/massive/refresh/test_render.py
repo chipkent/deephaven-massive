@@ -26,6 +26,7 @@ _PATH = RestPath(
     params=(
         Param(name="id", kind=ParamKind.STRING, in_path=True),
         Param(name="timestamp.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.MS),
+        Param(name="window", kind=ParamKind.INTEGER, default=50),
     ),
     fields=(
         Field(
@@ -57,7 +58,9 @@ def test_render_writes_one_line_per_field_and_parameter() -> None:
         "unit": None,
         "wire_key": "price",
     }
+    assert document["sources"][0]["params"][2]["default"] == 50
     assert document["sources"][0]["params"][1] == {
+        "default": None,
         "in_path": False,
         "kind": "timestamp",
         "name": "timestamp.gte",
@@ -67,7 +70,7 @@ def test_render_writes_one_line_per_field_and_parameter() -> None:
     lines = text.splitlines()
     assert '    {"column": "Price", "conversion": null, "required": false, ' in text
     assert sum('"wire_key"' in line for line in lines) == 4
-    assert sum('"in_path"' in line for line in lines) == 4
+    assert sum('"in_path"' in line for line in lines) == 6
     assert text.endswith("}\n")
 
 
