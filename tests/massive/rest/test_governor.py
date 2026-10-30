@@ -402,6 +402,26 @@ def test_a_request_whose_patience_ends_before_the_pause_fails_at_once() -> None:
     assert clock.monotonic() == 601.0
 
 
+def test_a_pause_past_any_date_still_gives_up_with_its_message() -> None:
+    clock = FakeClock(wall=1_800_000_000.0)
+    governor = _governor(clock)
+    # 10**12 s is some 31,700 years: no date can name when the probe goes.
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=1e12
+    )
+    with pytest.raises(WireError) as caught:
+        governor.admission("stocks", lane=object(), patience=Patience(600.0)).acquire(Cancel())
+    assert caught.value.status == 429
+    assert (
+        "Its next request, a probe, goes in 1000000000000 s, later than any date can name, "
+        "but this read waits out at most 600 s of pauses"
+    ) in str(caught.value)
+    waiting_read = governor.charge_pause("stocks", Patience(600.0))
+    assert waiting_read is not None
+    assert "later than any date can name" in str(waiting_read)
+    assert clock.waits == []
+
+
 def test_a_request_whose_patience_ends_with_the_pause_waits_for_it() -> None:
     clock = FakeClock()
     governor = _governor(clock)

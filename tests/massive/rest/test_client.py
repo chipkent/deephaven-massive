@@ -692,18 +692,20 @@ def test_with_an_unusable_date_an_http_date_is_measured_on_the_local_clock(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     # The fake clock's wall time starts at 1800000000 (2027-01-15 08:00:00 UTC). (The fake
-    # server always sends a Date; the client's `_http_time` test covers none at all.)
+    # server always sends a Date; `net.retry.http_date_seconds` reads none at all as None.)
     headers = {"Date": "not a date", "Retry-After": "Fri, 15 Jan 2027 08:00:12 -0000"}
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers), _ok())
     client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert clock.waits == [12.0]
 
 
-def test_http_time_reads_a_date_header() -> None:
-    assert client_module._http_time(None) is None
-    assert client_module._http_time("soon") is None
-    assert client_module._http_time("Fri, 15 Jan 2027 08:00:00 GMT") == 1_800_000_000.0
-    assert client_module._http_time("Fri, 15 Jan 2027 08:00:00 -0000") == 1_800_000_000.0
+def test_a_retry_after_too_large_for_a_float_falls_back_to_the_first_pause(
+    client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    headers = {"Retry-After": "9" * 400}
+    fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=429, headers=headers), _ok())
+    client.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert clock.waits == [15.0]
 
 
 def test_a_429_without_retry_after_pauses_15_30_then_60_and_never_counts_as_a_retry(

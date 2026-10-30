@@ -1211,11 +1211,22 @@ class RequestGovernor:
 
         Returns:
             The message: the bucket's requests and the latest refusal; when the next request
-            goes, in UTC and in local time; the read's patience and what it has spent; the
+            goes, in UTC and in local time (in seconds from now when the pause ends past the
+            last date a `datetime` can name, as a `Retry-After` of trillions of seconds would
+            make it); the read's patience and what it has spent; the
             usual cause; and the remedies, the declaration only for a bucket that can be
             declared.
         """
-        goes = datetime.fromtimestamp(self._clock.time() + state.pause_until - now, UTC)
+        wait = state.pause_until - now
+        try:
+            goes = datetime.fromtimestamp(self._clock.time() + wait, UTC)
+            when = (
+                f"at {goes.isoformat(timespec='seconds')} "
+                f"({goes.astimezone().isoformat(timespec='seconds')} local time)"
+            )
+        except (OverflowError, ValueError, OSError):
+            # A `Retry-After` of more seconds than a date can reach (past the year 9999).
+            when = f"in {wait:.0f} s, later than any date can name"
         remedies = "retry after that time, or stop the other program"
         if state.declarable:
             remedies = (
@@ -1225,9 +1236,7 @@ class RequestGovernor:
             )
         return (
             f"Massive is refusing {state.label} with HTTP 429 (latest refusal: "
-            f"{state.last_refusal}). Its next request, a probe, goes at "
-            f"{goes.isoformat(timespec='seconds')} "
-            f"({goes.astimezone().isoformat(timespec='seconds')} local time), but this read "
+            f"{state.last_refusal}). Its next request, a probe, goes {when}, but this read "
             f"waits out at most {patience.seconds:.0f} s of pauses and has spent "
             f"{patience.spent:.0f} s of its patience. The usual cause is another program or "
             f"process using the same Massive account, whose limit they share. To go on: "
