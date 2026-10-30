@@ -38,7 +38,7 @@ developer.
 - **Keep it current.** When the scope of the PR changes, retitle it (`gh pr edit <n> --title`).
 
 CI checks every new or changed title against the rules a program can check: the type and the
-one scope, a lowercase first word after the colon, no trailing period, and the 60-character
+one scope, a lowercase letter to start the summary, no trailing period, and the 60-character
 limit (lifted for Dependabot's titles, which name a package and two versions). It comments on
 the PR with each rule the title breaks. Run the same check before you open a PR:
 
