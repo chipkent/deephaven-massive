@@ -1358,7 +1358,9 @@ every live table keeps updating while the read runs.
   REST path's parameters (`RestTransport.check_fetch` and `check_history` plan the requests
   with no request made; a crypto pair is split later, by the read), a closed session, and the
   update-graph thread. A failure during the download fails the table instead
-  ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)).
+  ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)). A `history()` range no
+  row can lie in still returns a background read, whose empty result lands at once, so
+  `wait=False` always returns the same kind of table.
 - **Telling loading from done.** The result's `m.streams()` row has `Kind=read` and `State`
   `LOADING`, then `DONE` (or `FAILED`, `RELEASED`, `CLOSED`), with `RowsPublished` set when the
   rows land. The table's description, which Deephaven fixes when the table is created, says it
