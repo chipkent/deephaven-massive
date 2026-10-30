@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from tests._fakes.ws_session import WsSession
 
 OWNER = "namespaces/futures"
-DOCS = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.md"
 
 Loader = Callable[[str, str], bytes]
 
@@ -463,17 +462,16 @@ def test_schedule_and_status_times_are_instants_and_sessions_dates() -> None:
         assert "Date" not in types  # reference rows have no trading-day column of the library
 
 
-# Docstrings: each factory starts with its summary and links its column reference section.
+# Docstrings: each factory starts with its summary and names its dataset page.
 
 
 @pytest.mark.parametrize("spec", futures.DATASETS, ids=lambda spec: spec.name)
-def test_docstrings_link_the_column_reference(spec: DatasetSpec) -> None:
+def test_docstrings_name_their_dataset_page(spec: DatasetSpec) -> None:
     dataset = spec.name.removeprefix("futures.")
     doc = getattr(futures._Futures, dataset).__doc__
     assert doc is not None
-    assert f"{DOCS}#{dataset.replace('.', '-')}" in doc
+    assert f"docs/datasets/{spec.name}.md" in doc
     assert doc.splitlines()[0] == spec.summary
-    assert "columns()" in doc
 
 
 # Fixtures: every payload is shaped by the generated source it stands for.

@@ -15,6 +15,7 @@ from deephaven_massive._massive.spec.types import (
     Membership,
     Param,
     ParamKind,
+    PlanTerms,
     RestPath,
     Source,
     Transport,
@@ -245,6 +246,17 @@ def _descriptions(**change: object) -> str:
         "urls": {"REST": {"/v1/x": [_URL]}},
         "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},
         "class_descriptions": {"REST": {"/v1/x": {"price": {"options": "Per share."}}}},
+        "plans": {
+            _URL: {
+                "title": "X",
+                "access": "Included in all Stocks plans",
+                "recency": "Real-time",
+                "history": "",
+                "plans": [
+                    {"plan": "Stocks Basic", "access": "Included", "recency": None, "history": None}
+                ],
+            }
+        },
     }
     return json.dumps({**document, **change})
 
@@ -260,6 +272,15 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
     assert isinstance(found.urls[Transport.REST], MappingProxyType)
     assert isinstance(found.texts[Transport.REST], MappingProxyType)
     assert isinstance(found.texts[Transport.REST]["/v1/x"], MappingProxyType)
+    page = found.plans[_URL]
+    assert (page.title, page.access, page.recency, page.history) == (
+        "X",
+        "Included in all Stocks plans",
+        "Real-time",
+        "",
+    )
+    assert page.plans == (PlanTerms(plan="Stocks Basic", access="Included"),)
+    assert isinstance(found.plans, MappingProxyType)
 
 
 @pytest.mark.parametrize(
@@ -312,6 +333,45 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
             ValueError,
             "missing member 'class_descriptions'",
         ),
+        (
+            json.dumps(
+                {"fetched": "2026-10-27", "urls": {}, "descriptions": {}, "class_descriptions": {}}
+            ),
+            ValueError,
+            "missing member 'plans'",
+        ),
+        (_descriptions(plans=[]), TypeError, "plans is \\[\\], not an object"),
+        (_descriptions(plans={_URL: []}), TypeError, f"plans of {_URL} is \\[\\], not an object"),
+        (
+            _descriptions(
+                plans={
+                    _URL: {
+                        "title": "X",
+                        "access": "A",
+                        "recency": "R",
+                        "history": "H",
+                        "plans": [1],
+                    }
+                }
+            ),
+            ValueError,
+            "expected an array of objects",
+        ),
+        (
+            _descriptions(
+                plans={
+                    _URL: {
+                        "title": "X",
+                        "access": "A",
+                        "recency": "R",
+                        "history": "H",
+                        "plans": [{"plan": "P", "access": "A", "recency": 1, "history": None}],
+                    }
+                }
+            ),
+            TypeError,
+            "'recency' is 1, not a string",
+        ),
     ],
     ids=[
         "not an object",
@@ -329,6 +389,11 @@ def test_parse_descriptions_reads_the_generated_format() -> None:
         "a class description not text",
         "a field's class descriptions not an object",
         "no class descriptions",
+        "no plans",
+        "plans not an object",
+        "a page's plans not an object",
+        "a plan row not an object",
+        "a plan's recency not text",
     ],
 )
 def test_parse_descriptions_coerces_nothing(

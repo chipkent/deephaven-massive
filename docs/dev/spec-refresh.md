@@ -2,7 +2,7 @@
 
 The library does not hand-write the shape of anything Massive sends. Every wire schema
 (`src/deephaven_massive/_massive/spec/*.json`) is generated from a pinned copy of Massive's
-published specifications, and the column reference (`docs/datasets/`) is generated from the
+published specifications, and the dataset reference (`docs/datasets/`) is generated from the
 dataset schemas. This page says how to take a change from Massive, how to answer a refresh
 gate, and what to do when a refresh adds something new.
 
@@ -21,8 +21,9 @@ gate, and what to do when a refresh adds something new.
     `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `KINDS`, `PROJECTIONS`,
     `TRANSPORT_ONLY`, and `VENUES`;
   - `refresh/exclusions.py`: `EXCLUSIONS` and `SAMPLE_ERRORS`.
-- **The column reference**, `docs/datasets/<namespace>.md` (and `snapshots.md` for
-  `m.snapshots`), rendered by
+- **The dataset reference**, `docs/datasets/`: an index, `README.md`, and one page per dataset,
+  `<dataset>.md` (`stocks.trades.md`, `snapshots.md`), each with Massive's plan tables for
+  its pages, rendered by
   `scripts/render_reference.py`, which owns the whole directory: it rewrites stale pages and
   deletes any file it did not render.
 
@@ -50,7 +51,7 @@ uv run pytest tests/datasets/test_column_reference.py -q      # the column-refer
    text, or a statement Massive's own documentation of the field contradicts) is corrected the
    same way, by a `DESCRIPTION_FIXES` entry that quotes it.
 4. Run `scripts/render_reference.py`: every page shows the snapshot's fetch date, so any refresh
-   changes the column reference. Before it writes the pages, the command prints one line per
+   changes the dataset reference. Before it writes the pages, the command prints one line per
    dataset whose columns the refresh changed (`columns: m.forex.quotes: added …; removed …;
    retyped …`): the refresh itself cannot see datasets, so this is where a refresh shows what
    it does to each table. Put those lines in the pull request.

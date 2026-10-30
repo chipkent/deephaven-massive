@@ -11,7 +11,7 @@ Deephaven:
 - `source_columns`: the columns one source contributes to one dataset, after the key rename;
 - `column_descriptions`: the description of every dataset column, and the spelling and order
   of the transports;
-- `column_reference`: the generated column reference pages, and their sync;
+- `column_reference`: the generated dataset reference pages, and their sync;
 - `request`: the `Request` record a verb hands to a transport, and the other plain records of a
   request;
 - `timestamps`: the declared unit of every timestamp field and its conversion to nanoseconds;

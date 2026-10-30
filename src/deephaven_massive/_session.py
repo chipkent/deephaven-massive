@@ -201,22 +201,18 @@ class MassiveSession:
     Create it inside a Deephaven worker (a server console, an application script, or anywhere
     an `ExecutionContext` is active); the library captures that context for its own threads and
     never starts a JVM. Configuration comes only from `MassiveConfig`, and the session does not
-    expose it again: keeping the API key out of the session's attributes keeps it one step
-    further from console globals that every user of a worker can read.
+    expose it again, keeping the API key out of console globals.
 
     Dataset methods hang off the namespaces (`m.stocks.trades(...)`) and return queries; verbs
-    on a query return Deephaven tables. A live table keeps running, and keeps its session
-    running, for as long as it, or a table derived from it, is in use, even after the session
-    object itself was dropped. Live results are released automatically when garbage collected,
-    or at once with `m.release(table)`; `m.close()` stops everything and fails every live
-    table. As a context manager the session closes on exit, which suits scripts whose results
-    are static.
+    on a query return Deephaven tables (README.md#how-it-works). A live table keeps running,
+    and keeps its session running, while it or a table derived from it is in use; release it
+    with `m.release(table)`, and `m.close()` stops everything and fails every live table
+    (README.md#live-tables). As a context manager the session closes on exit.
 
-    Sessions of one process with the same API key share their WebSocket connections
-    (individual plans allow one connection per cluster per account), as long as their
-    connection settings are equal; otherwise a WARNING says that they compete for the slot.
-    The session's label (`MassiveSession #1`, a per-process counter) appears in its `repr`, in
-    that WARNING, and in error messages. Thread-safe.
+    Sessions of one process with the same API key share their WebSocket connections when their
+    connection settings are equal; otherwise a WARNING says they compete for the slot. The
+    session's label (`MassiveSession #1`) appears in its `repr`, its warnings, and its error
+    messages. Thread-safe.
 
     Example:
         ::
@@ -224,15 +220,9 @@ class MassiveSession:
             import deephaven_massive as dm
 
             m = dm.MassiveSession()  # MASSIVE_API_KEY from the environment
-            m  # <MassiveSession #1 open>
-            m.stocks  # <MassiveSession #1 stocks>, the namespace of stock datasets
-            conns = m.connections()  # live diagnostics: connections and host decisions
+            latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
             streams = m.streams()  # live diagnostics: one row per stream
-            limits = m.rate_limits()  # live diagnostics: REST pace and pauses per subscription
             m.close()  # live tables fail (keeping their rows); verbs now raise MassiveError
-
-            with dm.MassiveSession() as m2:  # closes on exit
-                m2.partners.benzinga  # <MassiveSession #2 partners.benzinga>
     """
 
     __slots__ = (
@@ -390,48 +380,36 @@ class MassiveSession:
     ) -> Query:
         """The current state of tickers of any asset classes, from Massive's unified snapshot.
 
-        One row per ticker: its latest trade, quote, minute and session bars, and, for options,
-        the greeks, implied volatility, open interest, and underlying asset. Rows are the union
-        schema of the unified snapshot, so a column another class fills is null. An options
-        row also has `Underlying`, its underlying's ticker, and `OptionRoot`, the OCC root
-        read from its symbol, as `m.options.snapshots` has; both are null on other rows. The
-        dataset is named `snapshots`, the name `m.streams()` and messages show. Served over
-        REST (`/v3/snapshot` with `ticker.any_of`, up to 250 tickers per request); `fetch()`
-        returns one row per requested ticker and `poll()` re-fetches them, keyed by `Symbol`.
-        A ticker Massive does not know or the plan does not cover keeps its row, with `Error`
-        and `Message` set. `dm.ALL` is not accepted: the endpoint needs tickers, and each
-        class's `snapshots(dm.ALL)` covers a whole market. Its columns, and what each means,
-        are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/snapshots.md#snapshots,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per ticker: its latest trade, quote, minute and session bars, and, for options, the
+        greeks, implied volatility, open interest, `Underlying`, and `OptionRoot`. A column another
+        class fills is null. Up to 250 tickers go in one request. A ticker Massive does not know or
+        the plan does not cover keeps its row, with `Error` and `Message` set.
 
         Args:
             symbols: Massive's exact tickers of any class (`AAPL`, `O:SPY251219C00600000`,
-                `C:EURUSD`, `X:BTCUSD`, `I:SPX`), or a Deephaven table with a `Symbol` column;
-                each prefix selects the class, and a ticker without one is a stock.
-            sort: The field to sort by (`"ticker"`); None for the endpoint's default. With
-                more than 250 tickers it orders the rows within each request of 250, not
-                across them.
-            order: The sort direction, within each request the same way; None for the
-                endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores. `type` is refused: every request sends tickers, and Massive
-                answers `type` beside tickers with HTTP 400; a ticker's prefix selects its class.
+                `C:EURUSD`, `X:BTCUSD`, `I:SPX`), or a table; a ticker without a prefix is a stock.
+                `dm.ALL` is refused: use a class's `snapshots(dm.ALL)`. See README.md#symbols.
+            sort: The field to sort by (`"ticker"`); past 250 tickers it orders each request's rows,
+                not all of them. See README.md#sort-order-limit.
+            order: The sort direction, per request the same way. See README.md#sort-order-limit.
+            limit: The total-row cap. See README.md#sort-order-limit.
+            filters: Further endpoint parameters; `type` is refused, since Massive rejects it beside
+                tickers. See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A query. Columns: docs/datasets/snapshots.md.
 
         Raises:
-            TypeError: If an argument has the wrong type: `symbols` not a `str`, a sequence of
-                `str`, or a table; `sort` not a `str`; `order` not a `dm.Order`; `limit` not an
-                `int`; or `filters` not a mapping.
+            TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is None, `dm.ALL`, empty, or holds a ticker that is not
-                Massive's exact ticker; a table has no `Symbol` column; `limit` is not
-                positive; or a filter is not a parameter of the endpoint or its value does not
-                fit it; or `filters` holds `type`, which Massive refuses beside
-                tickers (each ticker's prefix selects its class).
+                Massive's exact ticker; a table has no `Symbol` column; `limit` is not positive; a
+                filter is not a parameter of the endpoint or its value does not fit it; or `filters`
+                holds `type`.
+
+        Example:
+            ::
+
+                mixed = m.snapshots(["AAPL", "C:EURUSD", "X:BTCUSD", "I:SPX"]).fetch()
         """
         if isinstance(filters, Mapping) and "type" in filters:
             logger.debug("snapshots: refused the type filter %r, sent beside tickers", filters)
@@ -457,32 +435,20 @@ class MassiveSession:
     def connections(self) -> Table:
         """Return the live diagnostics table of connections and host decisions.
 
-        One row per WebSocket connection plus one `Transport=REST` row per resolved (asset
-        class, channel family), with the host, recency, evidence, state, topic counts,
-        `BufferedRows` (rows a connection received that no flush has taken yet; a WARNING is
-        logged when they pass 1,000,000), the last error, and `SchemaDrift`: the fields a
-        connection's frames had beyond the documented schema (`channel:field+`) or lacked
-        (`channel:field-`). A connection shared with another session of the same API key shows
-        in both. Each call returns a new view, a live result like any other: while it is held it
-        keeps the session running and current, and after `close()` it keeps showing the final
-        rows.
+        One row per WebSocket connection, plus one `Transport=REST` row per resolved (asset
+        class, channel family) host decision. A connection shared with another session of the
+        same API key shows in both. Each call returns a new live view; after `close()` it keeps
+        its final rows. How to read it: README.md#diagnostics.
 
         Returns:
-            A live table keyed by `Transport`, `AssetClass`, and `Family`, with these columns:
-            `Transport` (String), `WebSocket` for a connection or `REST` for a host decision;
-            `AssetClass` (String); `Family` (String), `TICK` or `FMV`; `Host` (String), the
-            host chosen; `Path` (String), such as `/stocks`; `Recency` (String), `REALTIME`,
-            `DELAYED`, or `UNKNOWN`; `Evidence` (String), why the host was chosen; `State`
-            (String), `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT` (another
-            connection with the key holds the slot), `RECONNECTING`, `FAILED`, or `CLOSED`;
-            `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics` (int), the topics
-            wanted, acknowledged, awaiting acknowledgement, and never acknowledged after one
-            re-send; `BufferedRows` (long), rows received and not yet published; `Reconnects`
-            (int); `LastMessageAt`, `NextReconnectAt`, and `UpdatedAt` (Instant), when the last
-            frame arrived, when the next reconnect is due, and when the row was written;
-            `LastError` (String); and `SchemaDrift` (String), the fields frames had beyond the
-            documented schema (`channel:field+`) or lacked (`channel:field-`). How to read it:
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
+            A live table keyed by `Transport`, `AssetClass`, and `Family`, with `Host`, `Path`,
+            `Recency` (`REALTIME`, `DELAYED`, or `UNKNOWN`), `Evidence`, `State` (`RESOLVING`,
+            `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`, `FAILED`, or `CLOSED`),
+            the topic counts `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics`,
+            `BufferedRows` (a WARNING past 1,000,000), `Reconnects`, `LastMessageAt`,
+            `NextReconnectAt`, `UpdatedAt`, `LastError`, and `SchemaDrift` (fields frames had
+            beyond the documented schema, `channel:field+`, or lacked, `channel:field-`). Each
+            column's tooltip says what it holds.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
@@ -493,37 +459,21 @@ class MassiveSession:
     def streams(self) -> Table:
         """Return the live diagnostics table of streams, `poll()` tables, and background reads.
 
-        One row per WebSocket stream, `poll()` table, and background read (`fetch(wait=False)` or
-        `history(..., wait=False)`), told apart by `Kind` (`stream`, `poll`, `read`): the dataset,
-        the query, symbols, `HeldResults`, deferred option contracts, host, rows published, requests
-        per poll cycle, `State`, error, and `SchemaDrift`. A stream or poll is `RUNNING`; a
-        background read is `LOADING` until its whole result lands in its table, then `DONE`, and
-        `FAILED` with the error when its download fails. `SchemaDrift` holds the fields the stream's
-        payloads had beyond the documented schema (`transport:field+`) or lacked
-        (`transport:field-`), shown apart from the error because drift is not a failure. `Error`
-        also shows warnings that do not stop a stream: the options cap's deferral, and the wait for
-        a WebSocket slot that another connection with the key (for example from another process)
-        holds. Each call returns a new view, a live result like any other: while it is held it keeps
-        the session running and current, and after `close()` it keeps showing the final rows,
-        `CLOSED` included.
+        One row per WebSocket stream (`Kind=stream`), `poll()` table (`poll`), and background
+        read (`read`, from `fetch(wait=False)` or `history(..., wait=False)`). A stream or poll
+        is `RUNNING`; a read is `LOADING`, then `DONE`, or `FAILED` with the error. `Error` also
+        shows warnings that do not stop a stream, such as deferred options contracts or the wait
+        for a WebSocket slot. Each call returns a new live view; after `close()` it keeps its
+        final rows. How to read it: README.md#diagnostics.
 
         Returns:
-            A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Kind`
-            (String), `stream` for a WebSocket stream, `poll` for a `poll()` table, or `read`
-            for a background read; `Dataset` (String), such as `stocks.trades`; `Query`
-            (String), the query that opened the stream, the call that built it, such as
-            `m.stocks.trades('AAPL')`, which tells two streams of
-            one dataset apart; `SymbolCount` (int), null for `dm.ALL`; `Symbols` (String), a
-            shortened list; `HeldResults` (int), the stream's tables the library still holds;
-            `Deferred` (int), options contracts held back by the per-connection cap;
-            `Transport` (String), `WebSocket` for a stream, `REST` for a `poll()` or a REST
-            read, or `flat files` for a read from flat files; `Host` and `Path` (String);
-            `RowsPublished` (long); `RequestsPerCycle` (int), a `poll()` table's REST requests
-            per cycle; `State` (String), `RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or
-            `CLOSED`; `Error` (String), why the stream failed, or a
-            warning that does not stop it; `CreatedAt` (Instant); and `SchemaDrift` (String),
-            the fields payloads had beyond the documented schema (`transport:field+`) or
-            lacked (`transport:field-`). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
+            A live table keyed by `StreamId`, with `Kind`, `Dataset`, `Query` (the call that
+            built the query, such as `m.stocks.trades('AAPL')`), `SymbolCount` (null for
+            `dm.ALL`), `Symbols`, `HeldResults`, `Deferred`, `Transport`, `Host`, `Path`,
+            `RowsPublished`, `RequestsPerCycle`, `State` (`RUNNING`, `LOADING`, `DONE`,
+            `FAILED`, `RELEASED`, or `CLOSED`), `Error`, `CreatedAt`, and `SchemaDrift`
+            (`transport:field+` or `transport:field-`). Each column's tooltip says what it
+            holds.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
@@ -534,29 +484,21 @@ class MassiveSession:
     def rate_limits(self) -> Table:
         """Return the live diagnostics table of REST rate limits, one row per subscription.
 
-        Massive limits REST requests per subscription (5 per minute on the free Basic tier,
-        none on a paid one), counted across every key and session of the account. Each row
-        shows one subscription's bucket, or `other` for reference data and the other datasets
-        Massive assigns to none: its `State` (`READY`, `PACED` while requests wait for a slot,
-        `PAUSED` after a 429), `RequestsPerMinute` and `LimitSource` (`DECLARED` in
-        `MassiveConfig.rest_basic_subscriptions`, or `LEARNED` from Massive's refusal), the
-        requests in flight, waiting, and in the last window, totals of requests and refusals,
-        `PausedUntil`, and the latest refusal. Sessions of this process that use the same API
-        key share one governor, so their tables show the same rows. Each call returns a new
-        view, a live result like any other: while it is held it keeps the session running and
-        current, and after `close()` it keeps showing the final rows.
+        Massive limits REST requests per subscription (5 per minute on a free Basic plan, none
+        on a paid one), counted across every key and session of the account. Each row is one
+        subscription's bucket, or `other` for the datasets Massive assigns to none. Sessions of
+        this process with the same API key share one governor, so their tables show the same
+        rows. Each call returns a new live view; after `close()` it keeps its final rows. How
+        to read it: README.md#diagnostics.
 
         Returns:
-            A live table keyed by `Bucket`, with these columns: `Bucket` (String), a
-            subscription (`stocks`, `options`, `indices`, `currencies`, `futures`) or `other`;
-            `State` (String), `READY`, `PACED`, or `PAUSED`; `RequestsPerMinute` (int), the
-            pace, null while unpaced; `LimitSource` (String), `DECLARED` or `LEARNED`, null while
-            unpaced; `InFlight`, `Waiting`, and `RecentRequests` (int), the requests sent and
-            unanswered, waiting for a slot or a pause's end, and sent within the last 61
-            seconds; `Attempts` and `Refusals` (long), every attempt (retries included) and
-            every HTTP 429 since this process's first session with the key; `PausedUntil`
-            (Instant), null without a pause; `LastRefusal` (String), the latest 429 with its
-            status, path, and request id; and `UpdatedAt` (Instant). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
+            A live table keyed by `Bucket` (`stocks`, `options`, `indices`, `currencies`,
+            `futures`, or `other`), with `State` (`READY`, `PACED`, or `PAUSED` after a 429),
+            `RequestsPerMinute` and `LimitSource` (`DECLARED` in
+            `MassiveConfig.rest_basic_subscriptions` or `LEARNED` from a refusal), `InFlight`,
+            `Waiting`, `RecentRequests` (within the last 61 seconds), `Attempts`, `Refusals`,
+            `PausedUntil`, `LastRefusal`, and `UpdatedAt`. Each column's tooltip says what it
+            holds.
 
         Raises:
             MassiveError: After `close()` (`"MassiveSession #1 is closed"`).
@@ -566,15 +508,12 @@ class MassiveSession:
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
-        The library's hold on the table is released on the session's reaper thread, right away;
-        inside a console command, which holds the update graph's lock, it is released once the
-        command ends. The table keeps ticking only while something else holds it (a derived table,
-        an open UI panel); once nothing does, its stream unsubscribes, its poller stops, or its
-        background read (`wait=False`) stops downloading. A table derived in the console is held
-        only weakly by the console, so after `del` it keeps its stream running until the JVM next
-        collects it: usually seconds, but unbounded on an idle heap; `close()` stops everything at
-        once. Releasing a result twice does nothing, and `release()` keeps working after `close()`.
-        Static results (`fetch()`, `history()` with the default `wait=True`) are not tracked.
+        The library's hold is released on the session's reaper thread at once, or, inside a
+        console command, once the command ends. The table keeps ticking only while something
+        else holds it (a derived table, an open UI panel); once nothing does, its stream
+        unsubscribes, its poller stops, or its background read stops. Releasing twice does
+        nothing, and `release()` keeps working after `close()`. Static results are not tracked.
+        See README.md#live-tables.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -599,22 +538,15 @@ class MassiveSession:
         """Stop every stream and poller of the session now, and fail every live table. Idempotent.
 
         Every live table of the session, and every table derived from one, fails with
-        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`, whatever
-        still holds it, so no table is left looking live while it never changes. A failed table
-        keeps its rows: `t.snapshot()`, `deephaven.pandas.to_pandas(t)`, and
-        `deephaven.arrow.to_arrow(t)` still return them, so take `t.snapshot()` to keep working
-        with the data; a new operation on `t` itself (`t.where(...)`) raises "Can not listen to
-        failed table". `m.streams()` shows every stream `CLOSED` (one that had already failed
-        keeps `FAILED`), and a `connections()` or `streams()` table taken before the close
-        keeps its final rows (in a console command, which holds the update graph's lock, once
-        the command is over; there `close()` returns at once, waiting for nothing). The
-        session's streams leave their WebSocket connections, and
-        every connection no other session of the same key uses is closed. "MassiveSession #1
-        closed; N live tables failed, streams N [...]" is logged, naming the failed tables'
-        stream ids, at WARNING when N > 0. After `close()`, verbs,
-        `connections()`, `streams()`, and `rate_limits()` raise
-        `MassiveError("MassiveSession #1 is closed")`; building queries, reaching namespaces,
-        and `release()` keep working.
+        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`, so no
+        table is left looking live while it never changes. A failed table keeps its rows: take
+        `t.snapshot()` to keep working with them. `m.streams()` shows every stream `CLOSED`
+        (one that had already failed keeps `FAILED`); in a console command `close()` returns at
+        once, waiting for nothing, and the tables show their final state once the command ends.
+        Connections no other session of the key
+        uses are closed. After `close()`, verbs and the diagnostics methods raise
+        `MassiveError("MassiveSession #1 is closed")`; building queries and `release()` keep
+        working. See README.md#live-tables.
 
         Raises:
             ValueError: On a Deephaven update-graph thread, for example inside a table

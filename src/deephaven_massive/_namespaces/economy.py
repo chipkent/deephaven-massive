@@ -161,32 +161,29 @@ class _Economy(Namespace):
     ) -> Query:
         """US Treasury yields at constant maturities from one month to 30 years, one row per day.
 
-        Served over REST (`/fed/v1/treasury-yields`); `fetch()` returns every row in range and
-        `poll()` re-fetches it, keyed by `Date`. The dataset takes no symbols, so `dm.ALL`
-        does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.md#treasury_yields,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
-                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
-            end: The last date, inclusive, in the same forms. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The wire column to sort by, such as `"date"`; None sorts by date.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
-                ascending. It needs `sort`.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores; the date axis is set only through `start` and `end`.
+            start: The first date; a calendar date only. See README.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future. See
+                README.md#start-and-end.
+            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
+            limit: The total-row cap. See README.md#sort-order-limit.
+            filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A query. Columns: docs/datasets/economy.treasury_yields.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
-                `sort`, or an unknown filter.
+            TypeError: If an argument has the wrong type.
+            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
+                given without `sort`, or a filter is unknown.
+
+        Example:
+            ::
+
+                yields = m.economy.treasury_yields(start="2025-01-01").fetch()
         """
         return self._query(
             TREASURY_YIELDS,
@@ -211,32 +208,29 @@ class _Economy(Namespace):
     ) -> Query:
         """US inflation: CPI, core CPI, and the PCE price indexes and spending, one row per month.
 
-        Served over REST (`/fed/v1/inflation`); `fetch()` returns every row in range and
-        `poll()` re-fetches it, keyed by `Date`. The dataset takes no symbols, so `dm.ALL`
-        does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.md#inflation,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per month. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
-                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
-            end: The last date, inclusive, in the same forms. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The wire column to sort by, such as `"date"`; None sorts by date.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
-                ascending. It needs `sort`.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores; the date axis is set only through `start` and `end`.
+            start: The first date; a calendar date only. See README.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future. See
+                README.md#start-and-end.
+            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
+            limit: The total-row cap. See README.md#sort-order-limit.
+            filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A query. Columns: docs/datasets/economy.inflation.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
-                `sort`, or an unknown filter.
+            TypeError: If an argument has the wrong type.
+            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
+                given without `sort`, or a filter is unknown.
+
+        Example:
+            ::
+
+                cpi = m.economy.inflation(start="2020-01-01").fetch()
         """
         return self._query(
             INFLATION,
@@ -261,32 +255,29 @@ class _Economy(Namespace):
     ) -> Query:
         """US inflation expectations from market prices and models, one row per day.
 
-        Served over REST (`/fed/v1/inflation-expectations`); `fetch()` returns every row in
-        range and `poll()` re-fetches it, keyed by `Date`. The dataset takes no symbols, so
-        `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.md#inflation_expectations,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
-                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
-            end: The last date, inclusive, in the same forms. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The wire column to sort by, such as `"date"`; None sorts by date.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
-                ascending. It needs `sort`.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores; the date axis is set only through `start` and `end`.
+            start: The first date; a calendar date only. See README.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future. See
+                README.md#start-and-end.
+            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
+            limit: The total-row cap. See README.md#sort-order-limit.
+            filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A query. Columns: docs/datasets/economy.inflation_expectations.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
-                `sort`, or an unknown filter.
+            TypeError: If an argument has the wrong type.
+            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
+                given without `sort`, or a filter is unknown.
+
+        Example:
+            ::
+
+                expected = m.economy.inflation_expectations(start="2025-01-01").fetch()
         """
         return self._query(
             INFLATION_EXPECTATIONS,
@@ -311,32 +302,29 @@ class _Economy(Namespace):
     ) -> Query:
         """US labor-market indicators: unemployment, participation, earnings, and job openings.
 
-        One row per month. Served over REST (`/fed/v1/labor-market`); `fetch()` returns every
-        row in range and `poll()` re-fetches it, keyed by `Date`. The dataset takes no
-        symbols, so `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.md#labor_market,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per month. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
-                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
-            end: The last date, inclusive, in the same forms. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The wire column to sort by, such as `"date"`; None sorts by date.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
-                ascending. It needs `sort`.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores; the date axis is set only through `start` and `end`.
+            start: The first date; a calendar date only. See README.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future. See
+                README.md#start-and-end.
+            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
+            limit: The total-row cap. See README.md#sort-order-limit.
+            filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A query. Columns: docs/datasets/economy.labor_market.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
-                `sort`, or an unknown filter.
+            TypeError: If an argument has the wrong type.
+            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
+                given without `sort`, or a filter is unknown.
+
+        Example:
+            ::
+
+                jobs = m.economy.labor_market(start="2020-01-01").fetch()
         """
         return self._query(
             LABOR_MARKET,
@@ -361,32 +349,29 @@ class _Economy(Namespace):
     ) -> Query:
         """US short-term funding conditions: policy, overnight, and repo rates, one row per day.
 
-        Served over REST (`/fed/v1/funding-conditions`); `fetch()` returns every row in range
-        and `poll()` re-fetches it, keyed by `Date`. The dataset takes no symbols, so
-        `dm.ALL` does not apply. Its columns, and what each means, are in
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.md#funding_conditions,
-        in the web UI's column tooltips, and in the query's `columns()`.
+        One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
 
         Args:
-            start: The first date: a `date` or `"YYYY-MM-DD"`; None for the start of the
-                series. The axis is a calendar date, so a `datetime` raises `ValueError`.
-            end: The last date, inclusive, in the same forms. None (the default) sends no upper
-                bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
-            sort: The wire column to sort by, such as `"date"`; None sorts by date.
-            order: The direction of `sort`, sent as its `.asc` or `.desc` suffix; None for
-                ascending. It needs `sort`.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
-            filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores; the date axis is set only through `start` and `end`.
+            start: The first date; a calendar date only. See README.md#start-and-end.
+            end: The last date, inclusive; None also returns rows dated in the future. See
+                README.md#start-and-end.
+            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
+            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
+            limit: The total-row cap. See README.md#sort-order-limit.
+            filters: Further endpoint parameters. See README.md#filters.
 
         Returns:
-            A `Query`; call `fetch()` or `poll(interval)` on it.
+            A query. Columns: docs/datasets/economy.funding_conditions.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For a `datetime` bound, a range that ends before it starts, `order` without
-                `sort`, or an unknown filter.
+            TypeError: If an argument has the wrong type.
+            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
+                given without `sort`, or a filter is unknown.
+
+        Example:
+            ::
+
+                rates = m.economy.funding_conditions(start="2025-01-01").fetch()
         """
         return self._query(
             FUNDING_CONDITIONS,

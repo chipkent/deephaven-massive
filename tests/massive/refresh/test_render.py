@@ -13,6 +13,8 @@ from deephaven_massive._massive.spec.types import (
     Membership,
     Param,
     ParamKind,
+    PlanAccess,
+    PlanTerms,
     RestPath,
     Source,
     Transport,
@@ -175,6 +177,25 @@ def test_render_descriptions_writes_the_documented_format() -> None:
         {Transport.REST: [_PATH], Transport.WS: [channel]},
         fetched=dt.date(2026, 10, 27),
         urls={Transport.REST: {_PATH.key: (_URL, _OTHER)}},
+        plans={
+            _URL: PlanAccess(
+                title="Things",
+                access="Included in select Stocks plans",
+                recency="Real-time",
+                history="",
+                plans=(
+                    PlanTerms(plan="Stocks Basic", access="Not included"),
+                    PlanTerms(plan="Stocks Advanced", access="Included", recency="Real-time"),
+                ),
+            ),
+            _OTHER: PlanAccess(
+                title="Crypto things",
+                access="Available to existing subscribers only",
+                recency="Updated daily",
+                history="",
+                plans=(),
+            ),
+        },
     )
     assert json.loads(text) == {
         "generated_by": "python -m deephaven_massive._massive.refresh",
@@ -188,7 +209,38 @@ def test_render_descriptions_writes_the_documented_format() -> None:
         },
         # Only a field with per-asset-class descriptions has an entry.
         "class_descriptions": {"REST": {}, "WS": {"stocks/T": {"p": {"options": "Per share."}}}},
+        # Pages are sorted by URL; each page's plans keep their table order.
+        "plans": {
+            _OTHER: {
+                "title": "Crypto things",
+                "access": "Available to existing subscribers only",
+                "recency": "Updated daily",
+                "history": "",
+                "plans": [],
+            },
+            _URL: {
+                "title": "Things",
+                "access": "Included in select Stocks plans",
+                "recency": "Real-time",
+                "history": "",
+                "plans": [
+                    {
+                        "plan": "Stocks Basic",
+                        "access": "Not included",
+                        "recency": None,
+                        "history": None,
+                    },
+                    {
+                        "plan": "Stocks Advanced",
+                        "access": "Included",
+                        "recency": "Real-time",
+                        "history": None,
+                    },
+                ],
+            },
+        },
     }
+    assert list(json.loads(text)["plans"]) == [_OTHER, _URL]
     # One line per entry, so a reworded description is one changed line of the diff.
     assert '    "price": "The price."' in text.splitlines()
     assert f'    "{_URL}"' in text.splitlines()
@@ -206,6 +258,7 @@ def test_a_source_without_descriptions_has_no_entry_but_keeps_its_url() -> None:
             {Transport.REST: [bare]},
             fetched=dt.date(2026, 1, 2),
             urls={Transport.REST: {"/v1/bare": [_URL]}},
+            plans={},
         )
     )
     assert document["descriptions"] == {"REST": {}}
@@ -218,6 +271,6 @@ def test_render_descriptions_keeps_text_that_is_not_ascii() -> None:
         fields=(Field(wire_key="x", column="X", wire_type=WireType.LONG, description="Café ≥ 1"),),
     )
     text = render.render_descriptions(
-        {Transport.REST: [accented]}, fetched=dt.date(2026, 1, 2), urls={}
+        {Transport.REST: [accented]}, fetched=dt.date(2026, 1, 2), urls={}, plans={}
     )
     assert '"x": "Café ≥ 1"' in text

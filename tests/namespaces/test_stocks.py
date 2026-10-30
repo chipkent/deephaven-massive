@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
-DOCS = "docs/datasets/stocks.md#"
+DOCS = "docs/datasets/stocks."
 # Whole New York days in epoch milliseconds: 2020-01-02 00:00 through 2020-01-03 23:59:59.999.
 RANGE_PATH = "/v2/aggs/ticker/AAPL/range/1/day/1577941200000/1578113999999"
 SNAPSHOTS_PATH = "/v2/snapshot/locale/us/markets/stocks/tickers"
@@ -251,14 +251,11 @@ def test_the_namespace_alone_passes_every_catalog_gate() -> None:
 
 
 @pytest.mark.parametrize("name", ALL_NAMES)
-def test_every_dataset_docstring_links_its_column_reference(
+def test_every_dataset_docstring_names_its_own_page(
     massive_session: dm.MassiveSession, name: str
 ) -> None:
     doc = inspect.getdoc(factory(massive_session, name)) or ""
-    assert f"{DOCS}{name.replace('.', '-')}," in doc
-    assert "limit" in doc
-    assert "dm.ALL" in doc
-    assert "columns()" in doc
+    assert f"{DOCS}{name}.md" in doc
 
 
 # --- Schemas -------------------------------------------------------------------------------------

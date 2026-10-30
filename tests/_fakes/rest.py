@@ -7,7 +7,8 @@ what the server received (`requests`).
 
 Replies are matched by the request's full target (path and query) first, then by its path
 alone. Each match consumes the first scripted reply of its queue; the last one is kept, so a
-path scripted once answers every request the same way. An unscripted path answers 404.
+path scripted once answers every request the same way. An unscripted path answers 404, or the
+reply set with `reply_default`, for tests that run code touching many paths.
 
 The server also behaves as an HTTP proxy. A `CONNECT host:port` request is recorded (method
 `CONNECT`, `proxied=True`) and then tunnelled byte for byte to that address, so a test can put
@@ -172,6 +173,7 @@ class FakeRestServer:
         """
         self._lock = threading.Lock()
         self._script: dict[str, deque[Reply]] = {}
+        self._default: Reply | None = None
         self._received: list[Received] = []
         self._on_request: Callable[[Received], None] | None = None
         self._tunnel_status: int | None = None
@@ -212,6 +214,15 @@ class FakeRestServer:
         """
         with self._lock:
             self._script.setdefault(target, deque()).extend(replies)
+
+    def reply_default(self, reply: Reply) -> None:
+        """Answer every unscripted path with `reply` instead of 404.
+
+        Args:
+            reply: The reply, such as an empty envelope.
+        """
+        with self._lock:
+            self._default = reply
 
     def reply_first(self, target: str, *replies: Reply) -> None:
         """Script replies to be used before those already scripted for `target`.
@@ -271,7 +282,7 @@ class FakeRestServer:
             self._received.append(received)
             queue = self._script.get(received.target) or self._script.get(path)
             if not queue:
-                reply = Reply(b'{"status":"NOT_FOUND"}', status=404)
+                reply = self._default or Reply(b'{"status":"NOT_FOUND"}', status=404)
             elif len(queue) > 1:
                 reply = queue.popleft()
             else:
