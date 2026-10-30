@@ -97,14 +97,49 @@ again after a split. Pass `adjusted=False` to `bars()` for as-traded history.
 
 ## Warnings and errors in the log
 
-The library writes to Deephaven's log, which the web UI shows in its **Log** panel.
+The library writes to Deephaven's log, which the web UI shows in its **Log** panel. Each level
+tells you what, if anything, to do.
 
-- A **WARNING** is something to know about or act on: a refusal you can avoid, a read that
-  left columns empty, a long command pausing live tables, a symbol Massive has no data for.
-- An **ERROR** is a failure: a table that stopped, or a request that failed. The message says
-  what failed and why. If it ends with **"This is a bug in deephaven-massive"**, the problem is
-  in the library, not in your code or your plan: please report it with the debug log described
-  next and the contents of `m.streams()`.
+- **INFO** reports a decision or progress: which source a history read chose, how long a paced
+  download will take, a connection that came back. Nothing to do.
+- **WARNING** means a live table may be stale or wrong, or there is something you should act
+  on. The message says which. Examples: a WebSocket connection is down and its tables get no
+  data until it reconnects; no data has arrived for a while during trading hours; a poll's
+  cycles take longer than its interval; a long console command is pausing every live table.
+  Each is logged once when it starts, not every second while it lasts, and an INFO line says
+  when it has recovered.
+- **ERROR** means a defect broke a result, and the message says whose defect it is:
+  - **Yours**, in your code or input that the library caught, such as a callback that raised
+    or a watchlist table that failed upstream. The message names what to fix.
+  - **The library's**: the message ends with "This is a bug in deephaven-massive" and says how
+    to report it. Please do, with the debug log described next and the contents of
+    `m.streams()`.
+
+Expected conditions are never logged at ERROR: a refusal from your plan, a rate limit, a
+network failure, or your own `close()`. When one of them reaches you as an exception, it is
+logged only at DEBUG, since the exception already tells you.
+
+Every `dm.MassiveError` says the same thing in code, through its `cause`:
+
+| `cause` | Meaning | Logged at |
+|---|---|---|
+| `dm.ErrorCause.EXPECTED` | A condition the library expects and reports: a refusal, a plan or rate limit, a network failure, a closed session. | below ERROR |
+| `dm.ErrorCause.USER_DEFECT` | A defect in your code or input that the library caught. The message names what to fix. | ERROR |
+| `dm.ErrorCause.LIBRARY_DEFECT` | A bug in the library, or data from Massive it cannot read. The message says how to report it. | ERROR |
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+
+try:
+    bars = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-01-02", "2026-10-30")
+except dm.MassiveError as error:
+    if error.cause is dm.ErrorCause.LIBRARY_DEFECT:
+        print(f"please report this: {error}")
+    else:
+        print(f"failed: {error}")
+```
 
 ## The debug log
 
