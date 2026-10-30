@@ -22,6 +22,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -3030,33 +3031,39 @@ def test_an_outage_without_live_tables_logs_nothing(
     assert not [m for m in messages if "is down" in m or "reconnected after" in m]
 
 
+def _quiet_connection(acknowledged: frozenset[str], last: int) -> ws.Connection:
+    # The state `Connection._check_frames` reads, without a socket: a live connection's status
+    # frames would move its last-frame time while the test owns it.
+    state = SimpleNamespace(
+        url=_URL,
+        asset_class=AssetClass.STOCKS,
+        _state=ConnectionState.CONNECTED,
+        subscriptions=SimpleNamespace(acknowledged=acknowledged),
+        _episodes=ws._Episodes(last_frame_at=last),
+        _last_message_at=None,
+    )
+    state._check_frames = functools.partial(
+        ws.Connection._check_frames, cast("ws.Connection", state)
+    )
+    return cast("ws.Connection", state)
+
+
 def test_a_silent_connection_warns_once_while_its_market_trades(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     trading = [False]
     monkeypatch.setattr(ws, "in_trading_hours", lambda _asset_class, _moment: trading[0])
-    result = ws_session.query(TRADES, ["AAPL"]).blink()
-    ws_session.subscribed("T.AAPL")
-    connection = ws_session.connection()
-    # The connection's last frame, fixed an hour ahead so the test owns the times: a status
-    # frame that arrives meanwhile records the real time, which is earlier and changes nothing.
-    last = time.time_ns() + 3600 * 10**9
-    ws_session.on_loop(connection, lambda: setattr(connection._episodes, "last_frame_at", last))
+    last = 1_800_000_000 * 10**9
+    connection = _quiet_connection(frozenset({"T.AAPL"}), last)
     quiet = last + int(ws.NO_FRAMES_WARNING * 1e9)
-
-    def check(now: int) -> None:
-        ws_session.on_loop(connection, lambda: connection._check_frames(now))
-
     with caplog.at_level(logging.INFO, logger=ws.__name__):
-        check(quiet)  # silent long enough, but the market is closed
+        connection._check_frames(quiet)  # silent long enough, but the market is closed
         trading[0] = True
-        check(quiet - 10**9)  # not silent long enough yet
-        check(quiet)
-        check(quiet + 60 * 10**9)  # the same episode: logged once
-        ws_session.on_loop(
-            connection, lambda: setattr(connection._episodes, "last_frame_at", quiet + 61 * 10**9)
-        )
-        check(quiet + 62 * 10**9)
+        connection._check_frames(quiet - 10**9)  # not silent long enough yet
+        connection._check_frames(quiet)
+        connection._check_frames(quiet + 60 * 10**9)  # the same episode: logged once
+        connection._episodes.last_frame_at = quiet + 61 * 10**9  # a frame arrives
+        connection._check_frames(quiet + 62 * 10**9)
     assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == ws.__name__] == [
         (
             logging.WARNING,
@@ -3069,22 +3076,29 @@ def test_a_silent_connection_warns_once_while_its_market_trades(
         ),
         (logging.INFO, f"{_URL}: frames arrive again"),
     ]
-    ws_session.session.release(result)
 
 
 def test_a_connection_with_nothing_acknowledged_is_never_silent(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(ws, "in_trading_hours", lambda _asset_class, _moment: True)
+    connection = _quiet_connection(frozenset(), 0)
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        connection._check_frames(int(2 * ws.NO_FRAMES_WARNING * 1e9))
+    assert not caplog.records
+
+
+def test_the_summary_checks_for_silence(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
-    ws_session.session.release(result)
-    ws_session.unsubscribed("T.AAPL")
     connection = ws_session.connection()
-    later = time.time_ns() + int(2 * ws.NO_FRAMES_WARNING * 1e9)
-    with caplog.at_level(logging.INFO, logger=ws.__name__):
-        ws_session.on_loop(connection, lambda: connection._check_frames(later))
-    assert not [r for r in caplog.records if "no frame" in r.getMessage()]
+    checked: list[int] = []
+    monkeypatch.setattr(connection, "_check_frames", checked.append)
+    ws_session.on_loop(connection, connection._summarize)
+    assert len(checked) == 1
+    ws_session.session.release(result)
 
 
 def test_symbol_changes_and_shutdowns_are_logged(
