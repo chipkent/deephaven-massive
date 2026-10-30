@@ -1675,6 +1675,21 @@ and which plan serves it before they install.
   D205 requires a blank line after that line, so a sentence too long to fit on it, after the
   method's indentation and the opening quotes, within the 100-character line length, is
   shortened in the spec, never wrapped in the docstring.
+- **Dataset and verb docstrings link the README, never repeat it** (owner decision, 2026-10-30).
+  `README.md` holds all hand-written user documentation and defines once each shared argument
+  (`symbols`, `start` and `end`, `as_of`, `sort`, `order`, `limit`, `filters`, `adjusted`,
+  `timespan`, `multiplier`, `venues`, and the verb arguments) and each concept (table shapes,
+  time, bars, history sources, split adjustment, live-table lifetime, plans and errors,
+  diagnostics), each under an explicit `<a id>` anchor. A dataset docstring runs about 15 to 25
+  lines: the summary; what a row is and what is unusual about the dataset (its `poll()` mode
+  where not the plain default, a per-symbol `limit`, a refused `dm.ALL`, vendor quirks); one
+  Args line per argument, a shared one giving only this dataset's difference and `See
+  README.md#<anchor>.`; a one-line Returns naming `docs/datasets/<dataset>.md`; exact Raises;
+  and one or two example lines. A verb docstring stays within 40 lines. `tests/test_docs.py`
+  fails on any cited `README.md#<anchor>` or `docs/datasets/<dataset>.md` that does not exist,
+  runs every Python block of the README against the fakes, and checks the README's namespace
+  table against the catalog. The tests that pinned the old repeated sentences check only that a
+  docstring names its own page.
 
 ### 7.5 One-row datasets
 
@@ -1800,7 +1815,7 @@ Notation:
   (the indicators) or a symbol parameter that takes one ticker
   (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
   (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
-  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. Every docstring says so. The cap is
+  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. The README states the rule once, and each per-symbol dataset's docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
   when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging

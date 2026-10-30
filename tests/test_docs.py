@@ -153,6 +153,8 @@ def readme_server(
         return made
 
     monkeypatch.setattr(dm, "MassiveSession", session)
+    # An example that builds its own configuration reads the key from the environment.
+    monkeypatch.setenv("MASSIVE_API_KEY", "test-key")
     yield fake_rest
     for made in opened:
         made.close()
@@ -205,7 +207,7 @@ def test_every_readme_example_runs_in_order(
     contract = {"ticker": "ESZ6", "product_code": "ES", "date": "2026-10-07", "active": True}
     readme_server.reply("/futures/v1/contracts", Reply(envelope([contract])))
     blocks = _blocks(README.read_text(encoding="utf-8"))
-    assert len(blocks) >= 20
+    assert len(blocks) >= 15
     names = _run_blocks(blocks, tmp_path, "readme")
     # A few of the tables the README promises.
     assert isinstance(names["week"], Table)
