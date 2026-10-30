@@ -133,7 +133,7 @@ def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSess
     q = build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=5)
     assert q._request.limit == 5
     assert "limit" not in dict(q._request.params)
-    assert "limit=5" in repr(q)
+    assert "limit=5" in repr(massive_session.stocks.dividends("AAPL", limit=5))
     assert build(massive_session, DIVIDENDS, symbols=["AAPL"])._request.limit is None
     with pytest.raises(TypeError, match="limit must be an int"):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=cast("int", "10"))
@@ -371,7 +371,7 @@ def test_a_wrong_call_names_the_method_by_its_path(massive_session: dm.MassiveSe
     m = massive_session
     bars = cast("Callable[..., object]", m.stocks.bars)  # a call no overload accepts
     with pytest.raises(
-        TypeError, match=r"^stocks\.bars\(\) takes from 2 to 3 positional arguments but 5 were"
+        TypeError, match=r"^stocks\.bars\(\) takes 3 positional arguments but 5 were"
     ):
         bars("AAPL", dm.Timespan.MINUTE, 1, "adjusted")
     news = cast("Callable[..., object]", m.partners.benzinga.news)

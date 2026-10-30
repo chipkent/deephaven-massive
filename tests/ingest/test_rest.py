@@ -1633,7 +1633,7 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     # A table whose rows are all bad raises rather than read nothing.
     with pytest.raises(
         ValueError,
-        match=r"^indices\.snapshots: no row of the symbol table is Massive's ticker, so the "
+        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is Massive's ticker, so the "
         r"result would follow nothing: skipping 1 symbol-table value that is not Massive's "
         r"ticker: 'SPX'; fix or delete that row$",
     ):

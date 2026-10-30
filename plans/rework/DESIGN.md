@@ -1144,10 +1144,29 @@ There is no `stop()` on queries. Release is automatic (garbage collection) or ex
 ## 7. Query classes and verbs
 
 Four classes, defined in `_query.py`. Nothing touches the network until a verb is called. Queries
-are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
-arguments that differ from their defaults, for example
-`<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
-symbol table, static or refreshing, as `<symbol table>`. Queries have no other attributes: the verbs and `columns()`
+are immutable, hashable, and reusable. A query's repr is the call that built it, as a user would
+type it: `m.options.contracts(underlying='AAPL')`, `m.stocks.trades(['AAPL', 'MSFT'])`. It is
+built from the normalized arguments, so equal queries print alike:
+
+- public parameter names, never wire names;
+- `symbols` positional: one symbol as `'AAPL'`, several as the sorted list `['AAPL', 'MSFT']`,
+  whose first five are followed by `… (N more)`; `dm.ALL` as `dm.ALL` and a symbol table,
+  static or refreshing, as `<symbol table>`;
+- an argument the method requires, such as a bar's `timespan`, by position after the symbols
+  (`m.stocks.bars('AAPL', dm.Timespan.DAY)`); every other one as `name=value`;
+- enum members as `dm.ContractType.CALL`, dates and times as ISO-8601 text, a set of enum members
+  in its enum's order;
+- only the arguments that differ from their defaults, in signature order.
+
+A query built without its dataset method (the library's own reads, tests) carries only its
+dataset's path, `m.stocks.trades()`.
+
+The dataset method records the call when it returns the query; equality stays on the normalized
+request, so the call is not part of it. The repr appears in the `Query` column of `m.streams()`
+and in the messages about the query: a verb that held the update graph's lock too long, a feed's
+`poll()` without a start or a limit, a symbol table that holds no ticker. Messages about the
+whole dataset (a verb or column it does not have, a source that cannot serve it) name the
+dataset. Queries have no other attributes: the verbs and `columns()`
 are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
 “`columns()` on every query”).
 
@@ -1673,8 +1692,8 @@ endpoint, with `fetch()` and `poll()` like every `Query`:
   York time for indices), and a stamp at a time of day Massive is not known to use raises
   `MassiveError`, naming `bars(symbols, dm.Timespan.DAY).history()` for that day. Stock and
   option bars are split-adjusted unless `adjusted=False`, and every page's `adjusted` echo is
-  checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, so the
-  repr shows `timespan=Timespan.DAY`.
+  checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, which
+  the caller never passes, so the repr is the call alone: `m.stocks.previous_day_bar('AAPL')`.
 - **`poll()`.** `REPLACE`, keyed by `Symbol`, so a polled one-row dataset holds each symbol's
   latest row; an explicit `APPEND` records each cycle's row when it is new, through its revision
   key (`Timestamp`, or `TimestampStart` for the bar). A poll sees only the latest trade or quote
@@ -3991,7 +4010,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `StreamId` | key; a read's is its call id |
 | `Kind` | `stream` (a WebSocket stream), `poll` (a `poll()` table), or `read` (a background `fetch()` or `history()`) |
 | `Dataset` | `"stocks.trades"` |
-| `Query` | the `repr` of the query whose verb opened the stream or `poll()`, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
+| `Query` | the `repr` of the query whose verb opened the stream or `poll()`, the call that built it, such as `m.stocks.trades(['AAPL', 'MSFT'])`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
 | `SymbolCount`, `Symbols` | count and a truncated list |
 | `HeldResults` | results currently held by the library (result records not yet released) |
 | `Deferred` | options contracts deferred by the cap |
@@ -6205,7 +6224,8 @@ document already reflects them.
 21. **Sessions and queries expose no introspection attributes; their reprs are defined.**
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
-    messages, and a query's dataset and arguments only in its repr. The public surface stays
+    messages, and a query's dataset and arguments only in its repr, the call that built it
+    (`m.stocks.trades('AAPL')`). The public surface stays
     exactly the verbs, `columns()` (see “`columns()` on every query” below), and the namespaces,
     and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from

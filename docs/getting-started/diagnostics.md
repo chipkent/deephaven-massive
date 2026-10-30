@@ -33,7 +33,7 @@ so it has no row.
 | `StreamId` | A number that identifies the row. |
 | `Kind` | `stream` for a WebSocket stream, `poll` for a `poll()` table, `read` for a background download. |
 | `Dataset` | The dataset, such as `stocks.trades`. |
-| `Query` | The query that opened it, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`, so two streams of one dataset can be told apart. Long text is cut at 200 characters. |
+| `Query` | The query that opened it, the call that built it, such as `m.stocks.trades(['AAPL', 'MSFT'])`, so two streams of one dataset can be told apart. Long text is cut at 200 characters. |
 | `SymbolCount` | How many symbols it covers now. For a watchlist, this follows the table. |
 | `Symbols` | The symbols, cut short when there are many. |
 | `HeldResults` | How many of the tables you got from it the library still tracks. It drops as you release tables. |

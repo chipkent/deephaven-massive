@@ -43,6 +43,7 @@ from deephaven_massive._query import (
     QueryBase,
     StreamHistoryQuery,
     StreamQuery,
+    _shown,
     bar_query_class,
     query_class,
 )
@@ -283,35 +284,46 @@ def test_queries_are_immutable_hashable_and_typed(massive_session: dm.MassiveSes
         a.__setattr__("_spec", None)
 
 
-def test_query_repr(massive_session: dm.MassiveSession) -> None:
-    assert repr(trades(massive_session, ["MSFT", "AAPL"])) == (
-        "<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>"
-    )
-    assert repr(trades(massive_session, dm.ALL)) == "<StreamHistoryQuery stocks.trades symbols=ALL>"
+def test_query_repr_is_the_call_that_built_it(massive_session: dm.MassiveSession) -> None:
+    m = massive_session
+    # Symbols come first and positionally, sorted, whatever the caller's order.
+    assert repr(m.stocks.trades(["MSFT", "AAPL"])) == "m.stocks.trades(['AAPL', 'MSFT'])"
+    assert repr(m.stocks.trades("AAPL")) == "m.stocks.trades('AAPL')"
+    assert repr(m.stocks.trades(dm.ALL)) == "m.stocks.trades(dm.ALL)"
     watchlist = new_table([string_col("Symbol", ["A"])])
-    assert repr(trades(massive_session, watchlist)) == (
-        "<StreamHistoryQuery stocks.trades symbols=<symbol table>>"
+    assert repr(m.stocks.trades(watchlist)) == "m.stocks.trades(<symbol table>)"
+    many = ["A", "B", "C", "D", "E", "F", "G"]
+    assert repr(m.stocks.trades(many)) == ("m.stocks.trades(['A', 'B', 'C', 'D', 'E', … (2 more)])")
+    # A required argument goes by position; only arguments that differ from their defaults
+    # are shown, by their public names.
+    assert repr(m.forex.bars("C:EURUSD", Timespan.MINUTE, multiplier=1)) == (
+        "m.forex.bars('C:EURUSD', dm.Timespan.MINUTE)"
     )
-    assert repr(make(massive_session, NEWS_SPEC)) == "<Query economy.inflation>"
-    bars = make(
-        massive_session,
-        BARS_SPEC,
-        symbols=["C:EURUSD"],
-        timespan=Timespan.MINUTE,
-        multiplier=5,
-        adjusted=False,
-        start="2025-01-02",
-        params={"sort": "asc"},
+    assert repr(m.forex.bars("C:EURUSD", timespan=Timespan.HOUR, multiplier=5)) == (
+        "m.forex.bars('C:EURUSD', dm.Timespan.HOUR, multiplier=5)"
     )
-    assert repr(bars) == (
-        "<HistoryQuery forex.bars symbols=('C:EURUSD',) timespan=Timespan.MINUTE multiplier=5 "
-        "adjusted=False start=2025-01-02 params={'sort': 'asc'}>"
+    # Time bounds are written as the request holds them, parsed.
+    assert repr(m.economy.inflation(start=date(2025, 1, 2), limit=10)) == (
+        "m.economy.inflation(start='2025-01-02', limit=10)"
     )
-    # Without a time axis, the date filters are free for `filters=`.
-    unbounded = dataclasses.replace(NEWS_SPEC, time_axis=None)
-    filtered = make(massive_session, unbounded, filters={"date_gte": "2025-01-02"})
-    # The filter is held as the date its text names, rendered like `start`.
-    assert repr(filtered) == "<Query economy.inflation filters={'date_gte': 2025-01-02}>"
+    # Filters as the request parsed them; an empty mapping selects nothing and is left out.
+    filtered = m.stocks.dividends(filters={"distribution_type": "special"})
+    assert repr(filtered) == "m.stocks.dividends(filters={'distribution_type': 'special'})"
+    assert repr(m.stocks.dividends(filters={})) == "m.stocks.dividends()"
+    # A query built without its dataset method names only the dataset.
+    assert repr(make(m, NEWS_SPEC)) == "m.economy.inflation()"
+
+
+def test_query_repr_writes_values_as_a_user_types_them() -> None:
+    assert _shown(Timespan.DAY) == "dm.Timespan.DAY"
+    assert _shown(datetime(2025, 1, 2, 3, 4, tzinfo=UTC)) == "'2025-01-02T03:04:00+00:00'"
+    # A set prints in one order every run: enum members in their enum's order, others by text.
+    assert _shown(frozenset({Timespan.DAY, Timespan.MINUTE})) == (
+        "{dm.Timespan.MINUTE, dm.Timespan.DAY}"
+    )
+    assert _shown(frozenset({"b", "a"})) == "{'a', 'b'}"
+    assert _shown(("x", "y")) == "['x', 'y']"
+    assert _shown(1.5) == "1.5"
 
 
 def test_class_hierarchy() -> None:
@@ -432,7 +444,7 @@ def test_a_feed_without_start_refuses_to_poll(
 ) -> None:
     # Every cycle would re-read Massive's whole archive; the message names the fix.
     message = (
-        "economy.inflation poll() needs a start or a limit: without either, every cycle "
+        "m.economy.inflation().poll() needs a start or a limit: without either, every cycle "
         "re-reads the whole archive Massive keeps. Build the query with a start, such as "
         "m.economy.inflation(..., start=date.today()), or with a limit and a newest-first "
         "order, then call poll(). A fixed start keeps widening the window on a poll that runs "
@@ -840,7 +852,7 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
     assert flat.calls == []
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
     with pytest.raises(
-        ValueError, match=r"^stocks\.trades: no row of the symbol table is Massive's ticker"
+        ValueError, match=r"^m\.stocks\.trades\(\): no row of the symbol table is Massive's ticker"
     ):
         only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
 
@@ -852,7 +864,7 @@ def test_history_rejects_a_symbol_table_without_symbols(
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
             with pytest.raises(
-                ValueError, match=r"^stocks\.trades: the symbol table holds no symbols$"
+                ValueError, match=r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"
             ):
                 q.history("2025-03-03", "2025-03-03", source=source)
     assert rest.calls == []
@@ -978,7 +990,7 @@ def test_a_static_symbol_table_without_symbols_opens_no_stream(
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         call = getattr(q, verb)
         with pytest.raises(
-            ValueError, match=r"^stocks\.trades: the symbol table holds no symbols$"
+            ValueError, match=r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"
         ):
             call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
@@ -1014,7 +1026,7 @@ def test_a_static_symbol_table_row_that_is_not_canonical_is_skipped(
     assert len(fake_streams.opened) == 1
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
     call = getattr(only_bad, verb)
-    with pytest.raises(ValueError, match=r"^stocks\.trades: no row of the symbol table is"):
+    with pytest.raises(ValueError, match=r"^m\.stocks\.trades\(\): no row of the symbol table is"):
         call(3) if verb == "ring" else call()
     assert len(fake_streams.opened) == 1
 

@@ -377,10 +377,10 @@ def test_each_unit_streams_its_watchlist(massive_session: MassiveSession) -> Non
         ("indices-minute-bars", "indices delayed", "TimestampEnd", True),
         ("futures-minute-bars", "futures delayed", "TimestampEnd", True),
     ]
-    queries = {s.name: repr(s.query(massive_session)) for s in streams}
-    assert "ESZ6" in queries["futures-minute-bars"]
-    assert "NQZ6" in queries["futures-minute-bars"]
-    assert "KIMpL" in queries["stocks-minute-bars"]
+    symbols = {s.name: s.query(massive_session)._request.symbols for s in streams}
+    assert "ESZ6" in symbols["futures-minute-bars"]
+    assert "NQZ6" in symbols["futures-minute-bars"]
+    assert "KIMpL" in symbols["stocks-minute-bars"]
     starter = stream_capture.stream_day_streams(
         ["stocks delayed", "options delayed"],
         tiers={"stocks": "starter"},

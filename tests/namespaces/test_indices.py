@@ -290,7 +290,7 @@ def test_values_query(m: dm.MassiveSession) -> None:
     assert type(q) is StreamHistoryQuery
     assert q._spec is indices.VALUES
     assert q._request.symbols == ("I:NDX", "I:SPX")
-    assert repr(q) == "<StreamHistoryQuery indices.values symbols=('I:NDX', 'I:SPX')>"
+    assert repr(q) == "m.indices.values(['I:NDX', 'I:SPX'])"
     assert m.indices.values(dm.ALL)._request.symbols is dm.ALL
 
 
@@ -348,9 +348,7 @@ def test_bars_pick_their_class(m: dm.MassiveSession, case: tuple[dm.Timespan, in
 def test_bars_default_to_streamed_minutes(m: dm.MassiveSession) -> None:
     q = m.indices.bars(["I:SPX"], dm.Timespan.MINUTE)
     assert type(q) is StreamHistoryQuery
-    assert repr(q) == (
-        "<StreamHistoryQuery indices.bars symbols=('I:SPX',) timespan=Timespan.MINUTE>"
-    )
+    assert repr(q) == ("m.indices.bars('I:SPX', dm.Timespan.MINUTE)")
 
 
 def test_bars_reject_the_futures_session(m: dm.MassiveSession) -> None:
@@ -374,9 +372,7 @@ def test_bars_check_their_argument_types(m: dm.MassiveSession) -> None:
 def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     q = m.indices.previous_day_bar(["I:SPX", "I:NDX"])
     assert type(q) is Query
-    assert repr(q) == (
-        "<Query indices.previous_day_bar symbols=('I:NDX', 'I:SPX') timespan=Timespan.DAY>"
-    )
+    assert repr(q) == ("m.indices.previous_day_bar(['I:NDX', 'I:SPX'])")
     with pytest.raises(
         ValueError,
         match=r"^indices\.previous_day_bar does not accept dm\.ALL; use "

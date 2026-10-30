@@ -57,8 +57,10 @@ from __future__ import annotations
 import functools
 import logging
 import time
-from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta
+from enum import Enum
 from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 
 from deephaven import arrow as dh_arrow
@@ -100,7 +102,7 @@ from deephaven_massive._tables.watchlist import (
     skipped_rows_text,
     watched_rows,
 )
-from deephaven_massive._types import override
+from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     import threading
@@ -117,6 +119,7 @@ __all__ = [
     "HistoryQuery",
     "Query",
     "QueryBase",
+    "QueryCall",
     "StreamHistoryQuery",
     "StreamQuery",
     "bar_query_class",
@@ -135,6 +138,15 @@ _HISTORY_TRANSPORTS: Final = {
 }
 """The transport behind each source `history()` can read."""
 
+_FROM_REQUEST: Final = frozenset(
+    {"symbols", "timespan", "multiplier", "adjusted", "start", "end", "limit"}
+)
+"""The arguments a query's repr writes as its request holds them, normalized: the symbols sorted
+and de-duplicated, the time bounds parsed. They keep these names in every dataset method."""
+
+SYMBOLS_SHOWN: Final = 5
+"""The most symbols a query's repr lists; `… (N more)` stands for the rest."""
+
 _VERBS: Final = ("fetch", "poll", "blink", "append_only", "ring", "last_by", "history")
 """Every verb's name, in the order a missing verb's message lists the verbs a query has."""
 
@@ -151,8 +163,8 @@ def _verb(method: Callable[Concatenate[_Q, _P], _R]) -> Callable[Concatenate[_Q,
 
     So every verb raises `ValueError` on an update-graph thread and `MassiveError` on a closed
     session before it checks a single argument, and one that runs long on a thread that holds
-    the update graph's lock (a Deephaven console command) is reported once, as
-    `"<dataset> <verb>()"`.
+    the update graph's lock (a Deephaven console command) is reported once, as the query's call
+    and the verb, such as `"m.stocks.bars('AAPL', dm.Timespan.DAY).history()"`.
 
     Args:
         method: The verb's body.
@@ -163,7 +175,7 @@ def _verb(method: Callable[Concatenate[_Q, _P], _R]) -> Callable[Concatenate[_Q,
 
     @functools.wraps(method)
     def verb(self: _Q, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
-        call = f"{self._spec.name} {method.__name__}()"
+        call = f"{self!r}.{method.__name__}()"
         return self._core.run_verb(call, functools.partial(method, self, *args, **kwargs))
 
     return verb
@@ -254,7 +266,7 @@ def verbs(spec: DatasetSpec) -> tuple[str, ...]:
 
 
 def _read_symbol_table(
-    core: SessionCore, spec: DatasetSpec, symbols: SymbolTable, *, live: bool = False
+    core: SessionCore, spec: DatasetSpec, symbols: SymbolTable, *, query: str, live: bool = False
 ) -> tuple[str, ...]:
     """Read a symbol table once, under the session's rule for a row that is not a ticker.
 
@@ -269,6 +281,7 @@ def _read_symbol_table(
         core: The session core, for its execution context and its `noncanonical_symbols`.
         spec: The dataset, whose asset class the rows must follow.
         symbols: The boxed table, static or refreshing.
+        query: The `repr` of the query whose verb reads it, which the messages name.
         live: True for a live verb, which may start on a table with no row yet and follow
             it as rows arrive.
 
@@ -289,11 +302,11 @@ def _read_symbol_table(
         rows = read_symbols(rule, symbols.table)
     if rows.skipped and not rows.symbols:
         raise ValueError(
-            f"{spec.name}: no row of the symbol table is Massive's ticker, so the result would "
+            f"{query}: no row of the symbol table is Massive's ticker, so the result would "
             f"follow nothing: {skipped_rows_text(rows.skipped)}"
         )
     if not rows.symbols and not live:
-        raise ValueError(f"{spec.name}: the symbol table holds no symbols")
+        raise ValueError(f"{query}: the symbol table holds no symbols")
     return rows.symbols
 
 
@@ -328,19 +341,134 @@ def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
         )
 
 
+def _set_place(item: object) -> tuple[int, str]:
+    """Return where a set's item goes in a query's repr, so a set prints the same every run.
+
+    Args:
+        item: An item of a set argument, such as a `dm.FuturesVenue` member.
+
+    Returns:
+        An enum member's position in its enum, then the item's text; any other item sorts by
+        its text alone.
+    """
+    place = list(type(item)).index(item) if isinstance(item, Enum) else 0
+    return place, repr(item)
+
+
+def _shown(value: object) -> str:
+    """Write one argument value as a query's repr shows it, the way a user would type it.
+
+    Args:
+        value: The argument's normalized value.
+
+    Returns:
+        `dm.<Enum>.<MEMBER>` for an enum member; a date or time as quoted ISO-8601 text; a set
+        as braces, enum members in their enum's order and other items sorted by their text; a
+        list or tuple as a list; and anything else as its `repr`.
+    """
+    if isinstance(value, Enum):
+        return f"dm.{type(value).__name__}.{value.name}"
+    if isinstance(value, date | datetime):
+        return repr(value.isoformat())
+    if isinstance(value, AbstractSet):
+        items = sorted(value, key=_set_place)
+        return "{" + ", ".join(map(_shown, items)) + "}"
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(map(_shown, value)) + "]"
+    return repr(value)
+
+
+def _shown_symbols(symbols: object) -> str:
+    """Write the `symbols` argument as a query's repr shows it, in its positional place.
+
+    Args:
+        symbols: The normalized symbols: a sorted tuple, `ALL`, or a symbol table.
+
+    Returns:
+        One symbol as `'AAPL'`; several as a list of their first `SYMBOLS_SHOWN`, followed by
+        `… (N more)` when there are more; `ALL` as `dm.ALL`, and a symbol table, static or
+        refreshing, as `<symbol table>`.
+    """
+    if symbols is ALL:
+        return "dm.ALL"
+    if not isinstance(symbols, tuple):
+        return "<symbol table>"
+    if len(symbols) == 1:
+        return repr(symbols[0])
+    listed = [repr(symbol) for symbol in symbols[:SYMBOLS_SHOWN]]
+    if len(symbols) > SYMBOLS_SHOWN:
+        listed.append(f"… ({len(symbols) - SYMBOLS_SHOWN} more)")
+    return "[" + ", ".join(listed) + "]"
+
+
+@dataclass(frozen=True, slots=True)
+class QueryCall:
+    """The dataset-method call that built a query, as its repr shows it.
+
+    Created by the dataset method itself, through `shows_call` in
+    `_namespaces/query_building.py`, when it returns its query; a query built any other way
+    carries only its dataset's path. Not part of the query's equality: two calls that
+    normalize to one request are one query, and since `text` writes the normalized values,
+    they print alike. Immutable and thread-safe.
+
+    Attributes:
+        path: The method's path from the session, such as `"m.options.contracts"`.
+        arguments: The arguments that differ from their defaults, in signature order, as
+            `(public name, value as passed)` pairs; a list is kept as a tuple, a set as a
+            `frozenset`, and a mapping as the tuple of its items.
+        positional: The parameters the method requires, such as a bar's `timespan`, which the
+            repr writes by position, as a user types them, never as `name=value`.
+    """
+
+    path: str
+    arguments: tuple[tuple[str, object], ...] = ()
+    positional: frozenset[str] = frozenset()
+
+    def text(self, request: Request) -> str:
+        """Write the call as a user would type it, from its query's normalized request.
+
+        An argument in `_FROM_REQUEST` is written as the request holds it, when the dataset
+        stored it there, and `filters` as the request's parsed filters (left out when there are
+        none, as an empty mapping selects nothing); every other argument as passed.
+
+        Args:
+            request: The query's request.
+
+        Returns:
+            For example `m.options.contracts(underlying='AAPL')` or
+            `m.stocks.bars(['AAPL', 'MSFT'], dm.Timespan.MINUTE, multiplier=5)`: `symbols`
+            comes first and positionally (`_shown_symbols`), a required argument by position,
+            `filters` as a dictionary, and every other argument as `name=value` (`_shown`).
+        """
+        parts = []
+        for name, value in self.arguments:
+            stored = getattr(request, name) if name in _FROM_REQUEST else None
+            if name == "symbols":
+                parts.append(_shown_symbols(stored))
+            elif name == "filters" and request.filters:
+                pairs = ", ".join(f"{key!r}: {_shown(item)}" for key, item in request.filters)
+                parts.append(f"filters={{{pairs}}}")
+            elif name in self.positional:
+                parts.append(_shown(value if stored is None else stored))
+            elif name != "filters":
+                parts.append(f"{name}={_shown(value if stored is None else stored)}")
+        return f"{self.path}({', '.join(parts)})"
+
+
 @dataclass(frozen=True, repr=False, slots=True)
 class QueryBase:
     """The state every query class shares: the session, the dataset, and the arguments.
 
     Frozen and hashable; equality includes the concrete class, so a `StreamQuery` never equals
-    a `HistoryQuery`. Queries have no public attributes: the verbs and `columns()` are the
-    whole API, and the `repr` names the class, the dataset, and the arguments that differ from
-    their defaults.
+    a `HistoryQuery`, and covers the dataset and the normalized request, never the call that
+    built it. Queries have no public attributes: the verbs and `columns()` are the whole API,
+    and the `repr` is the call that built the query (`QueryCall`).
     """
 
     _core: SessionCore
     _spec: DatasetSpec
     _request: Request
+    _call: QueryCall = field(compare=False)
 
     @raises_through(refuse_update_graph_thread)
     def columns(self) -> Table:
@@ -381,14 +509,12 @@ class QueryBase:
 
     @override
     def __repr__(self) -> str:
-        """Show the query class, the dataset, and the non-default arguments.
+        """Show the call that built the query, with its non-default arguments.
 
         Returns:
-            For example `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`.
+            For example `m.stocks.trades(['AAPL', 'MSFT'])` (`QueryCall.text`).
         """
-        described = self._request.describe()
-        suffix = f" {described}" if described else ""
-        return f"<{type(self).__name__} {self._spec.name}{suffix}>"
+        return self._call.text(self._request)
 
     def __getattr__(self, name: str) -> object:
         """Explain a verb this query does not have, and name the dataset that has it.
@@ -540,7 +666,7 @@ class QueryBase:
         """
         request = self._request
         if isinstance(request.symbols, SymbolTable):
-            symbols = _read_symbol_table(self._core, self._spec, request.symbols)
+            symbols = _read_symbol_table(self._core, self._spec, request.symbols, query=repr(self))
             return replace(request, symbols=symbols)
         return request
 
@@ -777,14 +903,16 @@ class Query(QueryBase):
             name = self._spec.name
             logger.debug("%r poll() refused: a feed's poll needs a start or a limit", self)
             raise ValueError(
-                f"{name} poll() needs a start or a limit: without either, every cycle re-reads "
-                f"the whole archive Massive keeps. Build the query with a start, such as "
+                f"{self!r}.poll() needs a start or a limit: without either, every cycle "
+                f"re-reads the whole archive Massive keeps. Build the query with a start, such as "
                 f"m.{name}(..., start=date.today()), or with a limit and a newest-first order, "
                 "then call poll(). A fixed start keeps widening the window on a poll that runs "
                 "for days"
             )
         if isinstance(self._request.symbols, SymbolTable):
-            _read_symbol_table(self._core, self._spec, self._request.symbols, live=True)
+            _read_symbol_table(
+                self._core, self._spec, self._request.symbols, query=repr(self), live=True
+            )
         return self._core.rest_transport().poll(
             self._spec, self._request, interval=period, mode=chosen, query=repr(self)
         )
@@ -853,7 +981,10 @@ class StreamQuery(QueryBase):
         request = self._request
         symbols = request.symbols
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
-            return replace(request, symbols=_read_symbol_table(self._core, self._spec, symbols))
+            return replace(
+                request,
+                symbols=_read_symbol_table(self._core, self._spec, symbols, query=repr(self)),
+            )
         return request
 
     def _stream(self, shape: Callable[[Table], Table], request: Request) -> Table:
@@ -881,7 +1012,7 @@ class StreamQuery(QueryBase):
         spec = self._spec
         symbols = request.symbols  # a static table is already read: never read it twice
         if isinstance(symbols, SymbolTable):
-            _read_symbol_table(self._core, spec, symbols, live=True)
+            _read_symbol_table(self._core, spec, symbols, query=repr(self), live=True)
         schema = self._core.dataset_schema(spec)
         return self._core.stream_result(
             spec,
@@ -1302,7 +1433,7 @@ class HistoryQuery(QueryBase):
         )
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
-            symbols = _read_symbol_table(self._core, self._spec, symbols)
+            symbols = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
         # A dataset with a path per symbol class takes its days from its symbols' class.
         listed = symbols if isinstance(symbols, tuple) else ()
         request = replace(self._request, start=first, end=last, symbols=symbols)

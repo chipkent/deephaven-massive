@@ -336,7 +336,7 @@ def test_lookup_queries(massive_session: dm.MassiveSession) -> None:
         assert type(query) is Query
         assert query._spec is spec
         assert query._request == Request()
-    assert repr(ref.market_status()) == "<Query reference.market_status>"
+    assert repr(ref.market_status()) == "m.reference.market_status()"
 
 
 def test_each_endpoint_accepts_its_own_asset_classes(

@@ -12,15 +12,11 @@ that build requests live in `_query.py`; the transport interfaces that receive t
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
-from datetime import date, datetime
-from enum import Enum
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias
 
-from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._types import ALL
-
 if TYPE_CHECKING:
+    from datetime import date, datetime
     from enum import StrEnum
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
@@ -95,42 +91,3 @@ class Request:
         if self.symbols is None:
             raise ValueError("a stream needs symbols")
         return self.symbols
-
-    def describe(self) -> str:
-        """Render the fields that differ from their defaults, for a query's `repr`.
-
-        Returns:
-            Space-separated `name=value` pairs, such as `symbols=('AAPL', 'MSFT')`; `ALL`
-            renders as `ALL`, a symbol table as `<symbol table>`, enums (also a tuple of
-            them, such as the futures `venues`) by member name,
-            dates in ISO form, and parameters and filters as dictionaries.
-        """
-        parts = []
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if value != f.default:
-                parts.append(f"{f.name}={_render(value)}")
-        return " ".join(parts)
-
-
-def _render(value: object) -> str:
-    """Render one request value for a `repr`.
-
-    Args:
-        value: A field value of a `Request`.
-
-    Returns:
-        Its display form.
-    """
-    if value is ALL or isinstance(value, SymbolTable):
-        return "ALL" if value is ALL else "<symbol table>"
-    if isinstance(value, Enum):
-        return f"{type(value).__name__}.{value.name}"
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, tuple) and value:
-        if all(isinstance(item, Enum) for item in value):  # the futures venues
-            return "(" + ", ".join(_render(item) for item in value) + ")"
-        if isinstance(value[0], tuple):  # parameters and filters
-            return "{" + ", ".join(f"{k!r}: {_render(v)}" for k, v in value) + "}"
-    return repr(value)

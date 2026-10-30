@@ -63,7 +63,7 @@ from deephaven_massive._namespaces.indicators import _Indicators
 from deephaven_massive._namespaces.indices import _Indices
 from deephaven_massive._namespaces.options import _Options
 from deephaven_massive._namespaces.partners import _Partners
-from deephaven_massive._namespaces.query_building import build_query, list_params
+from deephaven_massive._namespaces.query_building import build_query, list_params, shows_call
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._tables.execution_context import (
@@ -363,6 +363,7 @@ class MassiveSession:
         """Partner datasets, by vendor: `benzinga`, `etf_global`, `tmx`, `fable`."""
         return self._partners
 
+    @shows_call("m")
     @raises_through(build_query, list_params)
     def snapshots(
         self,
@@ -496,8 +497,8 @@ class MassiveSession:
             A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Kind`
             (String), `stream` for a WebSocket stream, `poll` for a `poll()` table, or `read`
             for a background read; `Dataset` (String), such as `stocks.trades`; `Query`
-            (String), the query that opened the stream, such as
-            `<StreamHistoryQuery stocks.trades symbols=('AAPL',)>`, which tells two streams of
+            (String), the query that opened the stream, the call that built it, such as
+            `m.stocks.trades('AAPL')`, which tells two streams of
             one dataset apart; `SymbolCount` (int), null for `dm.ALL`; `Symbols` (String), a
             shortened list; `HeldResults` (int), the stream's tables the library still holds;
             `Deferred` (int), options contracts held back by the per-connection cap;

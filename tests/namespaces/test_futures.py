@@ -105,7 +105,7 @@ def test_trades_and_quotes_stream_and_have_history(massive_session: dm.MassiveSe
         two = factory("ESZ5", venues={dm.FuturesVenue.COMEX, dm.FuturesVenue.CBOT})
         assert request(two).venues == (dm.FuturesVenue.CBOT, dm.FuturesVenue.COMEX)
         assert request(factory(dm.ALL)).symbols is dm.ALL
-        assert "venues=(FuturesVenue.CME)" in repr(cme)
+        assert "venues={dm.FuturesVenue.CME}" in repr(cme)
 
 
 _PLAIN = cast("Any", "text")
@@ -262,7 +262,7 @@ def test_exchanges(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.exchanges()
     assert type(q) is Query
     assert request(q) == type(request(q))()
-    assert repr(q) == "<Query futures.exchanges>"
+    assert repr(q) == "m.futures.exchanges()"
     assert request(massive_session.futures.exchanges(limit=2)).limit == 2
 
 
