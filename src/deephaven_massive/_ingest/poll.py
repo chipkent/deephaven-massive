@@ -48,8 +48,9 @@ table, and `SchemaDrift` from each page's drift.
 row that breaks the schema, or, in any mode, has a null poll key, which would merge unrelated
 rows), `UnsupportedParameterError` (a symbol of a reactive table routed to a path that lacks a
 parameter the caller set), `SymbolRowError` (a symbol table's row that is not Massive's
-ticker), and `_ingest/rest.py`'s `UnlistedPairError` (a crypto pair whose currencies Massive's
-reference data does not give). Any other error, also one while publishing,
+ticker, under `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and the
+cycle's `Error` lists it), and `_ingest/rest.py`'s `UnlistedPairError` (a crypto pair whose
+currencies Massive's reference data does not give). Any other error, also one while publishing,
 is logged at ERROR and shown in the row's `Error`; the table keeps its rows and the next cycle
 runs as scheduled, and clears the `Error` once it succeeds.
 
@@ -64,7 +65,7 @@ poller the session would not stop. A stopped poller finishes a request already o
 stops at once a request still waiting for the rate governor (its stop token is the cycle's
 `Cancel`), and publishes nothing more; a failed table keeps its rows. The poller holds the
 session core only through a weak reference; the poll's record in the session keeps the session
-alive while the poll runs (`SessionCore.register_poll`).
+alive while the poll runs (`SessionCore.register_worker`).
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ from deephaven_massive._errors import (
 from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import (
+    StreamKind,
     StreamRow,
     StreamUpdate,
     describe_symbols,
@@ -104,7 +106,7 @@ from deephaven_massive._tables.diagnostics import (
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
-from deephaven_massive._tables.watchlist import read_symbols
+from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Sequence
@@ -163,8 +165,8 @@ class RowDataError(PermanentError):
 class UnsupportedParameterError(PermanentError):
     """A parameter the caller set that the path a `poll()` cycle chose does not take.
 
-    A reactive symbol table can route a new symbol to a path that lacks a parameter (an
-    explicit `adjusted` on the crypto indicators). Retrying cannot fix it, so the table fails
+    A reactive symbol table can route a new symbol to a path that lacks a parameter
+    (`adjusted=False` on the crypto indicators). Retrying cannot fix it, so the table fails
     with it.
     """
 
@@ -172,8 +174,10 @@ class UnsupportedParameterError(PermanentError):
 class SymbolRowError(PermanentError):
     """A row of a `poll()` table's reactive symbol table that is not Massive's exact ticker.
 
-    The table fails with it, since every later cycle would read the same row; its message
-    names `dm.canonicalize_symbols`, which converts such a table.
+    Raised only under `MassiveConfig.noncanonical_symbols=OnError.RAISE` (under `LOG` and
+    `IGNORE` the row is skipped and listed in the row's `Error`), or for a symbol table that
+    has failed. The table fails with it, since every later cycle would read the same row; its
+    message names `dm.canonicalize_symbols`, which converts such a table.
     """
 
 
@@ -348,6 +352,7 @@ class Poller:
         "_publisher",
         "_read",
         "_request",
+        "_rule",
         "_schema",
         "_seen",
         "_spec",
@@ -399,6 +404,7 @@ class Poller:
         self._key_names = key_columns(spec, self._schema)
         self._list_keys = list_keys(self._schema, self._key_names)
         self._request = request
+        self._rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
         self._interval = interval.total_seconds()
         self._mode = mode
         self._stream_id = stream_id
@@ -441,12 +447,12 @@ class Poller:
         result may still use the poll; the poller stops when the poll's blink table shuts down.
         The session is alive: the poll's record keeps it in the live set until this has run.
         """
-        cast("SessionCore", self._core()).release_poll(self._stream_id)
+        cast("SessionCore", self._core()).release_worker(self._stream_id)
 
     def fail(self, error: MassiveError) -> bool:
         """Stop the poller and fail its table, once: the session closed, or a thread died.
 
-        The session's hook for the poll (`SessionCore.register_poll`), called outside every lock
+        The session's hook for the poll (`SessionCore.register_worker`), called outside every lock
         while the poll is registered, so the session is alive. The row is updated first
         (`SessionCore.fail_stream`, which keeps a `CLOSED` row as it is), then the table fails;
         a table that already failed is left alone.
@@ -479,24 +485,30 @@ class Poller:
         finally:
             self._pollers.discard(self)
 
-    def _symbols(self) -> NormalizedSymbols | None:
+    def _symbols(self) -> tuple[NormalizedSymbols | None, tuple[str, ...]]:
         """Return the cycle's symbols, reading a reactive table once.
+
+        A row of a reactive table that is not Massive's exact ticker follows the session's
+        `MassiveConfig.noncanonical_symbols` (`read_symbols`): under `RAISE` it fails the table;
+        under `LOG` and `IGNORE` it is skipped, and returned so the cycle can list it.
 
         Returns:
             The request's symbols, or for a reactive table the symbols it holds now, sorted
-            (null rows are ignored).
+            (null rows are ignored); and the values skipped this cycle, sorted (empty but for
+            a reactive table under `LOG` or `IGNORE`).
 
         Raises:
-            SymbolRowError: If a row of the reactive table is not Massive's exact ticker; the
-                table fails with it.
+            SymbolRowError: If a row of the reactive table is not Massive's exact ticker under
+                `RAISE`, or the table has failed; the poll's table fails with it.
         """
         symbols = self._request.symbols
         if not isinstance(symbols, SymbolTable):
-            return symbols
+            return symbols, ()
         try:
-            return read_symbols(self._spec, symbols.table)
+            rows = read_symbols(self._rule, symbols.table)
         except ValueError as error:
-            raise SymbolRowError(f"{self._spec.name} poll(): {error}") from None
+            raise SymbolRowError(str(error)) from None
+        return rows.symbols, rows.skipped
 
     def _cycle(self, pool: ThreadPoolExecutor) -> bool:
         """Run one cycle: read, publish, and update the table's row.
@@ -540,7 +552,7 @@ class Poller:
             False if the poller was stopped while it read, so nothing was published.
         """
         began = self._clock.monotonic()
-        symbols = self._symbols()
+        symbols, skipped = self._symbols()
         record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST)
         table, requests = self._read(
             symbols=symbols, record=record, executor=pool, cancel=self._stop
@@ -558,11 +570,14 @@ class Poller:
             published,
             self._clock.monotonic() - began,
         )
+        # A successful cycle clears an earlier cycle's error; the skipped rows are kept apart.
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=requests,
             symbol_count=len(symbols) if isinstance(symbols, tuple) else None,
             clear_error=True,
+            skipped=skipped_rows_text(skipped) if skipped else None,
+            clear_skipped=not skipped,
         )
         core.update_streams({self._stream_id: update})
         return True
@@ -836,11 +851,12 @@ def key_columns(spec: DatasetSpec, schema: Schema) -> tuple[str, ...]:
     """Return the columns that identify a row of a `poll()` table: its key in every mode.
 
     They are the dataset's poll keys (`DatasetSpec.poll_keys`), plus `RawSymbol` when they hold
-    `Symbol` and the schema has a `RawSymbol` column (a session whose `unknown_symbols` is
-    `WARN`). Such a session keeps a row whose symbol Massive spelled in a way the library cannot
-    read, with a null `Symbol` and the text in `RawSymbol`; keyed on `Symbol` alone, every such
-    row would merge into one, or fail the null-key check. With `RawSymbol` in the key, a readable
-    row is keyed by its `Symbol` (its `RawSymbol` is null) and an unreadable one by its text.
+    `Symbol` and the schema has a `RawSymbol` column (a session whose `unreadable_symbols` is
+    `LOG`, the default, or `IGNORE`). Such a session keeps a row whose symbol Massive spelled in
+    a way the library cannot read, with a null `Symbol` and the text in `RawSymbol`; keyed on
+    `Symbol` alone, every such row would merge into one, or fail the null-key check. With
+    `RawSymbol` in the key, a readable row is keyed by its `Symbol` (its `RawSymbol` is null)
+    and an unreadable one by its text.
 
     Args:
         spec: The dataset.
@@ -928,7 +944,7 @@ def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel)
 
     Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
     thread after a failure, a gRPC thread, or Deephaven's liveness-cleanup thread), so it only
-    sets a token and updates the registry (`SessionCore.poll_shut_down`). The session is alive:
+    sets a token and updates the registry (`SessionCore.worker_shut_down`). The session is alive:
     the poll's record keeps it in the live set until this has run, and before the record
     exists the opening caller holds it.
 
@@ -938,7 +954,7 @@ def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel)
         stop: The poller's stop token.
     """
     stop.set()
-    cast("SessionCore", core_ref()).poll_shut_down(stream_id)
+    cast("SessionCore", core_ref()).worker_shut_down(stream_id)
 
 
 def _build(
@@ -1032,7 +1048,7 @@ def open_poll(
     Raises:
         MassiveError: If the session closed after the poll was registered but before its
             poller started (`"MassiveSession #1 is closed"`). One closed before the poll could
-            be registered raises the `MassiveError` of `SessionCore.register_poll` or
+            be registered raises the `MassiveError` of `SessionCore.register_worker` or
             `Pollers.add`.
     """
     stream_id = core.next_stream_id()
@@ -1057,9 +1073,10 @@ def open_poll(
         )
         symbols = request.symbols
         count, text = (None, "") if symbols is None else describe_symbols(symbols)
-        core.register_poll(
+        core.register_worker(
             StreamRow(
                 stream_id=stream_id,
+                kind=StreamKind.POLL,
                 dataset=spec.name,
                 query=shown_query(query),
                 symbol_count=count,
@@ -1081,7 +1098,7 @@ def open_poll(
                 poller.stop()
                 pollers.discard(poller)
             if registered:
-                core.release_poll(stream_id)
+                core.release_worker(stream_id)
         finally:
             release_scope(core.exec_ctx, scope)
         raise

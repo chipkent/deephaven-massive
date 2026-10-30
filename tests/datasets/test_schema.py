@@ -598,8 +598,9 @@ def test_derived_columns_follow_the_leading_keys() -> None:
     assert dataset_schema(by_request, (by_request,), lookup, raw_symbol=True) == plain
     kept = dataset_schema(from_rows, (from_rows,), lookup, raw_symbol=True)
     assert kept.column_names[:3] == ("Symbol", "OptionRoot", "RawSymbol")
-    assert (
-        "Present only in a session whose `unknown_symbols` is `WARN`" in kept.columns[2].description
+    assert kept.columns[2].description.endswith(
+        "Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on "
+        "such a row instead."
     )
     assert "RawSymbol" not in dataset_schema(from_rows, (from_rows,), lookup).column_names
 

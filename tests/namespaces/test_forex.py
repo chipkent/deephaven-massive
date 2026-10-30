@@ -138,7 +138,10 @@ def _schema(spec: DatasetSpec) -> dict[str, ColumnType]:
     The process catalog also merges the members other namespaces declare into each kind, so
     exact column lists are checked against the namespace's own catalog.
     """
-    return {c.name: c.type for c in Catalog(forex.DATASETS).dataset_schema(spec).columns}
+    return {
+        c.name: c.type
+        for c in Catalog(forex.DATASETS).dataset_schema(spec, raw_symbol=False).columns
+    }
 
 
 def test_quotes_join_the_last_quote_through_its_projection() -> None:

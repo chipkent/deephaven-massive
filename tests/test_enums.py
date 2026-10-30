@@ -29,7 +29,7 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
         "year",
         "session",
     ],
-    dm.PollMode: ["replace", "upsert", "append"],
+    dm.PollMode: ["auto", "replace", "upsert", "append"],
     dm.HistorySource: ["auto", "rest", "flat_files"],
     dm.FuturesVenue: ["cme", "cbot", "nymex", "comex"],
     dm.Direction: ["gainers", "losers"],
@@ -68,8 +68,7 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
         "LT",
     ],
     dm.SymbolConvention: ["massive", "yahoo", "nasdaq", "cms"],
-    dm.OnError: ["raise", "null"],
-    dm.UnknownSymbols: ["fail", "warn"],
+    dm.OnError: ["raise", "log", "ignore"],
 }
 
 # Enums that mirror a parameter enum of the generated REST paths, by parameter name. Every path
@@ -159,9 +158,7 @@ def test_require_enum_matches_names_and_ignores_case() -> None:
 
 
 def test_require_enum_falls_back_to_the_first_member() -> None:
-    with pytest.raises(
-        TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.REPLACE$"
-    ):
+    with pytest.raises(TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.AUTO$"):
         _require_enum("sometimes", dm.PollMode, "mode")
     with pytest.raises(TypeError, match=r"dm\.Order\.ASC$"):
         _require_enum(3, dm.Order, "order")
@@ -304,6 +301,7 @@ def test_literal_detection_ignores_enum_members() -> None:
 _FUTURES_ENUMS = "namespaces/test_futures.py::test_enum_parameters_reject_plain_strings"
 
 _CONVERTER_ENUMS = "datasets/test_symbols.py::test_converter_enums_reject_text"
+_SYMBOL_SETTINGS = "test_config.py::test_symbol_settings_are_the_enum"
 _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
 
 ENUM_PARAMETERS = {
@@ -311,7 +309,8 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.rest_basic_subscriptions": (
         "test_config.py::test_rest_basic_subscriptions_hold_subscriptions_only"
     ),
-    "MassiveConfig.__init__.unknown_symbols": "test_config.py::test_unknown_symbols_is_the_enum",
+    "MassiveConfig.__init__.noncanonical_symbols": _SYMBOL_SETTINGS,
+    "MassiveConfig.__init__.unreadable_symbols": _SYMBOL_SETTINGS,
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
     "canonicalize_symbols.asset_class": _CANONICALIZE_ENUMS,
@@ -350,9 +349,9 @@ ENUM_PARAMETERS = {
     "Query.poll.mode": "test_query.py::test_poll_mode_is_an_enum",
     "HistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
-    "_Futures.trades.venue": _FUTURES_ENUMS,
-    "_Futures.quotes.venue": _FUTURES_ENUMS,
-    "_Futures.bars.venue": _FUTURES_ENUMS,
+    "_Futures.trades.venues": _FUTURES_ENUMS,
+    "_Futures.quotes.venues": _FUTURES_ENUMS,
+    "_Futures.bars.venues": _FUTURES_ENUMS,
     "_Futures.snapshots.order": _FUTURES_ENUMS,
     "_Futures.contracts.order": _FUTURES_ENUMS,
     "_Futures.products.order": _FUTURES_ENUMS,

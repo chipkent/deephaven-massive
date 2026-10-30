@@ -654,7 +654,8 @@ OPTION_ROOT: Final = "OptionRoot"
 
 RAW_SYMBOL: Final = "RawSymbol"
 """The derived column of a dataset that reads its symbol from rows, in a session whose
-`unknown_symbols` is `WARN`: the text of a symbol the library could not read."""
+`unreadable_symbols` is `LOG` (the default) or `IGNORE`: the text of a symbol the library could
+not read."""
 
 _DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     OPTION_ROOT: (
@@ -666,7 +667,8 @@ _DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     RAW_SYMBOL: (
         "The symbol exactly as Massive sent it, on a row whose spelling the library cannot "
         "read as the dataset's class (its `Symbol` is then null); null on every other row. "
-        "Present only in a session whose `unknown_symbols` is `WARN`."
+        "Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails "
+        "on such a row instead."
     ),
 }
 """The library's description of each derived column."""
@@ -1253,8 +1255,8 @@ def dataset_schema(
         members: The datasets whose sources merge, in member order: the datasets of the
             dataset's kind (`Catalog.members`), or the dataset alone when it is in no kind.
         source: Returns the generated source of a transport and key.
-        raw_symbol: True for a session whose `unknown_symbols` is `WARN`, which keeps the text
-            of an unreadable symbol in `RawSymbol`.
+        raw_symbol: True for a session whose `unreadable_symbols` is `LOG` or `IGNORE`, which
+            keeps the text of an unreadable symbol in `RawSymbol`.
 
     Returns:
         The schema, named after the dataset.

@@ -93,10 +93,10 @@ from deephaven_massive._datasets.symbols import (
     SymbolTable,
     WireSymbols,
     option_roots,
-    unknown_symbol_message,
+    unreadable_symbol_message,
 )
 from deephaven_massive._datasets.timestamps import masked_instants, mismatch_message
-from deephaven_massive._enums import NotBars, UnknownSymbols
+from deephaven_massive._enums import NotBars, OnError
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
@@ -105,7 +105,7 @@ from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.transports import StreamHandle
-from deephaven_massive._tables.watchlist import SymbolWatch
+from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -340,7 +340,7 @@ class ChannelPlan:
         spec: DatasetSpec,
         channel: str,
         *,
-        unknown_symbols: UnknownSymbols,
+        unreadable_symbols: OnError,
     ) -> ChannelPlan:
         """Prepare the reading of a channel's rows for a dataset.
 
@@ -348,8 +348,8 @@ class ChannelPlan:
             catalog: The catalog, for the generated source and the dataset's merged schema.
             spec: A WebSocket dataset (with channels, so with an asset class).
             channel: One of its channels.
-            unknown_symbols: The session's rule for a symbol spelling the library cannot
-                read; `WARN` also adds the `RawSymbol` column to the schema.
+            unreadable_symbols: The session's setting for a symbol spelling the library cannot
+                read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
 
         Returns:
             The plan.
@@ -370,7 +370,7 @@ class ChannelPlan:
             raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key")
         # A WebSocket source has no key filled from a request: every column has its field.
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
-        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         _, symbol_field = fields[key_column(spec, "symbol", symbol)]
         # A bars channel serves one timespan, always of one unit; any other channel has none.
         span = next(span for span, name in spec.channels.items() if name == channel)
@@ -378,7 +378,9 @@ class ChannelPlan:
         return cls(
             dataset=spec.name,
             asset_class=asset_class,
-            symbols=WireSymbols(spec.name, asset_class, unknown_symbols, spec.symbols_as_written),
+            symbols=WireSymbols(
+                spec.name, asset_class, unreadable_symbols, spec.symbols_as_written
+            ),
             channel=channel,
             wire_schema=pa.schema(
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
@@ -415,8 +417,8 @@ class ChannelPlan:
         with a timestamp that overflows or lies outside 1990 to 2100 is dropped and reported.
         A row whose symbol is a spelling the library cannot read is dropped and reported too,
         failing every stream of the dataset on the channel (it cannot be routed to one), when
-        the session's `unknown_symbols` is `FAIL`; under `WARN` it is kept with a null
-        `Symbol` and the text in `RawSymbol`.
+        the session's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` it is kept with
+        a null `Symbol` and the text in `RawSymbol`.
 
         Args:
             rows: The decoded rows, keyed by long-form column.
@@ -495,13 +497,13 @@ class ChannelPlan:
         *,
         failures: list[tuple[int, str, bool]],
     ) -> tuple[pa.Array, pa.Array, pa.Array | None]:
-        """Read the rows' wire symbols; under `FAIL`, report the rows of unreadable ones.
+        """Read the rows' wire symbols; under `RAISE`, report the rows of unreadable ones.
 
         Args:
             column: The rows' symbols as sent.
             symbols: The flush thread's raw-to-canonical map (`convert`).
             failures: Extended with `(row, message, True)` for each row whose spelling the
-                library cannot read, when the session's `unknown_symbols` is `FAIL`: such a
+                library cannot read, when the session's `unreadable_symbols` is `RAISE`: such a
                 row fails every stream of the channel (`RowFailure.every_stream`).
 
         Returns:
@@ -509,10 +511,10 @@ class ChannelPlan:
             (None when no row fails).
         """
         read = self.symbols.read(column.combine_chunks(), symbols)
-        if not read.unknown or self.symbols.unknown is UnknownSymbols.WARN:
+        if not read.unreadable or self.symbols.keeps:
             return read.symbols, read.raw, None
         bad = pc.call_function("is_valid", [read.raw])
-        message = unknown_symbol_message(self.dataset, read.unknown)
+        message = unreadable_symbol_message(self.dataset, read.unreadable)
         indices = pc.call_function("indices_nonzero", [bad]).to_pylist()
         failures.extend((index, message, True) for index in indices)
         return read.symbols, read.raw, bad
@@ -1351,6 +1353,32 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
         sink.fail_later(message)
 
 
+def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) -> None:
+    """A watch's `on_skipped`: show the symbol-table values its stream skips in `m.streams()`.
+
+    The text is kept apart from the transport's own warning (`StreamRow.skipped`), so neither
+    replaces or clears the other in the row's `Error`.
+
+    Runs in the watch's listener, under the update-graph lock: `SessionCore.update_streams`
+    takes only the leaf `registry_lock` and makes no Deephaven call, so it never blocks there.
+    The sink and its session are held weakly, as in `_fail_later`.
+
+    Args:
+        sink_ref: The stream's sink, weakly.
+        values: The values skipped now, sorted; empty once every bad row is fixed or deleted,
+            which clears the row's `Error`.
+    """
+    sink = sink_ref()
+    core = None if sink is None else sink.core()
+    if sink is None or core is None:
+        return
+    if values:
+        update = StreamUpdate(skipped=skipped_rows_text(values))
+    else:
+        update = StreamUpdate(clear_skipped=True)
+    core.update_streams({sink.stream_id: update})
+
+
 def _drain(source: queue.SimpleQueue[_T]) -> list[_T]:
     """Take everything queued so far, without waiting.
 
@@ -1445,11 +1473,18 @@ def open_stream_tables(
                 stream_id, core=core, plan=plan, publisher=publisher, symbols=received
             )
             if isinstance(symbols, SymbolTable):
-                watch = SymbolWatch(
+                rule = SymbolRowRule(
+                    plan.dataset,
                     plan.asset_class,
+                    plan.symbols.as_written,
+                    core.config.noncanonical_symbols,
+                )
+                watch = SymbolWatch(
+                    rule,
                     symbols.table,
                     on_symbols,
                     on_invalid=functools.partial(_fail_later, weakref.ref(sink)),
+                    on_skipped=functools.partial(_show_skipped, weakref.ref(sink)),
                 )
                 watch.keep_alive_with(blink)
         handle = StreamHandle(

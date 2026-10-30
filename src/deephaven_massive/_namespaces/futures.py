@@ -19,8 +19,8 @@ Futures differ from the other asset classes in three ways that show here:
   it). WebSocket messages carry none: the WebSocket transport dates a streamed row by the 17:00
   Chicago rule, corrected by Massive's futures schedules.
 - **Venues.** Flat files are published per exchange (`us_futures_cme/...`), so `trades`,
-  `quotes`, and `bars` take a `venue` that picks the flat-file prefix. Streams always use the
-  `/futures` cluster path, whatever the venue.
+  `quotes`, and `bars` take `venues`, a set that picks the flat-file prefixes (all four by
+  default). Streams always use the `/futures` cluster path, whatever the venues.
 - **Bars.** The aggregates endpoint has a `session` unit and no `day` unit, so `bars` accepts
   `Timespan.SESSION` and rejects `Timespan.DAY`.
 
@@ -35,14 +35,15 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import AssetClass, NotBars, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import Namespace, build_query, list_params, one_or_any_of
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
-    from deephaven_massive._enums import FuturesVenue, Order
+    from deephaven_massive._enums import Order
     from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery
     from deephaven_massive._types import DateLike, FilterValue, FuturesSpan, StreamSpan, Symbols
 
@@ -261,7 +262,7 @@ class _Futures(Namespace):
 
     Futures symbols are contract tickers, such as `"ESZ5"` (the December 2025 E-mini S&P 500)
     or `"GCJ5"` (April 2025 gold). Every streamed dataset uses the `/futures` WebSocket cluster
-    path; `venue` only picks the exchange whose flat files `history()` reads.
+    path; `venues` only picks the exchanges whose flat files `history()` reads.
 
     Example:
         ::
@@ -276,7 +277,9 @@ class _Futures(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "futures"
 
-    def trades(self, symbols: Symbols, *, venue: FuturesVenue | None = None) -> StreamHistoryQuery:
+    def trades(
+        self, symbols: Symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
+    ) -> StreamHistoryQuery:
         """Trades of futures contracts, tick by tick.
 
         Each row is one trade: its price, its size, and the exchange's sequence numbers. Each
@@ -287,7 +290,7 @@ class _Futures(Namespace):
         stream's `m.streams()` row), and `TimestampInsert`, when the library received it. Live
         trades stream over the WebSocket `T` channel of the `/futures` cluster. `history()`
         reads the REST endpoint `/futures/v1/trades/{ticker}`, one contract per request, or the
-        flat files `us_futures_<venue>/trades_v1` (`venue`, or all four venues when it is None).
+        flat files `us_futures_<venue>/trades_v1` of each venue of `venues`, all four by default.
         A date bound of `history()` is a whole trading session, the session whose `Date` is that
         date, requested over REST one session at a time (`session_end_date=<date>`, weekdays
         only, whatever hours a holiday added to it). Datetime bounds are exact instants on
@@ -306,16 +309,17 @@ class _Futures(Namespace):
             symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
                 Deephaven table with a `Symbol` column (streams follow its rows as they
                 change), or `dm.ALL`.
-            venue: The exchange whose flat files `history()` reads; None reads all four
-                (CME, CBOT, NYMEX, COMEX). It does not affect the stream.
+            venues: The exchanges whose flat files `history()` reads, a set of
+                `dm.FuturesVenue`, such as `{dm.FuturesVenue.CME}`; every venue (CME, CBOT,
+                NYMEX, COMEX) by default. It does not affect the stream.
 
         Returns:
             A query with the stream verbs (`blink()`, `append_only()`, `ring()`,
             `last_by()`) and `history()`.
 
         Invalid symbols (none at all, for example from an exhausted generator, or a table
-        without a `Symbol` column) raise `ValueError`, and a `venue` that is not a
-        `dm.FuturesVenue` raises `TypeError`. No request is made.
+        without a `Symbol` column) raise `ValueError`; `venues` raises `TypeError` if it is
+        not a set of `dm.FuturesVenue` and `ValueError` if it is empty. No request is made.
 
         Example:
             ::
@@ -324,15 +328,17 @@ class _Futures(Namespace):
 
                 m = dm.MassiveSession()
                 live = m.futures.trades(["ESZ5", "NQZ5"]).append_only()
-                past = m.futures.trades("ESZ5", venue=dm.FuturesVenue.CME).history(
+                past = m.futures.trades("ESZ5", venues={dm.FuturesVenue.CME}).history(
                     "2025-10-01", "2025-10-03"
                 )
         """
         return cast(
-            "StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols, venue=venue)
+            "StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols, venues=venues)
         )
 
-    def quotes(self, symbols: Symbols, *, venue: FuturesVenue | None = None) -> StreamHistoryQuery:
+    def quotes(
+        self, symbols: Symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
+    ) -> StreamHistoryQuery:
         """Quotes of futures contracts: every change of the best bid and offer.
 
         Each row is one top-of-book update: bid and ask prices, sizes, and the time of each
@@ -343,8 +349,8 @@ class _Futures(Namespace):
         miss in its stream's `m.streams()` row), and `TimestampInsert`, when the library
         received it. Live quotes stream over the WebSocket `Q` channel of the `/futures`
         cluster. `history()` reads the REST endpoint `/futures/v1/quotes/{ticker}`, one contract
-        per request, or the flat files `us_futures_<venue>/quotes_v1` (`venue`, or all four
-        venues when it is None). A date bound of `history()` is a whole trading session,
+        per request, or the flat files `us_futures_<venue>/quotes_v1` of each venue of `venues`,
+        all four by default. A date bound of `history()` is a whole trading session,
         requested over REST one session at a time as for `trades`. Datetime bounds are exact
         instants on `Timestamp`. There is no `fetch()`: `m.futures.snapshots(symbols).fetch()`
         gives the latest quote of each contract in one request.
@@ -360,15 +366,16 @@ class _Futures(Namespace):
             symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
                 Deephaven table with a `Symbol` column (streams follow its rows as they
                 change), or `dm.ALL`.
-            venue: The exchange whose flat files `history()` reads; None reads all four
-                (CME, CBOT, NYMEX, COMEX). It does not affect the stream.
+            venues: The exchanges whose flat files `history()` reads, a set of
+                `dm.FuturesVenue`, such as `{dm.FuturesVenue.CME}`; every venue (CME, CBOT,
+                NYMEX, COMEX) by default. It does not affect the stream.
 
         Returns:
             A query with the stream verbs (`blink()`, `append_only()`, `ring()`,
             `last_by()`) and `history()`.
 
-        Invalid symbols raise `ValueError`, and a `venue` that is not a `dm.FuturesVenue`
-        raises `TypeError`. No request is made.
+        Invalid symbols raise `ValueError`; `venues` raises `TypeError` if it is not a set of
+        `dm.FuturesVenue` and `ValueError` if it is empty. No request is made.
 
         Example:
             ::
@@ -379,7 +386,7 @@ class _Futures(Namespace):
                 book = m.futures.quotes("CLZ5").last_by()  # the current top of book, live
         """
         return cast(
-            "StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols, venue=venue)
+            "StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols, venues=venues)
         )
 
     @overload
@@ -389,7 +396,7 @@ class _Futures(Namespace):
         timespan: StreamSpan = Timespan.MINUTE,
         *,
         multiplier: Literal[1] = 1,
-        venue: FuturesVenue | None = None,
+        venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
     ) -> StreamHistoryQuery: ...
     @overload
     def bars(
@@ -398,7 +405,7 @@ class _Futures(Namespace):
         timespan: FuturesSpan = Timespan.MINUTE,
         *,
         multiplier: int = 1,
-        venue: FuturesVenue | None = None,
+        venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
     ) -> HistoryQuery: ...
     def bars(
         self,
@@ -406,7 +413,7 @@ class _Futures(Namespace):
         timespan: FuturesSpan = Timespan.MINUTE,
         *,
         multiplier: int = 1,
-        venue: FuturesVenue | None = None,
+        venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
     ) -> HistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
@@ -468,14 +475,16 @@ class _Futures(Namespace):
             timespan: The bar unit, a `dm.Timespan` other than `DAY`: `SECOND`, `MINUTE`
                 (the default), `HOUR`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
             multiplier: How many units one bar spans; a positive `int`, 1 by default.
-            venue: The exchange whose flat files `history()` reads; None reads all four
-                (CME, CBOT, NYMEX, COMEX). It does not affect the stream.
+            venues: The exchanges whose flat files `history()` reads, a set of
+                `dm.FuturesVenue`, such as `{dm.FuturesVenue.CME}`; every venue (CME, CBOT,
+                NYMEX, COMEX) by default. It does not affect the stream.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars, otherwise a `HistoryQuery`.
 
         `Timespan.DAY` raises `ValueError` naming `Timespan.SESSION`; a `timespan` that is not
-        a `dm.Timespan` or a `venue` that is not a `dm.FuturesVenue` raises `TypeError`; a
+        a `dm.Timespan`, or `venues` that is not a set of `dm.FuturesVenue`, raises
+        `TypeError`, and an empty `venues` `ValueError`; a
         `multiplier` that is not a positive `int` raises `TypeError` or `ValueError`; invalid
         symbols raise `ValueError`. No request is made.
 
@@ -490,7 +499,7 @@ class _Futures(Namespace):
                     "2025-10-01", "2025-10-03"
                 )
                 sessions = m.futures.bars(
-                    dm.ALL, dm.Timespan.SESSION, venue=dm.FuturesVenue.CME
+                    dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CME}
                 ).history("2025-01-02", "2025-03-31")
         """
         query = build_query(
@@ -499,7 +508,7 @@ class _Futures(Namespace):
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
-            venue=venue,
+            venues=venues,
         )
         return cast("HistoryQuery", query)
 

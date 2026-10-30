@@ -30,7 +30,7 @@ from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.futures_sessions import CHICAGO
-from deephaven_massive._datasets.history_source import HistoryWindow
+from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -48,7 +48,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._namespaces import options as options_ns
 from deephaven_massive._namespaces import reference
@@ -669,7 +669,7 @@ def test_a_list_of_dates_takes_date_items(
     fetch(session, RATINGS, filters={"date_any_of": [date(2025, 6, 2), "2025-06-03"]})
     ((_, sent_query),) = sent(fake_rest)
     assert sent_query["date.any_of"] == ["2025-06-02,2025-06-03"]
-    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes text items"):
+    with pytest.raises(ValueError, match=r"filter 'ticker_any_of' takes no dates"):
         query(session, RATINGS, filters={"ticker_any_of": [date(2025, 6, 2)]})
 
 
@@ -1661,35 +1661,40 @@ def test_row_symbols_are_canonical(
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
-    assert "RawSymbol" not in out[0]
+    assert out[0]["RawSymbol"] is None  # the default session keeps the column, null when read
     assert sent(fake_rest)[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
-    # A spelling the library cannot read fails the request by default, naming it.
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the library "
-        r"cannot read as Massive's ticker\. Set MASSIVE_UNKNOWN_SYMBOLS=warn",
-    ):
-        fetch(session, CONVERSION, params={"from": "AUD", "to": "XXX"})
+    # Under RAISE, a spelling the library cannot read fails the request, naming it.
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unreadable_symbols=dm.OnError.RAISE
+    )
+    with dm.MassiveSession(config) as strict:
+        assert "RawSymbol" not in fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]
+        with pytest.raises(
+            dm.MassiveError,
+            match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the "
+            r"library cannot read as Massive's ticker\. To keep such rows .* This is a bug in "
+            r"deephaven-massive\.",
+        ):
+            fetch(strict, CONVERSION, params={"from": "AUD", "to": "XXX"})
 
 
-def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_under_warn(
+def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_by_default(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    monkeypatch.setattr(
-        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger(symbols.__name__), limit=5)
-    )
+    fresh = BoundedLog(logging.getLogger(symbols.__name__), limit=5, level=logging.ERROR)
+    monkeypatch.setattr(symbols, "_logged_spellings", fresh)
     body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
-    )
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, symbols.__name__):
         (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
     assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
-    assert "forex.conversion: Massive sent the symbol '?'" in caplog.text
+    (record,) = [r for r in caplog.records if r.name == symbols.__name__]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage().startswith("forex.conversion: Massive sent the symbol '?'")
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
@@ -1699,8 +1704,27 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
     assert sent(fake_rest)[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
-    with pytest.raises(ValueError, match=r"^a symbol table holds 'SPX' .*use 'I:SPX'"):
+    # A row that is not Massive's ticker is skipped, so the request names only the others.
+    fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX", "I:VIX"])]))
+    assert sent(fake_rest)[1][1]["ticker.any_of"] == ["I:VIX"]
+    # A table whose rows are all bad raises rather than read nothing.
+    with pytest.raises(
+        ValueError,
+        match=r"^indices\.snapshots: no row of the symbol table is Massive's ticker, so the "
+        r"result would follow nothing: skipping 1 symbol-table value that is not Massive's "
+        r"ticker: 'SPX'; fix or delete that row$",
+    ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
+    # Under RAISE, a bad row raises at once, naming the fix.
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, noncanonical_symbols=dm.OnError.RAISE
+    )
+    with dm.MassiveSession(config) as strict:
+        bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
+        with pytest.raises(
+            ValueError, match=r"^indices\.snapshots: a symbol table holds 'SPX' .*use 'I:SPX'"
+        ):
+            fetch(strict, INDEX_SNAPSHOTS, symbols=bad)
 
 
 # --- Rows ----------------------------------------------------------------------------------------
@@ -3747,3 +3771,75 @@ def test_fetch_rows_reads_every_page_raw(
     with pytest.raises(dm.MassiveError, match="cancelled"):
         transport.fetch_rows("/futures/v1/schedules", query, bucket="futures", cancel=stopped)
     assert len(fake_rest.requests) == 3
+
+
+# --- Background reads ------------------------------------------------------------------------
+
+
+def _join_reads(m: dm.MassiveSession) -> None:
+    # Waits for every background read of the session to end.
+    for state in list(m._core._workers.values()):
+        cast("Any", state.fail).__self__.thread.join(30.0)
+
+
+def test_a_background_fetch_checks_its_parameters_with_no_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    rest = session._core.rest_transport()
+    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
+    assert isinstance(q, Query)
+    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+        q.fetch(wait=False)
+    # A crypto pair is not split by the check, which would read Massive's ticker list.
+    pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
+    rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request)
+    assert fake_rest.requests == []
+    assert session._core._workers == {}
+
+
+def test_a_background_fetch_lands_the_rows_the_read_requested(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.fetch(wait=False)
+    _join_reads(session)
+    # The read's own row says how it ended; a failure shows its error here.
+    assert session._core.diagnostics.barrier().wait(30.0)
+    (row,) = dh_arrow.to_arrow(session.streams()).to_pylist()
+    assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 1)
+    pause = threading.Event()
+    for _ in range(3000):  # the rows land on the next update cycle
+        if table.size:
+            break
+        pause.wait(0.01)
+    assert [(r["Symbol"], r["CashAmount"]) for r in rows(table)] == [("AAPL", 0.25)]
+    session.release(table)
+
+
+def test_a_background_history_checks_its_plan_with_no_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Grouped daily bars of every symbol, a symbol's bars, and a crypto pair, which the check
+    # does not split: none of them makes a request.
+    rest = session._core.rest_transport()
+    first, last = date(2025, 3, 3), date(2025, 3, 4)
+    for spec, tickers in ((BARS, dm.ALL), (BARS, ["AAPL"]), (CRYPTO_BARS, ["X:BTCUSD"])):
+        q = query(session, spec, symbols=tickers, timespan=Timespan.DAY)
+        request = dataclasses.replace(q._request, start=first, end=last)
+        window = history_window(spec, request, start=first, end=last, classes=())
+        rest.check_history(spec, request, window)
+    assert fake_rest.requests == []
+
+
+def test_a_set_stop_token_ends_a_read_before_its_first_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    rest = session._core.rest_transport()
+    stop = Cancel()
+    stop.set()
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    with pytest.raises(dm.MassiveError):
+        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop)
+    assert fake_rest.requests == []

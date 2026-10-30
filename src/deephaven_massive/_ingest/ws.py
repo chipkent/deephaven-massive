@@ -96,7 +96,7 @@ from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
-from deephaven_massive._tables.watchlist import read_symbols
+from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -1992,7 +1992,8 @@ class WsConnections:
         symbols = request.symbol_key()
         if asset_class is AssetClass.CRYPTO:
             if isinstance(symbols, SymbolTable):
-                self.resolve_pairs(read_symbols(spec, symbols.table))
+                rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
+                self.resolve_pairs(read_symbols(rule, symbols.table).symbols)
             elif isinstance(symbols, tuple):
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
@@ -2098,7 +2099,7 @@ class WsConnections:
             plan = self._plans.get((spec, channel))
         if plan is None:
             built = ChannelPlan.build(
-                core.catalog, spec, channel, unknown_symbols=core.config.unknown_symbols
+                core.catalog, spec, channel, unreadable_symbols=core.config.unreadable_symbols
             )
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)

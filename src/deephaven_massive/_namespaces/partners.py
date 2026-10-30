@@ -899,8 +899,8 @@ class _Benzinga(Namespace):
 
     def news(
         self,
-        *,
         symbols: Symbols | None = None,
+        *,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -970,7 +970,7 @@ class _Benzinga(Namespace):
 
                 from datetime import date, timedelta
 
-                q = m.partners.benzinga.news(symbols=["AAPL", "NVDA"], start="2025-06-02")
+                q = m.partners.benzinga.news(["AAPL", "NVDA"], start="2025-06-02")
                 headlines = q.fetch().view(["Timestamp", "Title", "Tickers"])
                 yesterday = date.today() - timedelta(days=1)
                 feed = m.partners.benzinga.news(start=yesterday).poll(30)

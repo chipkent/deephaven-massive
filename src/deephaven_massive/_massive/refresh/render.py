@@ -114,6 +114,7 @@ def _param_json(item: Param) -> dict[str, Json]:
         "in_path": item.in_path,
         "values": list(item.values),
         "unit": item.unit.value if item.unit else None,
+        "default": item.default,
     }
 
 
