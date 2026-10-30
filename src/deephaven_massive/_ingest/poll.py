@@ -56,7 +56,7 @@ poller the session would not stop. A stopped poller finishes a request already o
 stops at once a request still waiting for the rate governor (its stop token is the cycle's
 `Cancel`), and publishes nothing more; a failed table keeps its rows. The poller holds the
 session core only through a weak reference; the poll's record in the session keeps the session
-alive while the poll runs (`SessionCore.register_poll`).
+alive while the poll runs (`SessionCore.register_worker`).
 """
 
 from __future__ import annotations
@@ -86,7 +86,12 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
-from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
+from deephaven_massive._tables.diagnostics import (
+    StreamKind,
+    StreamRow,
+    StreamUpdate,
+    describe_symbols,
+)
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
@@ -419,12 +424,12 @@ class Poller:
         result may still use the poll; the poller stops when the poll's blink table shuts down.
         The session is alive: the poll's record keeps it in the live set until this has run.
         """
-        cast("SessionCore", self._core()).release_poll(self._stream_id)
+        cast("SessionCore", self._core()).release_worker(self._stream_id)
 
     def fail(self, error: MassiveError) -> bool:
         """Stop the poller and fail its table, once: the session closed, or a thread died.
 
-        The session's hook for the poll (`SessionCore.register_poll`), called outside every lock
+        The session's hook for the poll (`SessionCore.register_worker`), called outside every lock
         while the poll is registered, so the session is alive. The row is updated first
         (`SessionCore.fail_stream`, which keeps a `CLOSED` row as it is), then the table fails;
         a table that already failed is left alone.
@@ -814,7 +819,7 @@ def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel)
 
     Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
     thread after a failure, a gRPC thread, or Deephaven's liveness-cleanup thread), so it only
-    sets a token and updates the registry (`SessionCore.poll_shut_down`). The session is alive:
+    sets a token and updates the registry (`SessionCore.worker_shut_down`). The session is alive:
     the poll's record keeps it in the live set until this has run, and before the record
     exists the opening caller holds it.
 
@@ -824,7 +829,7 @@ def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel)
         stop: The poller's stop token.
     """
     stop.set()
-    cast("SessionCore", core_ref()).poll_shut_down(stream_id)
+    cast("SessionCore", core_ref()).worker_shut_down(stream_id)
 
 
 def _build(
@@ -913,7 +918,7 @@ def open_poll(
     Raises:
         MassiveError: If the session closed after the poll was registered but before its
             poller started (`"MassiveSession #1 is closed"`). One closed before the poll could
-            be registered raises the `MassiveError` of `SessionCore.register_poll` or
+            be registered raises the `MassiveError` of `SessionCore.register_worker` or
             `Pollers.add`.
     """
     stream_id = core.next_stream_id()
@@ -937,9 +942,10 @@ def open_poll(
     count, text = (None, "") if symbols is None else describe_symbols(symbols)
     registered = False
     try:
-        core.register_poll(
+        core.register_worker(
             StreamRow(
                 stream_id=stream_id,
+                kind=StreamKind.POLL,
                 dataset=spec.name,
                 symbol_count=count,
                 symbols=text,
@@ -959,7 +965,7 @@ def open_poll(
             poller.stop()
             pollers.discard(poller)
             if registered:
-                core.release_poll(stream_id)
+                core.release_worker(stream_id)
         finally:
             release_scope(core.exec_ctx, scope)
         raise

@@ -187,8 +187,8 @@ class Patience:
     The governor reads and charges it only under its own lock, so a read's patience must be
     used with one governor.
 
-    Its `seconds` and `spent` are read-only; only `charge` changes it, and never a patience
-    without limit, so the one `UNLIMITED` serves every governor and thread.
+    Its `seconds`, `advice`, and `spent` are read-only; only `charge` changes it, and never a
+    patience without limit, so the one `UNLIMITED` serves every governor and thread.
 
     Example:
         ::
@@ -198,15 +198,18 @@ class Patience:
                 permit = admission.acquire(read)
     """
 
-    __slots__ = ("_counted_until", "_seconds", "_spent")
+    __slots__ = ("_advice", "_counted_until", "_seconds", "_spent")
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, *, advice: str = "") -> None:
         """Start with nothing charged.
 
         Args:
             seconds: The most pause time the read waits out, in seconds; `math.inf` for none.
+            advice: One more remedy the caller knows, which ends the message of a request that
+                gives up (`RequestGovernor` adds it after its own remedies); empty for none.
         """
         self._seconds = seconds
+        self._advice = advice
         self._spent = 0.0
         # The end of the pause time already charged (monotonic): a pause several requests of
         # the read wait out together is charged once.
@@ -216,6 +219,11 @@ class Patience:
     def seconds(self) -> float:
         """The most pause time the read waits out, in seconds; `math.inf` for no limit."""
         return self._seconds
+
+    @property
+    def advice(self) -> str:
+        """The caller's remedy that ends a give-up message; empty for none."""
+        return self._advice
 
     @property
     def spent(self) -> float:
@@ -1213,7 +1221,7 @@ class RequestGovernor:
             The message: the bucket's requests and the latest refusal; when the next request
             goes, in UTC and in local time; the read's patience and what it has spent; the
             usual cause; and the remedies, the declaration only for a bucket that can be
-            declared.
+            declared, then the patience's `advice`, when it has one.
         """
         goes = datetime.fromtimestamp(self._clock.time() + state.pause_until - now, UTC)
         remedies = "retry after that time, or stop the other program"
@@ -1223,6 +1231,8 @@ class RequestGovernor:
                 "on the Basic tier, declare it Basic (rest_basic_subscriptions) so its "
                 "requests are paced, or upgrade it"
             )
+        if patience.advice:
+            remedies = f"{remedies}; {patience.advice}"
         return (
             f"Massive is refusing {state.label} with HTTP 429 (latest refusal: "
             f"{state.last_refusal}). Its next request, a probe, goes at "

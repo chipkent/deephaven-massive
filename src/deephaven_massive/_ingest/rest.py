@@ -1909,17 +1909,24 @@ class RestReader:
             raise errors[0]
 
     def plan_fetch(
-        self, spec: DatasetSpec, request: Request, symbols: NormalizedSymbols | None
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        symbols: NormalizedSymbols | None,
+        *,
+        split: CryptoSplit | None = None,
     ) -> list[tuple[RestPath, list[Call]]]:
         """Plan the requests of a `fetch()` or `poll()` cycle, path by path.
 
         Makes no request, except that the first crypto pair a path takes as two currencies
-        reads the session's crypto ticker list (`crypto_pair`).
+        reads the session's crypto ticker list (`crypto_pair`), unless `split` is given.
 
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments.
             symbols: The static symbols.
+            split: Splits a crypto pair into its currencies; None for `crypto_pair`. A check
+                that must make no request passes `_unsplit`.
 
         Returns:
             Each path the cycle reads (`fetch_paths`) with its calls; none for an empty symbol
@@ -1939,7 +1946,7 @@ class RestReader:
                 request,
                 symbols=own,
                 dates=(request.start, request.end),
-                split=self.crypto_pair,
+                split=self.crypto_pair if split is None else split,
             )
             planned.append((rest_path, calls))
         return planned
@@ -1952,6 +1959,7 @@ class RestReader:
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
+        cancel: Cancel | None = None,
         pauses_live_tables: bool = False,
     ) -> tuple[pa.Table, int]:
         """Read a dataset's fetch paths for the symbols: `fetch()`.
@@ -1966,6 +1974,8 @@ class RestReader:
             symbols: The static symbols.
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
+            cancel: A background read's stop token, which ends the read's waits when set; None
+                when only the session's close should.
             pauses_live_tables: True when the calling thread holds the update graph's lock (a
                 console command), so the read pauses every live table of the worker while it
                 runs.
@@ -1985,7 +1995,7 @@ class RestReader:
             pauses_live_tables=pauses_live_tables,
         )
         return self._read_planned(
-            spec, request, planned, record=record, executor=executor, cancel=None
+            spec, request, planned, record=record, executor=executor, cancel=cancel
         )
 
     def _read_planned(
@@ -2267,7 +2277,9 @@ class RestEndpoints:
             )
         )
 
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+    def fetch(
+        self, spec: DatasetSpec, request: Request, *, call: int, stop: threading.Event | None = None
+    ) -> Table:
         """Return every row the dataset's fetch path returns for the request, as a static table.
 
         Requests run on this thread, or for a per-symbol path on a pool of up to
@@ -2280,6 +2292,9 @@ class RestEndpoints:
                 table before this call).
             call: The call's id (`SessionCore.next_stream_id`), which names its fan-out
                 threads (`"massive #1 call-7 rest_0"`).
+            stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`),
+                which ends the read's waits when set; None when only the session's close
+                should.
 
         Returns:
             A static table in the dataset's schema.
@@ -2297,12 +2312,34 @@ class RestEndpoints:
             spec,
             request,
             symbols=request.symbols,
+            cancel=_token(stop),
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
         return self._static(spec, table)
 
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+        """Plan `fetch`'s requests with none made, so a parameter error raises now.
+
+        A background `fetch(wait=False)` calls it on the caller thread before its table
+        exists. Crypto pairs are not split (`_unsplit`): the read splits them, and a pair
+        Massive does not list fails the read's table instead.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with static symbols.
+
+        A parameter a path does not take raises the `ValueError` of `_base`.
+        """
+        self._reader("check").plan_fetch(spec, request, request.symbols, split=_unsplit)
+
     def history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
@@ -2327,6 +2364,7 @@ class RestEndpoints:
             request: The normalized arguments, with static symbols.
             window: The call's window (`history_window` in `_datasets/history_source.py`).
             call: The call's id, which names its fan-out threads, as in `fetch`.
+            stop: A background read's stop token, as `fetch` takes it.
 
         Returns:
             A static table in the dataset's schema.
@@ -2337,23 +2375,9 @@ class RestEndpoints:
         HTTP 404, its data cut short.
         """
         reader = self._reader(f"call-{call}")
-        if isinstance(request.symbols, _All):
-            rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
-            path, query = _base(spec, rest_path, request, fixed={})
-            # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
-            days = [
-                day
-                for day in partition_dates(spec, window)
-                if is_trading_day(spec.asset_class, day)
-            ]
-            calls = [Call({**path, "date": day}, query) for day in days]
-            shape = ReadShape.PER_DAY
-        else:
-            rest_path = reader.rest_path(cast("str", spec.history_path))
-            calls = _history_calls(
-                spec, rest_path, request, window=window, split=reader.crypto_pair
-            )
-            shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
+        rest_path, calls, shape = _history_plan(
+            reader, spec, request, window=window, split=reader.crypto_pair
+        )
         announce(
             self._state.client.governor,
             f"{spec.name} history",
@@ -2369,10 +2393,25 @@ class RestEndpoints:
             limit=None,
             window=window,
             remedy=_history_remedy(request),
+            cancel=_token(stop),
             patience=reader.patience(),
         )
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
         return self._static(spec, table)
+
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+        """Plan `history`'s requests with none made, so a parameter error raises now.
+
+        The `check_fetch` of a background `history(..., wait=False)` served by REST.
+
+        Args:
+            spec: The dataset; `history()` has checked that REST can serve the request.
+            request: The normalized arguments, with static symbols and the parsed bounds.
+            window: The call's window.
+
+        A parameter the path does not take raises the `ValueError` of `_base`.
+        """
+        _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
 
     def poll(
         self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
@@ -2583,6 +2622,77 @@ def _range_segments(requested: TimeRange) -> dict[str, object]:
     first = requested.start.replace(microsecond=requested.start.microsecond // 1000 * 1000)
     last = requested.end - _ONE_MICROSECOND
     return {"from": first, "to": last.replace(microsecond=last.microsecond // 1000 * 1000)}
+
+
+def _history_plan(
+    reader: RestReader,
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    window: HistoryWindow,
+    split: CryptoSplit,
+) -> tuple[RestPath, list[Call], ReadShape]:
+    """Plan a REST `history()`'s requests: the path, its calls, and how they are counted.
+
+    `dm.ALL` reads the grouped-daily path, one request per trading day of the window; any other
+    request reads the history path (`_history_calls`). Makes no request unless `split` does.
+
+    Args:
+        reader: The reader whose paths the plan names.
+        spec: The dataset.
+        request: The normalized arguments, with static symbols.
+        window: The call's window.
+        split: Splits a crypto pair into its currencies (`RestReader.crypto_pair`, or
+            `_unsplit` for a check).
+
+    Returns:
+        The path, the planned calls in result order, and the read's `ReadShape`.
+
+    A parameter the path does not take raises the `ValueError` of `_base`.
+    """
+    if isinstance(request.symbols, _All):
+        rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
+        path, query = _base(spec, rest_path, request, fixed={})
+        # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
+        days = [
+            day for day in partition_dates(spec, window) if is_trading_day(spec.asset_class, day)
+        ]
+        return rest_path, [Call({**path, "date": day}, query) for day in days], ReadShape.PER_DAY
+    rest_path = reader.rest_path(cast("str", spec.history_path))
+    calls = _history_calls(spec, rest_path, request, window=window, split=split)
+    shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
+    return rest_path, calls, shape
+
+
+def _unsplit(symbol: str) -> tuple[str, str]:
+    """Stand in for a crypto pair's split in a plan that must make no request.
+
+    `check_fetch` and `check_history` plan requests only to raise their parameter errors at
+    the call; the read itself splits each pair by Massive's ticker list.
+
+    Args:
+        symbol: A canonical crypto ticker, unused.
+
+    Returns:
+        Two empty currencies.
+    """
+    del symbol
+    return "", ""
+
+
+def _token(stop: threading.Event | None) -> Cancel | None:
+    """Return a background read's stop token as the wire layer's `Cancel` it is.
+
+    The ports type the token as the `threading.Event` the tables layer may name;
+    `SessionClients.read_stop` makes every one a `Cancel`.
+
+    Args:
+        stop: The token, or None.
+
+    Returns:
+        The same object, typed as a `Cancel`.
+    """
+    return cast("Cancel | None", stop)
 
 
 def _history_calls(

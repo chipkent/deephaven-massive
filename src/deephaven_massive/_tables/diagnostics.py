@@ -5,8 +5,8 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
 - **connections**: one row per WebSocket connection, plus one `Transport=REST` row per resolved
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
-- **streams**: one row per stream (a live subscription with its own publisher) and per `poll()`
-  table. Keyed by `StreamId`.
+- **streams**: one row per stream (a live subscription with its own publisher), per `poll()`
+  table, and per background read (`wait=False`), told apart by `Kind`. Keyed by `StreamId`.
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
@@ -84,6 +84,7 @@ __all__ = [
     "RateLimitPull",
     "RateLimitRow",
     "RateLimitState",
+    "StreamKind",
     "StreamRow",
     "StreamState",
     "StreamUpdate",
@@ -112,16 +113,36 @@ class ConnectionState(StrEnum):
     CLOSED = "CLOSED"
 
 
+class StreamKind(StrEnum):
+    """The `Kind` of a row of `m.streams()`: what feeds the table the row describes.
+
+    Attributes:
+        STREAM: A WebSocket stream, shared by every live verb of an equal query.
+        POLL: A `poll()` table, which re-reads a REST dataset on an interval.
+        READ: A background read, `fetch(wait=False)` or `history(..., wait=False)`, whose
+            table fills once, when its download completes.
+    """
+
+    STREAM = "stream"
+    POLL = "poll"
+    READ = "read"
+
+
 class StreamState(StrEnum):
     """The `State` of a row of `m.streams()`.
 
+    `RUNNING` is a stream or `poll()` table that publishes. A background read is `LOADING`
+    while it downloads and `DONE` once its rows have landed; `DONE` is final, like `FAILED`.
     `RELEASED` means the library holds no result of the stream any more; the stream keeps
-    publishing until its blink table dies (a derived table or an open panel may hold it).
-    `FAILED` can follow `RUNNING` or `RELEASED`; a failed stream's row keeps `FAILED` when its
-    last result is released.
+    publishing until its blink table dies (a derived table or an open panel may hold it), and a
+    read released while loading keeps loading for such a table, becoming `DONE` if its rows
+    land. `FAILED` can follow `RUNNING`, `LOADING`, or `RELEASED`; a failed stream's row keeps
+    `FAILED` when its last result is released.
     """
 
     RUNNING = "RUNNING"
+    LOADING = "LOADING"
+    DONE = "DONE"
     FAILED = "FAILED"
     RELEASED = "RELEASED"
     CLOSED = "CLOSED"
@@ -196,6 +217,7 @@ STREAMS: Final = Schema(
         Column(name, column_type)
         for name, column_type in (
             ("StreamId", _L),
+            ("Kind", _S),
             ("Dataset", _S),
             ("SymbolCount", _I),
             ("Symbols", _S),
@@ -300,17 +322,19 @@ class StreamRow:
     """One row of `m.streams()`. Timestamps are epoch nanoseconds; None is null.
 
     Attributes:
-        stream_id: The stream's identifier (the key).
+        stream_id: The stream's identifier (the key); a background read's is its call id.
+        kind: What feeds the table: a stream, a `poll()` table, or a background read.
         dataset: The dataset name, such as `"stocks.trades"`.
         symbol_count: How many symbols the stream covers; null for `dm.ALL` and reactive
             tables until the transport fills it in.
         symbols: A truncated, readable list of the symbols.
         held_results: Results of the stream the library still holds.
         deferred: Options contracts deferred by the contract cap.
-        transport: `WS` or `REST`.
-        host: The serving host.
-        path: The cluster path.
-        rows_published: Rows published so far.
+        transport: `WS` or `REST`, or for a background read the source it reads, `REST` or
+            `FLAT_FILES`.
+        host: The serving host; null for a background read.
+        path: The cluster path; null for a background read.
+        rows_published: Rows published so far; a background read's, once its rows land.
         requests_per_cycle: REST requests per `poll()` cycle.
         state: The stream state.
         error: The failure or warning text.
@@ -321,6 +345,7 @@ class StreamRow:
     """
 
     stream_id: int
+    kind: StreamKind
     dataset: str
     symbol_count: int | None
     symbols: str
