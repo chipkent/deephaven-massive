@@ -244,7 +244,7 @@ uv run python scripts/live_run.py pack --out ~/massive-live   # writes live-resu
 
 Each group runs in a child process, with the probed plans in `MASSIVE_LIVE_PLANS`, the
 library's debug log in the attempt's folder (`<group>/<date>-<n>/debug.log`), and a pytest
-plugin (`tests/_live/outcomes.py`) that records each test's outcome as it runs, so a crash
+plugin (`tests/_live/live_run/outcomes.py`) that records each test's outcome as it runs, so a crash
 loses nothing. The raw replies come from the wire package's reply-capture hook, which hands
 over every REST body and WebSocket frame already cleaned of the key. A check that passed is not
 run again until a subscription's tier rises; a check that failed runs once more; a check

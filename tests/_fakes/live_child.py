@@ -1,6 +1,7 @@
 """A fake child process of the live-run program: pytest or a built-in group, scripted by a test.
 
-The live-run program (`tests/_live/live_run.py`) runs every group in a child process: pytest
+The live-run program (`tests/_live/live_run/commands.py`) runs every group in a child process:
+pytest
 with the outcomes plugin, or its own script's `_group` command. Its tests must never run the
 real live suites, which would call Massive, so they point the program's interpreter at a
 wrapper that runs this file instead, with the same arguments. It does what the test scripts in

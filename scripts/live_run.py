@@ -57,7 +57,7 @@ def main() -> int:
         Its exit status.
     """
     sys.path.insert(0, str(ROOT))
-    cli = importlib.import_module("tests._live.cli")
+    cli = importlib.import_module("tests._live.live_run.cli")
     status: int = cli.main(
         sys.argv[1:], root=ROOT, script=Path(__file__).resolve(), start_server=start_server
     )
