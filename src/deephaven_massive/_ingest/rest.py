@@ -394,8 +394,8 @@ class RestState:
         A failed read is removed before its future fails, but this check reads the future
         under the lock and looks at it after: its reader may forget and fail it in between. So
         only a list counts; a failed future gives None, and the caller then claims or waits
-        as usual (`RestReader._crypto_tickers`), where a failure reaches it as a copy and an
-        abandoned read as a retry.
+        as usual (`RestReader._crypto_tickers`). The failed read is forgotten by then, so the
+        caller claims a fresh one and reads the list itself.
 
         Returns:
             The list, or None while it is not read, is being read, or has just failed.
@@ -632,11 +632,11 @@ class RestReader:
         caller it joined; the lookup goes on for that caller and every other one still waiting.
 
         Blocks the calling thread until the lookup ends or this caller gives up; holds no lock
-        meanwhile. It leaves the governor's bucket listener behind on no path; the callback it
-        adds to the future cannot be removed, so it stays there, setting an event nobody waits
-        on once this call returns (a future cached for the session keeps one per caller that
-        waited on it). Logs the wait at DEBUG, a lookup abandoned by its maker at INFO, and
-        giving up at DEBUG: the caller raises the error.
+        meanwhile. It always removes its governor listener; the callback it adds to the future
+        cannot be removed, so it stays there, setting an event nobody waits on once this call
+        returns (a future cached for the session keeps one per caller that waited on it). Logs
+        the wait at DEBUG, a lookup abandoned by its maker at INFO, and giving up at DEBUG: the
+        caller raises the error.
 
         Args:
             future: The lookup's future, which the caller making it completes.

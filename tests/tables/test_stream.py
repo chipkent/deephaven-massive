@@ -994,7 +994,7 @@ def test_a_full_symbol_cache_starts_over_and_the_rows_still_publish(
     assert [row["Symbol"] for row in rows] == ["AAPL", "MSFT", "IBM", "AAPL"]
 
 
-def test_an_unreadable_spelling_is_warned_about_once_across_a_symbol_cache_reset(
+def test_an_unreadable_spelling_is_logged_once_across_a_symbol_cache_reset(
     massive_session: dm.MassiveSession,
     flusher: Flusher,
     monkeypatch: pytest.MonkeyPatch,
@@ -1002,11 +1002,13 @@ def test_an_unreadable_spelling_is_warned_about_once_across_a_symbol_cache_reset
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(
-        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger("t"), limit=5)
+        wire_symbols,
+        "_logged_spellings",
+        BoundedLog(logging.getLogger("t"), limit=5, level=logging.ERROR),
     )
     monkeypatch.setattr(stream, "SYMBOL_CACHE_LIMIT", 1)
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, FOREX, "C", unknown_symbols=UnknownSymbols.WARN)
+    plan = ChannelPlan.build(core.catalog, FOREX, "C", unreadable_symbols=OnError.LOG)
     opened = open_stream_tables(
         plan,
         core.catalog.dataset_schema(FOREX, raw_symbol=True),
@@ -1015,6 +1017,7 @@ def test_an_unreadable_spelling_is_warned_about_once_across_a_symbol_cache_reset
         stream_id=1,
         host="socket.test",
         path="/forex",
+        evidence="test host",
         on_shutdown=lambda: None,
         on_symbols=lambda *_: None,
     )

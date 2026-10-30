@@ -1258,6 +1258,53 @@ def test_a_failed_lookup_is_never_returned_as_known(
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        rest._AbandonedError("rate limited: the maker gave up"),
+        dm.MassiveError("the read failed: boom", status=500),
+    ],
+    ids=["abandoned", "failed"],
+)
+def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
+    *,
+    session: dm.MassiveSession,
+    snapshots: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    failure: Exception,
+) -> None:
+    # The late caller reads the claimed lookup under the lock; before it looks at it, the
+    # maker forgets the lookup and fails it. The late caller must make the lookup itself.
+    snapshots.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
+    snapshots.reply(DELISTED_TARGET, Reply(envelope([])))
+    state = cast("rest.RestEndpoints", session._core.rest_transport())._state
+    key = (AssetClass.STOCKS, ChannelFamily.TICK)
+    claimed, created = _claim(session, kind)
+    assert created
+    succeeded = host_decision.succeeded_result
+
+    def maker_fails_meanwhile(future: Future[Any] | None) -> object:
+        if future is claimed and not claimed.done():
+            if kind == "crypto":
+                state.forget_crypto()
+            else:
+                state.hosts.forget_host(key, claimed)
+            claimed.set_exception(failure)
+        return succeeded(future)
+
+    monkeypatch.setattr(rest, "succeeded_result", maker_fails_meanwhile)
+    monkeypatch.setattr(host_decision, "succeeded_result", maker_fails_meanwhile)
+    result = _lookup(session, kind)()
+    assert claimed.done()  # the race really ran
+    if kind == "crypto":
+        assert result == ("DOT", "USD")
+    else:
+        assert isinstance(result, HostDecision)
+        assert result.host == "delayed.massive.com"
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
 def test_an_interrupt_before_a_lookup_leaves_nothing_claimed(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
