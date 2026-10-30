@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, SupportsIndex, overload
 
 import pytest
 
@@ -18,6 +18,7 @@ from deephaven_massive._massive.rest.response import (
     http_error,
 )
 from deephaven_massive._massive.spec.types import DriftReport, RestPath
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -333,6 +334,29 @@ def test_an_http_error_without_a_message_quotes_200_characters_of_the_body(data:
 def test_an_http_error_with_an_empty_or_undecodable_body() -> None:
     assert str(http_error(503, b"", _REQUEST)).endswith(": an empty body")
     assert str(http_error(503, b"\xffoops", _REQUEST)).endswith(": �oops")
+
+
+def test_an_http_error_decodes_only_the_bytes_its_excerpt_can_need() -> None:
+    sliced: list[object] = []
+
+    class Recording(bytes):
+        """A body that records how it is sliced."""
+
+        @overload
+        def __getitem__(self, key: SupportsIndex, /) -> int: ...
+
+        @overload
+        def __getitem__(self, key: slice, /) -> bytes: ...
+
+        @override
+        def __getitem__(self, key: SupportsIndex | slice, /) -> int | bytes:
+            sliced.append(key)
+            return super().__getitem__(key)
+
+    body = "\U0001f600".encode() * 300  # 4 bytes a character, the most UTF-8 needs
+    error = http_error(502, Recording(body), _REQUEST)
+    assert sliced == [slice(None, 800)]  # 200 characters of 4 bytes, never the whole body
+    assert str(error).endswith(": " + "\U0001f600" * 200)
 
 
 def test_an_error_keeps_a_numeric_request_id_as_text() -> None:

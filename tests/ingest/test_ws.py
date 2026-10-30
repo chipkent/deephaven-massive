@@ -1770,6 +1770,41 @@ def test_a_move_awaits_its_streams_until_the_hand_over(
     custom_session.session.release(result)
 
 
+def test_a_close_during_a_move_leaves_the_old_connection_to_its_hand_over(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    # Between the move and the hand-over the old connection is out of the registry and holds
+    # no lease, so the session's close neither closes nor joins it. The close takes the stream
+    # off the successor and closes that; the hand-over then finds no stream to move and closes
+    # the old connection, which ends by itself.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    result = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    custom_session.subscribed("T.ESZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        held.set()
+        assert release.wait(TIMEOUT)
+
+    assert old.post(hold)  # the old loop is busy: the hand-over waits behind it
+    try:
+        assert held.wait(TIMEOUT)
+        decision = HostDecision("delayed.test", Recency.DELAYED, "server verdict: x")
+        custom_session.connections.group._move(old, decision)
+        successor = custom_session.connection("wss://delayed.test/futures")
+        custom_session.close()
+        assert successor.join(0)  # the close closed and joined the successor
+        assert not old.closing  # and left the old connection to its hand-over
+    finally:  # a failed check must not leave the old loop held
+        release.set()
+    assert old.join(TIMEOUT)
+    with custom_session.connections.group.lock:
+        assert not successor.awaiting
+    del result
+
+
 def test_a_failed_connection_is_not_moved(make_ws_session: Callable[..., WsSession]) -> None:
     custom_session = make_ws_session(decide=unknown_futures)
     result = custom_session.query(FUTURES, ["ESZ5"]).blink()
@@ -2309,7 +2344,7 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
     # the close takes the session's leases. The callback is held here until the close is done,
     # so the close always finds the lease. (Had the callback come first, nothing would close the
     # connection but its idle close; in the library only a fatal failure retires a connection
-    # this way, and the failure ends the connection by itself.)
+    # that still carries a lease, and the failure ends the connection by itself.)
     shut_down = ws_session.connections._shut_down
     lock = threading.Lock()
     held: list[int] = []
@@ -2330,7 +2365,7 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
         connection, lambda: ws_session.connections.group.retire(connection, idle=False)
     )
     ws_session.close()
-    assert connection.join(TIMEOUT)
+    assert connection.join(0)  # the close joined it
     with lock:  # a callback held so far is passed on now, and a later one goes straight through
         holding = False
         late = list(held)

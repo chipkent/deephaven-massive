@@ -1178,7 +1178,8 @@ def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
     until(lambda: dh_to_pylist(watch) == [])
     next_cycle(clock)
     until(lambda: symbols_of(table, dh_to_pylist) == [])
-    assert not table.j_table.isFailed()
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
 
 
 def test_the_path_column_names_the_paths_static_symbols_read(
@@ -1400,7 +1401,8 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     assert isinstance(q, Query)
     table = q.poll(60, mode=mode)
     until(lambda: sorted(row["Id"] for row in dh_to_pylist(table)) == ["a", "b"])
-    assert not table.j_table.isFailed()
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
     (found,) = streams_of(feed_session, dh_to_pylist)
     assert (found["State"], found["RowsPublished"]) == ("RUNNING", 2)
 
@@ -1496,7 +1498,8 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
         assert m._core.diagnostics.barrier().wait(30.0)
         assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
-        assert not table.j_table.isFailed()
+        failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+        assert not failed
 
 
 def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:

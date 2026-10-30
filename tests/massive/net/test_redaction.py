@@ -101,6 +101,14 @@ def test_the_redactor_finds_a_secret_spelled_by_json_escapes(kind: type) -> None
     assert json.loads(cleaned) == {"error": "bad key ***", "key": ["***", 1]}
 
 
+def test_the_redactor_cleans_a_bytearray_and_leaves_a_clean_one_uncopied() -> None:
+    clean = bytearray(b'{"status":"OK"}')
+    assert Redactor(PLANTED_KEY).received(clean) is clean
+    for spelled in (PLANTED_KEY, ESCAPED_KEY):
+        data = bytearray(f'{{"error":"bad key {spelled}"}}'.encode())
+        assert json.loads(Redactor(PLANTED_KEY).received(data)) == {"error": "bad key ***"}
+
+
 def test_the_redactor_passes_on_escapes_that_spell_no_secret_character() -> None:
     # The escape spells `é`, a character of no secret: the body is not searched further.
     data = b'{"text":"caf\\u00e9","n":1}'

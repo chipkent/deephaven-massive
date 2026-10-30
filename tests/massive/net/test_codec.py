@@ -72,8 +72,10 @@ def test_loads_delegates_to_orjson_when_selected(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.usefixtures("stdlib")
-@pytest.mark.parametrize("data", [VALID, VALID.decode("utf-8")], ids=["bytes", "str"])
-def test_stdlib_decodes_bytes_and_text(data: bytes | str) -> None:
+@pytest.mark.parametrize(
+    "data", [VALID, bytearray(VALID), VALID.decode("utf-8")], ids=["bytes", "bytearray", "str"]
+)
+def test_stdlib_decodes_bytes_and_text(data: bytes | bytearray | str) -> None:
     assert codec.loads(data) == VALID_DECODED
 
 
@@ -163,6 +165,12 @@ def test_stdlib_rejects_a_document_one_level_too_deep(as_bytes: bool) -> None:
     text = _nested(513)
     with pytest.raises(ValueError, match="JSON nests deeper than 512 arrays and objects"):
         codec.loads(text.encode() if as_bytes else text)
+
+
+@pytest.mark.usefixtures("stdlib")
+def test_stdlib_checks_the_depth_of_a_bytearray() -> None:
+    with pytest.raises(ValueError, match="JSON nests deeper than 512 arrays and objects"):
+        codec.loads(bytearray(_nested(513).encode()))
 
 
 @pytest.mark.usefixtures("stdlib")
