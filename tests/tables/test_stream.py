@@ -272,37 +272,73 @@ def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink
     return opened.sink, opened.handle.blink
 
 
+def shared_batch(plan: ChannelPlan, rows: list[dict[str, object]]) -> stream.SharedBatch:
+    # A flush's batch of the rows, as the flusher shares it among its streams.
+    converted = plan.convert(rows, {}, arrived=arrivals(rows))
+    return stream.SharedBatch(to_table(converted.batch), converted)
+
+
 def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.MassiveSession) -> None:
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
-    converted = plan.convert([trade("AAPL"), trade("MSFT")], {}, arrived=[ARRIVED] * 2)
-    batch = to_table(converted.batch)
+    batch = shared_batch(plan, [trade("AAPL"), trade("MSFT"), trade("IBM")])
     every, _ = make_sink(core, ALL)
-    assert every._select(batch, converted) is batch
+    assert every._select(batch) is batch.table
     assert every.receives(None)
-    disjoint, _ = make_sink(core, ("IBM",))
-    assert disjoint._select(batch, converted) is None  # no filter: it holds no batch symbol
-    superset, _ = make_sink(core, ("AAPL", "IBM", "MSFT"))
-    assert superset._select(batch, converted) is batch  # no filter: it holds them all
-    some, _ = make_sink(core, ("AAPL",))
-    selected = some._select(batch, converted)
+    disjoint, _ = make_sink(core, ("SPY",))
+    assert disjoint._select(batch) is None  # no filter: it holds no batch symbol
+    superset, _ = make_sink(core, ("AAPL", "IBM", "MSFT", "SPY"))
+    assert superset._select(batch) is batch.table  # no filter: it holds them all
+    assert batch._partition is None  # no stream so far needed one symbol's rows
+    some, _ = make_sink(core, ("AAPL", "MSFT", "SPY"))
+    selected = some._select(batch)  # two of the batch's three symbols: a filter
     assert selected is not None
-    assert selected.size == 1
+    assert selected.size == 2
     cached = some._filter
-    assert some._select(batch, converted) is not None
+    assert some._select(batch) is not None
     assert some._filter is cached  # the symbols did not change: the filter is reused
     assert some.receives("AAPL")
     assert not some.receives(None)
-    some.set_symbols(frozenset({"AAPL", "MSFT"}))
-    assert some._select(batch, converted) is batch
+    some.set_symbols(frozenset({"AAPL", "MSFT", "IBM"}))
+    assert some._select(batch) is batch.table
     some.set_symbols(frozenset())
-    assert some._select(batch, converted) is None
-    nameless = plan.convert([trade("AAPL"), trade("not a symbol")], {}, arrived=[ARRIVED] * 2)
-    with_null = to_table(nameless.batch)
-    some.set_symbols(frozenset({"AAPL"}))
-    filtered = some._select(with_null, nameless)  # a null Symbol row needs the filter
+    assert some._select(batch) is None
+    # A session that keeps unreadable symbols (`WARN`) gives their rows a null Symbol: a stream
+    # that holds every readable symbol of the batch still needs the filter to leave them out.
+    warned = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.WARN)
+    nameless = shared_batch(warned, [trade("AAPL"), trade("MSFT"), trade("not a symbol")])
+    assert nameless.converted.null_symbols
+    some.set_symbols(frozenset({"AAPL", "MSFT"}))
+    filtered = some._select(nameless)
     assert filtered is not None
-    assert filtered.size == 1
+    assert filtered.size == 2
+
+
+def test_streams_of_one_batch_symbol_share_one_partition(
+    massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # A stream that holds one of the batch's symbols reads that symbol's rows from a partition
+    # of the batch built once per flush, not a filter of its own; arrival order is kept.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
+    rows = [trade("AAPL", 1), trade("MSFT", 2), trade("AAPL", 3), trade("not a symbol", 4)]
+    batch = shared_batch(plan, rows)
+    aapl, _ = make_sink(core, ("AAPL", "SPY"))  # one batch symbol among others it holds
+    msft, _ = make_sink(core, ("MSFT",))
+    aapl_rows = aapl._select(batch)
+    partition = batch._partition
+    assert partition is not None
+    msft_rows = msft._select(batch)
+    assert batch._partition is partition  # the second stream reuses the first one's partition
+    assert aapl._filter is None
+    assert msft._filter is None
+    assert aapl_rows is not None
+    assert msft_rows is not None
+    assert [(r["Symbol"], r["Price"]) for r in dh_to_pylist(aapl_rows)] == [
+        ("AAPL", 1.0),
+        ("AAPL", 3.0),
+    ]
+    assert [(r["Symbol"], r["Price"]) for r in dh_to_pylist(msft_rows)] == [("MSFT", 2.0)]
 
 
 def test_a_failed_sink_publishes_nothing_and_fails_once(
@@ -310,13 +346,12 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
 ) -> None:
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
-    converted = plan.convert([trade("AAPL")], {}, arrived=[ARRIVED])
-    batch = to_table(converted.batch)
+    batch = shared_batch(plan, [trade("AAPL")])
     sink, _ = make_sink(core, ALL)
-    assert sink.publish(batch, converted) == 1
+    assert sink.publish(batch) == 1
     assert sink.fail(MassiveError("refused"))
     assert not sink.fail(MassiveError("again"))
-    assert sink.publish(batch, converted) == 0
+    assert sink.publish(batch) == 0
     assert sink.rows_published == 1
 
 
@@ -941,9 +976,9 @@ def test_benchmark_fan_out(
 
     def shared() -> None:
         converted = plan.convert(rows, {}, arrived=arrivals(rows))
-        table = dataset_table(converted.batch, plan.date_columns)
+        batch = stream.SharedBatch(dataset_table(converted.batch, plan.date_columns), converted)
         for sink in sinks:
-            sink.publish(table, converted)
+            sink.publish(batch)
 
     def grouped() -> None:
         buckets: dict[object, list[dict[str, object]]] = {}
