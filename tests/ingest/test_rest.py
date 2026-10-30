@@ -3489,14 +3489,10 @@ def test_a_background_fetch_lands_the_rows_the_read_requested(
     assert isinstance(q, Query)
     table = q.fetch(wait=False)
     _join_reads(session)
-    # The read's own row says how it ended; a failure shows its error here.
-    assert session._core.diagnostics.barrier().wait(30.0)
-    (row,) = dh_arrow.to_arrow(session.streams()).to_pylist()
+    # The read's own row says how it ended; a failure shows its error here. It shows DONE
+    # only after the update cycle that added the rows, so the table holds them from then on.
+    (row,) = rows_when(session.streams(), lambda rows: rows[0]["State"] != "LOADING")
     assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 1)
-    # The rows land on an update cycle of their own. The wait checks a consistent snapshot:
-    # a size read while that cycle runs already counts the rows, but a snapshot taken then
-    # still shows the table before the cycle, with none.
-    rows_when(table, bool)
     assert [(r["Symbol"], r["CashAmount"]) for r in rows(table)] == [("AAPL", 0.25)]
     session.release(table)
 
