@@ -771,12 +771,12 @@ size_and_return = facts.natural_join(returns_3m, on=["Symbol"], joins=["Return3m
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
-aapl_daily = m.stocks.bars("AAPL", dm.Timespan.DAY).history(year_ago)
+yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
+year_ago = yesterday - timedelta(days=364)
+aapl_daily = m.stocks.bars("AAPL", dm.Timespan.DAY).history(year_ago, yesterday)
 dividends = (
-    m.stocks.dividends("AAPL")
+    m.stocks.dividends("AAPL", start=year_ago, end=yesterday)
     .fetch()
-    .where(f"ExDividendDate >= `{year_ago}`")
     .view(["Symbol", "ExDividendDate", "CashAmount"])
 )
 dividend_yield = dividends.aj(

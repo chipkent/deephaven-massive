@@ -116,6 +116,24 @@ def image_commit(docker_image: str, run: Callable[[list[str]], str]) -> str:
     return "" if text == "<no value>" else text
 
 
+def parse_inspection(text: str) -> dict[str, object] | None:
+    """Read what `INSPECT_CONSOLE` printed, as the last line of the command's output.
+
+    Args:
+        text: The command's output: what the inspection printed, or an error, such as a
+            missing Python or a Docker daemon that is not running.
+
+    Returns:
+        The parsed object; None when the output is empty or its last line is not a JSON object.
+    """
+    lines = text.strip().splitlines()
+    try:
+        found = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
+
+
 def console_items(
     found: Mapping[str, object] | None, *, checkout_commit: str, where: str
 ) -> list[Item]:
@@ -212,11 +230,9 @@ def check_setup(
     items.append(tag_item(root, run))
     where = docker_image or str(console_python)
     text = run(console_command(console_python, docker_image)).strip()
-    found: dict[str, object] | None = None
-    if text:
-        found = json.loads(text.splitlines()[-1])
-        if docker_image:
-            found["commit"] = image_commit(docker_image, run)
+    found = parse_inspection(text)
+    if found is not None and docker_image:
+        found["commit"] = image_commit(docker_image, run)
     items.extend(console_items(found, checkout_commit=str(environment["commit"]), where=where))
     items.extend(probe_items(result))
     return items

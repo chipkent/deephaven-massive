@@ -16,7 +16,7 @@ import weakref
 from datetime import date, datetime, timedelta
 from datetime import time as day_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -429,3 +429,41 @@ def test_summary_line_names_the_first_line_of_an_error() -> None:
 def test_tables_of_skips_private_names_and_other_values() -> None:
     table: Table = empty_table(1)
     assert examples.tables_of({"t": table, "_hidden": table, "n": 1}) == {"t": table}
+
+
+class BrokenTable:
+    """Stands in for a refreshing table that failed: reading it raises."""
+
+    def head(self, _rows: int) -> Table:
+        raise RuntimeError("the stream failed: K-2\nmore detail")
+
+
+def test_save_tables_records_a_table_it_cannot_read_and_goes_on(tmp_path: Path) -> None:
+    tables = {"broken": cast("Table", BrokenTable()), "fine": empty_table(1)}
+    unsaved = examples.save_tables(tables, tmp_path, SecretFilter(("K-2",)))
+    assert unsaved == ["broken: RuntimeError: the stream failed: K-2"]
+    assert (tmp_path / "broken.error.txt").read_text() == (
+        "broken: RuntimeError: the stream failed: ***\n"
+    )
+    assert (tmp_path / "fine.csv").exists()
+
+
+def test_run_examples_names_a_table_it_could_not_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "examples"
+    folder.mkdir()
+    _write(folder, "01_a.py", "from deephaven import empty_table\nt = empty_table(1)\n")
+    _write(folder, "02_b.py", "pass\n")
+    monkeypatch.setattr(examples, "save_tables", lambda tables, _f, _s: [f"{n}: X" for n in tables])
+    lines: list[str] = []
+    examples.run_examples(
+        examples.example_files(folder),
+        tmp_path / "out",
+        secrets=SecretFilter(()),
+        echo=lines.append,
+        wait=lambda _namespace: True,
+    )
+    assert "  table not saved: t: X" in lines
+    assert (tmp_path / "out" / "01_a.txt").read_text() == "\ntable not saved: t: X"
+    assert lines[-1].startswith("02_b.py: passed")

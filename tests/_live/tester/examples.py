@@ -14,7 +14,9 @@ For each example it writes, under the output folder:
 
 - `<example>.txt`: what the example printed, then its error, if any;
 - `tables/<example>/<variable>.csv`: the first `TABLE_ROWS` rows of each table the example
-  created or replaced;
+  created or replaced, or `<variable>.error.txt` for a table that could not be read, such as
+  a refreshing table that failed after its example returned, which the example's text and
+  the progress lines also name;
 - `summary.txt`: one line per example, with its outcome and how long it took.
 
 Every text it writes passes through the secret filter (`SecretFilter.clean`). An example
@@ -253,18 +255,33 @@ def tables_of(namespace: dict[str, Any]) -> dict[str, Table]:
     return {n: v for n, v in namespace.items() if isinstance(v, Table) and not n.startswith("_")}
 
 
-def save_tables(tables: dict[str, Table], folder: Path, secrets: SecretFilter) -> None:
+def save_tables(tables: dict[str, Table], folder: Path, secrets: SecretFilter) -> list[str]:
     """Save the first rows of each table as a CSV file, cleaned of the secrets.
+
+    A table that cannot be read, such as a refreshing table that failed after its example
+    returned, gets `<variable>.error.txt` with the error's first line instead, and the run
+    goes on.
 
     Args:
         tables: The tables, by variable name.
         folder: Where the files go, created if missing.
         secrets: The secrets to keep out of the files.
+
+    Returns:
+        One line per table that could not be saved: its name and the error's first line.
     """
+    unsaved: list[str] = []
     for name, table in tables.items():
         folder.mkdir(parents=True, exist_ok=True)
-        text = to_pandas(table.head(TABLE_ROWS).snapshot()).to_csv(index=False)
-        (folder / f"{name}.csv").write_text(secrets.clean(text), encoding="utf-8")
+        try:
+            text = to_pandas(table.head(TABLE_ROWS).snapshot()).to_csv(index=False)
+        except Exception as failure:  # noqa: BLE001 - a failed table is recorded, not fatal
+            line = f"{name}: {type(failure).__name__}: {str(failure).strip().partition(chr(10))[0]}"
+            (folder / f"{name}.error.txt").write_text(secrets.clean(line) + "\n", encoding="utf-8")
+            unsaved.append(line)
+        else:
+            (folder / f"{name}.csv").write_text(secrets.clean(text), encoding="utf-8")
+    return unsaved
 
 
 @contextlib.contextmanager
@@ -327,11 +344,14 @@ def run_examples(
             echo(f"{path.name}: running")
             outcome, printed = run_example(path, namespace, lock=lock)
             outcomes.append(outcome)
-            text = printed + (f"\n{outcome.error}" if outcome.error else "")
-            (out / f"{path.stem}.txt").write_text(secrets.clean(text), encoding="utf-8")
             made = {n: t for n, t in tables_of(namespace).items() if before.get(n) is not t}
-            save_tables(made, out / "tables" / path.stem, secrets)
+            unsaved = save_tables(made, out / "tables" / path.stem, secrets)
+            text = printed + (f"\n{outcome.error}" if outcome.error else "")
+            text += "".join(f"\ntable not saved: {line}" for line in unsaved)
+            (out / f"{path.stem}.txt").write_text(secrets.clean(text), encoding="utf-8")
             echo(secrets.clean(summary_line(outcome)))
+            for line in unsaved:
+                echo(secrets.clean(f"  table not saved: {line}"))
     lines = [summary_line(o) for o in outcomes]
     (out / "summary.txt").write_text(secrets.clean("\n".join(lines)) + "\n", encoding="utf-8")
     return outcomes

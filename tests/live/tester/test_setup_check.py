@@ -171,3 +171,27 @@ def test_check_setup_fails_when_the_console_cannot_run(tmp_path: Path) -> None:
     )
     console = next(i for i in items if i.name == "console")
     assert console.verdict == FAIL
+
+
+def test_parse_inspection_reads_only_a_json_object_on_the_last_line() -> None:
+    assert setup_check.parse_inspection(f"noise\n{_console()}\n") == json.loads(_console())
+    assert setup_check.parse_inspection("") is None
+    assert setup_check.parse_inspection("Cannot connect to the Docker daemon\n") is None
+    assert setup_check.parse_inspection("[1, 2]\n") is None
+
+
+def test_check_setup_fails_the_console_item_on_an_error_instead_of_raising(
+    tmp_path: Path,
+) -> None:
+    traceback = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'json'\n"
+    items = setup_check.check_setup(
+        root=ROOT,
+        folder=tmp_path,
+        environ={"MASSIVE_API_KEY": "k"},
+        console_python=None,
+        docker_image="massive-test",
+        run=Commands({"-c": traceback}),
+        probe=lambda: ACCEPTED,
+    )
+    console = next(i for i in items if i.name == "console")
+    assert console.verdict == FAIL
