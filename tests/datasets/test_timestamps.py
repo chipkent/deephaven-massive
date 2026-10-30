@@ -17,7 +17,6 @@ from deephaven_massive._datasets.timestamps import (
     masked_instants,
     mismatch_message,
     time_unit,
-    to_epoch_ns,
     to_epoch_ns_array,
 )
 from deephaven_massive._errors import MassiveError
@@ -40,6 +39,16 @@ NANOS = SECONDS * 10**9
 
 def ints(*values: int | None) -> pa.Array:
     return pa.array(values, pa.int64())
+
+
+def one(label: str, unit: TimeUnit, value: int) -> int:
+    """Convert one epoch value through the column routine.
+
+    Returns:
+        The nanoseconds.
+    """
+    nanos: int = to_epoch_ns_array(label, unit, ints(value))[0].as_py()
+    return nanos
 
 
 # --- Units -----------------------------------------------------------------------------------
@@ -76,7 +85,8 @@ def test_every_generated_epoch_has_a_unit_of_the_routine() -> None:
         for found in sources(transport).values():
             for field in found.fields:
                 if field.wire_type is WireType.EPOCH:
-                    assert time_unit(found, field) in set(TimeUnit)
+                    assert field.unit is not None, (found.key, field.wire_key)
+                    time_unit(found, field)
 
 
 def test_the_fixed_units_are_the_wire_units() -> None:
@@ -87,10 +97,10 @@ def test_the_fixed_units_are_the_wire_units() -> None:
 
 
 def test_every_fixed_unit_scales_to_nanoseconds() -> None:
-    assert to_epoch_ns("x.s", S, SECONDS) == NANOS
-    assert to_epoch_ns("x.ms", MS, SECONDS * 10**3) == NANOS
-    assert to_epoch_ns("x.us", US, SECONDS * 10**6) == NANOS
-    assert to_epoch_ns("x.ns", NS, NANOS) == NANOS
+    assert one("x.s", S, SECONDS) == NANOS
+    assert one("x.ms", MS, SECONDS * 10**3) == NANOS
+    assert one("x.us", US, SECONDS * 10**6) == NANOS
+    assert one("x.ns", NS, NANOS) == NANOS
 
 
 def test_fmv_rule_classifies_at_the_threshold(
@@ -99,16 +109,16 @@ def test_fmv_rule_classifies_at_the_threshold(
     monkeypatch.setattr(_log_limits, "_logged", set())
     with caplog.at_level(logging.INFO, logger="deephaven_massive._datasets.timestamps"):
         # The documentation sample, 13 digits: milliseconds.
-        assert to_epoch_ns("stocks.fmv.t", FMV, 1678220098130) == 1678220098130 * 10**6
-        assert to_epoch_ns("stocks.fmv.t", FMV, NANOS) == NANOS
+        assert one("stocks.fmv.t", FMV, 1678220098130) == 1678220098130 * 10**6
+        assert one("stocks.fmv.t", FMV, NANOS) == NANOS
     detected = [r.getMessage() for r in caplog.records if "FMV timestamps" in r.getMessage()]
     assert detected == ["FMV timestamps detected in ms (magnitude rule)"]
     # The threshold itself is nanoseconds (1973, so out of bounds); just below it is
     # milliseconds, which overflows.
     with pytest.raises(MassiveError, match=rf"{FMV_NS_THRESHOLD} ms\|ns is outside 1990 to 2100"):
-        to_epoch_ns("stocks.fmv.t", FMV, FMV_NS_THRESHOLD)
+        one("stocks.fmv.t", FMV, FMV_NS_THRESHOLD)
     with pytest.raises(MassiveError, match=rf"{FMV_NS_THRESHOLD - 1} ms overflows"):
-        to_epoch_ns("stocks.fmv.t", FMV, FMV_NS_THRESHOLD - 1)
+        one("stocks.fmv.t", FMV, FMV_NS_THRESHOLD - 1)
 
 
 def test_fmv_rule_logs_only_a_decided_unit(
@@ -133,16 +143,16 @@ def test_array_conversions() -> None:
 def test_the_bound_includes_1990_and_all_of_2100() -> None:
     assert datetime.fromtimestamp(MIN_INSTANT_NS / 10**9, UTC) == datetime(1990, 1, 1, tzinfo=UTC)
     assert datetime.fromtimestamp(MAX_INSTANT_NS / 10**9, UTC) == datetime(2101, 1, 1, tzinfo=UTC)
-    assert to_epoch_ns("x", NS, MIN_INSTANT_NS) == MIN_INSTANT_NS
-    assert to_epoch_ns("x", NS, MAX_INSTANT_NS - 1) == MAX_INSTANT_NS - 1
+    assert one("x", NS, MIN_INSTANT_NS) == MIN_INSTANT_NS
+    assert one("x", NS, MAX_INSTANT_NS - 1) == MAX_INSTANT_NS - 1
     with pytest.raises(MassiveError, match=rf"{MIN_INSTANT_NS - 1} ns is outside 1990 to 2100"):
-        to_epoch_ns("x", NS, MIN_INSTANT_NS - 1)
+        one("x", NS, MIN_INSTANT_NS - 1)
     with pytest.raises(MassiveError, match=rf"{MAX_INSTANT_NS} ns is outside"):
-        to_epoch_ns("x", NS, MAX_INSTANT_NS)
+        one("x", NS, MAX_INSTANT_NS)
     seconds = MAX_INSTANT_NS // 10**9
-    assert to_epoch_ns("x", S, seconds - 1) == MAX_INSTANT_NS - 10**9
+    assert one("x", S, seconds - 1) == MAX_INSTANT_NS - 10**9
     with pytest.raises(MassiveError, match=rf"{seconds} s is outside"):
-        to_epoch_ns("x", S, seconds)
+        one("x", S, seconds)
 
 
 def test_milliseconds_read_as_nanoseconds_fail_the_bound() -> None:
@@ -169,14 +179,7 @@ def test_nanoseconds_read_as_milliseconds_overflow() -> None:
 
 def test_seconds_read_as_microseconds_fail_the_bound() -> None:
     with pytest.raises(MassiveError, match=rf"{SECONDS} us is outside"):
-        to_epoch_ns("x", US, SECONDS)
-
-
-def test_values_beyond_64_bits_are_rejected() -> None:
-    with pytest.raises(
-        MassiveError, match=rf"^timestamp unit mismatch for stocks\.trades\.t: {2**64} does not"
-    ):
-        to_epoch_ns(TRADES_T, MS, 2**64)
+        one("x", US, SECONDS)
 
 
 def test_nulls_pass_the_bound() -> None:
@@ -202,10 +205,6 @@ def test_the_routine_bounds_every_column() -> None:
         instants("x", NS, ints(0, 5), time_column=False)
 
 
-def test_fmv_threshold_is_ten_to_the_seventeenth() -> None:
-    assert FMV_NS_THRESHOLD == 10**17
-
-
 def test_a_unit_mismatch_is_a_massive_error() -> None:
     # Callers that catch MassiveError see it; a transport catches the subclass to name the file.
     assert issubclass(UnitMismatchError, MassiveError)
@@ -222,7 +221,7 @@ def test_the_masked_routine_reports_failing_rows_instead_of_raising() -> None:
     assert failed.to_pylist() == [False, False, False, True, True, True]  # 0 is absent there
 
 
-def test_the_masked_routine_applies_the_fmv_rule(caplog: pytest.LogCaptureFixture) -> None:
+def test_the_masked_routine_applies_the_fmv_rule() -> None:
     sent = pa.array([1_700_000_000_000, 1_700_000_000_000_000_000, 5, None], pa.int64())
     nanos, failed = masked_instants(TimeUnit.FMV_MAGNITUDE, sent, time_column=True)
     assert nanos.to_pylist() == [1_700_000_000_000_000_000] * 2 + [None, None]

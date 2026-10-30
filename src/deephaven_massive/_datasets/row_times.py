@@ -95,6 +95,7 @@ transports pass in.
 
 from __future__ import annotations
 
+import calendar
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -115,7 +116,9 @@ from deephaven_massive._datasets.dates import (
     DAY_ZONES,
     day_end,
     day_zone,
+    midnight,
 )
+from deephaven_massive._datasets.epoch import DAY_NS, epoch_instant, epoch_ns
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
     futures_session,
@@ -176,14 +179,12 @@ declared key, nor `Date` on a tick, bar, or daily-summary dataset (a vendor `dat
 name only on a dataset without the library's `Date`), and no `NAMES` entry of the refresh may
 coin one."""
 
-_DAY_NS: Final = 86_400 * 10**9
 _SECOND_NS: Final = 10**9
 _NEVER: Final = 2**62
 """An instant later than any bounded timestamp: a day whose clock never changes."""
 _INSTANT: Final = pa.timestamp("ns", tz="UTC")
 _UTC_FLAG: Final = "IsUtc"
 """The column in which a daily summary (the crypto open-close) says its times are UTC."""
-_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 _Rows = TypeVar("_Rows", pa.RecordBatch, pa.Table)
 
@@ -286,9 +287,9 @@ def _offset_ns(zone: tzinfo, ns: int) -> int:
     Returns:
         The offset; negative west of Greenwich.
     """
-    moment = _EPOCH + timedelta(microseconds=ns // 1000)
-    offset = moment.astimezone(zone).utcoffset()
-    return 0 if offset is None else offset // timedelta(microseconds=1) * 1000
+    # An aware datetime's zone always has an offset; utcoffset() is None only when naive.
+    offset = cast("timedelta", epoch_instant(ns).astimezone(zone).utcoffset())
+    return offset // timedelta(microseconds=1) * 1000
 
 
 def _day_offsets(zone: tzinfo, day: int) -> tuple[int, int, int]:
@@ -303,8 +304,8 @@ def _day_offsets(zone: tzinfo, day: int) -> tuple[int, int, int]:
         at the new offset (`_NEVER` when the clock does not change that day), and the offset at
         the day's end. The change is found to the second by bisection.
     """
-    low = day * _DAY_NS
-    high = low + _DAY_NS
+    low = day * DAY_NS
+    high = low + DAY_NS
     before, after = _offset_ns(zone, low), _offset_ns(zone, high)
     if before == after:
         return before, _NEVER, before
@@ -335,7 +336,7 @@ def _local_ns(ns: pa.Array, zone: tzinfo) -> pa.Array:
     """
     if zone is UTC:
         return ns
-    days = pc.divide(ns, _DAY_NS)
+    days = pc.divide(ns, DAY_NS)
     distinct = pc.unique(days)
     befores, changes, afters = [], [], []
     for day in distinct.to_pylist():
@@ -361,7 +362,7 @@ def _days(ns: pa.Array, zone: tzinfo) -> pa.Array:
     Returns:
         The days, `int64`; nulls stay null.
     """
-    return pc.divide(_local_ns(ns, zone), _DAY_NS)
+    return pc.divide(_local_ns(ns, zone), DAY_NS)
 
 
 def _iso(days: pa.Array) -> pa.Array:
@@ -387,30 +388,6 @@ def local_dates(ns: pa.Array, zone: tzinfo) -> pa.Array:
         The dates, `string`; nulls stay null.
     """
     return _iso(_days(ns, zone))
-
-
-def _instant(ns: int) -> datetime:
-    """Return epoch nanoseconds as an aware UTC `datetime`, to the microsecond.
-
-    Args:
-        ns: The instant; bar starts are positive, so the division floors.
-
-    Returns:
-        The instant.
-    """
-    return _EPOCH + timedelta(microseconds=ns // 1000)
-
-
-def _ns(moment: datetime) -> int:
-    """Return an aware `datetime` as epoch nanoseconds.
-
-    Args:
-        moment: The instant, a whole number of microseconds.
-
-    Returns:
-        The nanoseconds.
-    """
-    return (moment - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
 class StartRule(StrEnum):
@@ -465,27 +442,13 @@ def within(rows: _Rows, bounds: BarBounds) -> _Rows:
     if END not in names:
         return rows
     ends = rows.column(END)
-    latest = pa.scalar(_ns(bounds.latest), ends.type)
+    latest = pa.scalar(epoch_ns(bounds.latest), ends.type)
     keep = pc.fill_null(pc.less_equal(ends, latest), fill_value=True)
     if bounds.start_rule is StartRule.RANGE and START in names:
         starts = rows.column(START)
-        late = pc.greater_equal(starts, pa.scalar(_ns(bounds.earliest), starts.type))
+        late = pc.greater_equal(starts, pa.scalar(epoch_ns(bounds.earliest), starts.type))
         keep = pc.and_(keep, pc.fill_null(late, fill_value=True))
     return rows.filter(keep)
-
-
-def _midnight(day: date, zone: tzinfo) -> datetime:
-    """Return the first instant of a calendar day in a zone.
-
-    Args:
-        day: The day.
-        zone: The zone.
-
-    Returns:
-        Its midnight, aware; the calendar's own midnight, so a day around a daylight-saving
-        change keeps its length.
-    """
-    return datetime(day.year, day.month, day.day, tzinfo=zone)
 
 
 def _instants(values: list[int | None]) -> pa.Array:
@@ -511,11 +474,25 @@ class TimeRule:
     Example:
         ::
 
-            from deephaven_massive._datasets.row_times import RowTimes, TimeRule
-            from deephaven_massive._enums import AssetClass, Timespan
+            import time
 
-            rule = TimeRule("stocks.bars", RowTimes.BAR, AssetClass.STOCKS, Timespan.MINUTE, 5)
-            filled = rule.fill(batch, received=time.time_ns())  # Date, ends, insert time
+            import pyarrow as pa
+
+            from deephaven_massive._datasets.row_times import RowTimes, TimeRule
+            from deephaven_massive._enums import AssetClass
+
+            instant = pa.timestamp("ns", tz="UTC")
+            trades = pa.table(
+                {
+                    "Symbol": ["AAPL"],
+                    "Date": pa.array([None], pa.string()),
+                    "Timestamp": pa.array([1_741_016_400_000_000_000], instant),
+                    "TimestampInsert": pa.array([None], instant),
+                }
+            )
+            rule = TimeRule("stocks.trades", RowTimes.TICK, AssetClass.STOCKS)
+            filled = rule.fill(trades, received=time.time_ns())
+            assert filled.column("Date").to_pylist() == ["2025-03-03"]  # New York's day
 
     Attributes:
         dataset: The dataset, for messages.
@@ -676,8 +653,8 @@ class TimeRule:
                 ends.append(None)
                 continue
             day = date.fromisoformat(text)
-            starts.append(_ns(_midnight(day, zone)))
-            ends.append(_ns(day_end(self.asset_class, day)))
+            starts.append(epoch_ns(midnight(day, zone)))
+            ends.append(epoch_ns(day_end(self.asset_class, day)))
         index = pc.index_in(labels, value_set=distinct)
         rows = _set(rows, START, _instants(starts).take(index))
         return _set(rows, END, _instants(ends).take(index))
@@ -697,7 +674,7 @@ class TimeRule:
             return self._intraday(rows, session_dates)
         if self._futures:
             return self._futures_long(rows, timespan)
-        return self._days(rows, timespan)
+        return self._long_bars(rows, timespan)
 
     def _intraday(self, rows: _Rows, session_dates: SessionDates | None) -> _Rows:
         """Fill an intraday bar: its end is its start plus its length.
@@ -758,7 +735,7 @@ class TimeRule:
         later = pc.if_else(pc.greater(sent, computed), sent, computed)
         return pc.coalesce(later, computed)
 
-    def _days(self, rows: _Rows, timespan: Timespan) -> _Rows:
+    def _long_bars(self, rows: _Rows, timespan: Timespan) -> _Rows:
         """Fill a bar of a day or longer of a class with a day zone.
 
         Its start is moved to 00:00 of its window's first day and its end is 00:00 after its
@@ -785,12 +762,12 @@ class TimeRule:
                 ends.append(None)
                 dates.append(None)
                 continue
-            day = _instant(value).astimezone(zone).date()
+            day = epoch_instant(value).astimezone(zone).date()
             first, after = bar_days(
                 self.asset_class, day, timespan=timespan, multiplier=self.multiplier
             )
-            starts.append(_ns(_midnight(first, zone)))
-            ends.append(_ns(day_end(self.asset_class, after - timedelta(days=1))))
+            starts.append(epoch_ns(midnight(first, zone)))
+            ends.append(epoch_ns(day_end(self.asset_class, after - timedelta(days=1))))
             dates.append(day.isoformat() if single else None)
         index = pc.index_in(ns, value_set=distinct)
         rows = _set(rows, START, _instants(starts).take(index))
@@ -847,15 +824,15 @@ class TimeRule:
         session = date.fromisoformat(label)
         if timespan is not Timespan.SESSION:
             last = futures_period_last(session, timespan=timespan, multiplier=self.multiplier)
-            return _ns(futures_session_end(last))
+            return epoch_ns(futures_session_end(last))
         if self.multiplier == 1:
-            return _ns(futures_session_end(session))
+            return epoch_ns(futures_session_end(session))
         if start is None:
             return None
         # A session a holiday folded opens on the evening before the holiday, so the date its
         # `window_start` falls in can be the holiday itself: count one session more.
-        last = last_trading_day(futures_session(_instant(start)), self.multiplier + 1)
-        return _ns(futures_session_end(max(session, last)))
+        last = last_trading_day(futures_session(epoch_instant(start)), self.multiplier + 1)
+        return epoch_ns(futures_session_end(max(session, last)))
 
 
 def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:
@@ -1026,7 +1003,7 @@ serves, and for an indicator value of a day or longer, which is computed over th
 bars. The indices range's midnight in Chicago is that of its 1-day bars and of the index
 indicator samples' underlying aggregates."""
 
-_SUNDAY: Final = frozenset({6})
+_SUNDAY: Final = frozenset({calendar.SUNDAY})
 """The day a week bar must be stamped on, in every class: the Sunday Massive starts its week on
 (00:00 UTC for forex and crypto, 00:00 New York time for stocks, options, and indices)."""
 
@@ -1184,16 +1161,16 @@ def day_starts(
             starts.append(None)
             unexpected.append(False)
             continue
-        local = _instant(value).astimezone(zone)
+        local = epoch_instant(value).astimezone(zone)
         day = local.date()
         on_day = (not weekdays or day.weekday() in weekdays) and (
             not months or (day.day == 1 and day.month in months)
         )
         unexpected.append(not on_day or _millisecond_of_day(local.time()) not in accepted)
-        starts.append(_ns(datetime.combine(day, time(), zone)))
+        starts.append(epoch_ns(midnight(day, zone)))
     index = pc.index_in(ns, value_set=distinct)
     odd = pa.array(unexpected, pa.bool_()).take(index)
-    first = _instant(pc.filter(ns, odd)[0].as_py()) if pc.any(odd).as_py() else None
+    first = epoch_instant(pc.filter(ns, odd)[0].as_py()) if pc.any(odd).as_py() else None
     return pa.array(starts, pa.int64()).take(index).cast(values.type), first
 
 

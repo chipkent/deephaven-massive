@@ -419,11 +419,14 @@ def test_rest_history_problem() -> None:
     assert rest_history_problem(STOCK_TRADES, request(dm.ALL)) == every
     daily = request(dm.ALL, timespan=Timespan.DAY)
     assert rest_history_problem(STOCK_BARS, daily) is None  # the grouped-daily endpoint
-    assert rest_history_problem(INDEX_BARS, daily) is not None  # no grouped-daily endpoint
+    # No grouped-daily endpoint, or bars it does not serve: dm.ALL needs explicit symbols.
+    index_every = "indices.bars history over REST needs explicit symbols"
+    assert rest_history_problem(INDEX_BARS, daily) == index_every
+    stock_every = "stocks.bars history over REST needs explicit symbols"
     five = request(dm.ALL, timespan=Timespan.DAY, multiplier=5)
-    assert rest_history_problem(STOCK_BARS, five) is not None
+    assert rest_history_problem(STOCK_BARS, five) == stock_every
     minute = request(dm.ALL, timespan=Timespan.MINUTE)
-    assert rest_history_problem(STOCK_BARS, minute) is not None
+    assert rest_history_problem(STOCK_BARS, minute) == stock_every
 
 
 # --- choose_source: every branch of the AUTO rule --------------------------------------------

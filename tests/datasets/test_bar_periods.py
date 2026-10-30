@@ -404,6 +404,27 @@ def test_bar_days_cover_each_period_s_window() -> None:
     )
 
 
+def test_an_index_month_keeps_its_weekend_days() -> None:
+    # An index can update at weekends: June 2024, which starts on a Saturday, is whole.
+    june = date(2024, 6, 1)
+    assert bar_days(AssetClass.INDICES, june, timespan=Timespan.MONTH, multiplier=1) == (
+        june,
+        date(2024, 7, 1),
+    )
+
+
+def test_an_index_week_bar_needs_its_whole_calendar_week() -> None:
+    # Monday to Friday holds a stock week but not an index week, which runs Sunday to Saturday.
+    weekdays = TimeRange(
+        datetime(2025, 3, 3, tzinfo=NEW_YORK), datetime(2025, 3, 8, tzinfo=NEW_YORK)
+    )
+    whole = TimeRange(datetime(2025, 3, 2, tzinfo=NEW_YORK), datetime(2025, 3, 9, tzinfo=NEW_YORK))
+    week = Timespan.WEEK
+    assert not bar_starts(AssetClass.STOCKS, weekdays, timespan=week, multiplier=1).empty
+    assert bar_starts(AssetClass.INDICES, weekdays, timespan=week, multiplier=1).empty
+    assert not bar_starts(AssetClass.INDICES, whole, timespan=week, multiplier=1).empty
+
+
 def test_futures_period_last_takes_the_later_reading() -> None:
     label = date(2024, 3, 25)
     assert futures_period_last(label, timespan=Timespan.WEEK, multiplier=1) == date(2024, 3, 29)

@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._errors import ErrorCause, MassiveError
 from deephaven_massive._log_limits import log_once
 from deephaven_massive._massive import Transport
@@ -70,7 +71,6 @@ __all__ = [
     "masked_instants",
     "mismatch_message",
     "time_unit",
-    "to_epoch_ns",
     "to_epoch_ns_array",
 ]
 
@@ -79,10 +79,9 @@ logger = logging.getLogger(__name__)
 FMV_NS_THRESHOLD: Final = 10**17
 """FMV `t` values at or above this are nanoseconds; smaller values are milliseconds."""
 
-_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
-MIN_INSTANT_NS: Final = int((datetime(1990, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
+MIN_INSTANT_NS: Final = epoch_ns(datetime(1990, 1, 1, tzinfo=UTC))
 """The earliest instant a timestamp may convert to: 1990-01-01T00:00Z, in epoch nanoseconds."""
-MAX_INSTANT_NS: Final = int((datetime(2101, 1, 1, tzinfo=UTC) - _EPOCH).total_seconds()) * 10**9
+MAX_INSTANT_NS: Final = epoch_ns(datetime(2101, 1, 1, tzinfo=UTC))
 """The first instant past the bound: 2101-01-01T00:00Z, so the whole of 2100 is inside."""
 
 _INT64_MAX: Final = 2**63 - 1
@@ -160,34 +159,6 @@ def time_unit(source: Source, field: Field) -> TimeUnit:
     if source.transport is Transport.WS and source.key.rpartition("/")[2] == _FMV_CHANNEL:
         return TimeUnit.FMV_MAGNITUDE
     return TimeUnit(field.unit.value)
-
-
-def to_epoch_ns(label: str, unit: TimeUnit, value: int) -> int:
-    """Convert one epoch value to nanoseconds.
-
-    The scalar form of `to_epoch_ns_array`, which it calls, so both forms share one checked
-    conversion and one bound.
-
-    Args:
-        label: The field, as `<dataset>.<column>`, for the error message.
-        unit: The value's unit.
-        value: The epoch integer as Massive sent it.
-
-    Returns:
-        Nanoseconds since the Unix epoch.
-
-    Raises:
-        UnitMismatchError: If `value` does not fit a 64-bit integer, overflows 64-bit
-            nanoseconds, or lies outside 1990 to 2100.
-    """
-    try:
-        values = pa.array([value], pa.int64())
-    except (OverflowError, pa.ArrowInvalid):
-        raise UnitMismatchError(
-            f"timestamp unit mismatch for {label}: {value} does not fit 64 bits"
-        ) from None
-    nanos: int = to_epoch_ns_array(label, unit, values)[0].as_py()
-    return nanos
 
 
 def to_epoch_ns_array(label: str, unit: TimeUnit, values: pa.Array) -> pa.Array:

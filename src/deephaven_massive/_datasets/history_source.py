@@ -49,7 +49,6 @@ from deephaven_massive._datasets.bar_periods import (
 )
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import (
-    DAY_ZONES,
     NEW_YORK,
     DaySpan,
     TimeRange,
@@ -61,19 +60,18 @@ from deephaven_massive._datasets.dates import (
 )
 from deephaven_massive._datasets.filters import filter_key, param_family
 from deephaven_massive._datasets.futures_sessions import (
-    CHICAGO,
     futures_session,
     futures_session_before,
     futures_session_end,
     futures_session_open,
 )
 from deephaven_massive._datasets.row_times import BarBounds, StartRule
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, HistorySource, Timespan
+from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._massive import ParamKind, Transport, source
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
     from datetime import tzinfo
 
     from deephaven_massive._config import MassiveConfig
@@ -108,14 +106,6 @@ PUBLICATION_GRACE: Final = timedelta(days=1)
 """How long after its publication time a missing file may still just be late."""
 
 _ONE_DAY: Final = timedelta(days=1)
-
-_PARTITION_ZONES: Final[Mapping[AssetClass | ClassFromPrefix, tzinfo]] = dict(
-    [*DAY_ZONES.items(), (AssetClass.FUTURES, CHICAGO), (ClassFromPrefix.ANY, NEW_YORK)]
-)
-"""The zone whose calendar dates name a class's files and start its publication clock.
-
-Futures files are named by trading session, and Massive standardizes futures data in Central
-Time. A dataset without an asset class uses New York, as `dates.bounds` does."""
 
 
 def _now() -> datetime:
@@ -316,7 +306,7 @@ def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...
     if spec.asset_class is AssetClass.FUTURES:
         first, last = futures_session(times.start), futures_session_before(times.end)
         return DaySpan(first, last).days()
-    return times.partition_dates(_PARTITION_ZONES[spec.asset_class])
+    return times.partition_dates(day_zone(spec.asset_class))
 
 
 def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | None = None) -> bool:
@@ -332,7 +322,7 @@ def published(spec: DatasetSpec, day: date, *, cutoff: time, now: datetime | Non
         True from the file's publication time on.
     """
     moment = _now() if now is None else now
-    zone = _PARTITION_ZONES[spec.asset_class]
+    zone = day_zone(spec.asset_class)
     return flat_file_published(day, now=moment, zone=zone, cutoff=cutoff)
 
 
@@ -356,7 +346,7 @@ def within_publication_grace(
         True before `publish_time(day) + PUBLICATION_GRACE`.
     """
     moment = _now() if now is None else now
-    published = publish_time(day, zone=_PARTITION_ZONES[spec.asset_class], cutoff=cutoff)
+    published = publish_time(day, zone=day_zone(spec.asset_class), cutoff=cutoff)
     return moment.astimezone(UTC) < (published + PUBLICATION_GRACE).astimezone(UTC)
 
 
@@ -403,26 +393,25 @@ def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
     return None
 
 
-def _flat_file_problems(
+def _lasting_flat_file_problems(
     spec: DatasetSpec,
     request: Request,
-    dates: Sequence[date],
     *,
     config: MassiveConfig,
-    now: datetime,
 ) -> list[str]:
-    """List every reason flat files cannot serve a request; empty when they can.
+    """List every lasting reason flat files cannot serve a request; empty when none holds.
+
+    A lasting reason does not change with time: credentials, the dataset's files, and
+    adjustment. The one reason that does, a file not yet published, is `_unpublished`.
 
     Args:
         spec: The dataset.
         request: The normalized arguments.
-        dates: The partition dates of the request (`partition_dates`).
-        config: The session's configuration (credentials and publish cutoff).
-        now: The current instant.
+        config: The session's configuration (credentials).
 
     Returns:
         One human-readable reason per violated constraint, in a fixed order: credentials, the
-        dataset's files, adjustment, publication.
+        dataset's files, adjustment.
     """
     problems = []
     if config.s3_access_key_id is None:
@@ -442,9 +431,6 @@ def _flat_file_problems(
             "history() never mixes adjusted and unadjusted prices; pass adjusted=False for "
             "the flat files"
         )
-    unpublished = _unpublished(spec, dates, config=config, now=now)
-    if unpublished is not None:
-        problems.append(unpublished)
     return problems
 
 
@@ -464,7 +450,7 @@ def _unpublished(
     Returns:
         The reason, naming the first unpublished date, or None when every file is published.
     """
-    zone = _PARTITION_ZONES[spec.asset_class]
+    zone = day_zone(spec.asset_class)
     cutoff = config.flat_file_publish_cutoff
     late = [d for d in dates if not flat_file_published(d, now=now, zone=zone, cutoff=cutoff)]
     if not late:
@@ -544,7 +530,9 @@ def choose_source(
             neither source can. The message lists every violated constraint, per source.
     """
     moment = _now() if now is None else now
-    flat = _flat_file_problems(spec, request, dates, config=config, now=moment)
+    lasting = _lasting_flat_file_problems(spec, request, config=config)
+    unpublished = _unpublished(spec, dates, config=config, now=moment)
+    flat = lasting if unpublished is None else [*lasting, unpublished]
     if requested is HistorySource.FLAT_FILES:
         if flat:
             raise ValueError(f"{spec.name} cannot be read from flat files: {'; '.join(flat)}")
@@ -561,7 +549,7 @@ def choose_source(
     many = not isinstance(request.symbols, tuple) or len(request.symbols) >= threshold
     if flat:
         # Only an unpublished file changes with time; then the call moves to flat files later.
-        later = many and flat == [_unpublished(spec, dates, config=config, now=moment)]
+        later = many and not lasting
         return SourceChoice(
             HistorySource.REST,
             f"flat files cannot serve it: {'; '.join(flat)}",

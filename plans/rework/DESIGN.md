@@ -361,6 +361,8 @@ _datasets/               dataset semantics: no network I/O, no threads, no Deeph
                          hours, no holiday calendar), for the no-frames WARNING
   bar_periods.py         intraday spans, bar periods, bar starts, days and sessions
   timestamps.py          the one epoch-unit routine (section 12), the FMV magnitude rule
+  epoch.py               the epoch, a day in nanoseconds, and the conversions between aware
+                         datetimes and epoch nanoseconds
   row_times.py           the library's time columns: Date, TimestampStart, TimestampEnd,
                          TimestampInsert; RowTimes, TimeRule, and the bar-stamp rule (section 12)
   history_source.py      the history window, partition dates, publication and its grace, REST

@@ -27,6 +27,7 @@ pure and thread-safe.
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Final
@@ -38,6 +39,7 @@ from deephaven_massive._datasets.dates import (
     day_zone,
     trades_at_weekends,
 )
+from deephaven_massive._datasets.epoch import EPOCH
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
     FUTURES_HOLIDAY_MARGIN,
@@ -76,12 +78,6 @@ dropped by their session, `Date` (Massive's `session_end_date`)."""
 _ONE_DAY: Final = timedelta(days=1)
 
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
-
-_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
-
-_SATURDAY: Final = 5
-
-_SUNDAY: Final = 6
 
 _DAYS_A_WEEK: Final = 7
 
@@ -196,7 +192,7 @@ class _Periods:
         """
         span = self.timespan
         if span is Timespan.WEEK:
-            first = 0 if self.asset_class is AssetClass.FUTURES else _SUNDAY
+            first = calendar.MONDAY if self.asset_class is AssetClass.FUTURES else calendar.SUNDAY
             return day - timedelta(days=(day.weekday() - first) % _DAYS_A_WEEK)
         if span in _PERIOD_MONTHS:
             size = _PERIOD_MONTHS[span]
@@ -272,7 +268,7 @@ class _Periods:
             The first day the period's bar covers.
         """
         day = anchor
-        while self._trimmed() and day.weekday() >= _SATURDAY:
+        while self._trimmed() and day.weekday() >= calendar.SATURDAY:
             day += _ONE_DAY
         return day
 
@@ -287,7 +283,7 @@ class _Periods:
             period's trailing weekend days where weekends are out.
         """
         end = self.shift(anchor, 1)
-        while self._trimmed() and (end - _ONE_DAY).weekday() >= _SATURDAY:
+        while self._trimmed() and (end - _ONE_DAY).weekday() >= calendar.SATURDAY:
             end -= _ONE_DAY
         return end
 
@@ -355,10 +351,10 @@ def _round_to_unit(moment: datetime, seconds: int, *, up: bool) -> datetime:
     Returns:
         The rounded instant, in UTC.
     """
-    micros = (moment - _EPOCH) // _ONE_MICROSECOND
+    micros = (moment - EPOCH) // _ONE_MICROSECOND
     unit = seconds * 1_000_000
     whole = -(-micros // unit) if up else micros // unit
-    return _EPOCH + timedelta(microseconds=whole * unit)
+    return EPOCH + timedelta(microseconds=whole * unit)
 
 
 def bar_starts(
