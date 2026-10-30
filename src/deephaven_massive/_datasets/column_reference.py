@@ -5,10 +5,13 @@ Every dataset's columns are documented in three places, all read from the same d
 carries (`_tables/columns.py`), the static table of the queries' `columns()`, and these pages,
 which readers browse on GitHub before they install anything. This module owns the pages:
 
-- `render` turns a catalog and the provenance of the generated sources into one Markdown page
-  per namespace module (`stocks.md`, ..., `partners.md`), one section per dataset in
-  declaration order. It is pure: it reads only its arguments and the schemas the catalog
-  merges, imports no Deephaven (a type cell is the `ColumnType` value), and writes nothing.
+- `render` turns a catalog and the provenance of the generated sources into one Markdown page per
+  namespace (`stocks.md`, ..., `partners.md`), one section per dataset in declaration order, and one
+  page for each dataset the session serves itself (`snapshots.md`). It is pure: it reads only its
+  arguments and the schemas the catalog merges, imports no Deephaven (a type cell is the
+  `ColumnType` value), and writes nothing.
+- `column_changes` compares two renderings and says, per dataset, which columns a change
+  added or removed, so a refresh or a catalog change shows what it does to each table.
 - `sync` makes a directory hold exactly the rendered pages: it deletes every other file and
   subdirectory, and rewrites only the pages whose bytes differ. It is the only function of the
   dataset layer that touches the file system; it makes no network or Deephaven call.
@@ -22,13 +25,15 @@ fails on any page that differs from what `render` gives, so a catalog change or 
 moves a description lands with its regenerated pages.
 
 Each section starts with an explicit `<a id="<dataset>"></a>` anchor, the dataset's name below
-its namespace with dots written as hyphens (`trades`, `financials-ratios`, `benzinga-news`),
-because GitHub drops the dots of a heading's own anchor. Each dataset method's docstring links
+its namespace with dots written as hyphens (`trades`, `financials-ratios`, `benzinga-news`), or
+the whole name of a dataset with no namespace (`snapshots`), because GitHub drops the dots of a
+heading's own anchor. Each dataset method's docstring links
 its section by that anchor rather than listing columns.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import PurePath
@@ -46,7 +51,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import Column
     from deephaven_massive._massive import Provenance
 
-__all__ = ["COMMAND", "SyncResult", "anchor", "call_path", "render", "sync"]
+__all__ = ["COMMAND", "SyncResult", "anchor", "call_path", "column_changes", "render", "sync"]
 
 COMMAND: Final = "uv run python scripts/render_reference.py"
 """The command that regenerates the column reference, run from the repository root."""
@@ -65,18 +70,6 @@ _WIRE_HEADINGS: Final[Mapping[Transport, str]] = {
 _FROM_REQUEST: Final = "request"
 """The wire-field cell of a key the library fills from the request rather than from a field."""
 
-_SESSION_METHODS: Final[Mapping[str, str]] = {"reference.snapshots": "m.snapshots"}
-"""The datasets called as a method of the session itself rather than of their namespace. The
-unified snapshot spans asset classes, so it is `m.snapshots(...)`; its record is
-`reference.snapshots`, and its section is on the reference page."""
-
-_SESSION_METHOD_NOTE: Final = (
-    "Called as `{call}`, a method of the session itself rather than of `m.{namespace}`; its "
-    "catalog record is `{name}`, so its columns are documented on this page."
-)
-"""The line under the summary of a dataset that is a method of the session itself, which says
-why its section is on its namespace's page."""
-
 _GUIDE: Final = (
     "Each section lists one dataset's columns in the order every verb returns them. "
     "**Supplied by** names the transports that fill a column; a column the serving transport "
@@ -86,21 +79,32 @@ _GUIDE: Final = (
 )
 """The paragraph under every page's title."""
 
+_MERGE: Final = (
+    "A dataset has only the columns it can fill, so two asset classes' tables of one kind "
+    "(stock and forex quotes, say) can differ in their columns, while the columns they share "
+    "have one name and type. To merge them, keep the shared columns: "
+    "`common = [c for c in a.column_names if c in b.column_names]`, then "
+    "`merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each "
+    'missing one to the other table as a typed null first, such as `b.update("Tape = '
+    'NULL_LONG")`.'
+)
+"""The paragraph after the guide on a page with a dataset whose kind other datasets share: how to
+merge tables of different classes."""
+
 _RAW_SYMBOL_NOTE: Final = (
     "In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or "
-    "`MASSIVE_UNKNOWN_SYMBOLS=warn`), {datasets} also have a `RawSymbol` String column, which "
+    "`MASSIVE_UNKNOWN_SYMBOLS=warn`), {datasets} also {have} a `RawSymbol` String column, which "
     "holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is "
     "null, and `RawSymbol` is null on every other row. The tables below show the default "
     "session, without it."
 )
 """The paragraph under the guide of a page whose datasets read their symbol from rows,
-formatted with those datasets' call paths."""
+formatted with those datasets' call paths and the verb that agrees with their number."""
 
 _PROVENANCE: Final = (
     "Generated by `{command}` from Massive's documentation as fetched on {fetched}. The "
     "descriptions are Massive's, corrected where they are clearly wrong; the library writes "
-    "its own for the key columns and for columns that only other datasets of the same kind "
-    "fill."
+    "its own for the key columns and the columns it computes."
 )
 """Every page's footer, formatted with the command and the fetch date."""
 
@@ -137,9 +141,10 @@ def anchor(spec: DatasetSpec) -> str:
     Returns:
         The dataset's name below its namespace with dots written as hyphens: `"trades"` for
         `stocks.trades`, `"financials-ratios"` for `stocks.financials.ratios`, and
-        `"benzinga-news"` for `partners.benzinga.news`.
+        `"benzinga-news"` for `partners.benzinga.news`; the whole name of a dataset the session
+        serves itself, which has no namespace: `"snapshots"`.
     """
-    return spec.name.partition(".")[2].replace(".", "-")
+    return (spec.name.partition(".")[2] or spec.name).replace(".", "-")
 
 
 def call_path(spec: DatasetSpec) -> str:
@@ -149,33 +154,32 @@ def call_path(spec: DatasetSpec) -> str:
         spec: The dataset.
 
     Returns:
-        `m.` and the dataset's name, such as `"m.stocks.trades"`; for a dataset that is a
-        method of the session itself, that method, such as `"m.snapshots"` for
-        `reference.snapshots`.
+        `m.` and the dataset's name, such as `"m.stocks.trades"`, or `"m.snapshots"` for a
+        dataset the session serves itself.
     """
-    return _SESSION_METHODS.get(spec.name, f"m.{spec.name}")
+    return f"m.{spec.name}"
 
 
 def render(catalog: Catalog, provenance: Provenance) -> dict[str, str]:
-    """Render the column reference: one Markdown page per namespace module with datasets.
+    """Render the column reference: one Markdown page per namespace, and per session dataset.
 
-    Call it to regenerate the pages (the command passes them to `sync`) or to compare them
-    with the committed ones (the parity test). A page starts with a title and a short guide,
-    then, when some of its datasets read their symbol from rows, a note that names them and
-    the `RawSymbol` column they gain in a session with `UnknownSymbols.WARN` (the tables show
-    the default session), then holds one section per dataset of the namespace, in declaration
-    order: the anchor
-    (`anchor`), a heading with the dataset's call path (`call_path`), its
-    `DatasetSpec.summary`, and a table with one row per column in result order. The table's
-    columns are **Column**, **Deephaven type** (the `ColumnType` value, such as `Instant`),
-    **Description**, **Supplied by** (the transports that fill the column, as `REST`,
-    `flat files`, and `WebSocket`, empty for a column only other datasets of its kind fill),
-    and one wire-field column per transport the dataset reads (`REST field`,
-    `Flat-file field`, `WebSocket field`), each listing the distinct wire keys behind the
-    column in source order, or `request` for a key filled from the request. Under the table
-    comes the sorted, distinct list of Massive's pages documenting the dataset's own sources
-    (`_dataset_urls`), omitted when they have none. A footer gives the generator command and
-    the date Massive's documentation was fetched.
+    Call it to regenerate the pages (the command passes them to `sync`) or to compare them with
+    the committed ones (the parity test). A dataset with no namespace, which the session serves
+    itself (`m.snapshots`), has a page of its own, named after it. A page starts with a title, a
+    short guide, and, where a dataset's kind has other members, the recipe that merges tables of
+    different asset classes on their shared columns, then, when some of its datasets read their
+    symbol from rows, a note that names them and the `RawSymbol` column they gain in a session
+    with `UnknownSymbols.WARN` (the tables show the default session), then holds one section per
+    dataset of the namespace, in declaration order: the anchor (`anchor`), a heading with the
+    dataset's call path (`call_path`), its `DatasetSpec.summary`, and a table with one row per
+    column in result order. The table's columns are **Column**, **Deephaven type** (the
+    `ColumnType` value, such as `Instant`), **Description**, **Supplied by** (the transports
+    that fill the column, as `REST`, `flat files`, and `WebSocket`), and one wire-field column
+    per transport the dataset reads (`REST field`, `Flat-file field`, `WebSocket field`), each
+    listing the distinct wire keys behind the column in source order, or `request` for a key
+    filled from the request. Under the table comes the sorted, distinct list of Massive's pages
+    documenting the dataset's own sources (`_dataset_urls`), omitted when they have none. A
+    footer gives the generator command and the date Massive's documentation was fetched.
 
     A `|` in a cell is escaped with a backslash, no line has trailing whitespace, and every
     page ends in exactly one newline, so the pages pass the repository's commit hooks
@@ -192,8 +196,9 @@ def render(catalog: Catalog, provenance: Provenance) -> dict[str, str]:
             `_massive.provenance()` returns them; a source without URLs adds none.
 
     Returns:
-        The page text by file name, `"<namespace>.md"`, in the order the namespaces first
-        appear in the catalog; empty for an empty catalog.
+        The page text by file name, `"<namespace>.md"` (or `"<dataset>.md"` for a dataset
+        with no namespace), in the order the pages' datasets first appear in the catalog;
+        empty for an empty catalog.
 
     The schema merge's `ValueError` or `KeyError` (`Catalog.dataset_schema`) propagates for a
     catalog whose datasets do not merge.
@@ -210,10 +215,11 @@ def render(catalog: Catalog, provenance: Provenance) -> dict[str, str]:
 def _page(
     namespace: str, specs: Sequence[DatasetSpec], *, catalog: Catalog, provenance: Provenance
 ) -> str:
-    """Render one namespace's page.
+    """Render one namespace's page, or the page of one dataset with no namespace.
 
     Args:
-        namespace: The namespace, such as `"stocks"`.
+        namespace: The namespace, such as `"stocks"`, or the name of the dataset with no
+            namespace, such as `"snapshots"`.
         specs: Its datasets, in declaration order; at least one.
         catalog: The catalog that merges their schemas.
         provenance: The fetch date and the sources' URLs.
@@ -221,13 +227,17 @@ def _page(
     Returns:
         The page text, ending in one newline.
     """
+    title = f"the `m.{namespace}` datasets" if "." in specs[0].name else f"`m.{namespace}`"
     lines = [
-        f"# Columns of the `m.{namespace}` datasets",
+        f"# Columns of {title}",
         "",
         f"<!-- Generated by `{COMMAND}`; do not edit by hand. -->",
         "",
         _GUIDE,
     ]
+    # Only a dataset of a kind shared with other datasets has tables to merge across classes.
+    if any(spec.kind is not None and len(catalog.members(spec.kind)) > 1 for spec in specs):
+        lines.extend(("", _MERGE))
     kept = [
         f"`{call_path(spec)}`"
         for spec in specs
@@ -237,7 +247,8 @@ def _page(
         named = " and ".join(kept[-2:])
         if kept[:-2]:
             named = ", ".join([*kept[:-2], named.replace(" and ", ", and ")])
-        lines.extend(("", _RAW_SYMBOL_NOTE.format(datasets=named)))
+        have = "have" if kept[1:] else "has"
+        lines.extend(("", _RAW_SYMBOL_NOTE.format(datasets=named, have=have)))
     for spec in specs:
         lines.extend(("", *_section(spec, catalog, provenance)))
     fetched = provenance.fetched.isoformat()
@@ -272,7 +283,6 @@ def _section(spec: DatasetSpec, catalog: Catalog, provenance: Provenance) -> lis
         "",
         spec.summary,
         "",
-        *_session_note(spec),
         _row(header),
         _row(["---"] * len(header)),
     ]
@@ -282,23 +292,6 @@ def _section(spec: DatasetSpec, catalog: Catalog, provenance: Provenance) -> lis
         lines.extend(("", _LINKS_HEADING, ""))
         lines.extend(f"- <{url}>" for url in urls)
     return lines
-
-
-def _session_note(spec: DatasetSpec) -> tuple[str, ...]:
-    """Return the lines that explain why a session method's section is on its namespace page.
-
-    Args:
-        spec: The dataset.
-
-    Returns:
-        For a dataset that is a method of the session itself (`m.snapshots`), the note
-        (`_SESSION_METHOD_NOTE`) and a blank line; for every other dataset, nothing.
-    """
-    if spec.name not in _SESSION_METHODS:
-        return ()
-    namespace = spec.name.partition(".")[0]
-    note = _SESSION_METHOD_NOTE.format(call=call_path(spec), namespace=namespace, name=spec.name)
-    return (note, "")
 
 
 def _cells(column: Column, wire: Sequence[Transport]) -> list[str]:
@@ -377,6 +370,82 @@ def _segments(url: str) -> list[str]:
         either, so they never match one.
     """
     return url.split("/")
+
+
+_HEADING: Final = re.compile(r"^## `(m\.[^`]+)`$")
+"""A section's heading, which names its dataset's call path."""
+
+_COLUMN_ROW: Final = re.compile(r"^\| `([^`]+)` \| ([^|]+) \|")
+"""A row of a section's column table: its first cell names the column, its second the type."""
+
+
+def _columns_by_dataset(pages: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """Read each dataset's columns and their Deephaven types back from rendered pages.
+
+    The pages are the only record of what the reference said before a change, so the report
+    reads them back in the format `_section` writes: a `## `m.…`` heading per dataset, then a
+    table whose rows start with the column name in backticks and its type.
+
+    Args:
+        pages: Page text by file name, as `render` returns them or as a directory holds them.
+
+    Returns:
+        Each section's columns, in order, with their types, by the call path its heading names.
+    """
+    found: dict[str, dict[str, str]] = {}
+    current: dict[str, str] = {}
+    for text in pages.values():
+        for line in text.split("\n"):
+            heading = _HEADING.match(line)
+            if heading:
+                current = found.setdefault(heading[1], {})
+                continue
+            row = _COLUMN_ROW.match(line)
+            if row:
+                current[row[1]] = row[2]
+    return found
+
+
+def column_changes(before: Mapping[str, str], after: Mapping[str, str]) -> list[str]:
+    """Say which columns each dataset gained or lost between two renderings of the reference.
+
+    Call it with the committed pages and the newly rendered ones (`render`), before `sync`
+    replaces the first with the second: the command prints its lines, so a refresh of
+    Massive's specifications or a catalog change shows what it does to each dataset's table.
+    A change of a column's place or description is not reported; the pages' own diff shows it.
+    Pure: reads only its arguments.
+
+    Args:
+        before: Page text by file name, as the directory held it; empty for a first rendering.
+        after: Page text by file name, as `render` returns it.
+
+    Returns:
+        One line per dataset whose columns or column types changed, in the order of `after`
+        and then of the datasets only `before` has: `m.forex.quotes: added Exchange; removed
+        Tape; retyped Conditions int[] to long[]`, or
+        `m.snapshots: new dataset with 74 columns`, or `m.reference.snapshots: dataset
+        removed`. Empty when no dataset's columns changed.
+    """
+    old = _columns_by_dataset(before)
+    new = _columns_by_dataset(after)
+    lines = []
+    for path, columns in new.items():
+        if path not in old:
+            lines.append(f"{path}: new dataset with {len(columns)} columns")
+            continue
+        was = old[path]
+        added = [c for c in columns if c not in was]
+        removed = [c for c in was if c not in columns]
+        retyped = [f"{c} {was[c]} to {t}" for c, t in columns.items() if was.get(c, t) != t]
+        parts = [
+            f"{verb} {', '.join(names)}"
+            for verb, names in (("added", added), ("removed", removed), ("retyped", retyped))
+            if names
+        ]
+        if parts:
+            lines.append(f"{path}: {'; '.join(parts)}")
+    lines.extend(f"{path}: dataset removed" for path in old if path not in new)
+    return lines
 
 
 def sync(directory: Path, pages: Mapping[str, str]) -> SyncResult:

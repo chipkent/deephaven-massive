@@ -312,16 +312,17 @@ class _Crypto(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each crypto pair.
 
-        One row per pair: its most recent trade, in the columns of its kind that its endpoint fills:
-        its price, size, exchange ID, conditions, and time (`Timestamp`), its trading day `Date`
-        (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and `TimestampInsert`, when the
-        library received it. The endpoint carries no trade ID and no received time, so those columns
-        are null. Served by REST (`/v1/last/crypto/{from}/{to}`) through `fetch()` and `poll()`, one
-        request per pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each cycle's last trade when it is new, so a trade between
-        two cycles is never seen (`trades()` streams every one). Some plans lack the endpoint (HTTP
-        403 raises `EntitlementError`); `snapshots(symbols)` carries each pair's last trade on every
-        plan. A pair with no trade (HTTP 404) is left out, with a WARNING.
+        One row per pair: its most recent trade, in the columns of its kind that its endpoint
+        fills: its price, size, exchange ID, conditions, and time (`Timestamp`), its trading day
+        `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and `TimestampInsert`, when
+        the library received it. The endpoint carries no trade ID and no received time, so the
+        table has neither column. Served by REST (`/v1/last/crypto/{from}/{to}`) through
+        `fetch()` and `poll()`, one request per pair; `poll()` replaces the table each cycle,
+        keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last
+        trade when it is new, so a trade between two cycles is never seen (`trades()` streams
+        every one). Some plans lack the endpoint (HTTP 403 raises `EntitlementError`);
+        `snapshots(symbols)` carries each pair's last trade on every plan. A pair with no trade
+        (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
         since the endpoint takes one pair per request: use `m.crypto.snapshots(dm.ALL).fetch()`.

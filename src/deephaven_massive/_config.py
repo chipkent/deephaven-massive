@@ -53,29 +53,25 @@ _HOSTNAME: Final = re.compile(
 )
 
 
-def _env(*names: str) -> str | None:
-    """Return the first non-empty environment variable among `names`.
+def _env(name: str) -> str | None:
+    """Return an environment variable's value with surrounding blanks removed.
 
     Args:
-        *names: Variable names, in priority order.
+        name: The variable's name.
 
     Returns:
-        The value, or None when every variable is unset or empty.
+        The value, or None when the variable is unset or blank.
     """
-    for name in names:
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value
-    return None
+    return os.environ.get(name, "").strip() or None
 
 
 def _env_api_key() -> str:
-    """Read the API key from `MASSIVE_API_KEY`, then `POLYGON_API_KEY`.
+    """Read the API key from `MASSIVE_API_KEY`, Massive's own name for it.
 
     Returns:
-        The key, or an empty string when neither is set (rejected by validation).
+        The key, or an empty string when it is unset (rejected by validation).
     """
-    return _env("MASSIVE_API_KEY", "POLYGON_API_KEY") or ""
+    return _env("MASSIVE_API_KEY") or ""
 
 
 def _env_s3_access_key_id() -> str | None:
@@ -138,7 +134,7 @@ class MassiveConfig:
             m = dm.MassiveSession(pinned)
 
     Attributes:
-        api_key: The Massive API key. Defaults to `MASSIVE_API_KEY`, then `POLYGON_API_KEY`.
+        api_key: The Massive API key. Defaults to `MASSIVE_API_KEY`.
         s3_access_key_id: The flat-file S3 access key id. Defaults to
             `MASSIVE_S3_ACCESS_KEY_ID`. Flat-file history needs both S3 credentials.
         s3_secret_access_key: The flat-file S3 secret. Defaults to

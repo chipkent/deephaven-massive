@@ -25,6 +25,14 @@ inside its result scope on the caller thread, so a failure can fail the table
   does, so a `REPLACE` table over a churning key set (an options chain, the day's movers) grows
   with the keys it has ever held.
 
+A poll key may be a list column (`long[]` or `String[]`, such as a 13F line's `OtherManagers`),
+which Deephaven cannot key an aggregation on. A keyed table whose poll keys hold one keys its
+`last_by` on a hidden text column instead (`LIST_KEY_COLUMN`): the JSON text of the row's list
+keys, which the poller writes beside every row and tombstone, and which the result drops. Two
+rows have the same text exactly when their lists are equal, item by item and in order, as
+Deephaven compares two arrays and as `APPEND` compares identities: the same items in another
+order, as Massive sent them, are another key. The library never sorts a list Massive sends.
+
 Every row's `TimestampInsert` is when its page of the cycle arrived, so in a keyed table it is
 the time of the latest poll that returned the row; it is never part of a row's identity.
 
@@ -62,6 +70,7 @@ alive while the poll runs (`SessionCore.register_worker`).
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import threading
 import time
@@ -91,6 +100,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamUpdate,
     describe_symbols,
+    shown_query,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result, release_scope
@@ -98,7 +108,7 @@ from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import read_symbols
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable
+    from collections.abc import Callable, Hashable, Sequence
     from datetime import timedelta
 
     from deephaven.liveness_scope import LivenessScope
@@ -113,6 +123,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CLOCK",
+    "LIST_KEY_COLUMN",
     "LIVE_COLUMN",
     "CycleReader",
     "PollClock",
@@ -133,6 +144,11 @@ _ROW_TEXT: Final = 300
 LIVE_COLUMN: Final = "__MassiveLive"
 """The hidden column of a `REPLACE` table's publisher: False marks a tombstone. Dataset columns
 are PascalCase wire names, so none can take this name."""
+
+LIST_KEY_COLUMN: Final = "__MassiveListKey"
+"""The hidden column of a keyed (`UPSERT` or `REPLACE`) table's publisher whose poll keys hold a
+list column: the JSON text of the row's list keys, in key order, on which the `last_by` keys in
+their place. Hidden like `LIVE_COLUMN`, and dropped from the result."""
 
 
 class RowDataError(PermanentError):
@@ -324,6 +340,7 @@ class Poller:
         "_interval",
         "_key_names",
         "_keys",
+        "_list_keys",
         "_max_concurrency",
         "_mode",
         "_pollers",
@@ -381,6 +398,7 @@ class Poller:
         self._schema = core.dataset_schema(spec)
         self._spec = spec
         self._key_names = key_columns(spec, self._schema)
+        self._list_keys = list_keys(self._schema, self._key_names)
         self._request = request
         self._interval = interval.total_seconds()
         self._mode = mode
@@ -524,7 +542,7 @@ class Poller:
         """
         began = self._clock.monotonic()
         symbols = self._symbols()
-        record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST.value)
+        record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST)
         table, requests = self._read(
             symbols=symbols, record=record, executor=pool, cancel=self._stop
         )
@@ -592,6 +610,8 @@ class Poller:
         elif self._mode is PollMode.APPEND:
             table, identities = self._fresh(table)
             published = table.num_rows
+        if self._list_keys and self._mode is not PollMode.APPEND:
+            table = table.append_column(LIST_KEY_COLUMN, _list_key_text(table, self._list_keys))
         # Converted before the publish lock, so the lock is held only for the add: converting a
         # large cycle takes a while, and a close failing the table would wait for it. The
         # conversion builds static tables and takes no update-graph lock.
@@ -666,7 +686,7 @@ class Poller:
             harmless to add again).
         """
         names = (*self._key_names, *self._spec.revision_keys)
-        identities = zip(*(table.column(name).to_pylist() for name in names), strict=True)
+        identities = zip(*(_hashable(table.column(name)) for name in names), strict=True)
         taken: set[tuple[Hashable, ...]] = set()
         keep = []
         for identity in identities:
@@ -686,7 +706,7 @@ class Poller:
             The rows with the live column, then the tombstones; and the cycle's key set.
         """
         names = self._key_names
-        keys = set(zip(*(table.column(name).to_pylist() for name in names), strict=True))
+        keys = set(zip(*(_hashable(table.column(name)) for name in names), strict=True))
         gone = self._keys - keys
         rows = table.append_column(LIVE_COLUMN, pa.array([True] * table.num_rows, pa.bool_()))
         if not gone:
@@ -737,6 +757,55 @@ class Poller:
 
 _SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})
 """The key columns of a row's symbol in a `WARN` session: one of the two is always set."""
+
+
+def _hashable(column: pa.ChunkedArray) -> list[Hashable]:
+    """Return a column's values in a form a set can hold: a list value as a tuple.
+
+    A row's identity is a tuple of its key values, held in the poller's sets, so a list key
+    (`OtherManagers`) becomes a tuple of its items; pyarrow builds a list column back from it.
+
+    Args:
+        column: One key column of a cycle.
+
+    Returns:
+        Its values, each list as a tuple and every other value as is.
+    """
+    values = column.to_pylist()
+    if not pa.types.is_list(column.type):
+        return cast("list[Hashable]", values)
+    return [None if value is None else tuple(value) for value in values]
+
+
+def _list_key_text(table: pa.Table, names: Sequence[str]) -> pa.Array:
+    """Return the `LIST_KEY_COLUMN` of a keyed table's rows: their list keys as JSON text.
+
+    Args:
+        table: The rows to publish, tombstones included.
+        names: The list columns among the poll keys, in key order.
+
+    Returns:
+        A `string` array, one compact JSON array per row holding its list keys in order (null
+        for a null list), so equal lists give equal text and unequal lists unequal text.
+    """
+    columns = [table.column(name).to_pylist() for name in names]
+    texts = [json.dumps(row, separators=(",", ":")) for row in zip(*columns, strict=True)]
+    return pa.array(texts, pa.string())
+
+
+def list_keys(schema: Schema, keys: Sequence[str]) -> tuple[str, ...]:
+    """Return the poll keys that are list columns, which no `last_by` can key on directly.
+
+    Args:
+        schema: The dataset's schema in the session.
+        keys: The table's key columns (`key_columns`).
+
+    Returns:
+        The keys whose type is a list (`long[]`, `String[]`), in key order; empty for most
+        datasets.
+    """
+    lists = {c.name for c in schema.columns if pa.types.is_list(c.type.arrow_type)}
+    return tuple(key for key in keys if key in lists)
 
 
 def key_columns(spec: DatasetSpec, schema: Schema) -> tuple[str, ...]:
@@ -794,8 +863,28 @@ def build_table(
     """
     definitions = col_defs(schema)
     replace = mode is PollMode.REPLACE
+    keys = list(key_columns(spec, schema))
+    lists = list_keys(schema, keys) if mode is not PollMode.APPEND else ()
+    hidden = []
     if replace:
         definitions[LIVE_COLUMN] = dtypes.bool_
+        hidden.append(LIVE_COLUMN)
+    if lists:
+        # Deephaven keys no aggregation on an array column: the poller's text of the list keys
+        # stands in for them, and each list column is aggregated as the row's last value.
+        definitions[LIST_KEY_COLUMN] = dtypes.string
+        keys = [key for key in keys if key not in lists] + [LIST_KEY_COLUMN]
+        hidden.append(LIST_KEY_COLUMN)
+        logger.debug(
+            "stream %d: %s poll(mode=%s) keys on %s: the list poll keys %s are keyed by their "
+            "JSON text in %s",
+            stream_id,
+            spec.name,
+            mode.value,
+            keys,
+            list(lists),
+            LIST_KEY_COLUMN,
+        )
     blink, publisher = blink_publisher(
         f"massive.{spec.name}#{stream_id}",
         definitions,
@@ -804,14 +893,14 @@ def build_table(
     )
     if mode is PollMode.APPEND:
         return blink_to_append_only(blink), publisher
-    keys = list(key_columns(spec, schema))
     # When every column is a key, `last_by` has no column to aggregate and Deephaven refuses
     # it. Its rows would be the distinct key rows, which `select_distinct` of a blink table
-    # keeps across cycles. `REPLACE` never takes that branch: its hidden column is not a key.
+    # keeps across cycles. `REPLACE` never takes that branch: its hidden column is not a key,
+    # and neither is a list key, which its text replaces.
     keyed = blink.select_distinct(keys) if set(definitions) <= set(keys) else blink.last_by(keys)
-    if not replace:
-        return keyed, publisher
-    return keyed.where(LIVE_COLUMN).drop_columns(LIVE_COLUMN), publisher
+    if replace:
+        keyed = keyed.where(LIVE_COLUMN)
+    return (keyed.drop_columns(hidden) if hidden else keyed), publisher
 
 
 def _shut_down(core_ref: weakref.ref[SessionCore], stream_id: int, stop: Cancel) -> None:
@@ -883,6 +972,7 @@ def open_poll(
     request: Request,
     interval: timedelta,
     mode: PollMode,
+    query: str,
     read: CycleReader,
     pollers: Pollers,
     host: str | None,
@@ -906,6 +996,7 @@ def open_poll(
         request: The normalized arguments.
         interval: The time from one cycle's start to the next.
         mode: How cycles combine.
+        query: The `repr` of the query, for the row's `Query`.
         read: Reads one cycle's rows.
         pollers: The session's live pollers.
         host: The REST host, for the row's `Host`.
@@ -947,6 +1038,7 @@ def open_poll(
                 stream_id=stream_id,
                 kind=StreamKind.POLL,
                 dataset=spec.name,
+                query=shown_query(query),
                 symbol_count=count,
                 symbols=text,
                 held_results=1,

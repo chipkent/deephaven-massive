@@ -285,13 +285,14 @@ _READ_TYPES: Final[Mapping[WireType, pa.DataType]] = {
     WireType.DATE: pa.date32(),
     WireType.EPOCH: pa.int64(),
     WireType.ISO_INSTANT: pa.timestamp("ns", tz="UTC"),
-    WireType.INT_ARRAY: pa.string(),
+    WireType.LONG_ARRAY: pa.string(),
 }
 """The Arrow type the CSV reader parses each wire type as: an epoch as its raw integer count
-(converted by its unit afterwards), a list as text (parsed into `list<int32>` after filtering),
-and every other type as its column's own Arrow type."""
+(converted by its unit afterwards), a list of codes as text (parsed into `list<int64>` after
+filtering), and every other type as its column's own Arrow type. A flat file has no list of
+text: its only lists are the code lists of a `code-list-text` field."""
 
-_INT_LIST: Final = pa.list_(pa.int32())
+_LONG_LIST: Final = pa.list_(pa.int64())
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -400,7 +401,7 @@ class _Transform:
                     header[c.column],
                     c.column,
                     _READ_TYPES[c.wire_type],
-                    _INT_LIST if c.wire_type is WireType.INT_ARRAY else None,
+                    _LONG_LIST if c.wire_type is WireType.LONG_ARRAY else None,
                 )
                 for c in renamed
             ),

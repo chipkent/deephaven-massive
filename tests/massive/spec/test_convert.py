@@ -112,11 +112,24 @@ def test_an_iso_instant_needs_a_real_time_with_seconds_and_an_offset(value: obje
     _refused(WireType.ISO_INSTANT, value)
 
 
-def test_an_int_array_takes_lists_of_32_bit_integers() -> None:
-    assert convert(WireType.INT_ARRAY, [2**31 - 1, -(2**31)]) == [2**31 - 1, -(2**31)]
-    assert convert(WireType.INT_ARRAY, []) == []
-    for value in ([2**31], [-(2**31) - 1], [1, True], [1.0], 5, "1,2"):
-        _refused(WireType.INT_ARRAY, value)
+def test_a_long_array_takes_lists_of_64_bit_integers() -> None:
+    assert convert(WireType.LONG_ARRAY, [2**63 - 1, -(2**63), 2**31]) == [
+        2**63 - 1,
+        -(2**63),
+        2**31,
+    ]
+    assert convert(WireType.LONG_ARRAY, []) == []
+    assert convert(WireType.LONG_ARRAY, [1, None]) == [1, None]  # a null element stays null
+    for value in ([2**63], [-(2**63) - 1], [1, True], [1.0], 5, "1,2"):
+        _refused(WireType.LONG_ARRAY, value)
+
+
+def test_a_string_array_takes_lists_of_text() -> None:
+    assert convert(WireType.STRING_ARRAY, ["AAPL", "BRK.B", ""]) == ["AAPL", "BRK.B", ""]
+    assert convert(WireType.STRING_ARRAY, []) == []
+    assert convert(WireType.STRING_ARRAY, ["a", None]) == ["a", None]  # a null element stays
+    for value in (["a", 1], [["a"]], "a", {"a": 1}, 5):
+        _refused(WireType.STRING_ARRAY, value)
 
 
 def test_json_text_is_compact_and_keeps_order_and_unicode() -> None:
@@ -158,6 +171,7 @@ _CONVERSIONS = [
     (Conversion.CODE_LIST_TEXT, 12, [12]),
     (Conversion.CODE_LIST_TEXT, "12", [12]),
     (Conversion.CODE_LIST_TEXT, "12,37", [12, 37]),  # a flat file's list
+    (Conversion.CODE_LIST_TEXT, f"{2**31},1", [2**31, 1]),  # any 64-bit code
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00.000Z", date(2023, 3, 10)),
     (Conversion.MIDNIGHT_UTC_DATE, "2023-03-10T00:00:00+00:00", date(2023, 3, 10)),
@@ -206,12 +220,12 @@ def test_each_conversion_converts(case: tuple[Conversion, object, object]) -> No
         (Conversion.MIDNIGHT_UTC_DATE, 1_678_406_400),
         (Conversion.DATE_AS_EPOCH, "2025-07-30"),
         (Conversion.DATE_AS_EPOCH, 2**63),
-        (Conversion.CODE_LIST_TEXT, 2**31),
+        (Conversion.CODE_LIST_TEXT, 2**63),
         (Conversion.CODE_LIST_TEXT, [12]),
         (Conversion.CODE_LIST_TEXT, "12, 37"),
         (Conversion.CODE_LIST_TEXT, "12,"),
         (Conversion.CODE_LIST_TEXT, "12;37"),
-        (Conversion.CODE_LIST_TEXT, f"1,{2**31}"),
+        (Conversion.CODE_LIST_TEXT, f"1,{2**63}"),
     ],
 )
 def test_a_value_the_conversion_cannot_read_fails(conversion: Conversion, value: object) -> None:

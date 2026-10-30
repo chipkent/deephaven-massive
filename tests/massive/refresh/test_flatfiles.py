@@ -86,7 +86,7 @@ def test_the_columns_take_their_documented_types_units_and_conversions(
     files = {f.key: f for f in real[0]}
     trades = files["us_stocks_sip/trades_v1"]
     assert trades.field("Conditions").conversion is Conversion.CODE_LIST_TEXT
-    assert trades.field("Conditions").wire_type is WireType.INT_ARRAY
+    assert trades.field("Conditions").wire_type is WireType.LONG_ARRAY
     assert trades.field("SipTimestamp").unit is WireUnit.NS
     assert (
         trades.field("Ticker").description == "The exchange symbol that this item is traded under."
@@ -490,7 +490,7 @@ def test_a_type_fix_turns_a_documented_code_into_a_list() -> None:
     fix = overrides.TypeFix(conversion=Conversion.CODE_LIST_TEXT, reason="test")
     hand = dataclasses.replace(_EMPTY, type_fixes={("us_stocks_sip/trades_v1", "conditions"): fix})
     (trades,), _ = generate_flat_files(_snapshot(pages), hand)
-    assert trades.field("Conditions").wire_type is WireType.INT_ARRAY
+    assert trades.field("Conditions").wire_type is WireType.LONG_ARRAY
 
 
 def test_gate_example_type_reads_every_example_row() -> None:

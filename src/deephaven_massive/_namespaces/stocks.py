@@ -790,7 +790,7 @@ class _StockFinancials(Namespace):
 
         Each row is a company's assets, liabilities, and equity at the end of a quarter or
         fiscal year, as filed with the SEC. A filing can name several share classes, so a row
-        has no `Symbol`: its `Tickers` column holds the JSON list of tickers, and `symbols`
+        has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
         only selects the filings that list any of them. Served by REST
         (`/stocks/financials/v1/balance-sheets`) through `fetch()` and `poll()`; `poll()`
         replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
@@ -871,7 +871,7 @@ class _StockFinancials(Namespace):
 
         Each row is a company's revenue, expenses, earnings, and per-share figures for a
         quarter or fiscal year, as filed with the SEC. A filing can name several share
-        classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of
+        classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of
         tickers, and `symbols` only selects the filings that list any of them. Served by REST
         (`/stocks/financials/v1/income-statements`) through `fetch()` and `poll()`; `poll()`
         replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
@@ -941,7 +941,7 @@ class _StockFinancials(Namespace):
 
         Each row is a company's operating, investing, and financing cash flows for a quarter
         or fiscal year, as filed with the SEC. A filing can name several share classes, so a
-        row has no `Symbol`: its `Tickers` column holds the JSON list of tickers, and `symbols`
+        row has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and `symbols`
         only selects the filings that list any of them. Served by REST
         (`/stocks/financials/v1/cash-flow-statements`) through `fetch()` and `poll()`;
         `poll()` replaces the table each cycle, keyed by `Cik`, `PeriodEnd`, and `Timeframe`.
@@ -1153,7 +1153,9 @@ class _StockFilings(Namespace):
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
             form_type: The SEC form type, such as `"10-K"` or `"8-K"`; None for every form.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1216,7 +1218,9 @@ class _StockFilings(Namespace):
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1279,7 +1283,9 @@ class _StockFilings(Namespace):
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1324,7 +1330,7 @@ class _StockFilings(Namespace):
 
         Each row is one disclosure of an 8-K, with its primary, secondary, and tertiary categories,
         the supporting text, and the filing's accession number and date. A filing can name several
-        share classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of
+        share classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of
         tickers, and `symbols` only selects the filings that list any of them. Served by REST
         (`/stocks/filings/8-K/vX/disclosures`) through `fetch()` and `poll()`. By default `poll()`
         appends only the rows it has not seen before, telling rows apart by the dataset's key
@@ -1342,7 +1348,9 @@ class _StockFilings(Namespace):
         Args:
             symbols: Tickers whose filings to return (one `str`, a sequence, or a `Table`
                 with a `Symbol` column, re-read each `poll()` cycle); None for every filing.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1404,7 +1412,9 @@ class _StockFilings(Namespace):
         Args:
             symbols: The tickers (one `str`, a sequence, or a `Table` with a `Symbol` column,
                 re-read each `poll()` cycle); None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1466,7 +1476,9 @@ class _StockFilings(Namespace):
         Args:
             filer_cik: The SEC CIK of the filing manager, as text with its leading zeros,
                 such as `"0001067983"`; None for every filer.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1516,7 +1528,7 @@ class _StockFilings(Namespace):
         Each row is a security an officer, director, or 10% owner held on becoming an insider: the
         issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
         filing can name several share classes, so a row has no `Symbol`: its `Tickers` column holds
-        the JSON list of tickers, and `symbols` only selects the filings that list any of them.
+        the `String[]` of tickers, and `symbols` only selects the filings that list any of them.
         Served by REST (`/stocks/filings/vX/form-3`) through `fetch()` and `poll()`. By default
         `poll()` appends only the rows it has not seen before, telling rows apart by the dataset's
         key columns.
@@ -1539,7 +1551,9 @@ class _StockFilings(Namespace):
                 (sent as `issuer_cik.any_of`); None for every issuer.
             owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
                 way (`owner_cik` or `owner_cik.any_of`); None for every owner.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1589,7 +1603,7 @@ class _StockFilings(Namespace):
         Each row is a purchase, sale, grant, or exercise an officer, director, or 10% owner
         reported, or a holding reported beside them: the transaction code, date, shares, price, and
         the shares owned afterwards, with the issuer and owner. A filing can name several share
-        classes, so a row has no `Symbol`: its `Tickers` column holds the JSON list of tickers, and
+        classes, so a row has no `Symbol`: its `Tickers` column holds the `String[]` of tickers, and
         `symbols` only selects the filings that list any of them. Served by REST
         (`/stocks/filings/vX/form-4`) through `fetch()` and `poll()`. By default `poll()` appends
         only the rows it has not seen before, telling rows apart by the dataset's key columns.
@@ -1612,7 +1626,9 @@ class _StockFilings(Namespace):
                 (sent as `issuer_cik.any_of`); None for every issuer.
             owner_cik: The SEC CIK of the reporting owner, one or a sequence, sent the same
                 way (`owner_cik` or `owner_cik.any_of`); None for every owner.
-            start: The first filing date to include, inclusive; None for no lower bound.
+            start: The first filing date to include, inclusive; None for no lower bound,
+                which `poll()` refuses unless `limit` is set: it would re-read every filing
+                each cycle. A fixed start keeps widening the window of a long-running poll.
             end: The last filing date to include, inclusive. None (the default) sends no upper
                 bound, so rows dated in the future are returned too; pass `end=` to stop at a date.
             sort: The field to sort by, such as `"filing_date"`; None for the server default.
@@ -1672,7 +1688,7 @@ class _StockFilings(Namespace):
         filings; `insider_transactions()` returns the Form 4 lines themselves.
 
         A company can have several share classes, so a row has no `Symbol`: its `Tickers`
-        column holds the JSON list of the issuer's tickers on the transaction day, the totals
+        column holds the `String[]` of the issuer's tickers on the transaction day, the totals
         cover the issuer rather than each ticker, and `symbols` only selects the issuers that
         list any of them. Served by REST (`/stocks/insiders/vX/activity`) through `fetch()` and
         `poll()`. By default `poll()` replaces its table each cycle, keyed by `IssuerCik` and
@@ -1749,7 +1765,7 @@ class _StockFilings(Namespace):
         An insider is a company's director, officer, or holder of more than 10% of its shares,
         who reports an initial position on SEC Form 3 and every later change on Forms 4 and 5.
         Massive combines all of one insider's filings for one issuer into one current row: the
-        owner's name, CIK, roles (a JSON list of `director`, `officer`, `ten_percent_owner`,
+        owner's name, CIK, roles (a `String[]` of `director`, `officer`, `ten_percent_owner`,
         `other`), and officer title; the dates of the first and latest filing and their count;
         the shares owned directly, indirectly (through trusts, LLCs, family members, and other
         vehicles), and in total, as filed and not adjusted for splits, with no options or other
@@ -1762,7 +1778,7 @@ class _StockFilings(Namespace):
         filings themselves.
 
         A company can have several share classes, so a row has no `Symbol`: its `Tickers`
-        column holds the JSON list of the issuer's tickers, and `symbols` only selects the
+        column holds the `String[]` of the issuer's tickers, and `symbols` only selects the
         issuers that list any of them. Served by REST (`/stocks/insiders/vX/holdings`) through
         `fetch()` and `poll()`. By default `poll()` replaces its table each cycle, keyed by
         `IssuerCik` and `OwnerCik`, so a new filing updates its insider's row in place. Massive

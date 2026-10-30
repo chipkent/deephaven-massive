@@ -277,10 +277,14 @@ def test_other_datasets_have_no_timestamp(name: str) -> None:
 
 
 @pytest.mark.parametrize(("name", "kind"), list(ONE_ROW.items()))
-def test_one_row_datasets_have_the_columns_of_their_kind(name: str, kind: str) -> None:
-    # The same kind merges the same sources, so the two tables merge without a mapping.
+def test_one_row_datasets_share_the_columns_of_their_kind(name: str, kind: str) -> None:
+    # The same kind gives the columns the two datasets share one type and one order, so the
+    # tables merge on them; each has only the columns its own endpoints fill.
     assert spec_of(name).kind == spec_of(kind).kind
-    assert list(columns(name)) == list(columns(kind))
+    mine, theirs = columns(name), columns(kind)
+    shared = [(n, t) for n, t in mine.items() if n in theirs]
+    assert shared == [(n, t) for n, t in theirs.items() if n in mine]
+    assert len(shared) > 5
     assert type(spec_of(name).fetch_path) is str
     assert spec_of(kind).fetch_path is None
 
@@ -304,7 +308,7 @@ def test_single_ticker_rows_lead_with_symbol(name: str) -> None:
 def test_rows_that_list_several_tickers_keep_tickers_and_have_no_symbol(name: str) -> None:
     found = columns(name)
     assert "Symbol" not in found
-    assert found["Tickers"] is ColumnType.STRING
+    assert found["Tickers"] is ColumnType.STRING_ARRAY
     assert not CATALOG.takes_symbols(spec_of(name))
 
 
@@ -1247,7 +1251,7 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
         {"symbols": ["AAPL"]},
         "/stocks/filings/8-K/vX/disclosures",
         {"tickers.any_of": "AAPL", "limit": "1000"},
-        ("Tickers", '["AAPL"]'),
+        ("Tickers", ["AAPL"]),
     ),
     (
         "filings.risk_factors",
@@ -1384,7 +1388,7 @@ INSIDER_ROWS = {
         "SaleShares": 34918.0,
         "SaleValue": 7648632.45,
         "SellerCount": 1,
-        "Tickers": '["NVDA"]',
+        "Tickers": ["NVDA"],
         "TransactionDate": "2026-09-17",
     },
     "filings.insider_holdings": {
@@ -1399,11 +1403,11 @@ INSIDER_ROWS = {
         "OwnerName": "Kress Colette",
         "OwnershipPct": 0.0198,
         "PositionCount": 11,
-        "Roles": '["officer"]',
+        "Roles": ["officer"],
         "SharesOwned": 4776533.0,
         "SharesOwnedDirect": 765103.0,
         "SharesOwnedIndirect": 4011430.0,
-        "Tickers": '["NVDA"]',
+        "Tickers": ["NVDA"],
     },
 }
 
@@ -1879,7 +1883,7 @@ KEYED_CALLS: dict[str, tuple[Callable[[dm.MassiveSession], QueryBase], str]] = {
 
 def _other(value: object, wire_type: WireType) -> object:
     # A wire value that differs from `value` and still converts to the field's type.
-    if wire_type is WireType.JSON_TEXT:
+    if wire_type in {WireType.JSON_TEXT, WireType.STRING_ARRAY}:
         return [*cast("list[object]", value or []), "other"]
     if wire_type is WireType.DATE:
         base = date(2020, 1, 1) if value is None else date.fromisoformat(cast("str", value))
@@ -1916,7 +1920,11 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
     body[result_key] = rows
     fake_rest.reply(path, Reply(body=body))
     out = table_rows(cast("Query", make(rest_session)).fetch())
-    keyed = [tuple(row[k] for k in spec.poll_keys) for row in out]
+    # A list key (`OtherManagers`) is compared as a tuple, so a set can hold it.
+    keyed = [
+        tuple(tuple(v) if isinstance(v := row[k], list) else v for k in spec.poll_keys)
+        for row in out
+    ]
     assert len(set(keyed)) == len(rows)
     for index in range(len(spec.poll_keys)):
         fewer = {key[:index] + key[index + 1 :] for key in keyed}
@@ -1971,7 +1979,7 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
     template = cast("str", spec_of(name).fetch_path)
     body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
     fake_rest.reply(template, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)()).poll(60, mode=mode)
+    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60, mode=mode)
     rows = _rows_when(table, len(body["results"]))
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
@@ -1998,7 +2006,7 @@ def test_a_filing_under_two_filers_polls_as_two_rows(
     owner = {k: v for k, v in first.items() if k != "ticker"} | {"cik": "0001214128"}
     body["results"] = [first, owner]
     fake_rest.reply(path, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)()).poll(60)
+    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60)
     rows = _rows_when(table, 2)
     assert sorted((row["Cik"], row["AccessionNumber"]) for row in rows) == sorted(
         [(first["cik"], first["accession_number"]), ("0001214128", first["accession_number"])]
@@ -2048,7 +2056,7 @@ def _poll_lines(
     # line is published.
     path = cast("str", spec_of(name).fetch_path)
     server.reply(path, Reply(body={"status": "OK", "request_id": "r", "results": lines}))
-    table = cast("Query", factory(session, name)()).poll(60)
+    table = cast("Query", factory(session, name)(start="2025-01-02")).poll(60)
     return table, _rows_when(table, len(lines))
 
 

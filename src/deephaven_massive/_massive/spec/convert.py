@@ -13,7 +13,8 @@ builds its own columns from it.
 | `string` | text | `str` |
 | `date` | text `YYYY-MM-DD` naming a real date | `datetime.date` |
 | `iso-instant` | ISO-8601 date-time text, seconds, offset `Z` or `±HH:MM` | `int` ns, int64 |
-| `int-array` | a list of integers, each in the signed 32-bit range | `list[int]` |
+| `long-array` | a list of signed 64-bit integers and nulls | `list` of `int` and `None` |
+| `string-array` | a list of text values or nulls | `list` of `str` and `None` |
 | `json-text` | any JSON value | `str`, compact JSON |
 
 A value that does not fit raises `UnconvertibleError`; nothing is coerced. An epoch stays a raw
@@ -92,7 +93,6 @@ __all__ = [
 _T = TypeVar("_T")
 
 _INT64 = (-(2**63), 2**63 - 1)
-_INT32 = (-(2**31), 2**31 - 1)
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 _DECIMAL_INTEGER = re.compile(r"\d+", re.ASCII)
 # Codes written as decimal integers separated by single commas, such as `12,37`.
@@ -242,21 +242,44 @@ def _instant(value: object) -> int:
     return _long(total * _NANOS_PER_SECOND + int((match["fraction"] or "").ljust(9, "0")))
 
 
-def _int_array(value: object) -> list[int]:
-    """Return an `int-array` value.
+def _long_array(value: object) -> list[int | None]:
+    """Return a `long-array` value.
+
+    A null element is kept: a Deephaven `long[]` holds it as its null value, and nothing is
+    coerced to make room for it.
 
     Args:
         value: A decoded JSON value.
 
     Returns:
-        `value`, a list of integers in the signed 32-bit range.
+        `value`, a list of integers in the signed 64-bit range and nulls.
 
     Raises:
-        UnconvertibleError: If `value` is not a list, or an element is not such an integer.
+        UnconvertibleError: If `value` is not a list, or an element is neither null nor such an
+            integer.
     """
     if not isinstance(value, list):
         raise UnconvertibleError
-    return [_integer(element, _INT32) for element in value]
+    return [None if element is None else _long(element) for element in value]
+
+
+def _string_array(value: object) -> list[str | None]:
+    """Return a `string-array` value.
+
+    A null element is kept, as a null `String` of the Deephaven `String[]`.
+
+    Args:
+        value: A decoded JSON value.
+
+    Returns:
+        `value`, a list of text values and nulls.
+
+    Raises:
+        UnconvertibleError: If `value` is not a list, or an element is neither null nor text.
+    """
+    if not isinstance(value, list) or not all(e is None or isinstance(e, str) for e in value):
+        raise UnconvertibleError
+    return value
 
 
 def _json_text(value: object) -> str:
@@ -280,7 +303,8 @@ _CONVERTERS: dict[WireType, Callable[[object], object]] = {
     WireType.STRING: _of_type(str),
     WireType.DATE: _date,
     WireType.ISO_INSTANT: _instant,
-    WireType.INT_ARRAY: _int_array,
+    WireType.LONG_ARRAY: _long_array,
+    WireType.STRING_ARRAY: _string_array,
     WireType.JSON_TEXT: _json_text,
 }
 
@@ -401,7 +425,7 @@ def _code_list(value: object) -> list[int]:
         value: A decoded JSON value, or a flat file's cell text.
 
     Returns:
-        The codes, each in the signed 32-bit range.
+        The codes, each in the signed 64-bit range.
 
     Raises:
         UnconvertibleError: If `value` is neither an integer nor text of decimal integers
@@ -410,8 +434,8 @@ def _code_list(value: object) -> list[int]:
     if isinstance(value, str):
         if not _CODE_LIST.fullmatch(value):
             raise UnconvertibleError
-        return [_integer(int(code), _INT32) for code in value.split(",")]
-    return [_integer(value, _INT32)]
+        return [_long(int(code)) for code in value.split(",")]
+    return [_long(value)]
 
 
 # The converter of each named conversion.

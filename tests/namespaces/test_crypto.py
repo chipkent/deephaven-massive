@@ -187,7 +187,7 @@ def test_trades_schema() -> None:
         ("Symbol", "String"),
         ("Date", "String"),
         ("Timestamp", "Instant"),
-        ("Conditions", "int[]"),
+        ("Conditions", "long[]"),
         ("Exchange", "long"),
         ("Id", "String"),
         ("Price", "double"),
@@ -197,9 +197,14 @@ def test_trades_schema() -> None:
     ]
 
 
-def test_the_one_row_datasets_have_their_kind_s_columns() -> None:
-    assert columns(crypto.LAST_TRADE) == columns(crypto.TRADES)
-    assert columns(crypto.PREVIOUS_DAY_BAR) == columns(crypto.BARS)
+def test_the_one_row_datasets_have_the_kind_s_columns_their_endpoint_fills() -> None:
+    # Each has a subset of its stream dataset's columns, in the same order and types.
+    pairs = ((crypto.LAST_TRADE, crypto.TRADES), (crypto.PREVIOUS_DAY_BAR, crypto.BARS))
+    for one_row, stream in pairs:
+        mine = columns(one_row)
+        assert [c for c in columns(stream) if c in mine] == mine
+    # The last-trade endpoint carries no trade ID and no received time.
+    assert {"Id", "ReceivedTimestamp"}.isdisjoint(name for name, _ in columns(crypto.LAST_TRADE))
 
 
 def test_quotes_schema() -> None:
@@ -634,9 +639,9 @@ def test_last_trade_reads_the_last_trade_of_each_pair(
         "Size": 0.006909,
     }
     assert {name: row[name] for name in supplied} == supplied
-    # The trades kind's other columns (the trade ID, the received time, and the columns other
-    # asset classes supply) are null: the last-trade endpoint does not carry them.
-    assert {"Id", "ReceivedTimestamp"} <= set(row)
+    # The last-trade endpoint carries no trade ID and no received time, so the dataset has
+    # neither column.
+    assert {"Id", "ReceivedTimestamp"}.isdisjoint(row)
     assert row["TimestampInsert"] is not None  # when the page arrived
     assert all(row[name] is None for name in set(row) - {*supplied, "TimestampInsert"})
 

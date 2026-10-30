@@ -6,6 +6,8 @@
 - `stocks`, `options`, `futures`, `indices`, `forex`, `crypto`, `reference`, `indicators`,
   `economy`, `partners`: one namespace class each, and that namespace's `DatasetSpec`s
   (`DATASETS`), which `_session.py` composes into the process's dataset catalog.
+- `snapshots`: the `DatasetSpec` of `m.snapshots()`, the unified snapshot the session serves
+  itself rather than a namespace, composed into the catalog the same way.
 
 Layer: API, the top layer with `__init__.py`, `_session.py`, and `_query.py`; it may import
 every layer below except the ingest code (`_ingest`), which only `_session.py` imports. These

@@ -13,8 +13,8 @@ The five datasets and what serves them:
   `indices.snapshots`.
 - `indices.bars`: OHLC bars from the `A` (1 second) and `AM` (1 minute) channels, the range
   aggregates endpoint, and the minute and day aggregate flat files. Index aggregates are
-  computed from index values, so their volume columns are always null and they are never
-  adjusted: they take no `adjusted`.
+  computed from index values, so they have no volume columns and are never adjusted: they take
+  no `adjusted`.
 - `indices.previous_day_bar`: each index's 1-day bar of the previous session, from the
   previous-session aggregates endpoint, in the columns of the bars kind that its endpoint fills.
 - `indices.snapshots`: every field of the indices snapshot, one row per index.
@@ -249,8 +249,8 @@ class _Indices(Namespace):
         text, New York time), its window from `TimestampStart` to the exclusive `TimestampEnd`,
         its levels, and `TimestampInsert`, when the library received it. Index bars are
         computed from index values, so they are never adjusted and have no `adjusted`
-        parameter (Massive's endpoint has none), and the bar columns that only traded
-        instruments fill, such as `Volume`, `Vwap`, and `Transactions`, are always null. A
+        parameter (Massive's endpoint has none), and they have none of the bar columns that
+        only traded instruments fill, such as `Volume`, `Vwap`, and `Transactions`. A
         window in which the index did not change produces no bar.
 
         The timespan and multiplier decide the transports, and with them the query class:

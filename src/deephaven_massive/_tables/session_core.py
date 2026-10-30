@@ -95,8 +95,10 @@ from typing import TYPE_CHECKING, Final, TypeVar, cast
 from deephaven.dherror import DHError
 from deephaven.update_graph import shared_lock
 
+from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._enums import UnknownSymbols
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
@@ -106,6 +108,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamState,
     StreamUpdate,
     describe_symbols,
+    shown_query,
 )
 from deephaven_massive._tables.execution_context import (
     entered,
@@ -134,7 +137,7 @@ if TYPE_CHECKING:
         StreamTransport,
     )
 
-__all__ = ["PAUSED_TABLES_WARNING_SECONDS", "SessionCore"]
+__all__ = ["PAUSED_TABLES_WARNING_SECONDS", "SESSION_WARNINGS", "SessionCore"]
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +169,12 @@ landed. `close()` and a dying thread fail only the tables in none of them."""
 PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
 """Seconds a verb may run on a thread that holds the update graph's lock before the session
 logs, once, that the worker's live tables are paused (`SessionCore.run_verb`)."""
+
+SESSION_WARNINGS: Final = 1_000
+"""The most distinct once-per-session warnings a session logs (`SessionCore.warnings`).
+
+Far above what a session meets: `history()`'s unfilled-columns warning has at most two forms
+per dataset. The bound keeps the remembered set finite all the same."""
 
 
 def _next_stream_id() -> int:
@@ -411,6 +420,8 @@ class SessionCore:
         self._closed = False
         # Whether a long verb under the update graph's lock has been reported.
         self._warned_paused_tables = False
+        # The session's once-per-session warnings, such as history()'s unfilled columns.
+        self.warnings: Final = BoundedWarnings(logger, limit=SESSION_WARNINGS)
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
         finalizer = weakref.finalize(
@@ -639,6 +650,7 @@ class SessionCore:
         request: Request,
         *,
         channel: str,
+        query: str,
         build: Callable[[Table], Table],
     ) -> Table:
         """Create one live result over the stream of `(spec, channel, symbols)`.
@@ -673,6 +685,8 @@ class SessionCore:
             spec: The dataset.
             request: The normalized arguments.
             channel: The WebSocket channel.
+            query: The `repr` of the query whose verb asks, for the `Query` column of
+                `m.streams()`; a reused stream keeps the text of the query that opened it.
             build: Turns the stream's blink table into the result. It must create a new
                 table, never return the blink table itself, so the result scope manages the
                 result and each call returns a distinct table.
@@ -684,7 +698,7 @@ class SessionCore:
             MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`).
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
-        handle = self._acquire(spec, request, key, channel=channel)
+        handle = self._acquire(spec, request, key, channel=channel, query=query)
         blink = handle.blink
         scope: LivenessScope | None = None
         try:
@@ -750,7 +764,7 @@ class SessionCore:
             return state.row.error or "failed"
 
     def _acquire(
-        self, spec: DatasetSpec, request: Request, key: StreamKey, *, channel: str
+        self, spec: DatasetSpec, request: Request, key: StreamKey, *, channel: str, query: str
     ) -> StreamHandle:
         """Take a hold on the stream of `key`: reuse it, wait for its open, or open it.
 
@@ -776,6 +790,7 @@ class SessionCore:
             request: The normalized arguments.
             key: The stream key.
             channel: The WebSocket channel.
+            query: The `repr` of the asking query, for a new stream's `Query` column.
 
         Returns:
             The stream's handle, with one hold taken for the caller.
@@ -787,7 +802,7 @@ class SessionCore:
         while True:
             holds: list[tuple[int, threading.Event | None]] = []
             try:
-                claim = self._claim(spec, request, key, may_wait=may_wait, holds=holds)
+                claim = self._claim(spec, request, key, query=query, may_wait=may_wait, holds=holds)
                 if isinstance(claim, threading.Event):
                     claim.wait()  # another thread is opening the stream; never under a lock
                     continue
@@ -824,6 +839,7 @@ class SessionCore:
         request: Request,
         key: StreamKey,
         *,
+        query: str,
         may_wait: bool,
         holds: list[tuple[int, threading.Event | None]],
     ) -> StreamHandle | threading.Event | int:
@@ -844,6 +860,7 @@ class SessionCore:
             spec: The dataset.
             request: The normalized arguments.
             key: The stream key.
+            query: The `repr` of the asking query, the `Query` of a new record's row.
             may_wait: False when the caller holds the update graph's lock, so it may not wait
                 for another thread's open.
             holds: Receives one `(stream_id, ready)` entry per hold this call takes, appended
@@ -884,6 +901,7 @@ class SessionCore:
                 stream_id=stream_id,
                 kind=StreamKind.STREAM,
                 dataset=spec.name,
+                query=shown_query(query),
                 symbol_count=count,
                 symbols=text,
                 held_results=1,
@@ -929,7 +947,10 @@ class SessionCore:
         recorded on the record, and the stream is returned as is: `stream_result` then raises
         the `MassiveError` naming the failure instead of building a result. A reactive stream
         that shut down during the open has its watchlist listener stopped on the reaper here,
-        since the shutdown had no handle to stop it through.
+        since the shutdown had no handle to stop it through. The row takes the host and path
+        the stream opened on, unless the transport already reported a later host while the
+        open was finishing (a real-time verdict moved the stream to another host before the
+        open returned): that report is newer, so the row keeps it.
 
         Args:
             spec: The dataset.
@@ -953,7 +974,9 @@ class SessionCore:
                 )
             with self.registry_lock:
                 state = self._streams[stream_id]
-                row = replace(state.row, host=opened.host, path=opened.path)
+                row = state.row
+                if row.host is None:  # not moved while opening: it serves from where it opened
+                    row = replace(row, host=opened.host, path=opened.path)
                 self._streams[stream_id] = replace(state, handle=opened, row=row)
                 stored = True  # from here on, releasing the opener's hold releases the stream
                 self.diagnostics.write(row)
@@ -1114,7 +1137,7 @@ class SessionCore:
                 if state.handle is not None:  # an opening stream's row is written by _open
                     self.diagnostics.write(row)
 
-    def record_stream_drift(self, stream_id: int, prefix: str, drift: DriftReport) -> None:
+    def record_stream_drift(self, stream_id: int, transport: Transport, drift: DriftReport) -> None:
         """Add a payload's drift to a stream's `SchemaDrift` and write its row if it changed.
 
         The REST poller and the WebSocket flush thread call this for each payload a stream receives,
@@ -1127,9 +1150,11 @@ class SessionCore:
 
         Args:
             stream_id: The stream whose payload drifted.
-            prefix: The transport's value (`"WS"`, `"REST"`), the entries' prefix.
+            transport: The transport that carried the payload; its user-facing name
+                (`TRANSPORT_LABELS`, `"WebSocket"` or `"REST"`) prefixes the entries.
             drift: The payload's drift.
         """
+        prefix = TRANSPORT_LABELS[transport]
         with self.registry_lock:
             state = self._streams.get(stream_id)
             if state is None:

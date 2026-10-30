@@ -202,7 +202,13 @@ class RestTransport(Protocol):
         ...
 
     def poll(
-        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        interval: timedelta,
+        mode: PollMode,
+        query: str,
     ) -> Table:
         """Return a live table that re-runs `fetch` every `interval`, tracked by the session.
 
@@ -211,6 +217,7 @@ class RestTransport(Protocol):
             request: The normalized arguments.
             interval: The time between cycles.
             mode: How cycles combine.
+            query: The `repr` of the query, for the `Query` column of `m.streams()`.
         """
         ...
 

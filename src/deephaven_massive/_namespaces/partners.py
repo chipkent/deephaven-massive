@@ -21,17 +21,17 @@ news, its time (`Timestamp`), the wire parameters behind `symbols`, `start`, and
 keys of a keyed `poll()` table, and the page size, which is each endpoint's documented maximum.
 Columns, types, and descriptions come from the generated schemas, never from this module.
 
-Instruments. The Benzinga datasets that take tickers and the ETF Global datasets take
-Massive's stock tickers (`AAPL`, `BRK.B`), so their specs carry
-`AssetClass.STOCKS` and a symbol with another class's prefix (`X:BTCUSD`) is rejected when the
-query is built. Their rows each describe one instrument, which becomes the `Symbol` column (an
-ETF Global row's ETF, its `composite_ticker`; for consensus ratings, the symbol requested; for
-a TMX event or a Benzinga row without a ticker, null). Benzinga news names several tickers per
-article, so it has no `Symbol`, keeps its `Tickers` column (JSON text), and uses `symbols` only
-to filter the request. Benzinga analysts and firms, and both Fable datasets, take no symbols at all.
-The TMX corporate events come from Wall Street Horizon's global calendar, whose tickers are not
-US-market ones (each event names its venue's MIC and an ISIN), so that dataset takes and keeps
-its tickers exactly as Massive writes them (`DatasetSpec.symbols_as_written`).
+Instruments. The Benzinga datasets that take tickers and the ETF Global datasets take Massive's
+stock tickers (`AAPL`, `BRK.B`), so their specs carry `AssetClass.STOCKS` and a symbol with another
+class's prefix (`X:BTCUSD`) is rejected when the query is built. Their rows each describe one
+instrument, which becomes the `Symbol` column (an ETF Global row's ETF, its `composite_ticker`; for
+consensus ratings, the symbol requested; for a TMX event or a Benzinga row without a ticker, null).
+Benzinga news names several tickers per article, so it has no `Symbol`, keeps its `Tickers` column
+(a `String[]`), and uses `symbols` only to filter the request. Benzinga analysts and firms, and both
+Fable datasets, take no symbols at all. The TMX corporate events come from Wall Street Horizon's
+global calendar, whose tickers are not US-market ones (each event names its venue's MIC and an
+ISIN), so that dataset takes and keeps its tickers exactly as Massive writes them
+(`DatasetSpec.symbols_as_written`).
 """
 
 from __future__ import annotations
@@ -911,18 +911,23 @@ class _Benzinga(Namespace):
         """Benzinga news articles, with headline, teaser, body, and the tickers each one names.
 
         One row per article: its publication time as `Timestamp`, author, title, teaser, body,
-        URL, and the JSON lists of tickers, channels, tags, and images. An article names any
-        number of tickers, so the rows have no `Symbol` column: `Tickers` holds the list as
-        JSON text, and `symbols` only selects the articles that name at least one of them.
+        URL, and the lists of tickers, channels, tags, and images, each a `String[]` column.
+        An article names any number of tickers, so the rows have no `Symbol` column: `Tickers`
+        holds the list, and `symbols` only selects the articles that name at least one of
+        them. To keep the articles that name one ticker, filter with the query language's
+        `inObj`, which needs a list, as in
+        `table.where("Tickers != null && inObj(`AAPL`, Tickers)")`; for one row per article and
+        ticker, `table.ungroup("Tickers")`.
 
         Served by REST only, from `GET /benzinga/v2/news`: `fetch()` reads every page into a
         static table, and `poll(interval)` re-reads the endpoint into a live table that, by
         default (`PollMode.APPEND`), only grows: each cycle appends the articles it has not
-        seen before, keyed by `BenzingaId`, so every article appears once. Always give
-        `poll()` a `start`: every cycle reads every page of the range, and without one
-        the range is the whole Benzinga archive. There is no stream and no `history()`;
-        use `start` and `end` for a past range. The columns and what they mean are in
-        the column reference,
+        seen before, keyed by `BenzingaId`, so every article appears once. `poll()` needs a
+        `start` or a `limit`, and raises `ValueError` without either: every cycle reads every
+        page of the range, and without them the range is the whole Benzinga archive. A fixed
+        `start` keeps widening the window of a poll that runs for days. There is no stream
+        and no `history()`; use `start` and `end` for a past range. The columns and what they
+        mean are in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.md#benzinga-news,
         in the web UI's column tooltips, and in `columns()`.
 
@@ -934,7 +939,8 @@ class _Benzinga(Namespace):
                 instead.
             start: The earliest publication time: an ISO date (`"2025-06-02"`) or `date`,
                 meaning 00:00 America/New_York that day, or a timezone-aware `datetime` or
-                ISO text with an offset. None, the default, sets no lower bound.
+                ISO text with an offset. None, the default, sets no lower bound, which
+                `poll()` refuses unless `limit` is set.
             end: The end of the publication range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, and an aware
                 `datetime` is the first instant excluded. None (the default) sends no upper bound,

@@ -33,6 +33,12 @@ dependencies = [
     # no bound on pyarrow. pa.ListViewType, which deephaven-core needs, and numpy 2 support
     # are older.
     "pyarrow>=23.0.1",
+    # The library imports numpy itself, for numpy.datetime64 date arguments, so it declares it
+    # rather than reach it only through deephaven-core, which puts no bound on it. 1.23.2 is
+    # the first release with wheels for Python 3.11, the oldest Python the library supports;
+    # the whole suite passes on it with pyarrow and deephaven-core at their floors.
+    # numpy.datetime64, numpy.isnat, and numpy.datetime_data are much older.
+    "numpy>=1.23.2",
     "boto3>=1.34.63",  # the boto3 release paired with the botocore floor below
     # 1.34.63 is the first release that accepts urllib3 2.1 or later (on Python 3.10 and up);
     # 1.34.62 caps urllib3 below 2.1, which would hold urllib3 under its own floor below.

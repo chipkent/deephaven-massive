@@ -1893,20 +1893,26 @@ class RestReader:
         candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
         errors: list[ValueError] = []
         templates = [template for template in candidates if template is not None]
-        for template in templates:
-            rest_path = self.rest_path(template)
-            try:
-                _base(spec, rest_path, request, fixed={})
-                _axis_query(
-                    spec,
-                    rest_path,
-                    dates=(request.start, request.end),
-                    asset_class=spec.asset_class,
-                )
-            except ValueError as error:
-                errors.append(error)
-        if len(errors) == len(templates):
-            raise errors[0]
+        try:
+            for template in templates:
+                rest_path = self.rest_path(template)
+                try:
+                    _base(spec, rest_path, request, fixed={})
+                    _axis_query(
+                        spec,
+                        rest_path,
+                        dates=(request.start, request.end),
+                        asset_class=spec.asset_class,
+                    )
+                except ValueError as error:
+                    errors.append(error)
+            if len(errors) == len(templates):
+                raise errors[0]
+        finally:
+            # Each error's traceback holds this frame, and the frame's list holds the error: a
+            # cycle that keeps this reader, and so its session, alive after the session is
+            # dropped, until the cyclic garbage collector next runs. Emptying the list breaks it.
+            errors.clear()
 
     def plan_fetch(
         self,
@@ -2414,7 +2420,13 @@ class RestEndpoints:
         _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
 
     def poll(
-        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        interval: timedelta,
+        mode: PollMode,
+        query: str,
     ) -> Table:
         """Return a live table that re-reads the dataset's fetch path every `interval`.
 
@@ -2426,6 +2438,7 @@ class RestEndpoints:
             request: The normalized arguments; a reactive symbol table is read each cycle.
             interval: The time from one cycle's start to the next.
             mode: How cycles combine.
+            query: The `repr` of the query, for the `Query` column of `m.streams()`.
 
         Returns:
             The live table, tracked by the session.
@@ -2452,6 +2465,7 @@ class RestEndpoints:
             request=request,
             interval=interval,
             mode=mode,
+            query=query,
             read=functools.partial(
                 reader.read_cycle,
                 spec,

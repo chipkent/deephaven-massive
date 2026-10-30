@@ -1,14 +1,9 @@
-"""The `m.reference` namespace: cross-asset reference data, and the unified snapshot's record.
+"""The `m.reference` namespace: cross-asset reference data.
 
 Datasets: tickers, ticker details, ticker types, ticker events, related companies, news,
 exchanges, condition codes, market status, and market holidays. They declare no asset class:
 the reference endpoints span every class, and a symbol's prefix selects its class (`X:`
 crypto, `C:` forex, `I:` indices, `O:` options, none for stocks).
-
-The module also declares `reference.snapshots`, the catalog record of the unified snapshot
-(`/v3/snapshot`) that `MassiveSession.snapshots()` serves: the session method takes tickers of
-any classes in one call, so it hangs off the session rather than a namespace, but its dataset
-is reference data like the rest and is named, shown in `m.streams()`, and documented here.
 
 Each dataset is one factory method on `_Reference` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. This module owns the
@@ -51,7 +46,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["DATASETS", "SNAPSHOTS", "_Reference"]
+__all__ = ["DATASETS", "_Reference"]
 
 logger = logging.getLogger(__name__)
 
@@ -146,19 +141,6 @@ MARKET_HOLIDAYS: Final = DatasetSpec(
     fetch_path="/v1/marketstatus/upcoming",
     poll_keys=("Exchange", "Date"),
 )
-SNAPSHOTS: Final = DatasetSpec(
-    name="reference.snapshots",
-    summary="The current state of tickers of any asset classes, from Massive's unified snapshot.",
-    fetch_path="/v3/snapshot",
-    keys={(_REST, "/v3/snapshot"): SourceKeys(symbol=KeySpec("Ticker"))},
-    symbol_param="ticker.any_of",
-    page_size=250,
-    symbols_per_request=250,
-    # The update times that cover every asset class: an index's own, and a ticker's last quote
-    # and trade. An explicit APPEND poll appends each new state of a ticker.
-    revision_keys=("LastUpdated", "LastQuoteLastUpdated", "LastTradeLastUpdated"),
-)
-"""The unified snapshot, served by `MassiveSession.snapshots()`; at most 250 tickers a page."""
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
     TICKERS,
@@ -171,10 +153,8 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     CONDITIONS,
     MARKET_STATUS,
     MARKET_HOLIDAYS,
-    SNAPSHOTS,
 )
-"""Every dataset of `m.reference`, one `DatasetSpec` each (for example `reference.news`), and
-`reference.snapshots`, the record of `MassiveSession.snapshots()`."""
+"""Every dataset of `m.reference`, one `DatasetSpec` each (for example `reference.news`)."""
 
 
 _REST_ASSET_CLASS: Final = {
@@ -494,13 +474,18 @@ class _Reference(Namespace):
 
         Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
         `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range,
-        so pass `start`: a poll without it re-reads the news archive every cycle. An article
+        so `poll()` needs `start` or `limit` and raises `ValueError` without either; a fixed
+        `start` keeps widening the window of a poll that runs for days. Massive documents no
+        default order for this endpoint, so a poll of the latest headlines asks for one:
+        `m.reference.news(symbols="AAPL", sort="published_utc", order=dm.Order.DESC,
+        limit=50).poll(60)`. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
-        (JSON text), and
-        `symbols` only selects the articles that mention one ticker. The endpoint's `ticker`
-        parameter takes a single ticker, so `symbols` is one symbol; for several, build one
-        query per symbol. `symbols=None` reads every article; `dm.ALL` is not accepted (use
-        `symbols=None`). Its columns, and what each means, are in
+        (a `String[]`: `table.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps the
+        articles that name one, and `table.ungroup("Tickers")` gives a row per article and
+        ticker), and `symbols` only selects the articles that mention one ticker. The
+        endpoint's `ticker` parameter takes a single ticker, so `symbols` is one symbol; for
+        several, build one query per symbol. `symbols=None` reads every article; `dm.ALL` is not
+        accepted (use `symbols=None`). Its columns, and what each means, are in
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.md#news,
         in the web UI's column tooltips, and in the query's `columns()`.
 
@@ -508,7 +493,8 @@ class _Reference(Namespace):
             symbols: The one ticker whose articles to read, as a `str` or a one-element
                 sequence; None for every article.
             start: The earliest publication: a date is its 00:00 in New York, a `datetime`
-                is used as is; None for no lower bound, which reads the whole archive.
+                is used as is; None for no lower bound, which reads the whole archive and
+                which `poll()` refuses unless `limit` is set.
             end: The end of the range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, a
                 `datetime` is exclusive; None for no upper bound.

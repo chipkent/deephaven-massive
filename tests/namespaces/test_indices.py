@@ -132,17 +132,19 @@ def test_values_schema() -> None:
     ]
 
 
-def test_the_previous_day_bar_has_the_bars_columns() -> None:
-    assert CATALOG.dataset_schema(indices.PREVIOUS_DAY_BAR).column_names == (
-        CATALOG.dataset_schema(indices.BARS).column_names
-    )
+def test_the_previous_day_bar_has_the_bars_columns_its_endpoint_fills() -> None:
+    mine = CATALOG.dataset_schema(indices.PREVIOUS_DAY_BAR).column_names
+    bars = CATALOG.dataset_schema(indices.BARS).column_names
+    # The bars columns in the bars order, less the official open only the streams and files fill.
+    assert tuple(name for name in bars if name in mine) == mine
+    assert set(bars) - set(mine) == {"OfficialOpen"}
 
 
 def test_bars_schema() -> None:
     # Index bars come from index values: no volume, no VWAP, no trade count.
     columns = {c.name: c for c in CATALOG.dataset_schema(indices.BARS).columns}
     for name in ("Volume", "Vwap", "Transactions"):
-        assert columns[name].supplied_by == ()
+        assert name not in columns
     # The stream's window end `e` is the declared end key, so it is `TimestampEnd`.
     assert _schema(indices.BARS) == [
         ("Symbol", "String"),
@@ -523,7 +525,7 @@ def rows(table: Table) -> list[dict[str, Any]]:
 
 
 def bar_rows(table: Table) -> list[dict[str, Any]]:
-    # The columns index bars fill; every column only other asset classes' bars fill is null.
+    # The columns index bars fill, less the arrival time; any other column is null.
     filled = {name for name, _ in _schema(indices.BARS)} - {"TimestampInsert"}
     out = rows(table)
     for row in out:
@@ -630,7 +632,6 @@ def test_previous_day_bars_fetch_one_index_a_request(
             "Close": 5935.94,
             "High": 5940.35,
             "Low": 5876.0,
-            "OfficialOpen": None,
         }
     ]
 
