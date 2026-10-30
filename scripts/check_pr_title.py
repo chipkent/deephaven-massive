@@ -7,8 +7,9 @@ script checks the part of it a program can check:
 - **Type.** The title starts with one of the Conventional Commits types the project uses
   (`feat`, `fix`, `docs`, `test`, `refactor`, `ci`, `chore`), then a colon and one space. The
   only scope allowed is `chore(deps):`, and there is no `!` marker.
-- **Lowercase.** The first word after the colon starts with a lowercase letter, since it is a
-  verb in the imperative mood ("add", not "Add").
+- **Lowercase.** The first character after the colon and its space is a lowercase letter,
+  since the summary starts with a verb in the imperative mood: "add", not "Add", a number, or
+  a name in backticks.
 - **No trailing period.**
 - **Length.** At most 60 characters, type included. GitHub appends ` (#123)` to the squash
   commit, so a trailing pull request number in that form is not counted.
@@ -95,10 +96,11 @@ def find_problems(title: str, *, check_length: bool = True) -> list[str]:
                 "Type: put exactly one space after the colon, then the summary, as in"
                 " `docs: explain how history() picks a source`."
             )
-        elif subject[0].isupper():
+        elif not subject[0].islower():
+            first_word = subject.split(" ", 1)[0]
             problems.append(
-                "Lowercase: start the summary after the colon with a lowercase verb in the"
-                f" imperative mood, not `{subject.split(' ', 1)[0]}`."
+                "Lowercase: start the summary after the colon with a lowercase letter, the first"
+                f' letter of a verb in the imperative mood, not "{first_word}".'
             )
     if title.endswith("."):
         problems.append("No trailing period: remove the period at the end of the title.")
