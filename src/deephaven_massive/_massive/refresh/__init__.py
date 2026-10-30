@@ -21,6 +21,8 @@ Modules:
       it, and describes how two copies differ.
     - `docs`: reads the documentation index (`llms.txt`) and the REST, WebSocket, and
       flat-file pages it links.
+    - `knowledge_base`: the knowledge-base articles the library relies on, and the Markdown
+      extracted from each article's HTML page.
     - `openapi`: resolves references and merged schemas in the OpenAPI specifications.
     - `fields`: the field rules every generator shares: names, representation, units,
       conversions, and documented examples.

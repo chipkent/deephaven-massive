@@ -3084,8 +3084,9 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   own under a token the calendar's close sets. Reference data and the other datasets Massive
   assigns to no subscription (economy, partner data, the unified snapshot) go to the `other`
   bucket, whatever their filters: Massive's knowledge base ("What is the request limit for
-  Massive's RESTful APIs?") says reference and cross-asset endpoints are counted in a bucket
-  of their own. So `m.reference.tickers(market=dm.Market.CRYPTO)` goes to `other`, as does
+  Massive's RESTful APIs?", vendored as
+  `vendor/massive/knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md`)
+  says reference and cross-asset endpoints are counted in a bucket of their own. So `m.reference.tickers(market=dm.Market.CRYPTO)` goes to `other`, as does
   the session's own read of Massive's crypto ticker list, its pages in one lane of their own.
   `other` cannot be declared, since no setting names it, but it is paced like a subscription
   once a 429 names the per-minute limit.
@@ -4074,6 +4075,8 @@ refresh/             build time only; excluded from the wheel; may import any of
   docs.py            llms.txt and the pages it links: each REST page's endpoint line, each
                      WebSocket page's feed (cluster and channel), the flat-file overview
                      prefix tables, "Columns" tables, and "Example Data" headers
+  knowledge_base.py  ARTICLES (slug -> what the library takes from it), the knowledge-base
+                     articles the library relies on; the Markdown of an article's HTML page
   openapi.py         OpenAPI reading: $ref, allOf merge, one-branch choices, checked accessors
   plain_text.py      the four fixed rules that turn a vendor description into plain text
   naming.py          the naming policy shared by every transport: PascalCase columns, snake
@@ -4102,6 +4105,7 @@ vendor/massive/      outside the package; Massive's published content, vendored 
                      input, not covered by the repository's license, in no distribution
   openapi.json  websocket.json  llms.txt  manifest.json
   rest/  websocket/  flat-files/   (the pages of each area llms.txt links)
+  knowledge-base/  (the articles the library relies on, as Markdown extracted from HTML)
 ```
 
 **The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 36
@@ -5226,20 +5230,28 @@ specs, `--fetch` stores every REST, WebSocket, and flat-file page `llms.txt` lin
 `vendor/massive/rest/`, `websocket/`, and `flat-files/`, because `llms.txt` names pages, not
 paths: each REST page's `**Endpoint:**` line is what ties the documentation to an OpenAPI
 path, each WebSocket page names its feed's cluster and channel, and the flat-file overview
-and dataset pages are the flat-file schemas. The documentation host rate-limits a burst of page requests
+and dataset pages are the flat-file schemas. It also stores, under
+`vendor/massive/knowledge-base/<slug>.md`, each knowledge-base article the library relies on
+(`refresh/knowledge_base.py`, `ARTICLES`: a short, reviewed list of slugs, each with what the
+library takes from the article). Articles are published as HTML only, so the fetch extracts
+the title and the `<article>` element of each page as Markdown with the standard library's
+HTML parser; the manifest records the page's URL and the hash of the HTML as fetched. The
+first is "What is the request limit for Massive's RESTful APIs?", the source of the Basic 429
+wording and of the `other` bucket. The documentation host rate-limits a burst of page requests
 with HTTP 429, which the fetch waits out (`Retry-After`, capped at 60 s, else 2 to 32 s, five
 times); any other failure stops it and leaves the old snapshot in place, and the new snapshot
 is swapped in through a backup directory (`vendor/massive-incoming/` and
-`vendor/massive-previous/`, both gitignored). The snapshot (about 4 MB, 240 files, fetched
-2026-10-27 UTC) is Massive's published content, vendored as generation input and not covered
+`vendor/massive-previous/`, both gitignored). The snapshot (about 4 MB, 243 files, fetched
+2026-10-30 UTC) is Massive's published content, vendored as generation input and not covered
 by the repository's license, so it ships in neither the sdist nor the wheel.
 
-**`--check`** downloads the live `openapi.json`, `websocket.json`, `llms.txt`, and flat-file
-pages and overviews, compares them semantically with the snapshot (`refresh/drift.py`), prints a
+**`--check`** downloads the live `openapi.json`, `websocket.json`, `llms.txt`, documentation
+pages, and knowledge-base articles, compares them semantically with the snapshot (`refresh/drift.py`), prints a
 report, changes nothing, and exits non-zero on drift. It reports REST paths new, removed, or
 newly deprecated (including deprecated paths still in `rest.json`); fields and parameters
 added, removed, or retyped; WebSocket channels and keys; flat-file pages, headers, and overview
-rows; changed unit tags; the keys the gates would stop on; and **unaccounted items**:
+rows; knowledge-base articles whose text changed, naming what the library takes from each;
+changed unit tags; the keys the gates would stop on; and **unaccounted items**:
 documented REST endpoints, channels, and flat-file pages neither generated nor excluded, plus,
 when S3 credentials are set, bucket prefixes from `FlatFileClient.prefixes()` that nothing
 names.
@@ -5998,7 +6010,9 @@ document already reflects them.
       does; declaring it still raises.
     - Massive's knowledge-base article "What is the request limit for Massive's RESTful
       APIs?", which says reference and cross-asset endpoints are counted in a bucket of their
-      own, is to be vendored.
+      own, is vendored by the refresh as
+      `vendor/massive/knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md`,
+      and `--check` reports any change to its text.
     - Reference reads filtered by market and the session's crypto ticker list are charged to
       `other`, not to the class they filter by.
     - What a governor learned is forgotten with the governor, once the last session of its
