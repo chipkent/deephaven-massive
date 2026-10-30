@@ -42,6 +42,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     adjustment_notes,
     build_query,
@@ -231,9 +232,6 @@ _OPEN_CLOSE: Final = "/v1/open-close/{stocksTicker}/{date}"
 
 # The snapshots declare no time key: a ticker that has not traded can carry `updated` 0,
 # which as the declared time column would fail the whole response instead of reading as null.
-# The tickers travel comma-separated in the URL, so a long watchlist is split into requests of
-# 250 symbols, the size Massive's unified snapshot documents as its limit, to keep each URL
-# well under the lengths servers refuse.
 SNAPSHOTS: Final = DatasetSpec(
     name="stocks.snapshots",
     summary="Current market snapshots of US-listed stocks, one row per ticker.",
@@ -241,7 +239,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): _ticker_keys()},
     symbol_param="tickers",
-    symbols_per_request=250,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=("Updated",),
 )
 MOVERS: Final = DatasetSpec(

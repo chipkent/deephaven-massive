@@ -34,14 +34,13 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import Namespace, accepted_values, build_query, list_params
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._massive import RestPath
     from deephaven_massive._query import Query
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
@@ -186,8 +185,7 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
     if value is None:
         return None
     member = _require_enum(value, AssetClass, "asset_class")
-    path = cast("RestPath", core.catalog.source(_REST, cast("str", spec.fetch_path)))
-    accepted = next(param.values for param in path.params if param.name == "asset_class")
+    accepted = accepted_values(core, spec, "asset_class")
     if _REST_ASSET_CLASS[member] not in accepted:
         names = [m.name for m in AssetClass if _REST_ASSET_CLASS[m] in accepted]
         raise ValueError(
