@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import deephaven_massive as dm
 from deephaven_massive._massive import RestClient, Transport, source
 
 if TYPE_CHECKING:
@@ -20,8 +21,6 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
-
-    import deephaven_massive as dm
 
 pytestmark = pytest.mark.integration
 
@@ -112,7 +111,7 @@ def test_minute_bars_on_the_host_resolved_for_a_business_key(
     acknowledged the topic there, which it does whether or not the market is open; a refusal
     there means the base Business tick host is another one.
     """
-    table = live_session.stocks.bars("AAPL").append_only()
+    table = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
     hosts = {str(r["Host"]) for r in table_rows(live_session.connections())}
     for line in stream_report(live_session):

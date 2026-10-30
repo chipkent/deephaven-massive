@@ -241,18 +241,16 @@ class _Indices(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
     @overload
     def bars(
-        self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
+        self, symbols: Symbols, timespan: Timespan, *, multiplier: int = 1
     ) -> HistoryQuery: ...
     @raises_through(build_query)
-    def bars(
-        self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
-    ) -> HistoryQuery:
+    def bars(self, symbols: Symbols, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery:
         """Open, high, low, and close index levels over fixed windows of time.
 
         Each row is one bar of one index: `Symbol`, its trading day `Date` (ISO `yyyy-MM-dd`
@@ -308,7 +306,7 @@ class _Indices(Namespace):
         Args:
             symbols: The indices, such as `"I:SPX"` or `["I:SPX", "I:NDX"]` (`"SPX"` is refused); a
                 Deephaven table with a `Symbol` column; or `dm.ALL`.
-            timespan: The unit of the bar window, a `dm.Timespan`; `MINUTE` by default.
+            timespan: The unit of the bar window, a `dm.Timespan`; required, with no default.
                 `Timespan.SESSION` is for futures only.
             multiplier: The number of `timespan` units in one bar, a positive `int`; 1 by
                 default. `multiplier=5` with `Timespan.MINUTE` is 5-minute bars.
@@ -328,7 +326,8 @@ class _Indices(Namespace):
         Example:
             ::
 
-                live = m.indices.bars(["I:SPX"]).append_only()  # 1-minute bars as they close
+                # 1-minute bars as they close.
+                live = m.indices.bars(["I:SPX"], dm.Timespan.MINUTE).append_only()
                 hourly = m.indices.bars("I:SPX", dm.Timespan.HOUR).history(
                     "2025-06-02", "2025-06-06"
                 )

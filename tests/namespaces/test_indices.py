@@ -346,7 +346,7 @@ def test_bars_pick_their_class(m: dm.MassiveSession, case: tuple[dm.Timespan, in
 
 
 def test_bars_default_to_streamed_minutes(m: dm.MassiveSession) -> None:
-    q = m.indices.bars(["I:SPX"])
+    q = m.indices.bars(["I:SPX"], dm.Timespan.MINUTE)
     assert type(q) is StreamHistoryQuery
     assert repr(q) == (
         "<StreamHistoryQuery indices.bars symbols=('I:SPX',) timespan=Timespan.MINUTE>"
@@ -472,7 +472,11 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
 )
 def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
     method = cast("Callable[..., object]", getattr(m.indices, name))
-    extra: tuple[object, ...] = ("2025-06-02",) if name == "daily_open_close" else ()
+    extras: dict[str, tuple[object, ...]] = {
+        "daily_open_close": ("2025-06-02",),
+        "bars": (dm.Timespan.MINUTE,),
+    }
+    extra = extras.get(name, ())
     with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker; this dataset takes"):
         method("X:BTCUSD", *extra)
     with pytest.raises(ValueError, match=r"^'SPX' is not Massive's ticker; use 'I:SPX'"):
@@ -660,7 +664,7 @@ def test_bars_history_over_rest_fills_the_range_and_the_symbol(
 ) -> None:
     path = f"/v2/aggs/ticker/I:SPX/range/1/minute/{MIDNIGHT_MS}/{MIDNIGHT_MS + 86_400_000 - 1}"
     fake_rest.reply(quote(path), Reply(load_fixture(OWNER, "range.json")))
-    q = rest_session.indices.bars(["I:SPX"])
+    q = rest_session.indices.bars(["I:SPX"], dm.Timespan.MINUTE)
     out = rows(q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
@@ -859,7 +863,7 @@ def test_a_frame_lands_in_blink(
     elif topic.startswith("A."):
         blink = indices.bars("I:SPX", dm.Timespan.SECOND).blink()
     else:
-        blink = indices.bars("I:SPX").blink()
+        blink = indices.bars("I:SPX", dm.Timespan.MINUTE).blink()
     seen = blink_to_append_only(blink)
     ws_session.subscribed(topic)
     ws_session.publish(*json.loads(load_fixture(OWNER, fixture)))
@@ -972,7 +976,7 @@ def test_one_flat_file_round_trips(
     elif prefix == "us_indices/day_aggs_v1":
         q, value = s3_session.indices.bars(["I:SPX"], dm.Timespan.DAY), "Close"
     else:
-        q, value = s3_session.indices.bars(["I:SPX"]), "Close"
+        q, value = s3_session.indices.bars(["I:SPX"], dm.Timespan.MINUTE), "Close"
     out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
     time = "Timestamp" if value == "Value" else "TimestampStart"
     assert [

@@ -220,7 +220,11 @@ def test_the_session_after_a_holiday_and_year_candles(
     if "futures" in classes_on_basic:
         evidence(f"Futures on Basic: the library's minute bars of {session_day} are not read")
     else:
-        minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
+        minutes = table_rows(
+            live_session.futures.bars(contract, dm.Timespan.MINUTE).history(
+                session_day, session_day
+            )
+        )
         evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
         if minutes:
             evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")

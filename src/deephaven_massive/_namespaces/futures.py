@@ -420,7 +420,7 @@ class _Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -429,7 +429,7 @@ class _Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: FuturesSpan = Timespan.MINUTE,
+        timespan: FuturesSpan,
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -438,7 +438,7 @@ class _Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: FuturesSpan = Timespan.MINUTE,
+        timespan: FuturesSpan,
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -502,8 +502,9 @@ class _Futures(Namespace):
         Args:
             symbols: The contracts: one ticker such as `"ESZ5"`, a sequence of tickers, a
                 Deephaven table with a `Symbol` column, or `dm.ALL`.
-            timespan: The bar unit, a `dm.Timespan` other than `DAY`: `SECOND`, `MINUTE`
-                (the default), `HOUR`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+            timespan: The bar unit, a `dm.Timespan` other than `DAY`: `SECOND`, `MINUTE`,
+                `HOUR`, `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`; required, with no
+                default.
             multiplier: How many units one bar spans; a positive `int`, 1 by default.
             venues: The exchanges whose flat files `history()` reads, a set of
                 `dm.FuturesVenue`, such as `{dm.FuturesVenue.CME}`; every venue (CME, CBOT,
@@ -527,8 +528,9 @@ class _Futures(Namespace):
                 import deephaven_massive as dm
 
                 m = dm.MassiveSession()
-                # ESZ5 has expired: name a current contract, from m.futures.contracts()
-                minute = m.futures.bars("ESZ5").ring(390)  # the latest 390 1-minute bars, live
+                # ESZ5 has expired: name a current contract, from m.futures.contracts().
+                # The latest 390 1-minute bars, live.
+                minute = m.futures.bars("ESZ5", dm.Timespan.MINUTE).ring(390)
                 five = m.futures.bars("ESZ5", dm.Timespan.MINUTE, multiplier=5).history(
                     "2025-10-01", "2025-10-03"
                 )

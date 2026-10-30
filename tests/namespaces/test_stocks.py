@@ -473,7 +473,7 @@ def test_bars_pick_their_class_from_the_timespan(
 
 
 def test_bars_default_to_streamed_adjusted_minutes(massive_session: dm.MassiveSession) -> None:
-    query = massive_session.stocks.bars(dm.ALL)
+    query = massive_session.stocks.bars(dm.ALL, dm.Timespan.MINUTE)
     assert type(query) is StreamHistoryQuery
     assert query._request.timespan is dm.Timespan.MINUTE
     unadjusted = massive_session.stocks.bars("AAPL", dm.Timespan.DAY, adjusted=False)
@@ -487,9 +487,10 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars("AAPL", "minute")
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars("AAPL", adjusted="yes")
+        bars("AAPL", dm.Timespan.MINUTE, adjusted="yes")
+    # None would otherwise mean a path without `adjusted`.
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars("AAPL", adjusted=None)  # None would otherwise mean a path without `adjusted`
+        bars("AAPL", dm.Timespan.MINUTE, adjusted=None)
     with pytest.raises(ValueError, match="multiplier"):
         bars("AAPL", dm.Timespan.MINUTE, multiplier=0)
 
@@ -1411,7 +1412,7 @@ STREAM_CASES: list[
     ),
     (
         "bars.minute",
-        lambda s: s.bars("MSFT"),
+        lambda s: s.bars("MSFT", dm.Timespan.MINUTE),
         "AM.MSFT",
         {
             "ev": "AM",

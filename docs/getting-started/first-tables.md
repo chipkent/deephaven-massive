@@ -82,7 +82,7 @@ Deephaven's values let you take a range straight from another table. This finds 
 individual trades needs a Stocks plan that includes them):
 
 ```python
-minutes = m.stocks.bars("AAPL").history("2026-10-29", "2026-10-29")
+minutes = m.stocks.bars("AAPL", dm.Timespan.MINUTE).history("2026-10-29", "2026-10-29")
 busiest = next(minutes.sort_descending("Volume").head(1).iter_dict())
 trades = m.stocks.trades("AAPL").history(busiest["TimestampStart"], busiest["TimestampEnd"])
 ```

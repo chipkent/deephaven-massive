@@ -1500,7 +1500,7 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
     Example:
         ::
 
-            q = m.stocks.bars(["AAPL", "MSFT"])  # one-minute bars
+            q = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE)
             live = q.append_only()
             day = q.history("2025-03-03", "2025-03-03")
     """

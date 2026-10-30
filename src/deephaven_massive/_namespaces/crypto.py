@@ -418,7 +418,7 @@ class _Crypto(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
@@ -426,7 +426,7 @@ class _Crypto(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery: ...
@@ -434,7 +434,7 @@ class _Crypto(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery:
@@ -496,7 +496,7 @@ class _Crypto(Namespace):
         Args:
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
-            timespan: The unit of the bar window, a `dm.Timespan`; `MINUTE` by default.
+            timespan: The unit of the bar window, a `dm.Timespan`; required, with no default.
                 `Timespan.SESSION` is for futures only.
             multiplier: How many `timespan` units one bar spans, a positive integer; 1 by
                 default. Only 1 streams.
@@ -518,7 +518,7 @@ class _Crypto(Namespace):
         Example:
             ::
 
-                live = m.crypto.bars("X:BTCUSD").last_by()  # 1-minute bars
+                live = m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()
                 hourly = m.crypto.bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=4).history(
                     "2026-01-01", "2026-01-07"
                 )

@@ -533,7 +533,7 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
         adjusted: bool = True,
@@ -542,7 +542,7 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -551,7 +551,7 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -609,8 +609,8 @@ class _Options(Namespace):
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, a Deephaven table with a `Symbol` column, or `dm.ALL`.
-            timespan: The bar unit; `Timespan.MINUTE` by default. `Timespan.SESSION` is for
-                futures only.
+            timespan: The bar unit, a `dm.Timespan`; required, with no default.
+                `Timespan.SESSION` is for futures only.
             multiplier: How many units one bar spans, a positive `int`; 1 by default.
             adjusted: Whether REST bars are adjusted for splits of the underlying; True by
                 default. The flat files and the streams are as traded, so `history()` reads the
@@ -631,7 +631,7 @@ class _Options(Namespace):
             ::
 
                 # For append_only(), name a current contract: this one has expired (see chain())
-                minute = m.options.bars("O:AAPL250117C00150000").append_only()
+                minute = m.options.bars("O:AAPL250117C00150000", dm.Timespan.MINUTE).append_only()
                 hourly = m.options.bars(
                     "O:AAPL250117C00150000", dm.Timespan.HOUR, multiplier=4
                 ).history("2025-01-02", "2025-01-10")

@@ -117,7 +117,7 @@ _PLAIN = cast("Any", "text")
         (lambda f: f.trades("ESZ5", venues=_PLAIN), "venues must be a set of dm.FuturesVenue"),
         (lambda f: f.quotes("ESZ5", venues={_PLAIN}), "venues must hold only dm.FuturesVenue"),
         (
-            lambda f: f.bars("ESZ5", venues=dm.FuturesVenue.CME),
+            lambda f: f.bars("ESZ5", dm.Timespan.MINUTE, venues=dm.FuturesVenue.CME),
             "venues must be a set of dm.FuturesVenue, such as",
         ),
         (lambda f: f.bars("ESZ5", _PLAIN), "timespan must be dm.Timespan"),
@@ -172,13 +172,13 @@ def test_bars_pick_their_class_from_the_timespan(
     assert request(q).multiplier == multiplier
 
 
-def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.futures.bars(dm.ALL, venues={dm.FuturesVenue.NYMEX})
+def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSession) -> None:
+    q = massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues={dm.FuturesVenue.NYMEX})
     assert type(q) is StreamHistoryQuery
     assert request(q).timespan is dm.Timespan.MINUTE
     assert request(q).venues == (dm.FuturesVenue.NYMEX,)
     with pytest.raises(ValueError, match="venues is empty; leave it out to read every venue"):
-        massive_session.futures.bars(dm.ALL, venues=frozenset())
+        massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues=frozenset())
 
 
 def test_bars_reject_the_day_timespan(massive_session: dm.MassiveSession) -> None:
@@ -930,7 +930,7 @@ def at_ms(millis: int) -> datetime:
         (lambda f: f.trades("ESZ4"), "T.ESZ4", 0),
         (lambda f: f.quotes("ESZ4"), "Q.ESZ4", 1),
         (lambda f: f.bars("6CH5", dm.Timespan.SECOND), "A.6CH5", 2),
-        (lambda f: f.bars("6CH5"), "AM.6CH5", 3),
+        (lambda f: f.bars("6CH5", dm.Timespan.MINUTE), "AM.6CH5", 3),
     ],
     ids=["trades", "quotes", "second-bars", "minute-bars"],
 )
@@ -1007,7 +1007,11 @@ CME = dm.FuturesVenue.CME
     [
         (lambda f: f.trades("ESZ4", venues={CME}), "trades_v1", date(2024, 12, 17)),
         (lambda f: f.quotes("GCJ5", venues={CME}), "quotes_v1", date(2024, 12, 17)),
-        (lambda f: f.bars("GCJ5", venues={CME}), "minute_aggs_v1", date(2025, 2, 4)),
+        (
+            lambda f: f.bars("GCJ5", dm.Timespan.MINUTE, venues={CME}),
+            "minute_aggs_v1",
+            date(2025, 2, 4),
+        ),
         (
             lambda f: f.bars("GCJ5", dm.Timespan.SESSION, venues={CME}),
             "session_aggs_v1",

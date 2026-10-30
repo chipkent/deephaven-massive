@@ -352,7 +352,7 @@ def test_bars_pick_their_class(
 
 
 def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.bars(dm.ALL)
+    q = massive_session.crypto.bars(dm.ALL, dm.Timespan.MINUTE)
     assert type(q) is StreamHistoryQuery
     request = request_of(q)
     # Crypto has no corporate actions: bars carry no adjustment choice.
@@ -447,7 +447,7 @@ def exhausted() -> Iterator[str]:
     [
         lambda c: c.trades(exhausted()),
         lambda c: c.quotes([]),
-        lambda c: c.bars(exhausted()),
+        lambda c: c.bars(exhausted(), dm.Timespan.MINUTE),
         lambda c: c.fmv(exhausted()),
         lambda c: c.snapshots(exhausted()),
         lambda c: c.daily_open_close(exhausted(), "2026-01-02"),
@@ -503,7 +503,9 @@ def test_rest_history_needs_explicit_symbols(massive_session: dm.MassiveSession)
     with pytest.raises(ValueError, match=r"crypto\.trades history over REST needs explicit"):
         massive_session.crypto.trades(dm.ALL).history("2026-01-02", "2026-01-02", source=rest)
     with pytest.raises(ValueError, match=r"crypto\.bars history over REST needs explicit"):
-        massive_session.crypto.bars(dm.ALL).history("2026-01-02", "2026-01-02", source=rest)
+        massive_session.crypto.bars(dm.ALL, dm.Timespan.MINUTE).history(
+            "2026-01-02", "2026-01-02", source=rest
+        )
 
 
 def test_flat_file_history_states_its_constraints(massive_session: dm.MassiveSession) -> None:
@@ -912,6 +914,8 @@ def test_a_documented_frame_lands_in_blink(
     namespace = ws_session.session.crypto
     if dataset == "bars_second":
         query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.SECOND))
+    elif dataset == "bars":
+        query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.MINUTE))
     else:
         query = getattr(namespace, dataset)(symbol)
     blink = query.blink()
@@ -968,7 +972,7 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
             ],
         ),
         (
-            lambda c: c.bars("X:BTCUSD"),
+            lambda c: c.bars("X:BTCUSD", dm.Timespan.MINUTE),
             "global_crypto/minute_aggs_v1",
             [
                 ("X:BTCUSD", 1679961600000000000, 27139.64),

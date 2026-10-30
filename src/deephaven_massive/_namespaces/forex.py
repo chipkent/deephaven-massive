@@ -353,7 +353,7 @@ class _Forex(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
@@ -361,7 +361,7 @@ class _Forex(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery: ...
@@ -369,7 +369,7 @@ class _Forex(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery:
@@ -416,8 +416,8 @@ class _Forex(Namespace):
             symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
                 a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
                 (`dm.canonical_symbol_forex` converts `EUR/USD`).
-            timespan: The unit of one bar's window. `dm.Timespan.SESSION` is futures only.
-                Defaults to one minute.
+            timespan: The unit of one bar's window, a `dm.Timespan`; required, with no
+                default. `dm.Timespan.SESSION` is futures only.
             multiplier: The number of `timespan` units in one bar's window, a positive
                 integer. Defaults to 1.
 
@@ -436,7 +436,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                live = m.forex.bars("C:EURUSD").append_only()
+                live = m.forex.bars("C:EURUSD", dm.Timespan.MINUTE).append_only()
                 hourly = m.forex.bars(["C:EURUSD"], dm.Timespan.HOUR).history(
                     "2026-10-01", "2026-10-23"
                 )

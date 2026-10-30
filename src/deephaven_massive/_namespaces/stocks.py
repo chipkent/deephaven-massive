@@ -587,7 +587,7 @@ class _Stocks(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
         adjusted: bool = True,
@@ -596,7 +596,7 @@ class _Stocks(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -605,7 +605,7 @@ class _Stocks(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         adjusted: bool = True,
@@ -669,8 +669,8 @@ class _Stocks(Namespace):
         Args:
             symbols: The tickers: one `str`, a sequence of them, a `Table` with a `Symbol`
                 column (streams follow its rows), or `dm.ALL`.
-            timespan: The bar unit, a `dm.Timespan` other than `SESSION`; defaults to
-                `MINUTE`.
+            timespan: The bar unit, a `dm.Timespan` other than `SESSION`; required, with no
+                default. `SECOND` and `MINUTE` stream; every other unit is history only.
             multiplier: The number of `timespan` units per bar, a positive `int`; defaults to
                 1. Only 1 streams.
             adjusted: True (the default) for bars adjusted for splits, from REST only; False
@@ -691,7 +691,7 @@ class _Stocks(Namespace):
         Example:
             ::
 
-                live = m.stocks.bars(["AAPL"]).append_only()  # one-minute bars, streamed
+                live = m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()  # streamed
                 daily = m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
                 hourly = m.stocks.bars("SPY", dm.Timespan.HOUR, multiplier=4).history(
                     "2025-01-01", "2025-03-31"

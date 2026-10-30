@@ -81,7 +81,7 @@ def test_text_of_the_delayed_key_refusal_on_the_real_time_host(
     )
     session = dm.MassiveSession(config)
     try:
-        table = session.stocks.bars("AAPL").append_only()
+        table = session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
         rows = wait_rows(session, table, time.monotonic() + _WAIT)
         for line in stream_report(session):
             evidence(line)
