@@ -501,9 +501,9 @@ def test_each_static_verb_is_one_logged_call(
     query = repr(trades(massive_session))
     assert _calls(caplog) == [
         f"call 1 start: {news(massive_session)!r}.fetch()",
-        "call 1 published: 0 rows in <s> s",
+        "call 1 done: 0 rows in <s> s",
         f"call 2 start: {last_trade(massive_session)!r}.fetch()",
-        "call 2 published: 0 rows in <s> s",
+        "call 2 done: 0 rows in <s> s",
         (
             f"call 3 start: {query}.history('2025-03-03', '2025-03-04', "
             "source=<HistorySource.REST: 'rest'>)"
