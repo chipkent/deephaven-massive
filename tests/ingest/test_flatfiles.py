@@ -2805,7 +2805,7 @@ def test_a_background_history_lands_the_files_rows(
         cast("Any", state.fail).__self__.thread.join(TIMEOUT)
     # The read's row shows DONE only after the update cycle that added the rows, so the
     # table holds them from then on.
-    (row,) = rows_when(session.streams(), lambda rows: rows[0]["State"] != "LOADING")
+    (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
     assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 4)
     assert [r["Symbol"] for r in rows(table)] == ["AAPL", "MSFT", "AAPL", "SPY"]
     session.release(table)
