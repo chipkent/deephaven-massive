@@ -730,11 +730,6 @@ TYPE_FIXES: Mapping[tuple[str, str], TypeFix] = MappingProxyType(
         ("/v1/marketstatus/now", "serverTime"): _iso('"2020-11-10T17:37:37-05:00"'),
         ("/v1/marketstatus/upcoming", "open"): _iso('"2020-11-27T14:30:00.000Z"'),
         ("/v1/marketstatus/upcoming", "close"): _iso('"2020-11-27T18:00:00.000Z"'),
-        ("/futures/v1/products", "last_updated"): TypeFix(
-            conversion=Conversion.ISO_DATE_TEXT,
-            reason="The specification declares format date-time, but the documentation sample "
-            'is the date "2025-02-22", which no date-time parser accepts.',
-        ),
         ("/futures/v1/snapshot", "details.settlement_date"): TypeFix(
             conversion=Conversion.DATE_AS_EPOCH,
             reason="The specification declares format date, but its example and the "

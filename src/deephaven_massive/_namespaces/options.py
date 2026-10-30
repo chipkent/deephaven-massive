@@ -54,6 +54,7 @@ from deephaven_massive._namespaces.base import (
     list_params,
     require_bool,
 )
+from deephaven_massive._types import ALL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -73,7 +74,11 @@ logger = logging.getLogger(__name__)
 _REST, _WS, _FLAT = Transport.REST, Transport.WS, Transport.FLAT_FILES
 
 _SNAPSHOT_TYPE: Final = "options"
-"""The `type` the unified snapshot is sent, so `dm.ALL` lists options contracts only."""
+"""The `type` the unified snapshot is sent for `dm.ALL`, so it lists options contracts only.
+
+Tickers never travel with it: Massive answers `type` beside `ticker.any_of` with HTTP 400
+("Cannot specify tickers and type."), and each contract's `O:` prefix already names its class.
+"""
 
 _LAST_TRADE: Final = "/v2/last/trade/{optionsTicker}"
 _TRADES: Final = "/v3/trades/{optionsTicker}"
@@ -868,8 +873,9 @@ class _Options(Namespace):
                 `dm.Order`, `limit` is not an `int`, or `filters` is not a mapping.
             ValueError: If a symbol is not an OCC option symbol, a sequence is empty or an exhausted
                 generator, a table has no `Symbol` column, `limit` is not positive, a filter key is
-                not a parameter of the endpoint or is `type` (the library sends `type=options`), or
-                a filter value does not fit its parameter. Also for `symbols` of None, with a
+                not a parameter of the endpoint or is `type` (the library sends `type=options` for
+                `dm.ALL`, and Massive refuses it beside tickers), or a filter value does not fit
+                its parameter. Also for `symbols` of None, with a
                 message that names the forms it takes.
 
         Example:
@@ -878,7 +884,16 @@ class _Options(Namespace):
                 watch = ["O:AAPL250117C00150000", "O:AAPL250117P00150000"]
                 greeks = m.options.snapshots(watch).poll(5)
         """
-        params: dict[str, object] = {"type": _SNAPSHOT_TYPE}
+        # Massive refuses `type` beside tickers, so only `dm.ALL` sends it. The key stays when
+        # its value is None, which keeps `type` refused as a filter either way.
+        listing = symbols is ALL
+        logger.debug(
+            "options.snapshots: %s, so type=%s is %s",
+            "dm.ALL" if listing else "tickers given",
+            _SNAPSHOT_TYPE,
+            "sent" if listing else "left out",
+        )
+        params: dict[str, object] = {"type": _SNAPSHOT_TYPE if listing else None}
         params.update(list_params(sort=sort, order=order))
         return cast(
             "Query",

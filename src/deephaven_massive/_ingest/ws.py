@@ -2334,7 +2334,10 @@ class WsConnections:
 
         Runs on an update-graph thread (or the caller thread for the initial replay), with the
         update-graph lock held: it takes the group's lock only to find the connection, and
-        never blocks.
+        never blocks or raises. A futures change that finds the session closed, or the group
+        left by every session, after the connection was found is dropped and logged at DEBUG:
+        the close tears the stream down, so failing it from here would only blame its
+        watchlist.
 
         Args:
             stream_id: The stream.
@@ -2346,7 +2349,19 @@ class WsConnections:
         if connection is None:
             return
         if connection.asset_class is AssetClass.FUTURES and added:
-            self.futures_calendar().watch(added)
+            try:
+                calendar = self.futures_calendar()
+            except MassiveError as error:
+                logger.debug(
+                    "stream %d: a watchlist change (%d added, %d removed) was dropped; the "
+                    "session is closing (%s)",
+                    stream_id,
+                    len(added),
+                    len(removed),
+                    error,
+                )
+                return
+            calendar.watch(added)
         if connection.asset_class is not AssetClass.CRYPTO:
             connection.post(connection.change_symbols, stream_id, added, removed)
             return

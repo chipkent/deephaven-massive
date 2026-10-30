@@ -733,8 +733,9 @@ class StreamSink:
         recorded too, and names it. When the session's close came first, the table fails with
         the close's error instead, so the table and its `CLOSED` row name the same cause, and
         nothing is logged (the close logs its count). Any other failure is logged at ERROR.
-        The stream counts as failed only once `publish_failure` has returned, so a failure
-        that raises can be retried. Never call it on an update-graph thread or under
+        The stream counts as failed even when `publish_failure` raises (the exception then
+        propagates): its row already reads `FAILED`, so it publishes no more rows, and the
+        failure is not tried again. Never call it on an update-graph thread or under
         `registry_lock`; the thread needs an execution context.
 
         Args:
@@ -750,10 +751,12 @@ class StreamSink:
             closed = None if core is None else core.fail_stream(self.stream_id, str(error))
             if closed is None:
                 logger.error("%s stream %d failed: %s", self.plan.dataset, self.stream_id, error)
-            self.publisher.publish_failure(
-                error if closed in (None, str(error)) else MassiveError(closed)
-            )
-            self.failed = True
+            try:
+                self.publisher.publish_failure(
+                    error if closed in (None, str(error)) else MassiveError(closed)
+                )
+            finally:  # the row reads FAILED: the stream publishes nothing more either way
+                self.failed = True
             return True
 
     def fail_later(self, message: str) -> None:
@@ -1100,11 +1103,7 @@ class Flusher:
                 "updates"
             )
             with entered(self._exec_ctx):
-                for sink in self.routes.sinks():
-                    try:
-                        sink.fail(error)
-                    except Exception:
-                        logger.exception("%s: could not fail a stream", self._thread.name)
+                self._fail_each(self.routes.sinks(), error)
             raise
         finally:
             self.routes.clear()
@@ -1120,10 +1119,12 @@ class Flusher:
         """Apply the queued failures, publish every buffered row, then report the queued drift.
 
         Failures come first, so a stream that failed gets no row published after its failure
-        was reported. Runs under the flush lock, inside the flusher's execution context, with
-        no other library lock held: it calls Deephaven (`to_table`, `partition_by`, `where_in`,
-        `add`, `publish_failure`) and then each session with a stream that published once
-        (`update_streams`).
+        was reported. Each step is isolated: a stream that cannot be failed, or a drift report
+        that raises, is logged at ERROR, and the flush still publishes every other stream's
+        rows, applies the other failures, and reports the row counts. Runs under the flush
+        lock, inside the flusher's execution context, with no other library lock held: it
+        calls Deephaven (`to_table`, `partition_by`, `where_in`, `add`, `publish_failure`) and
+        then each session with a stream that published once (`update_streams`).
         """
         with self._flush_lock, entered(self._exec_ctx):
             controls = _drain(self._control)
@@ -1134,9 +1135,8 @@ class Flusher:
             routes = self.routes.current()
             for item in controls:
                 if isinstance(item, _Fail):
-                    for sink in self.routes.sinks():
-                        if sink.stream_id in item.stream_ids:
-                            sink.fail(item.error)
+                    failing = [s for s in self.routes.sinks() if s.stream_id in item.stream_ids]
+                    self._fail_each(failing, item.error)
             updates: dict[StreamSink, StreamUpdate] = {}
             for channel, frames in drained.items():
                 sinks = routes.get(channel, ())
@@ -1146,7 +1146,17 @@ class Flusher:
                     self._publish(rows, sinks, arrived=arrived, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
-                    self._report_drift(routes.get(item.channel, ()), item.drift, where=item.where)
+                    try:
+                        self._report_drift(
+                            routes.get(item.channel, ()), item.drift, where=item.where
+                        )
+                    except Exception:
+                        logger.exception(
+                            "%s: could not report the drift of channel %s (%s)",
+                            self._thread.name,
+                            item.channel,
+                            item.where,
+                        )
             _report_updates(updates)
             routed = [sink for sinks in routes.values() for sink in sinks]
             if self._shown:  # forget the misses of streams no longer routed
@@ -1155,6 +1165,24 @@ class Flusher:
             if self._symbols:  # forget the spellings of datasets no longer routed
                 plans = {sink.plan for sink in routed}
                 self._symbols = {p: m for p, m in self._symbols.items() if p in plans}
+
+    def _fail_each(self, sinks: Iterable[StreamSink], error: MassiveError) -> None:
+        """Fail streams one by one; a stream whose failure raises costs the others nothing.
+
+        A failure that raises is logged at ERROR with the stream's id, and the next stream is
+        failed.
+
+        Args:
+            sinks: The streams to fail; one already failed is skipped by its own `fail`.
+            error: The error their tables fail with.
+        """
+        for sink in sinks:
+            try:
+                sink.fail(error)
+            except Exception:
+                logger.exception(
+                    "%s: could not fail stream %d (%s)", self._thread.name, sink.stream_id, error
+                )
 
     def _drained(self, count: int) -> None:
         """Take rows a flush drained off the backlog; re-arm the WARNING below half the level.
@@ -1195,8 +1223,7 @@ class Flusher:
                 failure = MassiveError(
                     f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
                 )
-                for sink in readers:
-                    sink.fail(failure)
+                self._fail_each(readers, failure)
 
     def _publish_plan(
         self,
@@ -1231,11 +1258,9 @@ class Flusher:
                         self._shown[sink.stream_id] = message
                         found = updates.get(sink, StreamUpdate())
                         updates[sink] = replace(found, error=message)
-        for failure in converted.failures:
-            error = MassiveError(failure.message)
-            for sink in readers:
-                if failure.every_stream or sink.receives(failure.symbol):
-                    sink.fail(error)
+        for failure in converted.failures:  # one refused failure never fails another stream
+            failing = [s for s in readers if failure.every_stream or s.receives(failure.symbol)]
+            self._fail_each(failing, MassiveError(failure.message))
         if not converted.batch.num_rows:
             return
         shared = SharedBatch(dataset_table(converted.batch, plan.date_columns), converted)
@@ -1460,16 +1485,16 @@ def open_stream_tables(
                     on_skipped=functools.partial(_show_skipped, weakref.ref(sink)),
                 )
                 watch.keep_alive_with(blink)
+        handle = StreamHandle(
+            stream_id,
+            blink,
+            scope,
+            host,
+            path,
+            sink.fail,
+            stop_watch=None if watch is None else watch.stop,
+        )
+        return OpenedStream(handle, sink, watch)
     except BaseException:  # also KeyboardInterrupt: the scope must not leak
         release_scope(core.exec_ctx, scope)
         raise
-    handle = StreamHandle(
-        stream_id,
-        blink,
-        scope,
-        host,
-        path,
-        sink.fail,
-        stop_watch=None if watch is None else watch.stop,
-    )
-    return OpenedStream(handle, sink, watch)

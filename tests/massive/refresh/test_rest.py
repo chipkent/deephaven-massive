@@ -281,6 +281,7 @@ def test_gate_example_type_finds_the_samples_the_vendor_types_contradict() -> No
         [
             *(("example-type", path, wire_key) for path, wire_key in fixed),
             ("example-type", "/vX/reference/ipos", "us_code"),  # a wrong sample
+            ("example-type", "/futures/v1/products", "last_updated"),  # a wrong sample
         ]
     )
 

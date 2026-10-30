@@ -13,6 +13,7 @@ import importlib
 import inspect
 import itertools
 import logging
+import re
 import sys
 import threading
 import weakref
@@ -1452,6 +1453,50 @@ def test_a_failure_while_the_shape_is_derived_is_named(
     assert isinstance(raised.value.__cause__, DHError)
     drain()
     assert core.results.held() == 0
+
+
+def test_a_close_while_the_shape_is_derived_raises_the_closed_session(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    # The close fails the stream: the verb names the close, not a failure of the stream.
+    core = massive_session._core
+    q = stream_query(massive_session)
+
+    def closing_then_shaping(blink: Table) -> Table:
+        core.close()
+        assert fake_streams.shutdown[1].wait(TIMEOUT)
+        return blink_to_append_only(blink)
+
+    with pytest.raises(dm.MassiveError, match=rf"^{re.escape(core.label)} is closed$") as raised:
+        core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=closing_then_shaping
+        )
+    assert isinstance(raised.value.__cause__, DHError)
+
+
+def test_a_close_the_streams_row_does_not_show_yet_raises_the_closed_session(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The close failed the table, and Deephaven refuses the described copy, before the
+    # stream's row reads CLOSED: the verb still names the close, never Deephaven's error.
+    core = massive_session._core
+    q = stream_query(massive_session)
+    monkeypatch.setattr(core, "_failure", lambda _: None)
+
+    def closing_then_describing(blink: Table) -> Table:
+        core.close()
+        raise RuntimeError(
+            "java.lang.UnsupportedOperationException: Cannot mutate attributes after they have "
+            "been published"
+        )
+
+    with pytest.raises(dm.MassiveError, match=rf"^{re.escape(core.label)} is closed$") as raised:
+        core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=closing_then_describing
+        )
+    assert type(raised.value.__cause__) is RuntimeError
 
 
 def test_a_failure_while_the_blink_copy_is_described_is_named(

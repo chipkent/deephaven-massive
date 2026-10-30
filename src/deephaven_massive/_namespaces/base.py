@@ -627,13 +627,13 @@ def build_query(
 ) -> QueryBase:
     """Validate one dataset call and return its query.
 
-    The dataset's `fixed_params` (parameters the library sets itself, such as the options
-    snapshot's `type="options"`) join the typed parameters in `Request.params` and are sent on
+    The dataset's `fixed_params` (parameters the library sets itself, such as the indicators'
+    `expand_underlying=False`) join the typed parameters in `Request.params` and are sent on
     every request. The catalog's `wire parameters` gate guarantees that every REST path of the
     dataset takes each of them, so a fixed parameter can never be blamed on the caller as a
     parameter its path lacks. Each one's whole family is reserved from `filters` ("the library
-    sets type itself; it is not a filter") and left out of the valid keys a refused filter
-    lists.
+    sets expand_underlying itself; it is not a filter") and left out of the valid keys a
+    refused filter lists.
 
     Args:
         core: The session core the query will run on.
