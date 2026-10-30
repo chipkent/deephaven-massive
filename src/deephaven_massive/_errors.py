@@ -21,9 +21,9 @@ Parameter mistakes are not `MassiveError`s: a wrong *value* raises `ValueError` 
 *type* (for example a plain string where an enum member is required) raises `TypeError`, both
 synchronously on the calling thread.
 
-Static verbs (`fetch()`, `history()`) raise these exceptions directly. Live tables report them
-through `TablePublisher.publish_failure`, so the table fails where Deephaven users look, and the
-failure is also logged at ERROR and shown in `m.streams()`.
+Static verbs (`fetch()`, `history()`) raise these exceptions directly. A live table fails with
+one (its publisher's `publish_failure`), so the failure shows where Deephaven users look; it is
+also logged at ERROR and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
 fix, which is not exported, and `raises_through`, the declaration that lets a test check the

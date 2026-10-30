@@ -47,10 +47,12 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     adjustment_notes,
     build_query,
     list_params,
+    require_bool,
 )
 
 if TYPE_CHECKING:
@@ -93,8 +95,7 @@ _TICK_PAGE: Final = 50_000
 """The largest page the trades, quotes, and aggregates endpoints return."""
 
 _SNAPSHOT_PAGE: Final = 250
-"""The largest page the chain and the unified snapshot return; also the most tickers one
-unified-snapshot request may name."""
+"""The largest page the chain and the unified snapshot return."""
 
 _CONTRACTS_PAGE: Final = 1_000
 """The largest page the contracts endpoint returns."""
@@ -251,7 +252,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingAssetTicker")},
     symbol_param="ticker.any_of",
-    symbols_per_request=_SNAPSHOT_PAGE,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     page_size=_SNAPSHOT_PAGE,
     revision_keys=_SNAPSHOT_REVISION,
 )
@@ -624,7 +625,7 @@ class _Options(Namespace):
                 symbols=symbols,
                 timespan=timespan,
                 multiplier=multiplier,
-                adjusted=adjusted,
+                adjusted=require_bool("adjusted", adjusted),
             ),
         )
 
@@ -688,7 +689,7 @@ class _Options(Namespace):
                 "every contract's bar of that day"
             ),
             timespan=Timespan.DAY,
-            adjusted=adjusted,
+            adjusted=require_bool("adjusted", adjusted),
         )
         return cast("Query", query)
 
@@ -1035,7 +1036,7 @@ class _Options(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="use m.options.snapshots(dm.ALL)",
-                adjusted=adjusted,
+                adjusted=require_bool("adjusted", adjusted),
                 params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

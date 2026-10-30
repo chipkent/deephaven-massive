@@ -19,7 +19,6 @@ declares the symbol as filled from the request, so the row's `Symbol` is the who
 
 from __future__ import annotations
 
-import functools
 import logging
 import math
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
@@ -35,8 +34,13 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._errors import raises_through
-from deephaven_massive._massive import Transport, source
-from deephaven_massive._namespaces.base import Namespace, build_query
+from deephaven_massive._massive import Transport
+from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
+    Namespace,
+    accepted_values,
+    build_query,
+)
 
 if TYPE_CHECKING:
     from deephaven_massive._query import (
@@ -171,7 +175,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_REST, _SNAPSHOTS): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="tickers",
-    symbols_per_request=250,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=("Updated",),
 )
 """`m.forex.snapshots`: the full-market snapshot, narrowed by its `tickers` parameter."""
@@ -236,21 +240,6 @@ def _currency(name: str, value: object) -> str:
     if not is_forex_currency(code):
         raise ValueError(f"{name}={value!r} is not a three-letter currency code such as 'USD'")
     return code
-
-
-@functools.cache
-def _precisions() -> frozenset[int]:
-    """Return the decimal places the conversion endpoint accepts, from its generated parameter.
-
-    The endpoint declares `precision` as an enum of digit strings (`"0"` to `"4"` at the
-    snapshot), so the accepted values follow a refresh of the generated files.
-
-    Returns:
-        The accepted values, as integers.
-    """
-    path = source(Transport.REST, _CONVERSION)
-    (param,) = (p for p in path.params if p.name == "precision")
-    return frozenset(int(value) for value in param.values)
 
 
 class _Forex(Namespace):
@@ -617,7 +606,7 @@ class _Forex(Namespace):
         side = _require_enum(direction, Direction, "direction")
         return cast("Query", build_query(self._core, MOVERS, params={"direction": side}))
 
-    @raises_through(build_query, _currency, _precisions)
+    @raises_through(build_query, _currency)
     def conversion(
         self, from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2
     ) -> Query:
@@ -662,7 +651,8 @@ class _Forex(Namespace):
             raise ValueError(f"amount must be positive and finite, got {amount!r}")
         if isinstance(precision, bool) or not isinstance(precision, int):
             raise TypeError(f"precision must be an int, not {type(precision).__name__}")
-        accepted = _precisions()
+        # An enum of digit strings ("0" to "4" at the snapshot), followed through a refresh.
+        accepted = frozenset(map(int, accepted_values(self._core, CONVERSION, "precision")))
         if precision not in accepted:
             raise ValueError(f"precision must be one of {sorted(accepted)}, got {precision}")
         # The endpoint's `precision` is an enum of digit strings, so it is sent as text.

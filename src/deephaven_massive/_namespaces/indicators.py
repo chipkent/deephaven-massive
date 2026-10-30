@@ -38,13 +38,12 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import Namespace, accepted_values, build_query, list_params
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._massive import RestPath
     from deephaven_massive._query import Query
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
@@ -132,8 +131,7 @@ def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> T
             does.
     """
     span = _require_enum(timespan, Timespan, "timespan")
-    path = cast("RestPath", core.catalog.source(Transport.REST, cast("str", spec.fetch_path)))
-    accepted = next(param.values for param in path.params if param.name == "timespan")
+    accepted = accepted_values(core, spec, "timespan")
     if span.value not in accepted:
         names = [member.name for member in Timespan if member.value in accepted]
         raise ValueError(f"indicators do not accept Timespan.{span.name}; they accept {names}")

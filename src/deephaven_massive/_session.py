@@ -158,11 +158,11 @@ def _register(core: SessionCore) -> None:
         alive = [other for other in (ref() for ref in _open_sessions) if other is not None]
         _open_sessions[:] = [weakref.ref(other) for other in alive]
         _open_sessions.append(weakref.ref(core))
-        others = sorted(
+        others = [
             (other.label, other.config)
-            for other in alive
+            for other in alive  # in order of creation, so the oldest such session is named
             if other.config.api_key == core.config.api_key and not other.closed
-        )
+        ]
     for label, config in others:
         differ = [n for n in CONNECTION_SETTINGS if getattr(config, n) != getattr(core.config, n)]
         if differ:

@@ -124,6 +124,15 @@ class RestTransport(Protocol):
         Args:
             asset_class: The asset class of the stream.
             family: The channel family, `TICK` or `FMV`.
+
+        Returns:
+            The pair's decision: its host, its recency, and the evidence it rests on.
+
+        Raises:
+            EntitlementError: The plan has no WebSocket access for the asset class.
+            AuthenticationError: Massive rejected the API key.
+            MassiveError: The request failed, or Massive answered with a timeframe the
+                library does not know.
         """
         ...
 
@@ -174,6 +183,9 @@ class RestTransport(Protocol):
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
 
+        Returns:
+            A static table with the dataset's columns, in its schema's order.
+
         Raises:
             ValueError: Before any request, if a path the call reads does not take a parameter
                 or filter the request sets.
@@ -203,6 +215,10 @@ class RestTransport(Protocol):
             mode: How cycles combine.
             query: The `repr` of the query, for the `Query` column of `m.streams()`.
 
+        Returns:
+            The live table, with the dataset's columns, tracked by the session. A failure
+            after it exists fails the table rather than raising.
+
         Raises:
             ValueError: Before the table exists, if a path the call can read does not take a
                 parameter or filter the request sets. A cycle's failure later fails the table
@@ -221,6 +237,9 @@ class RestTransport(Protocol):
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
+
+        Returns:
+            A static table with the dataset's columns, holding the rows inside `window`.
 
         Raises:
             AuthenticationError: If Massive rejects the API key (HTTP 401).
@@ -257,6 +276,9 @@ class StreamTransport(Protocol):
             request: The normalized arguments.
             channel: The WebSocket channel.
             stream_id: The id the session minted for the stream.
+
+        Returns:
+            The stream's handle, carrying `stream_id`, its blink table, and its scope.
 
         Raises:
             ValueError: If explicit options contracts would put more than 1,000 topics on the
@@ -298,6 +320,10 @@ class FlatFileTransport(Protocol):
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
+
+        Returns:
+            A static table with the dataset's columns: the files' rows in date order. A
+            range without rows or files gives an empty table with every column.
 
         Raises:
             AuthenticationError: If S3 rejects the flat-file credentials.

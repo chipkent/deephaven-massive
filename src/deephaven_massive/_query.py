@@ -489,11 +489,9 @@ class Query(QueryBase):
         request on up to `max_concurrency` threads. `limit`, when the dataset was built with
         one, caps the total number of rows; the page size is internal. Columns are the
         dataset's schema, ending with `TimestampInsert`, when the row's page arrived. A
-        reactive symbol table is read once, when the verb is called. HTTP 401 raises
-        `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
-        `MassiveError`; a symbol with no data (HTTP 404 on its first request) returns no rows,
-        with a WARNING, while HTTP 404 on a later page of its pages raises `MassiveError`,
-        since its data was cut short.
+        reactive symbol table is read once, when the verb is called. A symbol with no data
+        (HTTP 404 on its first request) returns no rows, with a WARNING, while HTTP 404 on a
+        later page of its pages raises `MassiveError`, since its data was cut short.
 
         Returns:
             A static table.
