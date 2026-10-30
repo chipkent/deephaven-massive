@@ -135,7 +135,7 @@ def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
 
 
 @pytest.mark.needs("indices:basic")
-@pytest.mark.settles("index ticker spelling")
+@pytest.mark.settles("44")
 @pytest.mark.requests(5)
 @pytest.mark.timeout(110)
 def test_index_ticker_spelling_on_every_index_endpoint(

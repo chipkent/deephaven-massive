@@ -94,17 +94,21 @@ consequences:
   with its count. A live run lifts the 120 s limit after which faulthandler would end the
   process; each test's own timeout bounds it.
 - **How long a free key takes.** With every class on Basic, `-m integration` runs the tests of
-  the "Every class on Basic" row below. Together they declare about 66 requests to stocks
-  (reference data included), 27 to currencies, 21 to futures, 8 to options, and 7 to indices,
-  so the stock requests alone take at least 13 minutes at 5 a minute, and the run takes
-  roughly a quarter of an hour. On paid plans nothing waits, and the tests read their full
+  the "Every class on Basic" row below. Together they declare about 68 requests to stocks
+  (reference data included), 32 to currencies, 26 to futures, 8 to options, and 7 to indices,
+  so the stock requests alone take at least 13 minutes at 5 a minute; with the rate-limit
+  tests, which wait out about six minutes between them, the run takes roughly 20 minutes. On paid plans nothing waits, and the tests read their full
   sets.
 - **Indices.** Indices Basic excludes SPX, DJI, RUT, and VIX ([S6]): with Indices on Basic,
   the index tests use `I:NDX` instead of `I:SPX`.
 
-The rate-limit test needs at least one class left on Basic (Indices is preferred), and it
-runs first in `-m integration`, after a minute's pause so earlier requests no longer count. It
-draws a few HTTP 429 refusals on purpose.
+The rate-limit tests need at least one class left on Basic (Indices is preferred), and they
+run first in `-m integration`, each after a minute's pause so earlier requests no longer count.
+They draw a few HTTP 429 refusals on purpose, so each sends its class more than 5 requests:
+one records the refusal's text and which requests outside every subscription Massive
+counts; one whether a ticker lookup filtered by a class's market (Indices, Currencies, or
+Stocks) is charged to that class; and one whether a session learns the limit from the
+refusal and a later session of the key forgets it, which takes about three minutes.
 
 ## Dates, markets, and corporate actions
 
@@ -156,7 +160,7 @@ plan keeps its access to the month's end ([S4], [S5]).
 
 | Plans | Per month | What it settles |
 |---|---|---|
-| Every class on Basic | $0 | the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; plus the 429 text, the rate buckets, and how a spent minute frees its requests |
+| Every class on Basic | $0 | the reference keys (ticker events, inactive tickers, exchanges, conditions), the filings without a ticker, the insider activity and holdings keys, week, month, and multi-unit bar alignment, the futures sessions, labels, and holiday session (from minute bars), the crypto minute rebuild, the REST sides of the crypto and forex day cuts, the encoded index path (with `I:NDX`), the stock and index half-day stamps, the split basis (the year's latest forward split, the adjusted echo on every page, the latest special cash dividend, stock dividends), an unknown ticker's statuses, the daily indicator stamps, the futures session labels around the 17:00 Chicago roll and Good Friday; the futures spread ticker forms of every venue, the crypto ticker list's currencies; plus the 429 text, the rate buckets, whether a market-filtered ticker lookup is charged to its class, how a spent minute frees its requests, and whether a learned limit outlives the key's sessions |
 | Currencies Starter | $49 | adds the crypto and forex day cuts and file pairs, whether forex weekend day files exist, the REST timestamp units, the forex topic spelling, the unsubscribe, frame-size, slot, and wildcard checks, and the raw frame forms (with `s3` for the files) |
 | Options Starter | $29 | adds the index and `BRK.B` underlying spellings across the chain and snapshots, the adjusted deliverables (the oldest roots only on a plan that keeps their day), and the stamps of SPY and SPXW 1-day, half-day minute, and week bars on every source (with `s3` for the day file) |
 | Stocks Starter | $29 | adds the delayed-key refusal text and the stamps of AAPL's 1-day, week, and month bars on every source; with `s3`, also the flat-file publication time, the split stock's as-traded day file, and whether a weekend flat-file key answers 404 `NoSuchKey` through files.massive.com (if it answers anything else, the library raises on every flat-file range that holds a weekend) |
@@ -196,8 +200,10 @@ documentation page names its plan in its "Plan Access" table ([S15]).
   exceptions are the limit tests.
 - **REST.** Some checks query several symbols over REST, because the question is about the
   differences between them: nine options underlyings, five contract roots, four stock ticker
-  types and three partner pages, nine futures products' schedules, the inactive tickers from
-  `A` to `AC`, every exchange and condition, and a month of four filings datasets.
+  types and three partner pages, nine futures products' schedules, every futures combo
+  product and the combo contracts of four venues, the crypto ticker list (at most 5 pages on
+  Basic), the inactive tickers from `A` to `AC`, every exchange and condition, and a month of
+  four filings datasets.
 - **Other clients.** Stop every other client of the key before you run: a stream test on a
   cluster another client uses either waits for a connection slot or disconnects that client.
 
@@ -212,7 +218,7 @@ the variables above, and run, at any hour and on any day:
 uv run pytest -m "integration or integration_smoke" 2>&1 | tee -a live-checks.log
 ```
 
-The run probes the plans, runs the rate-limit test first, then every evidence test and the
+The run probes the plans, runs the rate-limit tests first, then every evidence test and the
 smoke tier. Whatever the key lacks, the market's hours, or the plan's history leaves out
 skips with its reason; nothing needs a person to time it. Two checks answer more on some days:
 the LULD check needs the regular session for rows, and `/prev` shows a short-day stamp only on

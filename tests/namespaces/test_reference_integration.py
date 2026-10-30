@@ -164,7 +164,7 @@ def test_conditions_are_keyed_by_asset_class_type_and_id(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("stock ticker spellings")
+@pytest.mark.settles("43")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(110)
 def test_stock_ticker_spellings_outside_the_documented_forms(
