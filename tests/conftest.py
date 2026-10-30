@@ -14,6 +14,12 @@ readers, the run's plans, dates, and corporate actions, and the `evidence` recor
 writes `live-evidence.log` as it goes and closes the terminal summary. The logic behind the
 plans, dates, contracts, and corporate actions lives in `tests/_live/`, where it is unit-tested
 against the fakes; the fixtures here only call it.
+
+The soak tests (marker `soak`) run the library against the fakes for `MASSIVE_SOAK_SECONDS`
+each, under load: a fast fake feed, many streams, and churn. Here they get a time limit scaled
+to that run instead of the suite's 60 s and faulthandler's 120 s, and the `soak` fixture, which
+paces their rounds and fails one whose memory or threads keep growing. `docs/dev/soak-tests.md`
+says how to run them, overnight included.
 """
 
 from __future__ import annotations
@@ -80,7 +86,7 @@ if TYPE_CHECKING:
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.stream import FakeStreamTransport
-    from tests._fakes.ws import FakeMassiveServer
+    from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
 
 _DATA_DIR = Path(__file__).parent / "data"
@@ -1043,6 +1049,212 @@ def _client_threads() -> list[str]:
     return [t.name for t in threading.enumerate() if _CLIENT_THREAD.match(t.name) and t.is_alive()]
 
 
+# --- Soak tests ------------------------------------------------------------------------------
+
+SOAK_SECONDS_VARIABLE: Final = "MASSIVE_SOAK_SECONDS"
+"""The environment variable that sets how long each soak test runs, in seconds."""
+
+_SOAK_DEFAULT_SECONDS: Final = 20.0
+"""How long each soak test runs when `MASSIVE_SOAK_SECONDS` is not set: long enough for a few
+rounds, short enough that `-m soak` finishes in a few minutes."""
+
+_SOAK = "soak"
+"""The marker of the soak tests."""
+
+_SOAK_MARGIN: Final = 300.0
+"""Seconds a soak test may take beyond its run before its timeout ends it: its setup, the
+drain of its last rows, and its checks. A test that hangs (a deadlock) is ended there, with
+every thread's stack in the report."""
+
+_SOAK_ROUND_SECONDS: Final = 2.0
+"""How long one round of a soak test lasts, at least: the resources are sampled between
+rounds."""
+
+_SOAK_JVM_GROWTH: Final = 256 * 2**20
+"""How far, in bytes, the JVM's used heap after a full collection may rise from the end of a
+soak test's first round to the end of its run. The first round warms up the code paths and
+the update graph; after it, a run that frees what it makes stays within tens of megabytes,
+while a stream or table kept per churn step grows by megabytes a second."""
+
+_SOAK_PYTHON_GROWTH: Final = 50_000
+"""How many more Python objects the garbage collector may track at the end of a soak test's
+run than at the end of its first round. A run that frees what it makes stays within a few
+thousand; a result or row kept per churn step grows by tens of thousands a minute."""
+
+_SOAK_THREAD_GROWTH: Final = 64
+"""How many more threads than at the end of its first round a soak test may have running at
+any round's end. Every library thread belongs to a session or a connection, so a run whose
+streams come and go has a steady count; a thread left per stream, call, or session grows it
+without limit."""
+
+
+def soak_seconds() -> float:
+    """Return how long each soak test runs: `MASSIVE_SOAK_SECONDS`, or 20 s when it is not set.
+
+    Returns:
+        The seconds, a positive number.
+
+    Raises:
+        pytest.UsageError: If the variable is set to anything but a positive number.
+    """
+    text = os.environ.get(SOAK_SECONDS_VARIABLE, "")
+    if not text:
+        return _SOAK_DEFAULT_SECONDS
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = 0.0
+    if not seconds > 0:
+        raise pytest.UsageError(
+            f"{SOAK_SECONDS_VARIABLE} must be a positive number of seconds, not {text!r}"
+        )
+    return seconds
+
+
+class Soak:
+    """One soak test's run: its rounds, and the bounds on what may grow across them.
+
+    The `soak` fixture creates one per soak test. The test runs its load (a feed, churning
+    worker threads) and iterates `rounds()` on its own thread; each round lasts at least
+    `_SOAK_ROUND_SECONDS`, and after each one the run samples the JVM's used heap after a full
+    collection, the objects Python's collector tracks, and the threads running. Once the run's
+    time is up the iteration ends, after checking that none of the three grew past its bound
+    (`_SOAK_JVM_GROWTH`, `_SOAK_PYTHON_GROWTH`, `_SOAK_THREAD_GROWTH`) from the end of the first
+    round, and writes a one-line summary to stderr with the test's own figures (`note`). A
+    test that ends early stops iterating, and nothing is checked. Used by the test's thread
+    only.
+
+    Attributes:
+        seconds: How long the run lasts (`soak_seconds`).
+        running: Set while the run lasts; worker threads loop while it is set, and it is
+            cleared when the time is up, before the checks.
+    """
+
+    def __init__(self, seconds: float, name: str, report: Callable[[str], None]) -> None:
+        """Prepare the run; its clock starts at the first round.
+
+        Args:
+            seconds: How long the run lasts.
+            name: The test's node id, for the summary.
+            report: Writes the summary line where the person running the tests sees it.
+        """
+        self.seconds = seconds
+        self.running = threading.Event()
+        self.running.set()
+        self._name = name
+        self._report = report
+        self._notes: dict[str, object] = {}
+        self._pause = threading.Event()  # never set; only paces the rounds
+        runtime = importlib.import_module("jpy").get_type("java.lang.Runtime")
+        self._runtime = runtime.getRuntime()
+
+    def note(self, **figures: object) -> None:
+        """Add figures to the run's summary line, such as the rows sent and their rate.
+
+        Args:
+            **figures: Each name and its value, shown as `name=value`.
+        """
+        self._notes.update(figures)
+
+    def rounds(self) -> Iterator[int]:
+        """Yield each round's number until the run's time is up, then check the growth bounds.
+
+        The run fails the test once its time is up if the JVM's heap, Python's objects, or the
+        threads grew past their bounds; the message gives the first round's figures and the
+        run's.
+
+        Yields:
+            0, 1, 2, ...: the round about to run. The test does or checks one round's work,
+            and the next round starts at least `_SOAK_ROUND_SECONDS` after this one did.
+        """
+        started = time.monotonic()
+        samples: list[tuple[int, int, int]] = []
+        round_ = 0
+        while True:
+            began = time.monotonic()
+            yield round_
+            self._pause.wait(max(0.0, began + _SOAK_ROUND_SECONDS - time.monotonic()))
+            samples.append(self._sample())
+            round_ += 1
+            if time.monotonic() - started >= self.seconds:
+                break
+        self.running.clear()
+        # The least of the last three samples of each measure, so one sample taken mid-burst
+        # does not count as growth.
+        first = samples[0]
+        last = tuple(min(sample[i] for sample in samples[-3:]) for i in range(3))
+        most_threads = max(sample[2] for sample in samples)
+        figures = " ".join(f"{name}={value}" for name, value in self._notes.items())
+        self._report(
+            f"soak {self._name}: {round_} rounds in {time.monotonic() - started:.0f} s; "
+            f"JVM heap {first[0] / 2**20:.0f} -> {last[0] / 2**20:.0f} MiB; Python objects "
+            f"{first[1]} -> {last[1]}; threads {first[2]} -> at most {most_threads}; {figures}"
+        )
+        assert last[0] - first[0] < _SOAK_JVM_GROWTH, (
+            f"the JVM's heap grew from {first[0]} to {last[0]} bytes over the run"
+        )
+        assert last[1] - first[1] < _SOAK_PYTHON_GROWTH, (
+            f"Python's tracked objects grew from {first[1]} to {last[1]} over the run"
+        )
+        assert most_threads - first[2] < _SOAK_THREAD_GROWTH, (
+            f"the threads grew from {first[2]} to {most_threads} over the run"
+        )
+
+    def _sample(self) -> tuple[int, int, int]:
+        """Collect both heaps, then measure them and count the threads.
+
+        Returns:
+            The JVM's used heap in bytes, the objects Python's collector tracks, and the
+            threads running.
+        """
+        gc.collect()
+        importlib.import_module("jpy").get_type("java.lang.System").gc()
+        used = self._runtime.totalMemory() - self._runtime.freeMemory()
+        return used, len(gc.get_objects()), threading.active_count()
+
+
+@pytest.fixture
+def make_trade_feed(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., TradeFeed]]:
+    """Return a factory of `TradeFeed`s (`tests/_fakes/ws.py`) on the fake WebSocket server.
+
+    The factory takes the feed's symbols and its keyword options (`rows_per_frame`); a feed it
+    made that is still running at teardown is stopped then.
+
+    Yields:
+        The factory; call `start()` on the feed it returns.
+    """
+    module = importlib.import_module("tests._fakes.ws")
+    feeds: list[TradeFeed] = []
+
+    def make(symbols: list[str], **options: object) -> TradeFeed:
+        feed: TradeFeed = module.TradeFeed(fake_ws_server, symbols, **options)
+        feeds.append(feed)
+        return feed
+
+    yield make
+    for feed in feeds:
+        feed.stop()
+
+
+@pytest.fixture
+def soak(request: pytest.FixtureRequest, capsys: pytest.CaptureFixture[str]) -> Soak:
+    """Return the run of a soak test, which lasts `MASSIVE_SOAK_SECONDS` (20 s by default).
+
+    Args:
+        request: The test, named in the summary.
+        capsys: Lets the summary line through to the terminal.
+
+    Returns:
+        The run; iterate its `rounds()`.
+    """
+
+    def report(line: str) -> None:
+        with capsys.disabled():
+            sys.stderr.write(f"\n{line}\n")
+
+    return Soak(soak_seconds(), request.node.nodeid, report)
+
+
 @pytest.fixture
 def ws_session(make_ws_session: Callable[..., WsSession]) -> WsSession:
     """Return a `WsSession` with the default options: a fixed real-time host, manual flushes.
@@ -1382,7 +1594,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     connection limits) and `integration_smoke` (the unattended check that every dataset and
     verb works). A test of either must also be a live test, and it is deselected unless the
     `-m` expression names its tier: `-m integration` runs every live test but those, and
-    `-m integration_limits` or `-m integration_smoke` runs only that tier.
+    `-m integration_limits` or `-m integration_smoke` runs only that tier. Last, every soak test
+    gets a time limit of its run (`soak_seconds`) plus `_SOAK_MARGIN`, in place of the suite's
+    60 s.
 
     Args:
         config: The pytest configuration, for the `-m` expression and the deselection hook.
@@ -1424,6 +1638,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             config.hook.pytest_deselected(items=tiered)
             items[:] = [item for item in items if item.get_closest_marker(tier) is None]
     _arrange_live_tests(config, items)
+    limit = soak_seconds() + _SOAK_MARGIN
+    for item in items:
+        if item.get_closest_marker(_SOAK) is not None:
+            item.add_marker(pytest.mark.timeout(limit))
 
 
 def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -1586,10 +1804,11 @@ def pytest_runtest_makereport(
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
-    """Lift the faulthandler limit from a live test, and decide what a refusal means.
+    """Lift the faulthandler limit from a live or soak test, and decide what a refusal means.
 
     The 120 s faulthandler limit is cancelled for the call of a live test, whose own timeout,
-    scaled to its paced requests, bounds it instead.
+    scaled to its paced requests, bounds it instead; and for a soak test's, whose timeout is
+    scaled to its run (`pytest_collection_modifyitems`).
 
     A refusal is an `EntitlementError`, or the wire's `WireEntitlementError` (an HTTP 403 or a
     `NOT_AUTHORIZED` envelope). One that names the timeframe ("Your plan doesn't include this
@@ -1616,9 +1835,10 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
             declared plans should have covered the request.
         WireEntitlementError: In the same cases.
     """
-    if item.get_closest_marker(_INTEGRATION) is not None:
-        # A live test waits on Massive's rate limits and streams, longer than the 120 s after
-        # which faulthandler would end the process; its own (scaled) timeout bounds it.
+    if item.get_closest_marker(_INTEGRATION) is not None or item.get_closest_marker(_SOAK):
+        # A live test waits on Massive's rate limits and streams, and a soak test runs for
+        # `MASSIVE_SOAK_SECONDS`, either longer than the 120 s after which faulthandler would
+        # end the process; each one's own (scaled) timeout bounds it.
         faulthandler.cancel_dump_traceback_later()
     try:
         return (yield)

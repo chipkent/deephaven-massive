@@ -21,10 +21,10 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
-from deephaven import dtypes, input_table, new_table
+from deephaven import agg, dtypes, input_table, new_table
 from deephaven.column import string_col
 
 import deephaven_massive as dm
@@ -35,7 +35,8 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, hosts, poll, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, StreamUpdate
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -48,14 +49,15 @@ from tests._fakes.clock import FakeClock
 from tests._fakes.ws_session import REALTIME, TIMEOUT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator, Mapping
     from typing import TypeAlias
 
     import pyarrow as pa
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive._tables.session_core import SessionCore
-    from tests._fakes.ws import FakeMassiveServer
+    from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
 
 
@@ -3079,3 +3081,382 @@ def test_a_reconnect_keeps_the_one_summary_timer(
     ws_session.wait(lambda s: s.opens == 2)
     assert ws_session.on_loop(connection, lambda: connection._summary) is first
     del result
+
+
+# --- Soak tests: long runs under load (marker `soak`, left out of a plain run) ----------------
+
+
+class Soak(Protocol):
+    # What the soak tests use of the `soak` fixture (tests/conftest.py).
+    seconds: float
+    running: threading.Event
+
+    def rounds(self) -> Iterator[int]: ...
+
+    def note(self, **figures: object) -> None: ...
+
+
+SOAK_SYMBOLS = [f"S{i:02d}" for i in range(40)]
+"""The symbols the soak feed trades."""
+
+SOAK_WAIT = 180.0
+"""Seconds a soak test waits for the rows still in flight when its feed stops, under load."""
+
+_MODULUS = 1_000_000_007
+"""A prime: each table sums its sequence numbers' squares modulo it, which stays in a long."""
+
+
+def sequence_stats(table: Table, *, distinct: bool = False) -> Table:
+    # Per symbol: the rows, the least and greatest sequence number, the sum of the numbers, the
+    # sum of their squares modulo `_MODULUS`, and with `distinct` how many different numbers.
+    # A table that received the numbers lo..hi of a symbol each exactly once has hi - lo + 1
+    # rows and those two sums (`exactly_once`); a lost or repeated row breaks one of them, and
+    # the state stays one row per symbol however long the run (`distinct` keeps every number,
+    # so only a short-lived table asks for it). Built here, not in a test: a formula copies its
+    # caller's locals into the JVM's query scope, and a test's locals hold its session.
+    aggregations = [
+        agg.count_("Rows"),
+        agg.min_("Lo = Q"),
+        agg.max_("Hi = Q"),
+        agg.sum_(["Sum = Q", "Squares = Q2"]),
+    ]
+    if distinct:
+        aggregations.append(agg.count_distinct("Distinct = Q"))
+    return table.update_view(
+        ["Q = SequenceNumber", f"Q2 = (Q % {_MODULUS}L) * (Q % {_MODULUS}L) % {_MODULUS}L"]
+    ).agg_by(aggregations, by=["Symbol"])
+
+
+def exactly_once(row: Mapping[str, Any]) -> bool:
+    # Whether a `sequence_stats` row is that of the numbers Lo..Hi, each exactly once.
+    lo, hi, rows = row["Lo"], row["Hi"], row["Rows"]
+    squares = (hi * (hi + 1) * (2 * hi + 1) - (lo - 1) * lo * (2 * lo - 1)) // 6
+    return bool(
+        rows == hi - lo + 1
+        and row["Sum"] == (lo + hi) * rows // 2
+        and row["Squares"] % _MODULUS == squares % _MODULUS
+    )
+
+
+def by_symbol(to_pylist: ToPylist, stats: Table) -> dict[str, dict[str, Any]]:
+    # A `sequence_stats` table's rows, by symbol.
+    return {row["Symbol"]: row for row in to_pylist(stats)}
+
+
+def all_exactly_once(to_pylist: ToPylist, stats: Table) -> bool:
+    # Whether a `sequence_stats` table holds every symbol's numbers from 1 on, each once.
+    return all(r["Lo"] == 1 and exactly_once(r) for r in by_symbol(to_pylist, stats).values())
+
+
+def soak_wait(condition: Callable[[], bool], what: str) -> None:
+    # Bounded wait for the rows a stopped feed left in flight to reach the tables.
+    pause = threading.Event()  # never set; only paces the polling
+    deadline = time.monotonic() + SOAK_WAIT
+    while not condition():
+        assert time.monotonic() < deadline, f"waited {SOAK_WAIT} s for {what}"
+        pause.wait(0.1)
+
+
+def soak_topics(server: FakeMassiveServer) -> set[str]:
+    # The topics the latest connection holds subscribed on the fake server.
+    with server._lock:
+        return set(server.connections[-1].topics) if server.connections else set()
+
+
+@pytest.mark.soak
+@pytest.mark.jvm_held
+def test_soak_every_stream_receives_every_row_of_a_fast_feed(
+    make_ws_session: Callable[..., WsSession],
+    *,
+    make_trade_feed: Callable[..., TradeFeed],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    soak: Soak,
+) -> None:
+    # Forty one-symbol streams, ten three-symbol streams and one of every symbol share one
+    # connection while the feed sends trades as fast as the fake server writes them, and the
+    # flush thread publishes every 50 ms. Every stream must end with every trade of its symbols,
+    # each exactly once, and no table may fail.
+    fake_ws_server.keep_frames = False
+    harness = make_ws_session(flush_interval=0.05)
+    core = harness.session._core
+    wanted: list[list[str]] = [[symbol] for symbol in SOAK_SYMBOLS]
+    wanted += [SOAK_SYMBOLS[i : i + 3] for i in range(0, 30, 3)]
+    results = [harness.query(TRADES, symbols).blink() for symbols in wanted]
+    results.append(harness.query(TRADES, dm.ALL).blink())
+    wanted.append(SOAK_SYMBOLS)
+    scope = new_scope()
+    with scope.open():
+        stats = [sequence_stats(result) for result in results]
+    # The stream of every symbol subscribes the channel's wildcard, which covers the others.
+    fake_ws_server.wait_for(lambda s: soak_topics(s) == {"T.*"})
+    feed = make_trade_feed(SOAK_SYMBOLS)
+    feed.start()
+    started = time.monotonic()
+    for _ in soak.rounds():
+        assert not any(table.j_table.isFailed() for table in results)
+        sent = sum(feed.sent().values())
+        soak.note(rows=sent, rows_per_second=round(sent / (time.monotonic() - started)))
+    feed.stop()
+    by_sent = feed.sent()
+    expected = [{symbol: by_sent[symbol] for symbol in symbols} for symbols in wanted]
+
+    def counts() -> list[dict[str, int]]:
+        return [{s: r["Rows"] for s, r in by_symbol(dh_to_pylist, t).items()} for t in stats]
+
+    soak_wait(lambda: counts() == expected, "every stream to receive every row sent")
+    assert all(all_exactly_once(dh_to_pylist, table) for table in stats)
+    release_scope(core.exec_ctx, scope)
+    for result in results:
+        harness.session.release(result)
+
+
+@pytest.mark.soak
+@pytest.mark.jvm_held
+def test_soak_streams_opened_and_released_under_load_lose_and_repeat_no_row(
+    make_ws_session: Callable[..., WsSession],
+    *,
+    make_trade_feed: Callable[..., TradeFeed],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    soak: Soak,
+) -> None:
+    # One stream of every symbol stays open while eight threads keep opening streams of one to
+    # three symbols, reading them for a moment and releasing them, so the connection subscribes
+    # and unsubscribes all the time under a fast feed. Every short stream must hold an unbroken
+    # run of each of its symbols' trades, each once; the long one every trade; and once the
+    # churn stops, only the long stream's topic stays subscribed.
+    fake_ws_server.keep_frames = False
+    harness = make_ws_session(flush_interval=0.05)
+    core = harness.session._core
+    every = harness.query(TRADES, dm.ALL).blink()
+    scope = new_scope()
+    with scope.open():
+        every_stats = sequence_stats(every)
+    fake_ws_server.wait_for(lambda s: "T.*" in soak_topics(s))
+    feed = make_trade_feed(SOAK_SYMBOLS)
+    feed.start()
+    lock = threading.Lock()
+    opened: list[int] = [0]
+    problems: list[str] = []
+
+    def churn(worker: int) -> None:
+        # Each worker walks its own fixed sequence of one to three distinct symbols and stream
+        # lifetimes, so a failure repeats on the next run.
+        pause = threading.Event()  # never set; only paces the stream's life
+        step = 0
+        with entered(core.exec_ctx):
+            while soak.running.is_set():
+                step += 1
+                symbols = [
+                    SOAK_SYMBOLS[(worker * 5 + step * 7 + k * 11) % 40]
+                    for k in range(1 + (worker + step) % 3)
+                ]
+                result = harness.query(TRADES, symbols).blink()
+                own = new_scope()
+                with own.open():
+                    stats = sequence_stats(result)
+                pause.wait((0.05, 0.12, 0.3, 0.08)[step % 4])
+                rows = dh_to_pylist(stats)
+                release_scope(core.exec_ctx, own)
+                harness.session.release(result)
+                bad = [r for r in rows if r["Symbol"] not in symbols or not exactly_once(r)]
+                with lock:
+                    opened[0] += 1
+                    problems.extend(f"{symbols}: {row}" for row in bad)
+
+    with ThreadPoolExecutor(8, thread_name_prefix="soak churn") as pool:
+        workers = [pool.submit(churn, worker) for worker in range(8)]
+        try:
+            for _ in soak.rounds():
+                with lock:
+                    assert not problems, problems[:5]
+                    soak.note(streams_opened=opened[0], rows=sum(feed.sent().values()))
+        finally:
+            soak.running.clear()  # a failed round stops the workers too
+            for worker in workers:
+                worker.result(SOAK_WAIT)
+    feed.stop()
+    assert not problems, problems[:5]
+    sent = feed.sent()
+    soak_wait(
+        lambda: {s: r["Rows"] for s, r in by_symbol(dh_to_pylist, every_stats).items()} == sent,
+        "the stream of every symbol to receive every row sent",
+    )
+    assert all_exactly_once(dh_to_pylist, every_stats)
+    soak_wait(lambda: soak_topics(fake_ws_server) == {"T.*"}, "the short streams' topics to go")
+    release_scope(core.exec_ctx, scope)
+    harness.session.release(every)
+
+
+def edit_watchlist(watchlist: InputTable, soak: Soak, edits: list[int]) -> None:
+    # Edit a watchlist until the run ends, on a thread of the test's: a fixed sequence of three
+    # adds and then three deletes, walking the symbols, 10 to 50 ms apart.
+    pause = threading.Event()  # never set; only paces the edits
+    while soak.running.is_set():
+        step = edits[0]
+        change = new_table([string_col("Symbol", [SOAK_SYMBOLS[(step * 7) % 40]])])
+        if (step // 3) % 2 == 0:
+            watchlist.add(change)
+        else:
+            watchlist.delete(change)
+        edits[0] += 1
+        pause.wait((0.01, 0.03, 0.05)[step % 3])
+
+
+def hold_exactly(watchlist: InputTable, symbols: list[str], to_pylist: ToPylist) -> None:
+    # Make a keyed watchlist hold exactly `symbols`; deletes take a static key table.
+    held = [row["Symbol"] for row in to_pylist(watchlist)]
+    if held:
+        watchlist.delete(new_table([string_col("Symbol", held)]))
+    watchlist.add(new_table([string_col("Symbol", symbols)]))
+
+
+@pytest.mark.soak
+@pytest.mark.jvm_held
+def test_soak_a_stream_follows_a_churning_watchlist_under_load(
+    make_ws_session: Callable[..., WsSession],
+    *,
+    make_trade_feed: Callable[..., TradeFeed],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    soak: Soak,
+) -> None:
+    # A thread keeps adding symbols to a watchlist and deleting them while the feed runs. Within
+    # each round the stream must never hold a trade twice; once the watchlist stops changing,
+    # the stream must subscribe exactly its symbols and receive their trades, and only theirs.
+    fake_ws_server.keep_frames = False
+    harness = make_ws_session(flush_interval=0.05)
+    core = harness.session._core
+    final = SOAK_SYMBOLS[:10]
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", final)]))
+    result = harness.query(TRADES, watchlist).blink()
+    fake_ws_server.wait_for(lambda s: f"T.{final[0]}" in soak_topics(s))
+    feed = make_trade_feed(SOAK_SYMBOLS)
+    feed.start()
+    edits: list[int] = [0]
+
+    def edit() -> None:
+        with entered(core.exec_ctx):
+            edit_watchlist(watchlist, soak, edits)
+
+    with ThreadPoolExecutor(1, thread_name_prefix="soak watchlist") as pool:
+        editor = pool.submit(edit)
+        try:
+            for _ in soak.rounds():
+                # Each round counts its own rows anew, so the distinct count stays small.
+                own = new_scope()
+                with own.open():
+                    stats = sequence_stats(result, distinct=True)
+                threading.Event().wait(1.5)  # never set; only paces the round
+                counted = dh_to_pylist(stats)
+                release_scope(core.exec_ctx, own)
+                assert all(r["Distinct"] == r["Rows"] for r in counted), counted
+                soak.note(edits=edits[0], rows=sum(feed.sent().values()))
+        finally:
+            soak.running.clear()
+            editor.result(SOAK_WAIT)
+    hold_exactly(watchlist, final, dh_to_pylist)
+    topics = {f"T.{symbol}" for symbol in final}
+    soak_wait(lambda: soak_topics(fake_ws_server) == topics, "the final watchlist's topics")
+    scope = new_scope()
+    with scope.open():
+        stats = sequence_stats(result)
+    soak_wait(lambda: set(by_symbol(dh_to_pylist, stats)) == set(final), "every final symbol")
+    feed.stop()
+    sent = feed.sent()
+    soak_wait(
+        lambda: all(r["Hi"] == sent[s] for s, r in by_symbol(dh_to_pylist, stats).items()),
+        "the final symbols' last rows",
+    )
+    received = by_symbol(dh_to_pylist, stats)
+    assert set(received) == set(final)
+    assert all(exactly_once(row) for row in received.values())
+    release_scope(core.exec_ctx, scope)
+    harness.session.release(result)
+
+
+def close_under_load(harness: WsSession, round_: int) -> float:
+    # One round of the close soak: a second session joins the connection, opens twenty streams,
+    # and four threads keep opening and releasing more of its streams; then four threads close
+    # it at once. Returns how long the slowest close took, in seconds.
+    other = join(harness)
+    symbols = [SOAK_SYMBOLS[(round_ + i) % 40] for i in range(20)]
+    results = [harness.query(TRADES, [symbol], other).blink() for symbol in symbols]
+    stop = threading.Event()
+    errors: list[str] = []
+    timings: list[float] = []
+    closing = threading.Barrier(5)
+
+    def churn(worker: int) -> None:
+        step = 0
+        while not stop.is_set():
+            step += 1
+            try:
+                result = harness.query(TRADES, [SOAK_SYMBOLS[(worker * 3 + step) % 40]], other)
+                other.release(result.blink())
+            except dm.MassiveError as error:  # a verb that races the close may find it closed
+                if " is closed" not in str(error) and " was closed" not in str(error):
+                    errors.append(str(error))
+                return
+
+    def close() -> None:
+        closing.wait(TIMEOUT)
+        began = time.monotonic()
+        other.close()
+        timings.append(time.monotonic() - began)
+
+    with ThreadPoolExecutor(8, thread_name_prefix="soak close") as pool:
+        churners = [pool.submit(churn, worker) for worker in range(4)]
+        closers = [pool.submit(close) for _ in range(4)]
+        threading.Event().wait(0.5)  # never set; lets the churn run under the feed first
+        closing.wait(TIMEOUT)
+        for closer in closers:
+            closer.result(TIMEOUT)
+        stop.set()
+        for churner in churners:
+            churner.result(TIMEOUT)
+    assert not errors, errors[:5]
+    wait_for(lambda: all(result.j_table.isFailed() for result in results))
+    return max(timings)
+
+
+@pytest.mark.soak
+@pytest.mark.jvm_held
+def test_soak_sessions_close_under_load_without_disturbing_a_shared_connection(
+    make_ws_session: Callable[..., WsSession],
+    *,
+    make_trade_feed: Callable[..., TradeFeed],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    soak: Soak,
+) -> None:
+    # Each round, a second session on the same connection is closed by four threads at once
+    # while its streams churn and the feed runs (`close_under_load`). Every close must return
+    # promptly, every verb racing it must succeed or say the session is closed, every table it
+    # made must fail, and the first session's stream of every symbol, on that connection all
+    # along, must still receive every trade exactly once.
+    fake_ws_server.keep_frames = False
+    harness = make_ws_session(flush_interval=0.05)
+    core = harness.session._core
+    every = harness.query(TRADES, dm.ALL).blink()
+    scope = new_scope()
+    with scope.open():
+        every_stats = sequence_stats(every)
+    fake_ws_server.wait_for(lambda s: soak_topics(s) == {"T.*"})
+    feed = make_trade_feed(SOAK_SYMBOLS)
+    feed.start()
+    slowest: list[float] = []
+    for round_ in soak.rounds():
+        slowest.append(close_under_load(harness, round_))
+        soak.note(sessions_closed=len(slowest), slowest_close_seconds=round(max(slowest), 2))
+    feed.stop()
+    sent = feed.sent()
+    soak_wait(
+        lambda: {s: r["Rows"] for s, r in by_symbol(dh_to_pylist, every_stats).items()} == sent,
+        "the first session's stream to receive every row sent",
+    )
+    assert all_exactly_once(dh_to_pylist, every_stats)
+    release_scope(core.exec_ctx, scope)
+    harness.session.release(every)
