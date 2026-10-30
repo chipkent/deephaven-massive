@@ -793,7 +793,8 @@ def test_products_over_rest(
         ("/futures/v1/products", {"product_code": ["EBE"], "limit": ["50000"]})
     ]
     assert [(r["ProductCode"], r["TradingVenue"], r["Date"], r["LastUpdated"]) for r in out] == [
-        ("EBE", "XNYM", "2025-07-07", "2025-02-22")
+        # Massive sends a time of day with an offset: 2017-01-01T17:11:39-06:00 is 23:11:39 UTC.
+        ("EBE", "XNYM", "2025-07-07", 1483312299000000000)
     ]
     assert out[0]["UnitOfMeasureQty"] == 1000.0
 
