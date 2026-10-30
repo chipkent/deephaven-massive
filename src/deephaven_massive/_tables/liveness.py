@@ -184,13 +184,13 @@ def make_result(build: Callable[[], Table]) -> tuple[Table, LivenessScope]:
 class StreamHandle:
     """A live stream as the WebSocket transport hands it to the session.
 
-    The transport creates the stream's `TablePublisher` and blink table inside `scope` (the
-    stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
+    The transport creates the stream's publisher (`BlinkPublisher`) and blink table inside `scope`
+    (the stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
     registry record is dropped (`SessionCore.stream_shut_down`) and topic reference counts are
-    released. The session's registry record holds the handle until the record is deleted (its
-    holds released and its blink table shut down), and releases `scope` when the last result is
-    released. Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist
-    listener, which Deephaven itself keeps only weakly.
+    released. The session's registry record holds the handle until the record is deleted (its holds
+    released and its blink table shut down), and releases `scope` when the last result is released.
+    Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist listener,
+    which Deephaven itself keeps only weakly.
 
     Attributes:
         stream_id: The stream's identifier, minted by the session before the open and unique
