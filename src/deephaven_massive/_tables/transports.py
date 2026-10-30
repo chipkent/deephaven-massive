@@ -125,6 +125,15 @@ class RestTransport(Protocol):
         Args:
             asset_class: The asset class of the stream.
             family: The channel family, `TICK` or `FMV`.
+
+        Returns:
+            The pair's decision: its host, its recency, and the evidence it rests on.
+
+        Raises:
+            EntitlementError: The plan has no WebSocket access for the asset class.
+            AuthenticationError: Massive rejected the API key.
+            MassiveError: The request failed, or Massive answered with a timeframe the
+                library does not know.
         """
         ...
 
@@ -185,6 +194,17 @@ class RestTransport(Protocol):
                 read's requests stop waiting for the rate governor and no new one starts, so
                 the call ends soon with an error the caller ignores. None for a call only the
                 session's close stops.
+
+        Returns:
+            A static table with the dataset's columns, in its schema's order.
+
+        Raises:
+            ValueError: The request sets a parameter a path of the call does not take; raised
+                before any request.
+            AuthenticationError: Massive rejected the API key (HTTP 401).
+            EntitlementError: The plan does not include the dataset (HTTP 403).
+            RowDataError: A row breaks the dataset's schema.
+            MassiveError: Any other failure, such as a rate limit or a closed session.
         """
         ...
 
@@ -198,6 +218,9 @@ class RestTransport(Protocol):
         Args:
             spec: The dataset.
             request: The normalized arguments, with static symbols.
+
+        Raises:
+            ValueError: The request sets a parameter a path of the call does not take.
         """
         ...
 
@@ -218,6 +241,14 @@ class RestTransport(Protocol):
             interval: The time between cycles.
             mode: How cycles combine.
             query: The `repr` of the query, for the `Query` column of `m.streams()`.
+
+        Returns:
+            The live table, with the dataset's columns, tracked by the session. A failure
+            after it exists fails the table rather than raising.
+
+        Raises:
+            ValueError: The request sets a parameter no path of the call takes; raised
+                before the table exists.
         """
         ...
 
@@ -239,6 +270,18 @@ class RestTransport(Protocol):
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
             stop: A background read's stop token, as `fetch` takes it.
+
+        Returns:
+            A static table with the dataset's columns, holding the rows inside `window`.
+
+        Raises:
+            ValueError: The request sets a parameter the history path does not take; raised
+                before any request.
+            AuthenticationError: Massive rejected the API key (HTTP 401).
+            EntitlementError: The plan does not include the dataset (HTTP 403).
+            RowDataError: A row breaks the dataset's schema.
+            MassiveError: Any other failure, including a page or bar the library cannot
+                place in the window.
         """
         ...
 
@@ -252,6 +295,9 @@ class RestTransport(Protocol):
             spec: The dataset; `history()` has checked that REST can serve the request.
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window.
+
+        Raises:
+            ValueError: The request sets a parameter a path of the call does not take.
         """
         ...
 
@@ -280,6 +326,16 @@ class StreamTransport(Protocol):
             request: The normalized arguments.
             channel: The WebSocket channel.
             stream_id: The id the session minted for the stream.
+
+        Returns:
+            The stream's handle, carrying `stream_id`, its blink table, and its scope.
+
+        Raises:
+            ValueError: Static options symbols would put more explicit topics on the options
+                connection than Massive allows.
+            EntitlementError: The plan has no WebSocket access for the asset class.
+            MassiveError: The session is closed, host resolution failed, or a crypto ticker
+                cannot be split into its base and quote.
         """
         ...
 
@@ -315,6 +371,16 @@ class FlatFileTransport(Protocol):
             stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
                 file read stops at its next block and no new one starts. None for a call only
                 the session's close stops.
+
+        Returns:
+            A static table with the dataset's columns: the files' rows in date order. A
+            range without rows or files gives an empty table with every column.
+
+        Raises:
+            AuthenticationError: S3 rejected the S3 credentials.
+            EntitlementError: S3 answered HTTP 403 for a file.
+            MassiveError: A file the window needs is missing or not yet published, S3 or its
+                bucket cannot be reached, a read failed, or the session closed meanwhile.
         """
         ...
 

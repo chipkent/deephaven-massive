@@ -275,6 +275,22 @@ def _outcome(future: Future[T]) -> T:
         raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
 
 
+def _decided(future: Future[T] | None) -> T | None:
+    """Return a shared lookup's result once it has succeeded, and None in every other state.
+
+    Args:
+        future: The lookup's future, or None when no lookup is claimed.
+
+    Returns:
+        The result; None when the lookup is not claimed, still running, or failed (its
+        future holds a `MassiveError` or `_AbandonedError`, which only the claim-or-wait path
+        may act on).
+    """
+    if future is None or not future.done() or future.exception() is not None:
+        return None
+    return future.result()
+
+
 def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
     """Read one row of Massive's crypto ticker list.
 
@@ -1075,18 +1091,22 @@ class RestState:
     def known_host(self, key: tuple[AssetClass, ChannelFamily]) -> HostDecision | None:
         """Return the decision of a (class, family) if one is made, without claiming it.
 
-        A failed decision is removed before its future completes, so a completed future under
-        the key always holds a decision.
+        A failed decision is removed before its future fails, but this check reads the future
+        under the lock and looks at it after: its maker may forget and fail it in between. So
+        only a decision counts; a failed future gives None, and the caller then claims or
+        waits as usual (`RestEndpoints.resolve_host`), where a failure reaches it as a copy
+        and an abandoned decision as a retry.
 
         Args:
             key: The asset class and channel family.
 
         Returns:
-            The decision, or None while none is made or one is being made.
+            The decision, or None while none is made, one is being made, or the one being made
+            has just failed.
         """
         with self._lock:
             future = self._hosts.get(key)
-        return future.result() if future is not None and future.done() else None
+        return _decided(future)
 
     def replace_host(self, key: tuple[AssetClass, ChannelFamily], decision: HostDecision) -> None:
         """Cache a decision for a (class, family) in place of any earlier one.
@@ -1132,15 +1152,18 @@ class RestState:
     def known_crypto(self) -> CryptoTickers | None:
         """Return the session's crypto ticker list if it is read, without claiming it.
 
-        A failed read is removed before its future completes, so a completed future always
-        holds the list.
+        A failed read is removed before its future fails, but this check reads the future
+        under the lock and looks at it after: its reader may forget and fail it in between. So
+        only a list counts; a failed future gives None, and the caller then claims or waits
+        as usual (`RestReader._crypto_tickers`), where a failure reaches it as a copy and an
+        abandoned read as a retry.
 
         Returns:
-            The list, or None while it is not read or being read.
+            The list, or None while it is not read, is being read, or has just failed.
         """
         with self._lock:
             future = self._crypto
-        return future.result() if future is not None and future.done() else None
+        return _decided(future)
 
     def forget_crypto(self) -> None:
         """Remove a failed read of the crypto ticker list, so that the next caller tries again.
@@ -1361,7 +1384,10 @@ class RestReader:
         caller it joined; the lookup goes on for that caller and every other one still waiting.
 
         Blocks the calling thread until the lookup ends or this caller gives up; holds no lock
-        meanwhile, and leaves no listener behind. Logs the wait at DEBUG, a lookup abandoned by
+        meanwhile. It leaves the governor's bucket listener behind on no path; the callback it
+        adds to the future cannot be removed, so it stays there, setting an event nobody waits
+        on once this call returns (a future cached for the session keeps one per caller that
+        waited on it). Logs the wait at DEBUG, a lookup abandoned by
         its maker at INFO, and giving up at ERROR.
 
         Args:

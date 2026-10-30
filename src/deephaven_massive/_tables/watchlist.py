@@ -53,8 +53,6 @@ __all__ = ["SymbolWatch", "invalid_row_message", "read_symbols"]
 logger = logging.getLogger(__name__)
 
 _SYMBOL: Final = "Symbol"
-_SHOWN: Final = 5
-"""The most bad values one message lists."""
 
 
 def invalid_row_message(
