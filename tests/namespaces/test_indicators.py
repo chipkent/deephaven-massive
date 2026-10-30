@@ -316,7 +316,7 @@ def test_a_daily_value_takes_the_day_of_its_symbols_class(
     [
         # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day.
         (dm.Timespan.DAY, datetime(2025, 1, 2, 3, tzinfo=UTC)),
-        # A week value must be stamped on its week's Monday (or the Sunday before it).
+        # A week value must be stamped on its week's Sunday, where Massive starts the week.
         (dm.Timespan.WEEK, datetime(2025, 1, 8, 5, tzinfo=UTC)),
     ],
     ids=["day", "week"],

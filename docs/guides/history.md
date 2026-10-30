@@ -45,16 +45,19 @@ A bar's window depends on its size and class:
 - **Weeks, months, quarters, and years of stocks, options, and futures** cover their calendar
   period without the weekend days at either end: a week runs Monday to Friday.
 - **The same periods of indices**, which can update around the clock, are whole calendar
-  periods, weekends included.
+  periods, weekends included: a week runs Sunday to Saturday.
 - **The same periods of forex and crypto**, which trade at weekends, are whole calendar weeks
-  (Monday to Sunday), months, quarters, and years.
+  (Sunday to Saturday), months, quarters, and years.
 - **A bar of several units**, such as 3-day bars, covers all of them, with room for holidays
   to push the end later.
 - **A futures bar named by session dates** covers its sessions. Massive does not document
   whether a bar of several sessions, a week, or longer is labelled with its first or its last
   session, so such a bar is kept only when it fits the range either way.
 
-There is no holiday calendar: a week whose Friday is a holiday is still a Monday-to-Friday week.
+Massive starts every week on Sunday at 00:00 in the class's time zone and stamps the week's bar
+there; a week bar stamped on any other day stops the read with an error. There is no holiday
+calendar: a stock week whose Friday is a holiday still runs Monday to Friday.
+=====
 
 Time bounds keep only whole calendar days of daily bars. Monday 09:30 to Friday 16:00 New York
 time returns Tuesday to Thursday, so pass dates when you want daily bars.

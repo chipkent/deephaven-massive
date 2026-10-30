@@ -1757,13 +1757,13 @@ def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
 def test_longer_bars_cover_their_whole_window_and_have_no_date(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # A week bar stamped on the Sunday before its week covers that Monday-to-Friday week; a
-    # month bar of June 2024 (whose 1st is a Saturday) its weekdays, Monday 3rd to Friday 28th.
+    # A week bar stamped on its Sunday (00:00 New York time, where Massive starts a week)
+    # covers its Monday-to-Friday week; a month bar of June 2024 (whose 1st is a Saturday) its
+    # weekdays, Monday 3rd to Friday 28th.
     sunday = new_york_midnight_ns(date(2025, 3, 2)) // 10**6
-    saturday = new_york_midnight_ns(date(2025, 3, 1)) // 10**6
     week_end = new_york_midnight_ns(date(2025, 3, 8)) // 10**6 - 1
     fake_rest.reply(
-        f"/v2/aggs/ticker/AAPL/range/1/week/{saturday}/{week_end}",
+        f"/v2/aggs/ticker/AAPL/range/1/week/{sunday}/{week_end}",
         Reply({"status": "OK", "adjusted": True, "results": [{"t": sunday, "c": 1.0}]}),
     )
     week = rest_session.stocks.bars("AAPL", dm.Timespan.WEEK)

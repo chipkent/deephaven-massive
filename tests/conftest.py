@@ -2748,14 +2748,17 @@ def week_bar_report(
 ) -> Callable[[str, str, str], WeekReport]:
     """Return a function that shows where Massive starts a week bar, from raw REST bars.
 
-    It reads the week bars and the hour bars of one ticker over four calendar weeks, the
+    It reads the week bars and the shorter bars of one ticker over four calendar weeks, the
     recent week without a holiday and the three before it, from the aggregates range endpoint,
-    unfiltered. For each week bar it reports its stamp, its volume, the first and last hour bar
-    of the seven days from its stamp, and the three candidate seven-day windows whose hour-bar
-    volume comes closest to the bar's (`week_windows.score`); a candidate within a relative
-    error of 1e-9 is marked `MATCH`: that is the bucket Massive uses, wherever the bar is
-    stamped. A bar of the four weeks (`week_windows.is_checked`) is checked by comparison: the
-    library's week must be the closest window, ties allowed (`week_windows.library_is_closest`).
+    unfiltered: hour bars for crypto and forex, and day bars for stocks, whose hour bars do not
+    add up to the week bar's volume (about a fifth off in the live check) while the day bars of
+    its Monday to Friday do exactly. For each week bar it reports its stamp, its volume, the
+    first and last shorter bar of the seven days from its stamp, and the three candidate
+    seven-day windows whose volume comes closest to the bar's (`week_windows.score`); a
+    candidate within a relative error of 1e-9 is marked `MATCH`: that is the bucket Massive
+    uses, wherever the bar is stamped. A bar of the four weeks (`week_windows.is_checked`) is
+    checked by comparison: the library's week must be the closest window, ties allowed
+    (`week_windows.library_is_closest`).
 
     Args:
         rest_rows: Reads raw REST rows.
@@ -2764,8 +2767,9 @@ def week_bar_report(
     Returns:
         A function `(ticker_param, ticker, zone)`: the path placeholder of the class (such as
         `"stocksTicker"`), the ticker, and the class's day zone, `"UTC"` (crypto, forex) or
-        `"New York"` (stocks). It returns the evidence lines, how many bars it checked, and the
-        stamps of the checked bars whose closest window is not the library's week.
+        `"New York"` (stocks), which also selects day bars instead of hour bars. It returns the
+        evidence lines, how many bars it checked, and the stamps of the checked bars whose
+        closest window is not the library's week.
     """
     span_of_weeks = (recent_week[0] - timedelta(days=21), recent_week[1])
     first, last = span_of_weeks
@@ -2781,14 +2785,16 @@ def week_bar_report(
             params |= {"from": first - timedelta(days=7), "to": last + timedelta(days=7)}
             return rest_rows(path, params, {"sort": "asc", "limit": 50_000})
 
-        week_rows, hours = bars("week"), bars("hour")
-        lines = [f"{ticker} {first} to {last}: {len(week_rows)} week bars, {len(hours)} hour bars"]
+        unit = "hour" if day_zone is UTC else "day"
+        week_rows, shorter = bars("week"), bars(unit)
+        counts = f"{len(week_rows)} week bars, {len(shorter)} {unit} bars"
+        lines = [f"{ticker} {first} to {last}: {counts}"]
         checked, misses = 0, []
         for week in week_rows:
             stamp = int(week["t"])
             target = float(week["v"])
-            inside = [h for h in hours if stamp <= h["t"] < stamp + week_windows.WEEK_MS]
-            scored = week_windows.score(stamp, target, hours, zone=day_zone)
+            inside = [h for h in shorter if stamp <= h["t"] < stamp + week_windows.WEEK_MS]
+            scored = week_windows.score(stamp, target, shorter, zone=day_zone)
             best = ", ".join(
                 f"{label} err={error:.2e}{' MATCH' if error <= week_windows.MATCH else ''}"
                 for error, label, _ in scored[:3]
@@ -2799,7 +2805,8 @@ def week_bar_report(
                 else "none"
             )
             lines.append(
-                f"week t={_instant_text(stamp * _MS)} v={target} hours from the stamp: {span}; "
+                f"week t={_instant_text(stamp * _MS)} v={target} {unit} bars from the stamp: "
+                f"{span}; "
                 f"closest windows: {best}"
             )
             if week_windows.is_checked(stamp, span_of_weeks):
@@ -3268,8 +3275,7 @@ def period_bar_report(
     stamped outside the span is recorded as such and left out. A read the plan refuses is recorded
     and the other units are still read; the first refusal is then raised, for the run to judge (a
     day outside the plan's history skips the test). Reading it: a bar stamped 00:00 New York time
-    (01:00 for an index) on its period's first day, or on the Saturday or Sunday before a week's
-    Monday, is one the library accepts.
+    (01:00 for an index) on its period's first day, a week's Sunday, is one the library accepts.
 
     Args:
         rest_rows: Reads raw REST rows.
