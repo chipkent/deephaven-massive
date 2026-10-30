@@ -73,10 +73,10 @@ uv build                                 # sdist and wheel
     WebSocket, S3 flat files) and imports neither Deephaven nor the rest of the library. Its own
     tests, under `tests/massive/`, may import any `_massive` module; all other code, tests
     included, uses only `deephaven_massive._massive` and its `__all__`.
-15. **Layers**, lowest first: wire; vocabulary (`_config`, `_enums`, `_errors`, `_types`);
-    `_datasets`; `_tables`; `_ingest`; API (`__init__`, `_debug_log`, `_session`, `_query`,
-    `_namespaces`). A module imports only its own layer or lower, under `TYPE_CHECKING` too;
-    pass objects down.
+15. **Layers**, lowest first: wire; vocabulary (`_config`, `_enums`, `_errors`, `_log_limits`,
+    `_types`); `_datasets`; `_tables`; `_ingest`; API (`__init__`, `_debug_log`, `_session`,
+    `_query`, `_namespaces`). A module imports only its own layer or lower, under `TYPE_CHECKING`
+    too; pass objects down.
 16. **`tests/test_layout.py` is the owner's.** It enforces the mirror, wire, and layer rules.
     Never widen its layer map, allow lists, or exceptions to pass a change; ask the owner.
 17. **Never edit generated or vendored files by hand.** `_massive/spec/*.json` changes only

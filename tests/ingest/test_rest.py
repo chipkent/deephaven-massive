@@ -43,9 +43,9 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
-from deephaven_massive._errors import BoundedWarnings
 from deephaven_massive._ingest import hosts, poll, rate_limits, rest
 from deephaven_massive._ingest.poll import RowDataError
+from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._namespaces import options as options_ns
 from deephaven_massive._namespaces import reference

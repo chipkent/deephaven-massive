@@ -8,7 +8,7 @@ from typing import cast
 import pyarrow as pa
 import pytest
 
-from deephaven_massive import _errors
+from deephaven_massive import _log_limits
 from deephaven_massive._datasets import row_times
 from deephaven_massive._datasets.dates import (
     CHICAGO,
@@ -282,7 +282,7 @@ def test_a_streamed_bar_s_own_end_is_recomputed() -> None:
 def test_a_futures_second_bar_ends_at_the_later_of_its_length_and_massive_s_end(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_errors, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", set())
     rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SECOND, 1)
     sent = bars(
         ["2025-03-07T15:00:00", "2025-03-07T15:00:01", "2025-03-07T15:00:02"],

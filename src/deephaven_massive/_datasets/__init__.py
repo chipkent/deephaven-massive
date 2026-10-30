@@ -16,8 +16,8 @@ Deephaven:
 - `history_source`: the partition dates of a window and the choice between flat files and REST.
 
 Layer: datasets, above the wire (`_massive`) and the vocabulary (the root `_config`, `_enums`,
-`_errors`, `_types`), which it may import; it imports nothing from the tables (`_tables`), the
-ingest code (`_ingest`), or the API, and imports `deephaven` only for type checking. So any
-of it is safe to call under the session's `registry_lock` and on any thread. The package
-defines no names of its own: import the module that owns a name.
+`_errors`, `_log_limits`, `_types`), which it may import; it imports nothing from the tables
+(`_tables`), the ingest code (`_ingest`), or the API, and imports `deephaven` only for type
+checking. So any of it is safe to call under the session's `registry_lock` and on any thread. The
+package defines no names of its own: import the module that owns a name.
 """
