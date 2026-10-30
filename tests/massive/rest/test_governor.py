@@ -404,7 +404,7 @@ def test_a_request_whose_patience_ends_before_the_pause_fails_at_once() -> None:
     assert clock.monotonic() == 301.0
 
 
-@pytest.mark.parametrize("asked", [600.5, 1e12, math.inf])
+@pytest.mark.parametrize("asked", [600.5, 1e10, 1e12, math.inf])
 def test_a_retry_after_beyond_ten_minutes_pauses_ten_minutes_and_says_so(
     asked: float, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -418,9 +418,13 @@ def test_a_retry_after_beyond_ten_minutes_pauses_ten_minutes_and_says_so(
         )
     assert MAX_RETRY_AFTER == 600.0
     assert governor.snapshot()[0].paused_until == 1_800_000_600.0
-    assert caplog.messages == [
+    # A diagnostics writer sleeps until the next change: always a bounded, finite wait.
+    assert governor.next_change() == 600.0
+    [record] = caplog.records
+    assert record.levelname == "WARNING"
+    assert record.getMessage() == (
         f"stocks: a refusal's Retry-After asks for {asked} s; pausing 600.0 s, the most honoured"
-    ]
+    )
     # A read with ten minutes of patience waits the clamped pause out.
     permit = governor.admission("stocks", lane=object(), patience=Patience(600.0)).acquire(Cancel())
     governor.done(permit, answered=True)

@@ -75,7 +75,7 @@ def test_an_unusable_retry_after_is_none_and_logged(
     )
 
 
-def test_a_retry_after_of_any_length_is_returned_as_asked_for_the_caller_to_cap(
+def test_a_long_retry_after_is_returned_as_asked_since_each_caller_caps_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     assert retry.retry_after_seconds("9" * 20, now=0.0) == 1e20

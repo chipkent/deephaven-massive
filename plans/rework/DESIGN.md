@@ -4462,7 +4462,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   admits a request only while fewer than 5 slots are held, a slot lasting from the request's
   start until 61 s after its response; a 429 pauses the bucket (its `Retry-After` in either
   form, an HTTP date measured against the response's own `Date` header, up to 10 minutes
-  (`MAX_RETRY_AFTER`; a longer one is clamped and logged at DEBUG), else a whole window
+  (`MAX_RETRY_AFTER`; a longer one is clamped and logged at WARNING), else a whole window
   when paced, else 15, 30, then 60 s by the run's refusals; a `Retry-After` of zero counts as
   none), the burst of 429s in flight when the pause began counting once; after a pause one
   probe request goes alone until it is answered; a run ends with an answer to a request

@@ -200,8 +200,9 @@ def retry_after_seconds(value: str | None, now: float) -> float | None:
 
     Returns:
         The wait in seconds, never negative (a date in the past asks for no wait), or `None`
-        when `value` is `None` or is neither form. The wait is as asked, however long (more
-        than 308 digits read as `math.inf`): each caller caps what it honours. An unusable
+        when `value` is `None` or is neither form. The wait is as asked, however long, so a
+        caller caps what it honours: the REST governor at `MAX_RETRY_AFTER`, the WebSocket
+        client at its longest backoff. An unusable
         value is logged at WARNING, quoted, on this module's logger, so the caller's fallback
         wait is never silent. A date is read as `http_date_seconds` reads it.
     """

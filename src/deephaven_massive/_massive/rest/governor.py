@@ -137,7 +137,7 @@ RATE_WINDOW: Final = 61.0
 
 MAX_RETRY_AFTER: Final = 600.0
 """The longest pause a 429's `Retry-After` sets, in seconds: 10 minutes. A longer one is clamped
-to it and logged at DEBUG; the bucket probes again when it ends."""
+to it and logged at WARNING; the bucket probes again when it ends."""
 
 _BASIC_REFUSAL: Final = "exceeded the maximum requests per minute"
 """The words of Massive's 429 message that mark a subscription on the Basic tier."""
@@ -943,7 +943,7 @@ class RequestGovernor:
         to an attempt that started after the latest pause counts toward the run and sets a
         new pause; one to an attempt that started before it only lengthens the pause to its
         own `Retry-After`. A `Retry-After` of zero counts as none, and one longer than
-        `MAX_RETRY_AFTER` pauses that long, logged at DEBUG with the value asked. A run that
+        `MAX_RETRY_AFTER` pauses that long, logged at WARNING with the value asked. A run that
         time has ended (see the module) ends first, so this refusal starts a new one. The
         caller then asks for a new permit, which waits out the pause, or fails if the pause
         ends past its own read's patience. Does nothing for a permit already reported.
@@ -962,7 +962,7 @@ class RequestGovernor:
         basic = is_basic_refusal(message)
         asked = retry_after if retry_after is not None and retry_after > 0 else None
         if asked is not None and asked > MAX_RETRY_AFTER:
-            logger.debug(
+            logger.warning(
                 "%s: a refusal's Retry-After asks for %s s; pausing %s s, the most honoured",
                 permit.bucket,
                 asked,

@@ -321,7 +321,7 @@ def test_rows_show_each_buckets_state() -> None:
     assert not waiting.is_alive()
 
 
-@pytest.mark.parametrize("asked", [1e12, float("inf")])
+@pytest.mark.parametrize("asked", [1e10, 1e12, float("inf")])
 def test_a_huge_retry_after_leaves_paused_until_a_valid_timestamp(asked: float) -> None:
     # A Retry-After of 31,700 years, or of more digits than a float holds, would put the pause
     # end past what a nanosecond timestamp can hold; the ten-minute cap keeps it a real time.
@@ -332,6 +332,7 @@ def test_a_huge_retry_after_leaves_paused_until_a_valid_timestamp(asked: float) 
     assert rows["options"].state is RateLimitState.PAUSED
     assert rows["options"].paused_until == (1_800_000_000 + 600) * 10**9
     assert rows["options"].paused_until < 2**63
+    assert governor.next_change() == 600.0
 
 
 # --- Notices -------------------------------------------------------------------------------------
