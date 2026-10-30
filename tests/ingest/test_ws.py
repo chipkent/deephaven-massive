@@ -32,19 +32,15 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
-from deephaven_massive._ingest import futures_calendar, host_decision, poll, ws
+from deephaven_massive._ingest import futures_calendar, host_decision, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
+from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._tables.watchlist import SymbolWatch
-
-# Imported, not taken from a fixture: no shared fixture provides the manual clock that
-# `poll.open_poll` needs for the thread-name test's poller, which must not cycle on its own.
 from tests._fakes.clock import FakeClock
-
-# Plain constants of the ws_session, which no fixture can hand over; sessions come from fixtures.
 from tests._fakes.ws_session import REALTIME, TIMEOUT
 
 if TYPE_CHECKING:
@@ -57,6 +53,12 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
+
+
+# Imported, not taken from a fixture: no shared fixture provides the manual clock that
+# `poll.open_poll` needs for the thread-name test's poller, which must not cycle on its own.
+
+# Plain constants of the ws_session, which no fixture can hand over; sessions come from fixtures.
 
 
 RowsWhen: TypeAlias = (
@@ -3032,6 +3034,7 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
         host="api.test",
         path=_DIVIDENDS_PATH,
         clock=FakeClock(manual=True),
+        stop=threading.Event(),
     )
     assert pooled.wait(TIMEOUT)
     # The host decision's reader would name a fan-out pool after the hosts.

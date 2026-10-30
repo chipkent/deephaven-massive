@@ -43,9 +43,9 @@ from deephaven_massive._enums import (
     Recency,
     Timespan,
 )
-from deephaven_massive._ingest import host_decision, poll, rate_limits, rest, rest_requests
+from deephaven_massive._errors import RowDataError
+from deephaven_massive._ingest import host_decision, rate_limits, rest, rest_requests
 from deephaven_massive._ingest.host_decision import HostDecisionCache
-from deephaven_massive._ingest.poll import RowDataError
 from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._namespaces import options as options_ns
@@ -53,6 +53,7 @@ from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces import stocks as stocks_ns
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import HistoryQuery, Query, QueryBase
+from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import HostDecision

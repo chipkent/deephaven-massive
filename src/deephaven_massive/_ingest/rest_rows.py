@@ -36,7 +36,7 @@ from deephaven_massive._datasets.symbols import option_roots
 from deephaven_massive._datasets.timestamps import UnitMismatchError, instants
 from deephaven_massive._datasets.wire_symbols import WireSymbols, unknown_symbol_message
 from deephaven_massive._enums import UnknownSymbols
-from deephaven_massive._ingest.poll import RowDataError
+from deephaven_massive._errors import RowDataError
 from deephaven_massive._massive import DriftReport, WireError, to_batch
 
 if TYPE_CHECKING:

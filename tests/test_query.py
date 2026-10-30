@@ -34,16 +34,10 @@ from deephaven_massive._enums import (
     PollMode,
     Timespan,
 )
-from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
-from deephaven_massive._query import (
-    HistoryQuery,
-    Query,
-    QueryBase,
-    StreamHistoryQuery,
-    StreamQuery,
-)
+from deephaven_massive._query import HistoryQuery, Query, QueryBase, StreamHistoryQuery, StreamQuery
+from deephaven_massive._tables import poll
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher
@@ -1272,6 +1266,7 @@ class EmptyTransport(Recorder):
             host="api.massive.com",
             path=spec.fetch_path or "",
             clock=self._clock,
+            stop=threading.Event(),
         )
 
 

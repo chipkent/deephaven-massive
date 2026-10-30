@@ -24,12 +24,12 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix
-from deephaven_massive._ingest.poll import Pollers, open_poll
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import reference
 from deephaven_massive._namespaces.base import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.poll import Pollers, open_poll
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
@@ -760,6 +760,7 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
         host="api.massive.com",
         path="/v1/marketstatus/now",
         clock=clock,
+        stop=threading.Event(),
     )
     _until(lambda: [r["Market"] for r in dh_to_pylist(table)] == ["open"])
     clock.wait_for_sleepers(1)

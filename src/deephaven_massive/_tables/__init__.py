@@ -12,7 +12,8 @@
 - `columns`: the Deephaven type of each column type and the column definitions of a schema;
 - `watchlist`: the check of a symbol table's rows and the watch that follows a reactive one;
 - `symbols`: `canonicalize_symbols`, the table form of the symbol converters;
-- `stream`: live streams' publishers, the flush thread, and the shared-batch fan-out.
+- `stream`: live streams' publishers, the flush thread, and the shared-batch fan-out;
+- `poll`: `poll()` tables, their pollers, and how each mode applies a cycle's rows.
 
 Layer: tables, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_log_limits`, `_types`), and the datasets (`_datasets`), which it may import; it never

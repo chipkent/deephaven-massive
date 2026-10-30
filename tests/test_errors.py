@@ -5,6 +5,8 @@ from deephaven_massive._errors import (
     EntitlementError,
     MassiveError,
     PermanentError,
+    RowDataError,
+    UnsupportedParameterError,
     from_wire,
 )
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
@@ -73,3 +75,9 @@ def test_errors_are_distinct() -> None:
     assert not issubclass(EntitlementError, AuthenticationError)
     # A permanent failure is neither: a poll() fails on it as on them, for its own reason.
     assert not issubclass(PermanentError, (AuthenticationError, EntitlementError))
+
+
+def test_the_row_and_parameter_errors_are_permanent() -> None:
+    # A poll() table fails on them rather than retrying every cycle.
+    for error in (RowDataError, UnsupportedParameterError):
+        assert issubclass(error, PermanentError)

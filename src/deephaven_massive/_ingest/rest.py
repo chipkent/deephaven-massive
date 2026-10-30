@@ -77,7 +77,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
 `RestState` is the part a session shares (the client, the host decisions, the live pollers,
 the once-per-session warnings); `SessionClients` creates it on first use and registers its
 close with the session. `RestEndpoints`, the session core's `RestTransport`, is a lightweight
-view of the core and that state, made for each call. `poll()` itself is `_ingest/poll.py`.
+view of the core and that state, made for each call. `poll()` itself is `_tables/poll.py`.
 The requests of a call are planned by `rest_requests.py`, and its pages become batches in
 `rest_rows.py`; this module runs the plan, page by page, and turns its failures into the
 public errors.
@@ -109,10 +109,14 @@ from deephaven_massive._datasets.history_source import partition_dates, session_
 from deephaven_massive._datasets.row_times import RowTimes, stamp_rule, time_rule
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import AssetClass, Timespan, UnknownSymbols, subscription_of
-from deephaven_massive._errors import MassiveError, PermanentError, from_wire
-from deephaven_massive._ingest import host_decision, poll
+from deephaven_massive._errors import (
+    MassiveError,
+    PermanentError,
+    UnsupportedParameterError,
+    from_wire,
+)
+from deephaven_massive._ingest import host_decision
 from deephaven_massive._ingest.host_decision import HostDecisionCache
-from deephaven_massive._ingest.poll import Pollers, UnsupportedParameterError
 from deephaven_massive._ingest.rate_limits import (
     OTHER,
     PaceCheck,
@@ -138,9 +142,11 @@ from deephaven_massive._ingest.rest_rows import (
     with_remedy,
 )
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
+from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
+from deephaven_massive._tables.poll import Pollers
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -1601,7 +1607,7 @@ class RestEndpoints:
     ) -> Table:
         """Return a live table that re-reads the dataset's fetch path every `interval`.
 
-        See `_ingest/poll.py`: the table is created here, on the caller thread, and one poller
+        See `_tables/poll.py`: the table is created here, on the caller thread, and one poller
         thread of its own runs the cycles until the table is released or the session closes.
 
         Args:
@@ -1637,16 +1643,21 @@ class RestEndpoints:
             interval=interval,
             mode=mode,
             query=query,
-            read=functools.partial(
-                reader.read_cycle,
-                spec,
-                request,
-                pace=PaceCheck(f"{spec.name} poll()", interval.total_seconds()),
+            # The poller hands each cycle the `Cancel` passed as `stop` below.
+            read=cast(
+                "poll.CycleReader",
+                functools.partial(
+                    reader.read_cycle,
+                    spec,
+                    request,
+                    pace=PaceCheck(f"{spec.name} poll()", interval.total_seconds()),
+                ),
             ),
             pollers=self._state.pollers,
             host=host,
             path=paths,
             clock=poll.CLOCK,
+            stop=Cancel(),
         )
 
 

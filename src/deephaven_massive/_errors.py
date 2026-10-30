@@ -26,8 +26,9 @@ through `TablePublisher.publish_failure`, so the table fails where Deephaven use
 failure is also logged at ERROR and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported. The rate-limited log helpers, `log_once` and `BoundedWarnings`,
-are in `_log_limits`.
+fix, which is not exported, and two of its subclasses, `RowDataError` and
+`UnsupportedParameterError`, which the ingest layer raises and the tables layer names. The
+rate-limited log helpers, `log_once` and `BoundedWarnings`, are in `_log_limits`.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
@@ -41,6 +42,8 @@ __all__ = [
     "EntitlementError",
     "MassiveError",
     "PermanentError",
+    "RowDataError",
+    "UnsupportedParameterError",
     "from_wire",
 ]
 
@@ -147,9 +150,11 @@ class PermanentError(MassiveError):
     (`UnsupportedParameterError`), a symbol table's row that is not Massive's ticker
     (`SymbolRowError`), and a crypto pair missing from the session's ticker list
     (`UnlistedPairError`). A `poll()` table fails with one rather than retrying it every cycle.
-    The subclasses are defined in the ingest modules (`_ingest/poll.py`, `_ingest/rest.py`),
-    and the fatal set of `poll()` names only this base, so a subclass defined in a module the
-    poll module cannot import (`rest.py` imports `poll.py`) still fails the table.
+    `RowDataError` and `UnsupportedParameterError` are defined here, since the REST transport
+    raises them and the tables layer names them; `SymbolRowError` is the poll module's
+    (`_tables/poll.py`) and `UnlistedPairError` the REST transport's (`_ingest/rest.py`). The
+    fatal set of `poll()` names only this base, so a subclass defined in a module the poll
+    module cannot import (the ingest layer) still fails the table.
 
     Example:
         ::
@@ -183,3 +188,22 @@ def from_wire(error: WireError) -> MassiveError:
     else:
         public = MassiveError
     return public(error.message, status=error.status, request_id=error.request_id)
+
+
+class RowDataError(PermanentError):
+    """A REST row that breaks its dataset's schema.
+
+    A row that lacks a key the dataset requires, a value that does not convert to its field's
+    type, a timestamp outside 1990 to 2100, or, in a `poll()` cycle, a null or NaN value in
+    one of the dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
+    a `poll()` table fails with it, since the next cycle would fail alike.
+    """
+
+
+class UnsupportedParameterError(PermanentError):
+    """A parameter the caller set that the path a `poll()` cycle chose does not take.
+
+    A reactive symbol table can route a new symbol to a path that lacks a parameter (an
+    explicit `adjusted` on the crypto indicators). Retrying cannot fix it, so the table fails
+    with it.
+    """

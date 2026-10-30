@@ -5357,7 +5357,7 @@ known to the WebSocket decoder only, and an extra key's value, so a WARNING can 
 outside equality and the `repr`). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
 session's `DriftRegistry` in `_tables/diagnostics.py` (a leaf lock, WARNINGs logged after release) and the
-routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
+routing in `_ingest/rest.py`, `_tables/poll.py`, `_ingest/ws.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
 
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
