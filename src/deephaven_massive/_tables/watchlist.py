@@ -217,20 +217,29 @@ class SymbolRowRule:
         reason = invalid_row_message(self.asset_class, symbol, as_written=self.as_written)
         return f"{self.dataset}: {reason}"
 
-    def skip(self, symbol: str) -> None:
+    def skip(self, symbol: str, *, stream_id: int | None) -> None:
         """Log a skipped row under `LOG` (WARNING) or `IGNORE` (DEBUG), once per value.
 
         Each value is logged once per dataset, a bounded number of values per process, so a
-        table edited for weeks keeps the log and the memory small. Never called under `RAISE`.
+        table edited for weeks keeps the log and the memory small. The record names the
+        dataset and the stream that first met the value, such as
+        `stocks.quotes stream 7: ...; the row is skipped until it is fixed or deleted`. Never
+        called under `RAISE`.
 
         Args:
             symbol: The row's symbol, which `accepts` refuses.
+            stream_id: The stream or `poll()` table that read the row, or None for a verb's
+                read of the table before any stream exists (`fetch()`, or the check a live
+                verb makes first).
         """
         rows = _logged_rows if self.noncanonical is OnError.LOG else _ignored_rows
+        reader = "a call's read" if stream_id is None else f"stream {stream_id}"
         rows.log(
             f"{self.dataset}\0{symbol}",
-            "%s; the row is skipped until it is fixed or deleted",
-            self.refusal(symbol),
+            "%s %s: %s; the row is skipped until it is fixed or deleted",
+            self.dataset,
+            reader,
+            invalid_row_message(self.asset_class, symbol, as_written=self.as_written),
         )
 
 
@@ -248,7 +257,7 @@ class SymbolRows:
     skipped: tuple[str, ...] = ()
 
 
-def read_symbols(rule: SymbolRowRule, table: Table) -> SymbolRows:
+def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) -> SymbolRows:
     """Read a symbol table's current rows once, sorting them into good and skipped values.
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
@@ -259,6 +268,8 @@ def read_symbols(rule: SymbolRowRule, table: Table) -> SymbolRows:
     Args:
         rule: The dataset's rule: its grammar and the session's `noncanonical_symbols`.
         table: The user's table with a `Symbol` column.
+        stream_id: The stream or `poll()` table the read is for, named in a skipped row's
+            record; None for a verb's read before any stream exists.
 
     Returns:
         The table's canonical symbols and, under `LOG` and `IGNORE`, its skipped values; both
@@ -281,7 +292,7 @@ def read_symbols(rule: SymbolRowRule, table: Table) -> SymbolRows:
         elif rule.noncanonical is OnError.RAISE:
             raise ValueError(rule.refusal(symbol))
         else:
-            rule.skip(symbol)
+            rule.skip(symbol, stream_id=stream_id)
             skipped.append(symbol)
     return SymbolRows(tuple(good), tuple(skipped))
 
@@ -339,6 +350,7 @@ class SymbolWatch:
                 rule,
                 watchlist,
                 lambda added, removed: None,
+                stream_id=7,
                 on_invalid=lambda message: None,
                 on_skipped=lambda values: None,
             )
@@ -354,6 +366,7 @@ class SymbolWatch:
         table: Table,
         on_change: Callable[[frozenset[str], frozenset[str]], None],
         *,
+        stream_id: int,
         on_invalid: Callable[[str], None],
         on_skipped: Callable[[tuple[str, ...]], None],
     ) -> None:
@@ -366,6 +379,7 @@ class SymbolWatch:
             rule: The dataset's grammar and the session's `noncanonical_symbols`.
             table: The user's refreshing table with a `Symbol` column.
             on_change: Receives each change of the set of symbols; see the class documentation.
+            stream_id: The stream that follows the table, named in the watch's log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
             on_skipped: Receives the values skipped now under `LOG` and `IGNORE`, each time
                 that set changes.
@@ -375,7 +389,13 @@ class SymbolWatch:
         self._view = table.view([_SYMBOL]).where(f"!isNull({_SYMBOL})")
         self._handle = TableListenerHandle(
             self._view,
-            _SymbolCounter(rule, on_change, on_invalid=on_invalid, on_skipped=on_skipped),
+            _SymbolCounter(
+                rule,
+                on_change,
+                stream_id=stream_id,
+                on_invalid=on_invalid,
+                on_skipped=on_skipped,
+            ),
             description="deephaven_massive symbol watch",
         )
 
@@ -425,6 +445,7 @@ class _SymbolCounter(TableListener):
         rule: SymbolRowRule,
         on_change: Callable[[frozenset[str], frozenset[str]], None],
         *,
+        stream_id: int,
         on_invalid: Callable[[str], None],
         on_skipped: Callable[[tuple[str, ...]], None],
     ) -> None:
@@ -433,10 +454,12 @@ class _SymbolCounter(TableListener):
         Args:
             rule: The dataset's grammar and the session's `noncanonical_symbols`.
             on_change: Receives each change of the set of symbols.
+            stream_id: The stream that follows the table, named in the log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
             on_skipped: Receives the values skipped now under `LOG` and `IGNORE`.
         """
         self._rule = rule
+        self._stream_id = stream_id
         self._counts: Counter[str] = Counter()
         self._skipped: Counter[str] = Counter()
         self._on_change = on_change
@@ -465,7 +488,12 @@ class _SymbolCounter(TableListener):
         after = set(self._counts)
         added, removed = frozenset(after - before), frozenset(before - after)
         if is_replay:
-            logger.debug("a symbol table holds %d valid symbols", len(after))
+            logger.debug(
+                "%s stream %d: its symbol table holds %d valid symbols",
+                self._rule.dataset,
+                self._stream_id,
+                len(after),
+            )
         if added or removed:
             self._on_change(added, removed)
         if set(self._skipped) != skipped_before:
@@ -508,7 +536,7 @@ class _SymbolCounter(TableListener):
                         self._on_invalid(self._rule.refusal(symbol))
                     continue
                 if step > 0:
-                    self._rule.skip(symbol)
+                    self._rule.skip(symbol, stream_id=self._stream_id)
                 counts = self._skipped
             count = counts[symbol] + step
             if count > 0:

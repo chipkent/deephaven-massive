@@ -345,7 +345,7 @@ class WsConnections:
         if asset_class is AssetClass.CRYPTO:
             if isinstance(symbols, SymbolTable):
                 rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
-                self.resolve_pairs(read_symbols(rule, symbols.table).symbols)
+                self.resolve_pairs(read_symbols(rule, symbols.table, stream_id=stream_id).symbols)
             elif isinstance(symbols, tuple):
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
@@ -369,6 +369,7 @@ class WsConnections:
                 core=core,
                 stream_id=stream_id,
                 host=decision.host,
+                evidence=decision.evidence,
                 path=connection.path,
                 # Held from Java until the JVM collects the publisher or the listener: weakly,
                 # so a finished session is freed without waiting for a JVM collection.

@@ -418,13 +418,22 @@ def test_any_other_missing_attribute_raises_python_s_own_error(
 # --- fetch and poll --------------------------------------------------------------------------
 
 
-def test_fetch_and_poll_delegate(massive_session: dm.MassiveSession, rest: Recorder) -> None:
+def test_fetch_and_poll_delegate(
+    massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
+) -> None:
     q = feed(massive_session)
     q.fetch()
-    q.poll(30)
-    q.poll(30, mode=PollMode.AUTO)
-    q.poll(timedelta(minutes=1), mode=PollMode.REPLACE)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+        q.poll(30)
+        q.poll(30, mode=PollMode.AUTO)
+        q.poll(timedelta(minutes=1), mode=PollMode.REPLACE)
     shown = repr(q)
+    # Each poll() logs the mode it asked for and the mode it got.
+    assert [m for m in caplog.messages if " poll(): " in m] == [
+        f"{shown} poll(): every 30.000 s, mode AUTO -> APPEND",
+        f"{shown} poll(): every 30.000 s, mode AUTO -> APPEND",
+        f"{shown} poll(): every 60.000 s, mode REPLACE -> REPLACE",
+    ]
     # AUTO, the default, is the dataset's own mode: APPEND for this feed.
     assert [(c[0], c[3]) for c in rest.calls] == [
         ("fetch", {}),
@@ -1389,7 +1398,7 @@ class EmptyTransport(Recorder):
             interval=interval,
             mode=mode,
             query=query,
-            read=lambda **_: (empty, 0),
+            read=lambda **_: (empty, 0, 600.0),
             pollers=self.pollers,
             host="api.massive.com",
             path=spec.fetch_path or "",

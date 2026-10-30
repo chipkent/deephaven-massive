@@ -98,7 +98,7 @@ from deephaven.update_graph import shared_lock
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._log_limits import BoundedLog, bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
@@ -656,6 +656,7 @@ class SessionCore:
         *,
         channel: str,
         query: str,
+        verb: str,
         build: Callable[[Table], Table],
     ) -> Table:
         """Create one live result over the stream of `(spec, channel, symbols)`.
@@ -695,6 +696,7 @@ class SessionCore:
             channel: The WebSocket channel.
             query: The `repr` of the query whose verb asks, for the `Query` column of
                 `m.streams()`; a reused stream keeps the text of the query that opened it.
+            verb: The verb that asks, such as `"last"`, for the log line of the open.
             build: Turns the stream's blink table into the result. It must create a new
                 table, never return the blink table itself, so the result scope manages the
                 result and each call returns a distinct table.
@@ -708,7 +710,7 @@ class SessionCore:
                 closed"`).
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
-        handle = self._acquire(spec, request, key, channel=channel, query=query)
+        handle = self._acquire(spec, request, key, channel=channel, query=query, verb=verb)
         blink = handle.blink
         scope: LivenessScope | None = None
         try:
@@ -778,7 +780,14 @@ class SessionCore:
             return state.row.error or "failed"
 
     def _acquire(
-        self, spec: DatasetSpec, request: Request, key: StreamKey, *, channel: str, query: str
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        key: StreamKey,
+        *,
+        channel: str,
+        query: str,
+        verb: str,
     ) -> StreamHandle:
         """Take a hold on the stream of `key`: reuse it, wait for its open, or open it.
 
@@ -805,6 +814,12 @@ class SessionCore:
             key: The stream key.
             channel: The WebSocket channel.
             query: The `repr` of the asking query, for a new stream's `Query` column.
+            verb: The asking verb, such as `"last"`.
+
+        Logs at DEBUG, with the session's label, the stream id, the query and verb, and the
+        channel, that the stream opened, with its host and path, why that host
+        (`HostDecision.evidence`), and its symbols (the count and the first twenty); or that it
+        was reused.
 
         Returns:
             The stream's handle, with one hold taken for the caller.
@@ -822,17 +837,32 @@ class SessionCore:
                     continue
                 if isinstance(claim, int):
                     claim = self._open(spec, request, channel=channel, stream_id=claim)
+                    symbols = request.symbol_key()
+                    shown = (
+                        bounded_list(symbols)
+                        if isinstance(symbols, tuple)
+                        else describe_symbols(symbols)[1]
+                    )
                     logger.debug(
-                        "stream %d opened: %s channel %s on %s%s",
+                        "%s: stream %d opened: %s.%s -> channel %s on %s%s (%s); symbols %s",
+                        self.label,
                         claim.stream_id,
-                        spec.name,
+                        query,
+                        verb,
                         channel,
                         claim.host,
                         claim.path,
+                        claim.evidence,
+                        shown,
                     )
                 else:
                     logger.debug(
-                        "stream %d reused: %s channel %s", claim.stream_id, spec.name, channel
+                        "%s: stream %d reused: %s.%s -> channel %s",
+                        self.label,
+                        claim.stream_id,
+                        query,
+                        verb,
+                        channel,
                     )
                 for _, ready in holds:  # inside the try: an interrupt here still cleans up
                     if ready is not None:
@@ -1432,48 +1462,54 @@ class SessionCore:
         """
         with self.registry_lock:
             fails = self._live_fails()
-        return self._fail_all(fails, error)
+        return len(self._fail_all(fails, error))
 
-    def _live_fails(self) -> list[Callable[[MassiveError], bool]]:
-        """Return the fail hooks of every running table; `registry_lock` is held.
+    def _live_fails(self) -> list[tuple[int, Callable[[MassiveError], bool]]]:
+        """Return the stream id and fail hook of every running table; `registry_lock` is held.
 
         Returns:
-            The hook of each opened stream and each worker table whose table has not shut down
-            and has not failed, closed, or, for a read, got its rows.
+            `(stream id, hook)` of each opened stream and each worker table whose table has not
+            shut down and has not failed, closed, or, for a read, got its rows.
         """
         fails = [
-            state.handle.fail
-            for state in self._streams.values()
+            (stream_id, state.handle.fail)
+            for stream_id, state in self._streams.items()
             if state.handle is not None and not state.shut_down and state.row.state not in _FINAL
         ]
         fails += [
-            worker.fail
-            for worker in self._workers.values()
+            (stream_id, worker.fail)
+            for stream_id, worker in self._workers.items()
             if not worker.shut_down and worker.row.state not in _FINAL
         ]
         return fails
 
     def _fail_all(
-        self, fails: Sequence[Callable[[MassiveError], bool]], error: MassiveError
-    ) -> int:
+        self, fails: Sequence[tuple[int, Callable[[MassiveError], bool]]], error: MassiveError
+    ) -> list[int]:
         """Fail tables outside every lock, each once; log a hook that raises and go on.
 
         Args:
-            fails: The tables' fail hooks.
+            fails: The tables' stream ids and fail hooks, from `_live_fails`.
             error: The error they fail with.
 
         Returns:
-            How many of the tables are failed now: by this call, or by a failure that raced it
-            (which then fails the table with this call's error if this call recorded it first).
+            The stream ids of the tables that are failed now, in the order given: by this call,
+            or by a failure that raced it (which then fails the table with this call's error if
+            this call recorded it first).
         """
-        failed = 0
-        for fail in fails:
+        failed = []
+        for stream_id, fail in fails:
             try:
                 fail(error)
             except Exception:
-                logger.exception("%s: could not fail a live table. %s", self.label, LIBRARY_BUG)
+                logger.exception(
+                    "%s: could not fail the table of stream %d. %s",
+                    self.label,
+                    stream_id,
+                    LIBRARY_BUG,
+                )
             else:
-                failed += 1
+                failed.append(stream_id)
         return failed
 
     def close(self) -> None:
@@ -1500,8 +1536,9 @@ class SessionCore:
         releases the lock. There the closers join no thread either (`WsConnections.close`):
         while they would wait no live table updates, and the threads, daemons that never need
         the lock, end on their own. Results stay tracked, so garbage collection and `release()`
-        still free them. Logs "MassiveSession #1 closed; N live tables failed": a WARNING when
-        N > 0, INFO otherwise; the tables themselves are not logged one by one. On an
+        still free them. Logs "MassiveSession #1 closed; N live tables failed, streams [...]",
+        with the stream ids of the failed tables (`bounded_list`): a WARNING when N > 0, INFO
+        otherwise. On an
         update-graph thread it raises the `ValueError` of `refuse_update_graph_thread`, even
         when the session is already closed.
         """
@@ -1544,7 +1581,13 @@ class SessionCore:
         with shared_lock(self.exec_ctx.update_graph):
             pass
         level = logging.WARNING if failed else logging.INFO
-        logger.log(level, "%s closed; %d live tables failed", self.label, failed)
+        logger.log(
+            level,
+            "%s closed; %d live tables failed, streams %s",
+            self.label,
+            len(failed),
+            bounded_list(failed),
+        )
 
 
 def _closed_row(row: StreamRow, error: str) -> StreamRow:

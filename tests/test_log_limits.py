@@ -5,7 +5,24 @@ import pytest
 
 from deephaven_massive import _log_limits
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
-from deephaven_massive._log_limits import BoundedLog, log_failure, log_once, mark_failure_logged
+from deephaven_massive._log_limits import (
+    LIST_LIMIT,
+    BoundedLog,
+    bounded_list,
+    log_failure,
+    log_once,
+    mark_failure_logged,
+)
+
+
+def test_bounded_list_shows_the_count_and_the_first_items() -> None:
+    assert bounded_list([]) == "0 []"
+    assert bounded_list(["AAPL", "MSFT"]) == "2 [AAPL, MSFT]"
+    assert bounded_list(iter([7, 9])) == "2 [7, 9]"  # any iterable, each item by str
+    assert bounded_list("ABCDE", limit=3) == "5 [A, B, C, +2 more]"
+    assert bounded_list("ABC", limit=3) == "3 [A, B, C]"  # exactly the limit: none left out
+    many = [f"T{n}" for n in range(LIST_LIMIT + 1)]
+    assert bounded_list(many).endswith(f", T{LIST_LIMIT - 1}, +1 more]")
 
 
 def test_log_once_logs_each_key_once(

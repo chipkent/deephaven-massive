@@ -299,7 +299,7 @@ def _read_symbol_table(
     """
     rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
     with entered(core.exec_ctx):
-        rows = read_symbols(rule, symbols.table)
+        rows = read_symbols(rule, symbols.table, stream_id=None)
     if rows.skipped and not rows.symbols:
         raise ValueError(
             f"{query}: no row of the symbol table is Massive's ticker, so the result would "
@@ -852,7 +852,9 @@ class Query(QueryBase):
         table (its `m.streams()` row shows `FAILED`) and ends the poller. Any other failure is
         shown in the row's `Error` and logged once per run of failures, at WARNING (ERROR for a
         defect); the table keeps its rows and the next cycle runs. A cycle that ends after its
-        interval logs one WARNING per run of late cycles.
+        interval logs one WARNING per run of late cycles. The debug log records the interval
+        and the mode asked for and chosen (`AUTO -> REPLACE`), the poll's start with its
+        `StreamId` and symbols, each cycle, and the poll's end with its reason.
 
         Args:
             interval: Seconds between cycles, or a `timedelta`; must be positive.
@@ -895,9 +897,8 @@ class Query(QueryBase):
             MassiveError: If the session is closed.
         """
         period = _interval(interval)
-        chosen = _require_enum(mode, PollMode, "mode")
-        if chosen is PollMode.AUTO:
-            chosen = self._spec.poll_mode
+        asked = _require_enum(mode, PollMode, "mode")
+        chosen = self._spec.poll_mode if asked is PollMode.AUTO else asked
         request = self._request
         if self._spec.is_feed and request.start is None and request.limit is None:
             name = self._spec.name
@@ -913,6 +914,13 @@ class Query(QueryBase):
             _read_symbol_table(
                 self._core, self._spec, self._request.symbols, query=repr(self), live=True
             )
+        logger.debug(
+            "%r poll(): every %.3f s, mode %s -> %s",
+            self,
+            period.total_seconds(),
+            asked.name,
+            chosen.name,
+        )
         return self._core.rest_transport().poll(
             self._spec, self._request, interval=period, mode=chosen, query=repr(self)
         )
@@ -987,7 +995,7 @@ class StreamQuery(QueryBase):
             )
         return request
 
-    def _stream(self, shape: Callable[[Table], Table], request: Request) -> Table:
+    def _stream(self, shape: Callable[[Table], Table], request: Request, *, verb: str) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.
 
         The result is the shape, described last (`describe`): an append-only or ring table
@@ -1002,6 +1010,7 @@ class StreamQuery(QueryBase):
             shape: Turns the stream's blink table into the result's shape; the identity for
                 `blink()`, whose described copy is then a new table of its own.
             request: The request from `_stream_request`.
+            verb: The verb's name, such as `"last_by"`, for the log line of a stream's open.
 
         Returns:
             The tracked live result.
@@ -1019,6 +1028,7 @@ class StreamQuery(QueryBase):
             request,
             channel=self._channel,
             query=repr(self),
+            verb=verb,
             build=lambda blink: describe(shape(blink), spec, schema),
         )
 
@@ -1055,7 +1065,7 @@ class StreamQuery(QueryBase):
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
         """
-        return self._stream(lambda blink: blink, self._stream_request())
+        return self._stream(lambda blink: blink, self._stream_request(), verb="blink")
 
     @_verb
     @raises_through(
@@ -1089,7 +1099,7 @@ class StreamQuery(QueryBase):
                 it, naming the failure; or if Massive's crypto ticker list cannot be read or
                 does not hold a crypto pair.
         """
-        return self._stream(blink_to_append_only, self._stream_request())
+        return self._stream(blink_to_append_only, self._stream_request(), verb="append_only")
 
     @_verb
     @raises_through(
@@ -1128,7 +1138,9 @@ class StreamQuery(QueryBase):
                 does not hold a crypto pair.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
-        return self._stream(lambda blink: ring_table(blink, rows), self._stream_request())
+        return self._stream(
+            lambda blink: ring_table(blink, rows), self._stream_request(), verb="ring"
+        )
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:
         """Validate the `by` argument of `last_by`.
@@ -1222,15 +1234,21 @@ class StreamQuery(QueryBase):
         request = self._stream_request()
         symbols = request.symbols
         if not isinstance(symbols, SymbolTable):
-            return self._stream(lambda blink: blink.last_by(list(keys)), request)
+            return self._stream(lambda blink: blink.last_by(list(keys)), request, verb="last_by")
         watch = symbols.table
         if "Symbol" in keys:
             # One row per symbol: filtering after the aggregation evicts a removed symbol's rows.
             return self._stream(
-                lambda blink: watched_rows(blink.last_by(list(keys)), watch), request
+                lambda blink: watched_rows(blink.last_by(list(keys)), watch),
+                request,
+                verb="last_by",
             )
         # Groups span symbols: filter first, so a group's row is the latest of a watched symbol.
-        return self._stream(lambda blink: watched_rows(blink, watch).last_by(list(keys)), request)
+        return self._stream(
+            lambda blink: watched_rows(blink, watch).last_by(list(keys)),
+            request,
+            verb="last_by",
+        )
 
 
 class HistoryQuery(QueryBase):

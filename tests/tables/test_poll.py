@@ -54,6 +54,8 @@ if TYPE_CHECKING:
 R = Transport.REST
 TIMEOUT = 30.0
 LOGGER = "deephaven_massive._tables.poll"
+
+
 PATH = "/stocks/v1/dividends"
 DIVIDENDS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -92,7 +94,7 @@ class Script:
         record: Callable[[DriftReport], None],
         executor: ThreadPoolExecutor,
         cancel: threading.Event,
-    ) -> tuple[pa.Table, int]:
+    ) -> tuple[pa.Table, int, float]:
         self.symbols.append(symbols)
         self.cancel = cancel
         if self.drift is not None:
@@ -102,7 +104,7 @@ class Script:
             self.clock.advance(self.took)
         if isinstance(outcome, BaseException):
             raise outcome
-        return cast("pa.Table", outcome), 3
+        return cast("pa.Table", outcome), 3, 600.0
 
 
 @pytest.fixture
@@ -391,9 +393,20 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
         next_cycle(clock)  # the same rows again: read, but nothing new to publish
         script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
         next_cycle(clock)
+    patience = "waiting out at most 600 s of pauses"
     assert caplog.messages == [
-        "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in 0.000 s",
-        "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 0 published in 0.000 s",
+        (
+            f"{massive_session._core.label}: poll() stream 1 started: <Query test> every "
+            "60.000 s, mode APPEND, symbols 2 [AAPL, MSFT]"
+        ),
+        (
+            f"stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in "
+            f"0.000 s, {patience}"
+        ),
+        (
+            f"stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 0 published in "
+            f"0.000 s, {patience}"
+        ),
         (
             "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as scheduled: "
             "HTTP 503 from GET /stocks/v1/dividends"
@@ -448,10 +461,10 @@ def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
     names: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
     schema = massive_session._core.catalog.dataset_schema(DIVIDENDS).arrow_schema()
 
-    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int]:
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int, float]:
         pooled = executor.submit(lambda: threading.current_thread().name).result(TIMEOUT)
         names.put((threading.current_thread().name, pooled))
-        return schema.empty_table(), 1
+        return schema.empty_table(), 1, 600.0
 
     # Held until the end: a table nothing refers to may be collected, which stops its poller
     # before its first cycle.
@@ -719,6 +732,7 @@ def test_close_stops_every_poller_and_marks_the_rows(
     script: Script,
     clock: FakeClock,
     dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     pollers = cast("Any", massive_session._core.rest_transport())._state.pollers
     script.rows(("AAPL", 1.0))
@@ -726,11 +740,15 @@ def test_close_stops_every_poller_and_marks_the_rows(
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
     streams = massive_session.streams()
     poller = poller_of(pollers)
-    massive_session.close()
-    assert poller.stopped
-    clock.advance(60)
-    poller.thread.join(TIMEOUT)
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        massive_session.close()
+        assert poller.stopped
+        clock.advance(60)
+        poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
+    assert "stocks.dividends poll() stream 1 stopped after 1 cycles: its table failed" in (
+        caplog.messages
+    )
     # The table failed, naming the close, and keeps its rows for a snapshot.
     until(lambda: bool(table.j_table.isFailed()))
     assert pairs(table.snapshot(), dh_to_pylist) == [("AAPL", 1.0)]
@@ -870,18 +888,28 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
 
 
 def test_a_collected_table_stops_its_poller(
-    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers, clock: FakeClock
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows()
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
-    del table
-    gc.collect()
-    until(lambda: poller.stopped)
-    clock.advance(60)
-    poller.thread.join(TIMEOUT)
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        del table
+        gc.collect()
+        until(lambda: poller.stopped)
+        clock.advance(60)
+        poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
+    assert (
+        "stocks.dividends poll() stream 1 stopped after 1 cycles: it was stopped: its table "
+        "shut down"
+    ) in caplog.messages
 
 
 def test_a_poll_keeps_its_session_alive_while_its_table_is_used(
@@ -1018,6 +1046,7 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
     poller._core = cast("Any", lambda: None)
     with ThreadPoolExecutor(1) as pool:
         assert poller._cycle(pool) is False
+    assert poller._end_reason() == "its session is gone"
 
 
 def test_a_stop_during_a_cycle_publishes_nothing(
@@ -1026,7 +1055,7 @@ def test_a_stop_during_a_cycle_publishes_nothing(
     gate = threading.Event()
     reading = threading.Event()
 
-    def slow(**kwargs: object) -> tuple[pa.Table, int]:
+    def slow(**kwargs: object) -> tuple[pa.Table, int, float]:
         reading.set()
         gate.wait(TIMEOUT)
         return script(**cast("dict[str, Any]", kwargs))
@@ -1071,7 +1100,7 @@ def test_an_error_after_a_stop_is_not_reported(
     reading = threading.Event()
     gate = threading.Event()
 
-    def stopped(**kwargs: object) -> tuple[pa.Table, int]:
+    def stopped(**kwargs: object) -> tuple[pa.Table, int, float]:
         reading.set()
         gate.wait(TIMEOUT)
         raise copy.copy(error)  # the parameter outlives the test; its traceback must not

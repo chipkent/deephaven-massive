@@ -789,11 +789,13 @@ def test_a_shutdown_after_the_connection_ended_is_logged(
     connection.close()
     assert connection.join(TIMEOUT)
     with (
-        caplog.at_level(logging.INFO, logger=ws.__name__),
-        caplog.at_level(logging.INFO, logger=ws_connection.__name__),
+        caplog.at_level(logging.DEBUG, logger=ws.__name__),
+        caplog.at_level(logging.DEBUG, logger=ws_connection.__name__),
     ):
         ws_session.session.release(result)
         wait_for(lambda: "has closed; dropped release_stream" in caplog.text)
+    [dropped] = [r for r in caplog.records if "dropped release_stream" in r.getMessage()]
+    assert dropped.levelno == logging.DEBUG  # an ended connection is expected, not news
 
 
 def test_a_failing_shutdown_is_logged(
@@ -1823,9 +1825,9 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     core = custom_session.session._core
     pooled = threading.Event()
 
-    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int]:
+    def read(*, executor: ThreadPoolExecutor, **_: object) -> tuple[pa.Table, int, float]:
         executor.submit(pooled.set).result(TIMEOUT)
-        return core.catalog.dataset_schema(_DIVIDENDS).arrow_schema().empty_table(), 1
+        return core.catalog.dataset_schema(_DIVIDENDS).arrow_schema().empty_table(), 1, 600.0
 
     table = poll.open_poll(
         core,
