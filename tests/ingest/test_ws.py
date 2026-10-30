@@ -1925,6 +1925,8 @@ class Live:
         derived: The user's tables on the result (the `user_tables` fixture).
         heard: Each table above, with the reader of the failures its listener heard.
         race: Runs calls at the same moment (the `race` fixture).
+        cycles_ended: Waits until every queued failure is delivered (the `cycles_ended`
+            fixture).
     """
 
     result: Table
@@ -1933,6 +1935,7 @@ class Live:
     derived: list[Table] = dataclasses.field(default_factory=list)
     heard: list[tuple[Table, Callable[[], int]]] = dataclasses.field(default_factory=list)
     race: Callable[..., None] = dataclasses.field(init=False)
+    cycles_ended: Callable[[], None] = dataclasses.field(init=False)
 
 
 def quote(symbol: str) -> dict[str, object]:
@@ -1994,6 +1997,7 @@ def open_live(
     user_tables: UserTables,
     failures_heard: FailuresHeard,
     race: Callable[..., None],
+    cycles_ended: Callable[[], None],
     refused: bool = False,
 ) -> Live:
     # Opens the anchor (and, for a watching result, the stream it watches, of a watchlist),
@@ -2015,6 +2019,7 @@ def open_live(
         ws_session.server.hold_reads(held=True)
     live = SHAPES[shape](ws_session, upstream, watchlist)
     live.race = race
+    live.cycles_ended = cycles_ended
     live.derived = user_tables(live.result, "Symbol", "Timestamp")
     live.heard = [(t, failures_heard(t)) for t in (live.result, *upstream, *live.derived)]
     if refused:
@@ -2066,7 +2071,7 @@ def then_closed(first: Callable[[WsSession, Live], None]) -> Callable[[WsSession
     def path(ws_session: WsSession, live: Live) -> None:
         first(ws_session, live)
         wait_for(functools.partial(failed_after_flush, ws_session, live.result))
-        cycle_ended(ws_session)
+        live.cycles_ended()
         ws_session.session.close()
 
     return path
@@ -2104,8 +2109,7 @@ def failed_once(ws_session: WsSession, live: Live, *, everything: bool) -> None:
     # it exactly once, and every table that did not fail heard nothing.
     for table in [*live.derived, *(live.upstream if everything else ())]:
         wait_for(functools.partial(failed_after_flush, ws_session, table))
-    cycle_ended(ws_session)
-    cycle_ended(ws_session)
+    live.cycles_ended()
     heard = [(bool(table.j_table.isFailed()), count()) for table, count in live.heard]
     assert [count for _, count in heard] == [int(failed) for failed, _ in heard]
     if not everything:
@@ -2122,6 +2126,7 @@ def test_every_stream_shape_fails_once_by_every_path(
     user_tables: UserTables,
     failures_heard: FailuresHeard,
     race: Callable[..., None],
+    cycles_ended: Callable[[], None],
 ) -> None:
     fail, everything = PATHS[path]
     live = open_live(
@@ -2130,6 +2135,7 @@ def test_every_stream_shape_fails_once_by_every_path(
         user_tables=user_tables,
         failures_heard=failures_heard,
         race=race,
+        cycles_ended=cycles_ended,
         refused=path.startswith("topic refused"),
     )
     fail(ws_session, live)
@@ -2147,12 +2153,18 @@ def test_a_stream_failing_while_its_watchlist_changes_fails_once(
     user_tables: UserTables,
     failures_heard: FailuresHeard,
     race: Callable[..., None],
+    cycles_ended: Callable[[], None],
 ) -> None:
     # The edit adds a symbol and the stream fails before the subscription it asks for is sent:
     # the watch's change and the failure are on their way at once.
     fail, everything = PATHS[path]
     live = open_live(
-        ws_session, shape, user_tables=user_tables, failures_heard=failures_heard, race=race
+        ws_session,
+        shape,
+        user_tables=user_tables,
+        failures_heard=failures_heard,
+        race=race,
+        cycles_ended=cycles_ended,
     )
     assert live.watchlist is not None
     live.watchlist.add(new_table([string_col("Symbol", [ADDED])]))

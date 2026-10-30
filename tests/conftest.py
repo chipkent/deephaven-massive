@@ -642,21 +642,32 @@ def race() -> Callable[..., None]:
             start.wait(_RACE_TIMEOUT)
             call()
 
-        with ThreadPoolExecutor(len(calls), thread_name_prefix="racer") as pool:
+        # Not a `with` block: its exit would wait for a call that deadlocked, forever, and the
+        # test would never fail. A stuck thread is left behind for the leak check to name.
+        pool = ThreadPoolExecutor(len(calls), thread_name_prefix="racer")
+        try:
             for future in [pool.submit(run, call) for call in calls]:
                 future.result(_RACE_TIMEOUT)
+        finally:
+            pool.shutdown(wait=False)
 
     return run_together
+
+
+_CYCLES_TIMEOUT: Final = 30.0
+"""Seconds `cycles_ended` waits for the update graph to run its cycles before failing the test."""
 
 
 @pytest.fixture
 def cycles_ended(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
     """Return a function that waits until every failure queued so far has been delivered.
 
-    Deephaven delivers a published failure on the next update cycle. Taking the update graph's
-    shared lock waits for the running cycle to end; taking it twice waits for the cycle after
-    that too, so every failure queued before the call has reached every listener, and the
-    process has survived it, once the function returns.
+    Deephaven delivers a published failure at the start of the next update cycle. The function
+    waits until the update graph's logical clock has moved two steps past its value at the
+    call, so a cycle has started and finished since, and then takes the shared lock, which
+    waits for the running cycle to end: every failure queued before the call has reached every
+    listener, and the process has survived it, once the function returns. A clock that stops
+    for 30 seconds fails the test.
 
     Returns:
         The function.
@@ -664,9 +675,15 @@ def cycles_ended(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
     update_graph = importlib.import_module("deephaven.update_graph")
 
     def wait() -> None:
-        for _ in range(2):
-            with update_graph.shared_lock(dh_exec_ctx.update_graph):
-                pass
+        clock = dh_exec_ctx.update_graph.j_update_graph.clock()
+        target = clock.currentStep() + 2
+        deadline = time.monotonic() + _CYCLES_TIMEOUT
+        pause = threading.Event()  # never set; only paces the polling
+        while clock.currentStep() < target:
+            assert time.monotonic() < deadline, "the update graph ran no cycle in 30 s"
+            pause.wait(0.005)
+        with update_graph.shared_lock(dh_exec_ctx.update_graph):
+            pass
 
     return wait
 
