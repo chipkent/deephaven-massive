@@ -30,6 +30,14 @@ EVENT_SETTLED: Final = 3
 EVENT_CANDIDATES: Final = 5
 """How many recent events are kept, newest first; a test takes the first one that has bars."""
 
+BASIC_EVENT_CANDIDATES: Final = 1
+"""How many recent events are kept when stocks are on Basic: each candidate a test tries costs
+two bar requests, and a test sends a class on Basic at most 5 requests."""
+
+BASIC_EVENT_CHECKS: Final = 2
+"""How many candidates' tickers are checked when stocks are on Basic, each check a request to the
+reference data, which Massive paces as a class of its own on a Basic key."""
+
 PLAIN_TICKER: Final = re.compile(r"[A-Z]{1,5}")
 """A plain listed ticker: no class suffix, warrant, or unit, which may lack bars. ETFs,
 leveraged ones included, have plain tickers too, so a candidate is also checked to be a common
@@ -167,25 +175,31 @@ def special_dividends(dividends: Iterable[Row], splits: list[Row]) -> list[Divid
 
 
 def first_common(
-    events: Iterable[E], symbol: Callable[[E], str], is_common: Callable[[str], bool]
+    events: Iterable[E],
+    symbol: Callable[[E], str],
+    is_common: Callable[[str], bool],
+    *,
+    keep: int = EVENT_CANDIDATES,
 ) -> list[E]:
-    """Keep the events of common stocks, in order, up to `EVENT_CANDIDATES`.
+    """Keep the events of common stocks, in order, up to `keep` of them.
 
     Each candidate's ticker is checked only until enough are kept, since each check is a
-    request.
+    request; a caller that must bound the checks passes fewer candidates.
 
     Args:
         events: The candidate events.
         symbol: Returns an event's ticker.
         is_common: Tells whether a ticker is a common stock (an ETF, leveraged or not, a fund,
             or a warrant is not).
+        keep: The most events kept: `EVENT_CANDIDATES` by default, `BASIC_EVENT_CANDIDATES`
+            when stocks are on Basic.
 
     Returns:
         The first events whose ticker is a common stock.
     """
     kept: list[E] = []
     for event in events:
-        if len(kept) == EVENT_CANDIDATES:
+        if len(kept) == keep:
             break
         if is_common(symbol(event)):
             kept.append(event)
