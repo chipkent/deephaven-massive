@@ -25,6 +25,7 @@ says what ran.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import logging
 import threading
@@ -128,18 +129,31 @@ def _next_number() -> int:
 
 
 def _log_session(label: str, config: MassiveConfig) -> None:
-    """Log, at INFO, a new session's label and its configuration, without its secrets.
+    """Log, at INFO, a new session's label and its configuration, without its credentials.
 
-    The configuration's `repr` leaves out both secrets; each is shown only as set or unset. The
-    process itself (versions, the GIL, the snapshot, the proxy and CA settings) is described
-    once, when the log is turned on.
+    The line holds every field the configuration's `repr` shows except `s3_access_key_id`: the
+    API key, the S3 access key id, and the S3 secret are each shown only as set or unset, since
+    a log is attached to bug reports. The two S3 credentials are set together or not at all.
+    The process itself (versions, the GIL, the snapshot, the proxy and CA settings) is
+    described once, when the log is turned on.
 
     Args:
         label: The session's label, such as `"MassiveSession #1"`.
         config: The session's configuration.
     """
-    secret = "set" if config.s3_secret_access_key is not None else "unset"
-    logger.info("%s: %r with api_key set, s3_secret_access_key %s", label, config, secret)
+    shown = ", ".join(
+        f"{field.name}={getattr(config, field.name)!r}"
+        for field in dataclasses.fields(config)
+        if field.repr and field.name != "s3_access_key_id"
+    )
+    s3 = "set" if config.s3_access_key_id is not None else "unset"
+    logger.info(
+        "%s: MassiveConfig(%s) with api_key set, s3_access_key_id %s, s3_secret_access_key %s",
+        label,
+        shown,
+        s3,
+        s3,
+    )
 
 
 def _register(core: SessionCore) -> None:

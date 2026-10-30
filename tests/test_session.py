@@ -188,10 +188,16 @@ def test_creating_a_session_logs_its_configuration_without_secrets(
         m = dm.MassiveSession(config)
     m.close()
     [line] = [r.getMessage() for r in caplog.records if "with api_key set" in r.getMessage()]
-    secret = "set" if s3 else "unset"
-    assert line == f"{label(m)}: {config!r} with api_key set, s3_secret_access_key {secret}"
-    assert "api-hidden" not in line
-    assert "s3-hidden" not in line
+    setting = "set" if s3 else "unset"
+    # Every field the repr shows, in its order, except the S3 access key id.
+    shown = repr(config).replace(f"s3_access_key_id={config.s3_access_key_id!r}, ", "")
+    assert line == (
+        f"{label(m)}: {shown} with api_key set, s3_access_key_id {setting}, "
+        f"s3_secret_access_key {setting}"
+    )
+    assert "s3_access_key_id=" not in line
+    for secret in ("api-hidden", "AKIDLOG", "s3-hidden"):
+        assert secret not in line
 
 
 def test_config_must_be_a_massive_config() -> None:

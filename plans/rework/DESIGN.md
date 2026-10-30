@@ -683,7 +683,7 @@ Two environment variables turn it on, read once per process when the first sessi
 | Variable | Meaning |
 |---|---|
 | `DEEPHAVEN_MASSIVE_LOG` | A level name (`DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `CRITICAL`, any case). Unset or blank changes nothing; any other value raises `ValueError` naming the variable from `MassiveSession()`. |
-| `DEEPHAVEN_MASSIVE_LOG_FILE` | With `DEEPHAVEN_MASSIVE_LOG`, append the lines to this file (UTF-8) instead of stderr; ignored alone. A file that cannot be opened raises `OSError` naming the variable. |
+| `DEEPHAVEN_MASSIVE_LOG_FILE` | Append the lines to this file (UTF-8) instead of stderr. Alone, without `DEEPHAVEN_MASSIVE_LOG`, it turns the log on at DEBUG: naming a file asks for a log in it, and silently ignoring it would leave a tester with an empty file. A file that cannot be opened raises `OSError` naming the variable. |
 
 ## 6. `MassiveSession` and lifecycle
 
@@ -4104,7 +4104,7 @@ the old one:
   starts `deephaven_server.Server` may import the library before the server replaces
   `sys.stderr`, and a handler made then would keep the old stream. A session needs the server,
   so by then `sys.stderr` is final. The variables are skipped once `enable_debug_logging` has
-  run.
+  run. The file variable alone turns the log on at DEBUG.
 - `dm.enable_debug_logging(output=LogOutput.STDERR)`, for a running console, where a new variable
   takes effect only after a worker restart. It sets DEBUG; `output` is `LogOutput.STDERR` or a
   file path to append to, an unopenable file raises its `OSError` and keeps the previous
@@ -4145,11 +4145,16 @@ DEBUG, and its worker threads are `call-<id> rest_<n>` or `call-<id> files_<n>`.
 clients cannot see the group, so `WsClient` takes the prefix as a constructor argument.
 
 **The environment line.** Each time the log is turned on, by a variable or by the function,
-it logs one INFO line describing the process: the library's version; Python's, with whether
-the GIL is enabled; the version of every dependency the library declares (an absent `orjson`
-means the standard library decodes JSON); the date of the Massive spec snapshot; and whether
-`HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values. Each `MassiveSession()` then logs
-its label and its configuration's `repr` at INFO, with each secret shown only as set or unset.
+it first logs one INFO line naming the level, where the lines go (a file by its absolute path,
+symbolic links resolved), and what turned it on. Then it logs one INFO line describing the
+process: the library's version and the git commit it was installed from (`vcs_info.commit_id`
+of the distribution's PEP 610 `direct_url.json`, or "not recorded"); Python's, with whether
+the GIL is enabled; `platform.platform()`; the local time's offset from UTC and zone name, so
+the log's UTC times map to the tester's clock; the version of every dependency the library
+declares (an absent `orjson` means the standard library decodes JSON); the date of the Massive
+spec snapshot; and whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values. Each
+`MassiveSession()` then logs its label and its configuration's fields at INFO, with each
+credential (the API key, the S3 access key id, and the S3 secret) shown only as set or unset.
 
 **Secrets.** The API key travels only in the REST client's header and the WebSocket
 authentication frame; the S3 secret goes only to boto3; the proxy password is already
