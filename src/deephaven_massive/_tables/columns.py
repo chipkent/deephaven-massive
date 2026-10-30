@@ -162,7 +162,8 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
         dates: The dataset's calendar-date columns (`Schema.date_columns`).
 
     Returns:
-        The static table, with every column of `rows`, in order.
+        The static table, with every column of `rows`, in order. Its row keys are the
+        positions 0 to n - 1 (`isFlat()`), as in `to_table`'s own result.
     """
     apart = _string_lists_without_values(rows)
     if not dates and not apart:
@@ -176,6 +177,12 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
     runs = {name: _DateRuns.of(rows.column(name)) for name in dates}
     interned = any(len(found.starts) > _MAX_RUNS for found in runs.values())
     if interned:
+        logger.debug(
+            "interning the date columns of %d rows by a formula: runs per column %s, over %d",
+            rows.num_rows,
+            {name: len(found.starts) for name, found in runs.items()},
+            _MAX_RUNS,
+        )
         runs = {}
     others = dh_arrow.to_table(rows.drop_columns([*runs, *apart])).j_table
     sources = _LinkedHashMap()
@@ -189,7 +196,11 @@ def dataset_table(rows: pa.Table, dates: Sequence[str]) -> Table:
             sources.put(name, alone.getColumnSource(name))
         else:
             sources.put(name, others.getColumnSource(name))
-    table = Table(_QueryTable(others.getRowSet(), sources))
+    joined = _QueryTable(others.getRowSet(), sources)
+    # The rows are those of `others`, a static table whose rows are 0 to n - 1, so the joined
+    # table is flat as `to_table`'s own result is, and row positions serve as row keys.
+    joined.setFlat()
+    table = Table(joined)
     return _interned(table, dates) if interned else table
 
 
@@ -206,8 +217,9 @@ def _string_lists_without_values(rows: pa.Table) -> list[str]:
     with no copy. A list of numbers is not affected.
 
     The batches checked are those of the whole table, whose boundaries include those of any
-    subset of its columns, so a column that holds a string in every batch here holds one in
-    every batch of the table it is converted in.
+    subset of its columns, so a column that holds a string in every batch with rows here holds
+    one in every batch with rows of the table it is converted in. A batch without rows is
+    harmless (`_holds_no_string`).
 
     Args:
         rows: The rows.
@@ -227,17 +239,22 @@ def _string_lists_without_values(rows: pa.Table) -> list[str]:
 
 
 def _holds_no_string(batch: pa.RecordBatch, name: str) -> bool:
-    """Say whether a list column of a record batch holds no element, its offsets all equal.
+    """Say whether a list column of a record batch has rows but holds no element.
+
+    A batch with no row is harmless: Deephaven converts it correctly, whatever its list columns
+    hold. Counting it would convert a column alone just because a table's chunks include an
+    empty one, as they do when an empty page is joined to a real one.
 
     Args:
         batch: The record batch.
         name: The list column.
 
     Returns:
-        True when every row of the column is null or an empty list, or the batch has no row.
+        True when the batch has rows and every row of the column is null or an empty list,
+        its first and last offsets equal.
     """
     offsets = cast("pa.ListArray", batch.column(name)).offsets
-    return bool(offsets[0].as_py() == offsets[-1].as_py())
+    return batch.num_rows > 0 and bool(offsets[0].as_py() == offsets[-1].as_py())
 
 
 _MAX_RUNS: Final = 4096

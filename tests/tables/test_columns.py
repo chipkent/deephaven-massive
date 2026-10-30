@@ -420,7 +420,7 @@ def test_a_list_without_strings_in_one_record_batch_is_converted_alone(
 
 
 def test_interleaved_dates_beside_a_list_without_strings_keep_their_values(
-    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
+    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The formula interns the dates; they are never also copied run by run.
     def refused(*_: object) -> object:
@@ -435,16 +435,17 @@ def test_interleaved_dates_beside_a_list_without_strings_keep_their_values(
             "Size": pa.array(range(len(days))),
         }
     )
-    table = dataset_table(rows, ("Date",))
+    with caplog.at_level(logging.DEBUG, logger=columns.__name__):
+        table = dataset_table(rows, ("Date",))
     assert _string_objects(table, "Date") == 3
     assert dh_arrow.to_arrow(table).to_pylist() == rows.to_pylist()
+    assert "interning the date columns of 30000 rows by a formula" in caplog.text
+    assert "{'Date': 30000}, over 4096" in caplog.text
+    assert table.j_table.isFlat()
 
 
-def test_lists_that_hold_strings_convert_with_the_other_columns(
-    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Only a list of strings with none in a batch is converted apart; other columns cost
-    # one conversion.
+def _conversions(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    # The columns of each Arrow table converted from here on, in order.
     converted: list[list[str]] = []
     convert = dh_arrow.to_table
 
@@ -453,6 +454,15 @@ def test_lists_that_hold_strings_convert_with_the_other_columns(
         return convert(rows)
 
     monkeypatch.setattr(dh_arrow, "to_table", counted)
+    return converted
+
+
+def test_lists_that_hold_strings_convert_with_the_other_columns(
+    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only a list of strings with none in a batch is converted apart; other columns cost
+    # one conversion.
+    converted = _conversions(monkeypatch)
     rows = pa.table(
         {
             "Tickers": pa.array([["AAPL"], None], _STRINGS),
@@ -462,3 +472,50 @@ def test_lists_that_hold_strings_convert_with_the_other_columns(
     table = dataset_table(rows, ())
     assert converted == [["Tickers", "Ids"]]
     assert dh_arrow.to_arrow(table).to_pylist() == rows.to_pylist()
+
+
+def test_a_sliced_batch_is_judged_by_its_own_rows(
+    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both columns are slices that start at row 1 of a longer array: `Keywords` holds a
+    # string only in the row sliced away, and `Tickers` only after it.
+    converted = _conversions(monkeypatch)
+    rows = pa.table(
+        {
+            "Keywords": pa.array([["rates"], None, []], _STRINGS).slice(1),
+            "Tickers": pa.array([["AAPL"], None, ["UBS"]], _STRINGS).slice(1),
+            "Size": pa.array([1, 2]),
+        }
+    )
+    table = dataset_table(rows, ())
+    assert converted == [["Tickers", "Size"], ["Keywords"]]
+    assert dh_arrow.to_arrow(table).to_pylist() == rows.to_pylist()
+
+
+def test_a_batch_without_rows_converts_no_column_alone(
+    dh_exec_ctx: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An empty page joined to a real one leaves a record batch without rows, which Deephaven
+    # converts correctly: only `Keywords`, empty on the real page, is converted alone.
+    converted = _conversions(monkeypatch)
+
+    def pages(real: list[object], value_type: pa.DataType) -> pa.ChunkedArray:
+        return pa.chunked_array([pa.array([], value_type), pa.array(real, value_type)])
+
+    rows = pa.table(
+        {
+            "Keywords": pages([None, None], _STRINGS),
+            "Tickers": pages([["AAPL"], None], _STRINGS),
+            "Size": pages([1, 2], pa.int64()),
+        }
+    )
+    assert [batch.num_rows for batch in rows.to_batches()] == [0, 2]
+    table = dataset_table(rows, ())
+    assert converted == [["Tickers", "Size"], ["Keywords"]]
+    assert dh_arrow.to_arrow(table).to_pylist() == rows.to_pylist()
+
+
+def test_a_joined_dataset_table_is_flat(dh_exec_ctx: object) -> None:
+    # Like `to_table`'s own result, its row keys are the positions 0 to n - 1.
+    rows = pa.table({"Date": pa.array(["2025-03-03", None]), "Size": pa.array([1, 2])})
+    assert dataset_table(rows, ("Date",)).j_table.isFlat()
