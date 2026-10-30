@@ -333,9 +333,10 @@ def test_a_feed_without_start_refuses_to_poll(
     # Every cycle would re-read Massive's whole archive; the message names the fix.
     message = (
         "economy.inflation poll() needs a start or a limit: without either, every cycle "
-        "re-reads the whole archive Massive keeps. Build the query with one, such as "
-        "m.economy.inflation(..., start=date.today()) or m.economy.inflation(..., limit=50), "
-        "then call poll(). A fixed start keeps widening the window on a poll that runs for days"
+        "re-reads the whole archive Massive keeps. Build the query with a start, such as "
+        "m.economy.inflation(..., start=date.today()), or with a limit and a newest-first "
+        "order, then call poll(). A fixed start keeps widening the window on a poll that runs "
+        "for days"
     )
     with (
         pytest.raises(ValueError, match=f"^{re.escape(message)}$"),

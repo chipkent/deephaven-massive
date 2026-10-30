@@ -1158,11 +1158,14 @@ and a feed query's `start`, `end`, and `limit` are its only bounds on what a cyc
 Basic subscription's five requests a minute on pages the table already holds. `poll()` on such
 a feed query raises `ValueError` before the table exists, in every mode, naming the dataset and
 the fix: `reference.news poll() needs a start or a limit: without either, every cycle re-reads
-the whole archive Massive keeps. Build the query with one, such as m.reference.news(...,
-start=date.today()) or m.reference.news(..., limit=50), then call poll(). A fixed start keeps
-widening the window on a poll that runs for days`. A query with a `limit`, such as
-`m.reference.news(symbols="AAPL", limit=50).poll(60)`, is the natural "latest headlines" poll
-and is allowed. The refusal logs one DEBUG line and nothing above it: the error is the report.
+the whole archive Massive keeps. Build the query with a start, such as m.reference.news(...,
+start=date.today()), or with a limit and a newest-first order, then call poll(). A fixed start
+keeps widening the window on a poll that runs for days`. A query with a `limit` is the natural
+"latest headlines" poll and is allowed. The `limit` keeps the first rows in the endpoint's
+order, so the query asks for newest first where Massive documents no such default:
+`m.reference.news(symbols="AAPL", sort="published_utc", order=dm.Order.DESC,
+limit=50).poll(60)` (Benzinga news is documented newest first already). The library does not
+check the order: the docstrings say it. The refusal logs one DEBUG line and nothing above it: the error is the report.
 `fetch()` keeps reading the whole range. Every feed declares a time axis (the catalog's
 feed-axis gate), so a `start` can always be given. A moving window that reads only what is new
 since the last cycle is a separate design item: it needs rules for late and revised articles

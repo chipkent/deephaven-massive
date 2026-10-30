@@ -507,9 +507,10 @@ class Query(QueryBase):
             logger.debug("%r poll() refused: a feed's poll needs a start or a limit", self)
             raise ValueError(
                 f"{name} poll() needs a start or a limit: without either, every cycle re-reads "
-                f"the whole archive Massive keeps. Build the query with one, such as "
-                f"m.{name}(..., start=date.today()) or m.{name}(..., limit=50), then call "
-                "poll(). A fixed start keeps widening the window on a poll that runs for days"
+                f"the whole archive Massive keeps. Build the query with a start, such as "
+                f"m.{name}(..., start=date.today()), or with a limit and a newest-first order, "
+                "then call poll(). A fixed start keeps widening the window on a poll that runs "
+                "for days"
             )
         if isinstance(self._request.symbols, SymbolTable):
             with entered(self._core.exec_ctx):

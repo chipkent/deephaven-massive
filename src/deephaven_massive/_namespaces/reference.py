@@ -495,8 +495,10 @@ class _Reference(Namespace):
         Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
         `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range,
         so `poll()` needs `start` or `limit` and raises `ValueError` without either; a fixed
-        `start` keeps widening the window of a poll that runs for days, and
-        `m.reference.news(symbols="AAPL", limit=50).poll(60)` keeps the latest headlines. An article
+        `start` keeps widening the window of a poll that runs for days. Massive documents no
+        default order for this endpoint, so a poll of the latest headlines asks for one:
+        `m.reference.news(symbols="AAPL", sort="published_utc", order=dm.Order.DESC,
+        limit=50).poll(60)`. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
         (JSON text), and
         `symbols` only selects the articles that mention one ticker. The endpoint's `ticker`
