@@ -93,6 +93,7 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
 )
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
+from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._tables.watchlist import read_symbols
@@ -1996,7 +1997,7 @@ class WsConnections:
             if opened.watch is not None:
                 opened.watch.start()
         except BaseException:
-            opened.handle.scope.release()
+            release_scope(core.exec_ctx, opened.handle.scope)
             self._abandon(connection, stream_id)
             raise
         return opened.handle

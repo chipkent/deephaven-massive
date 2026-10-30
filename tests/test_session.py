@@ -620,7 +620,14 @@ def test_stream_verbs_work_in_a_console_command(
     ws_session.publish(TRADE)
     for shape in ("append_only", "ring", "last_by"):
         rows_when(made[shape], lambda rows: [r["Price"] for r in rows] == [114.125])
-    streams = rows_when(made["streams"], lambda rows: len(rows) == 2)
+    # The reaper releases `blink` only once the command lets go of the lock: 4 held at first.
+    streams = rows_when(
+        made["streams"],
+        lambda rows: (
+            sorted((r["Dataset"], r["HeldResults"]) for r in rows)
+            == [("stocks.quotes", 1), ("stocks.trades", 3)]
+        ),
+    )
     assert sorted((r["Dataset"], r["State"], r["HeldResults"]) for r in streams) == [
         ("stocks.quotes", "RUNNING", 1),
         ("stocks.trades", "RUNNING", 3),
