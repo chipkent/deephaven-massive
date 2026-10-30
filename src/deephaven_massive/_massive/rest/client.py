@@ -32,8 +32,6 @@ import logging
 import random
 import re
 from dataclasses import dataclass, replace
-from datetime import UTC
-from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from urllib.parse import urlsplit
@@ -60,6 +58,7 @@ from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
+    http_date_seconds,
     retry_after_seconds,
     transient_wait,
 )
@@ -922,7 +921,7 @@ class RestClient:
             failure: The 429's error.
             response: The response, for its `Date` and `Retry-After` headers.
         """
-        now = _http_time(response.headers.get("Date"))
+        now = http_date_seconds(response.headers.get("Date"))
         asked = retry_after_seconds(
             response.headers.get("Retry-After"), self._clock.time() if now is None else now
         )
@@ -950,23 +949,3 @@ def _never_sent(error: BaseException) -> bool:
         True when a connection could not be made, or the proxy or its tunnel failed.
     """
     return any(isinstance(item, _UNSENT) for item in linked_errors(error))
-
-
-def _http_time(value: str | None) -> float | None:
-    """Return the time an HTTP `Date` header names, or None when it is absent or unusable.
-
-    Args:
-        value: The header's text, such as `"Wed, 21 Oct 2026 07:28:00 GMT"`, or None.
-
-    Returns:
-        Seconds since the Unix epoch (a date without a zone is read as GMT), or None.
-    """
-    if value is None:
-        return None
-    try:
-        when = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return when.timestamp()

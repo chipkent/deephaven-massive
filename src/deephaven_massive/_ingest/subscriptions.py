@@ -226,6 +226,7 @@ class Subscriptions:
         self._refused: set[str] = set()
         self._admitted: frozenset[str] = frozenset()
         self._deferred: frozenset[str] = frozenset()
+        self._admission_stale = False
         self._sent: set[str] = set()
         self._acked: set[str] = set()
         self._noack: set[str] = set()
@@ -251,6 +252,7 @@ class Subscriptions:
             if static:
                 self._static[topic] += 1
             self._refused.discard(topic)
+        self._admission_stale = True
 
     def remove(self, topics: Iterable[str], *, static: bool = False) -> None:
         """Count one stream fewer wanting each topic; a topic nobody wants leaves D.
@@ -274,6 +276,7 @@ class Subscriptions:
             self._refused.discard(topic)
             self._pending.discard(topic)
             self._cancel(topic)
+        self._admission_stale = True
 
     @property
     def wanted(self) -> bool:
@@ -341,11 +344,18 @@ class Subscriptions:
         """Apply the cap, send the next step if a generation is open and none is in flight.
 
         The cap is applied even with no generation open, so `admitted` always counts the
-        topics the streams have asked for. `on_change` is called every time, also while a
-        step is in flight, so the connection's row shows each partial acknowledgement,
-        refusal, and `NO_ACK` as it happens rather than when the whole step resolves.
+        topics the streams have asked for. It is recomputed only after a change of what the
+        streams want or of what the server refused: an acknowledgement or a `NO_ACK` changes
+        neither, and a step of thousands of topics brings one acknowledgement per topic, so
+        sorting every topic per acknowledgement would stall the loop for seconds.
+
+        `on_change` is called every time, also while a step is in flight, so the connection's
+        row shows each partial acknowledgement, refusal, and `NO_ACK` as it happens rather
+        than when the whole step resolves.
         """
-        self._defer()
+        if self._admission_stale:
+            self._admission_stale = False
+            self._defer()
         if self.generation is not None and not self._pending:
             self._send_step(self.generation)
         self._on_change()
@@ -465,6 +475,7 @@ class Subscriptions:
             self._pending.discard(topic)
             self._cancel(topic)
         if topics:
+            self._admission_stale = True
             self._on_refused(topics, message)
 
     def _desired(self) -> set[str]:
@@ -476,7 +487,11 @@ class Subscriptions:
         return {t for t in self._refs if t not in self._refused and t not in self._deferred}
 
     def _defer(self) -> None:
-        """Recompute the explicit topics the cap admits and those it defers (see the class)."""
+        """Recompute the explicit topics the cap admits and those it defers (see the class).
+
+        Called by `reconcile` after `add`, `remove`, or a refusal. Recomputing with nothing
+        changed gives the same sets, since topics admitted before keep their place.
+        """
         if self._cap is None:
             return
         explicit = sorted(t for t in self._refs if not is_wildcard(t) and t not in self._refused)
