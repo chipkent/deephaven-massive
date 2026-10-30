@@ -18,9 +18,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, the page
   size (`DatasetSpec.page_size`, or `Request.limit` when that is smaller, so a small cap
   fetches no more than it keeps), and for `history()` the ascending direction (`_ascending`).
-  `Request.limit` caps the total rows, and the client stops paging there; for a dataset whose
-  symbols overlap (`DatasetSpec.symbols_overlap`, the news of a watchlist) it caps each
-  request's rows instead, and a row several requests return is kept once (`_first_copies`).
+  `Request.limit` caps the total rows, and the client stops paging there; on a dataset that
+  sends one symbol per request (a per-symbol path such as Benzinga's consensus ratings, or an
+  indicator) it caps each symbol's rows instead, and for a dataset whose symbols overlap
+  (`DatasetSpec.symbols_overlap`, the news of a watchlist) each request's rows, keeping a row
+  several requests return once (`_first_copies`).
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -1255,9 +1257,9 @@ class RestReader:
                 runs.
 
         Returns:
-            The rows of every path, in path order, capped at `Request.limit` (each request's
-            rows, for a dataset whose symbols overlap; `_read_planned`), and the request
-            count.
+            The rows of every path, in path order, capped at `Request.limit` (each symbol's
+            rows where a request names one symbol, each request's rows for a dataset whose
+            symbols overlap; `_read_planned`), and the request count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `shared_params`.
@@ -1283,11 +1285,14 @@ class RestReader:
         executor: ThreadPoolExecutor | None,
         cancel: Cancel | None,
     ) -> tuple[pa.Table, int]:
-        """Make planned calls, path by path, and cap the total rows at `Request.limit`.
+        """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
-        For a dataset whose symbols overlap (`DatasetSpec.symbols_overlap`), such as the news
-        of a watchlist, each request is capped instead, and a row several requests returned
-        is kept once, at its first copy (`_first_copies`).
+        The cap is on the total rows, except where each request names one symbol
+        (`Call.symbol`, a per-symbol path): there it caps each symbol's rows, so a few symbols
+        with many rows never crowd out the rest. For a dataset whose symbols overlap
+        (`DatasetSpec.symbols_overlap`), such as the news of a watchlist, each request is
+        capped too, and a row several requests returned is kept once, at its first copy
+        (`_first_copies`).
 
         Args:
             spec: The dataset.
@@ -1339,7 +1344,17 @@ class RestReader:
                 request.limit,
             )
             return kept, requests
-        if request.limit is not None:
+        per_symbol = any(call.symbol is not None for _, calls in planned for call in calls)
+        if request.limit is not None and per_symbol:
+            # Each request named one symbol and was capped on its own.
+            logger.debug(
+                "%s: kept %d rows from %d one-symbol requests; limit=%d per symbol",
+                spec.name,
+                rows.num_rows,
+                requests,
+                request.limit,
+            )
+        elif request.limit is not None:
             rows = rows.slice(0, request.limit)
         return rows, requests
 
@@ -1580,9 +1595,10 @@ class RestEndpoints:
         """Return every row the dataset's fetch path returns for the request, as a static table.
 
         Requests run on this thread, or for a per-symbol path on a pool of up to
-        `max_concurrency` threads; `Request.limit` caps the total rows, or each request's rows
-        for a dataset whose symbols overlap, which keeps a row several requests return once
-        (`RestReader._read_planned`). Drift is logged, once per field.
+        `max_concurrency` threads; `Request.limit` caps the total rows, each symbol's rows on a
+        per-symbol path, or each request's rows for a dataset whose symbols overlap, which keeps
+        a row several requests return once (`RestReader._read_planned`). Drift is logged, once
+        per field.
 
         Args:
             spec: The dataset, with a fetch path.

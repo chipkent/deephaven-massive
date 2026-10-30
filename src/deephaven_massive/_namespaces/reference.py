@@ -290,8 +290,9 @@ class _Reference(Namespace):
             search: Text matched against the ticker and the company name; None for no search.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
             order: The sort direction; None for the endpoint's default.
-            limit: The maximum total number of rows across pages; None for every row. The
-                page size is internal.
+            limit: The most rows to return: in total for `symbols=None`, and for each symbol
+                otherwise, since each named ticker is its own request; None for every row.
+                The page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written
                 as underscores, such as `{"ticker_gte": "A", "ticker_lt": "B"}`.
 

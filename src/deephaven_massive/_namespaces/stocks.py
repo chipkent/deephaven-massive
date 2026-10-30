@@ -1196,7 +1196,8 @@ class _Stocks(Namespace):
         document: if it revised the name (a legal suffix added, say), the row under the old
         name would stay, showing the offering's earlier state beside the new row.
 
-        `limit` caps the total number of rows across pages; the page size is internal.
+        `limit` caps the rows: in total for `symbols=None`, and for each ticker otherwise,
+        since each named ticker is its own request; the page size is internal.
         `dm.ALL` is refused: pass `symbols=None` for every offering. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#ipos,
         the web UI's column tooltips, or `columns()`.
@@ -1210,7 +1211,8 @@ class _Stocks(Namespace):
             sort: The field to sort by, such as `"listing_date"`; None for the server default.
             order: The sort direction, sent as the IPO path's own `order` parameter, so it works
                 with or without `sort`; None for the server default.
-            limit: The most rows to return in total, a positive `int`; None for every row.
+            limit: The most rows to return, a positive `int`: in total for `symbols=None`,
+                for each ticker otherwise; None for every row.
             filters: Further query parameters of the endpoint by wire name with dots written
                 as underscores, such as `{"ipo_status": "pending"}`; checked now.
 

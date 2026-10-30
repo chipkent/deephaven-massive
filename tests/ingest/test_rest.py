@@ -1400,6 +1400,18 @@ def test_limit_caps_rows_across_requests(
     assert [q["limit"] for _, q in sent(fake_rest)] == [["3"], ["3"]]
 
 
+def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # An indicator sends one symbol per request, so the cap is per symbol: a symbol with many
+    # rows never crowds out the next.
+    values = [{"timestamp": 1741010400000 + i * 86_400_000, "value": float(i)} for i in range(3)]
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": values})))
+    fake_rest.reply("/v1/indicators/sma/MSFT", Reply(envelope({"values": values})))
+    out = fetch(session, SMA, symbols=["AAPL", "MSFT"], limit=2)
+    assert [r["Symbol"] for r in out] == ["AAPL", "AAPL", "MSFT", "MSFT"]
+
+
 def test_a_limit_above_the_page_size_keeps_the_page_size(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

@@ -1781,9 +1781,11 @@ Notation:
   `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
   class in each table below follows from the dataset's transports
   ([section 7](#7-query-classes-and-verbs)).
-- `limit` is a total-row cap, except on a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, `reference.news`): there it caps each symbol's request, so
-  one ticker's rows never crowd out another's. Page size is internal. Every docstring says so. The cap is
+- `limit` is a total-row cap, except where each request names one symbol: a per-symbol path
+  (the indicators) or a symbol parameter that takes one ticker
+  (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
+  (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
+  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. Every docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
   when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
