@@ -14,11 +14,12 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.schema import ColumnType, required_fields
+from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import indicators
-from deephaven_massive._namespaces.base import Namespace
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -316,7 +317,7 @@ def test_a_daily_value_takes_the_day_of_its_symbols_class(
     [
         # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day.
         (dm.Timespan.DAY, datetime(2025, 1, 2, 3, tzinfo=UTC)),
-        # A week value must be stamped on its week's Monday (or the Sunday before it).
+        # A week value must be stamped on its week's Sunday, where Massive starts the week.
         (dm.Timespan.WEEK, datetime(2025, 1, 8, 5, tzinfo=UTC)),
     ],
     ids=["day", "week"],

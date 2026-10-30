@@ -45,7 +45,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import (
+from deephaven_massive._namespaces.query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     adjustment_notes,
@@ -577,8 +577,8 @@ class _Options(Namespace):
         longer period from its first to its last weekday. A bar of several days counts
         trading days, ending as late as holidays could push it (one weekday more, and one
         more for every five further days), since there is no holiday calendar. A longer bar
-        must be stamped at 00:00 on the day its period starts: a week on its Monday or the
-        Saturday or Sunday before, a month, quarter, or year on its 1st. Any other stamp
+        must be stamped at 00:00 on the day its period starts: a week on its Sunday, where
+        Massive starts it, a month, quarter, or year on its 1st. Any other stamp
         fails the call with `MassiveError` naming the source, since the bar may cover other
         days than its label. `Date` is null for a bar that spans more than one date.
 

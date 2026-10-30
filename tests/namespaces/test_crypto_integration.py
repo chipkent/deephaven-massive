@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._massive import RestClient, Transport, source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping, Sequence
@@ -47,12 +48,16 @@ WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
+CryptoReport: TypeAlias = "Callable[..., list[str]]"
 
 _PAIR = "X:BTCUSD"
 _RANGE = "/v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/{timespan}/{from}/{to}"
 _PREV = "/v2/aggs/ticker/{cryptoTicker}/prev"
 _GROUPED = "/v2/aggs/grouped/locale/global/market/crypto/{date}"
 _DAY_FILE = "global_crypto/day_aggs_v1"
+_TICKERS = "/v3/reference/tickers"
+_TICKERS_PAGE = 1000
+"""Rows per page of the ticker list: its largest page, the one the library reads."""
 _MS = 1_000_000
 _DAY_NS = 86_400 * 1_000_000_000
 _STREAM_WAIT = 60.0
@@ -162,11 +167,12 @@ def _rebuilt(minutes: list[dict[str, Any]], start: datetime, end: datetime) -> t
 
 @pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("1")
-@pytest.mark.requests(8)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -181,7 +187,9 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     uses another day cut or only another stamp; the minute-rebuild test says which, and the
     library refuses those bars with `MassiveError` (shown here) until that is decided. A
     grouped stamp at no day boundary (such as 20:48 UTC) is the same bar with a write-time
-    stamp if its OHLCV equal the range bar's, otherwise another day cut.
+    stamp if its OHLCV equal the range bar's, otherwise another day cut. With Currencies on
+    Basic, which allows 5 requests a minute, it leaves out the library's `previous_day_bar`
+    and `dm.ALL` history, which read the same `/prev` and grouped daily as the raw requests.
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -210,12 +218,17 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
         f"grouped equal to /prev: {[_same(_ohlcv(b), _ohlcv(prev)) for b in grouped]}"
     )
     bars = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
-    prev_bar = live_session.crypto.previous_day_bar(_PAIR)
-    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
     evidence(
         "library history(REST): "
         f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
     )
+    if "currencies" in classes_on_basic:
+        evidence("Currencies on Basic: the library's previous_day_bar and dm.ALL are not read")
+        assert ranged
+        assert grouped
+        return
+    prev_bar = live_session.crypto.previous_day_bar(_PAIR)
+    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
     every = live_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     outcome = _library_rows(
         lambda: every.history(day, day, source=dm.HistorySource.REST), table_rows
@@ -397,15 +410,15 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
-    """Whether a crypto week bar covers the calendar week from Monday 00:00 UTC.
+    """Whether a crypto week bar covers the calendar week from Sunday 00:00 UTC.
 
     For each raw week bar of `X:BTCUSD` over the four weeks ending with the most recent week without
     a holiday, records its stamp and the candidate windows whose hour-bar volume is closest to its
     own; `MATCH` marks the bucket. Decides by comparison, not by an absolute tolerance: passes when,
-    for every bar of those weeks, the week from Monday 00:00 UTC, the calendar week the library
-    assumes, is the closest window, ties allowed; a failure names the bars whose closest window
-    starts elsewhere (such as a Sunday start), and the library's crypto week windows must start
-    there. The last line shows which bars the library's `history()` keeps.
+    for every bar of those weeks, the week from Sunday 00:00 UTC, where Massive stamps it and the
+    library starts its crypto week, is the closest window, ties allowed; a failure names the bars
+    whose closest window starts elsewhere, and the library's crypto week windows must start there.
+    The last line shows which bars the library's `history()` keeps.
     """
     lines, checked, misses = week_bar_report("cryptoTicker", _PAIR, "UTC")
     for line in lines:
@@ -418,6 +431,56 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
     assert checked >= 3, f"only {checked} week bars of the four weeks"
     assert not misses, f"week bars closer to another window than the library's: {misses}"
+
+
+@pytest.mark.needs("currencies:basic")
+@pytest.mark.settles("49")
+@pytest.mark.requests(5)
+@pytest.mark.timeout(100)
+def test_crypto_ticker_list_currencies_join(
+    live_rest: RestClient,
+    *,
+    classes_on_basic: frozenset[str],
+    crypto_report: CryptoReport,
+    evidence: Evidence,
+) -> None:
+    """Whether every pair of Massive's crypto ticker list names currencies that join to its ticker.
+
+    The library splits a crypto ticker into its two currencies (for a stream topic and for the
+    last-trade and daily open/close paths) only from this list: it reads
+    `/v3/reference/tickers?market=crypto` once per session, every page, first with
+    `active=true`, then with `active=false` so a delisted pair splits too, and refuses a pair
+    the list lacks or whose `base_currency_symbol` and `currency_symbol` do not join to its
+    ticker (`X:` + base + quote). Reads the same two lists, in pages of 1,000 rows. With
+    Currencies on Basic, which allows 5 requests a minute, it reads at most 3 pages of
+    listed pairs and 2 of delisted ones, so the test sends 5 requests, and a read cut short
+    is marked so; on a paid plan it reads every page.
+
+    Records each list's size, the tickers in both lists, the tickers without the `X:` prefix,
+    and every row whose currencies do not join to its ticker. Reading it: no such row confirms
+    that the list splits every pair it holds; each one is a pair the library refuses on those
+    paths, which needs a split from elsewhere or stays refused; a large delisted list means
+    the session's first read of it is slow on Basic.
+    """
+    basic = "currencies" in classes_on_basic
+    limits = (3 * _TICKERS_PAGE, 2 * _TICKERS_PAGE) if basic else (None, None)
+    reads = []
+    for active, limit in zip((True, False), limits, strict=True):
+        # Paced as Currencies: whether Massive charges a lookup filtered by market to its
+        # class is an open question, so the run never risks a refusal over it.
+        pages = live_rest.pages(
+            source(Transport.REST, _TICKERS),
+            {},
+            {"market": "crypto", "active": active, "limit": _TICKERS_PAGE},
+            bucket="currencies",
+            limit=limit,
+        )
+        reads.append([row for page in pages for row in page.rows])
+    if basic:
+        evidence("Currencies on Basic: at most 3 pages of listed and 2 of delisted pairs are read")
+    for line in crypto_report(*reads, listed_limit=limits[0], delisted_limit=limits[1]):
+        evidence(line)
+    assert reads[0], "Massive listed no crypto pair"
 
 
 @pytest.mark.needs("currencies:business")

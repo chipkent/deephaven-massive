@@ -49,6 +49,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, fields, replace
@@ -59,13 +60,8 @@ import pyarrow as pa
 from deephaven import arrow as dh_arrow
 from deephaven import input_table
 
-from deephaven_massive._datasets.schema import (
-    TRANSPORT_LABELS,
-    Column,
-    ColumnType,
-    Schema,
-    pascal_case,
-)
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
+from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._massive import Transport
@@ -106,6 +102,7 @@ __all__ = [
     "StreamUpdate",
     "as_row",
     "describe_symbols",
+    "pascal_case",
     "shown_query",
 ]
 
@@ -1094,3 +1091,21 @@ class Diagnostics:
                 return
             batch = pa.concat_tables(batches)
         table.add(dh_arrow.to_table(batch))
+
+
+def pascal_case(path: str) -> str:
+    """Turn a snake-case name or a dotted path of them into a PascalCase column name.
+
+    Every underscore- or dot-separated word is capitalized and joined: `sip_timestamp` becomes
+    `SipTimestamp` and `last_trade.sip_timestamp` becomes `LastTradeSipTimestamp`. Words that
+    are already capitalized keep their other letters. The diagnostics tables name their columns
+    with it.
+
+    Args:
+        path: A name or a dot-separated path of names.
+
+    Returns:
+        The PascalCase column name.
+    """
+    words = re.split(r"[._]+", path)
+    return "".join(word[:1].upper() + word[1:] for word in words if word)

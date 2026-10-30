@@ -33,20 +33,16 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import (
+from deephaven_massive._namespaces.query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     build_query,
     day_argument,
+    ticker_key,
 )
 
 if TYPE_CHECKING:
-    from deephaven_massive._query import (
-        HistoryQuery,
-        Query,
-        StreamHistoryQuery,
-        StreamQuery,
-    )
+    from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery, StreamQuery
     from deephaven_massive._types import DateLike, StreamSpan, Symbols
 
 __all__ = ["DATASETS", "_Crypto"]
@@ -112,7 +108,7 @@ TRADES: Final = DatasetSpec(
     keys={
         (_R, _TRADES): _keys(_request("cryptoTicker"), "ParticipantTimestamp"),
         (_W, "crypto/XT"): _keys(KeySpec("Pair"), "ParticipantTimestamp"),
-        (_F, _TRADE_FILES): _keys(KeySpec("Ticker"), "ParticipantTimestamp"),
+        (_F, _TRADE_FILES): ticker_key("ParticipantTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
     page_size=_MAX_PAGE,
@@ -159,11 +155,11 @@ BARS: Final = DatasetSpec(
     flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
     keys={
         (_R, _RANGE): _keys(_request("cryptoTicker"), "WindowStart"),
-        (_R, _GROUPED): _keys(KeySpec("Ticker"), "WindowStart"),
+        (_R, _GROUPED): ticker_key("WindowStart"),
         (_W, "crypto/XAS"): _STREAM_BAR_KEYS,
         (_W, "crypto/XA"): _STREAM_BAR_KEYS,
-        (_F, _MINUTE_FILES): _keys(KeySpec("Ticker"), "WindowStart"),
-        (_F, _DAY_FILES): _keys(KeySpec("Ticker"), "WindowStart"),
+        (_F, _MINUTE_FILES): ticker_key("WindowStart"),
+        (_F, _DAY_FILES): ticker_key("WindowStart"),
     },
     page_size=_MAX_PAGE,
 )
@@ -176,7 +172,7 @@ PREVIOUS_DAY_BAR: Final = DatasetSpec(
     asset_class=AssetClass.CRYPTO,
     kind="bars",
     fetch_path=_PREV,
-    keys={(_R, _PREV): _keys(KeySpec("Ticker"), "WindowStart")},
+    keys={(_R, _PREV): ticker_key("WindowStart")},
     per_symbol=True,
     revision_keys=("TimestampStart",),
 )
@@ -189,7 +185,7 @@ FMV: Final = DatasetSpec(
     kind="fmv",
     channels={NotBars.ANY: "FMV"},
     family=ChannelFamily.FMV,
-    keys={(_W, "crypto/FMV"): _keys(KeySpec("Ticker"), "FmvLastUpdated")},
+    keys={(_W, "crypto/FMV"): ticker_key("FmvLastUpdated")},
 )
 """`m.crypto.fmv`: the Business-only `FMV` stream."""
 
@@ -198,7 +194,7 @@ SNAPSHOTS: Final = DatasetSpec(
     summary="The current state of crypto pairs: today's, the last minute's, and yesterday's bars.",
     asset_class=AssetClass.CRYPTO,
     fetch_path=_SNAPSHOTS,
-    keys={(_R, _SNAPSHOTS): _keys(KeySpec("Ticker"))},
+    keys={(_R, _SNAPSHOTS): ticker_key()},
     symbol_param="tickers",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=("Updated",),
@@ -210,7 +206,7 @@ MOVERS: Final = DatasetSpec(
     summary="The 20 crypto pairs that gained or lost the most since the previous day's close.",
     asset_class=AssetClass.CRYPTO,
     fetch_path=_MOVERS,
-    keys={(_R, _MOVERS): _keys(KeySpec("Ticker"))},
+    keys={(_R, _MOVERS): ticker_key()},
     revision_keys=("Updated",),
 )
 """`m.crypto.movers`: the gainers and losers snapshots."""
@@ -474,13 +470,13 @@ class _Crypto(Namespace):
         20:48 UTC), which would be another day cut, so a 1-day bar stamped anywhere in its UTC day
         but its first or last millisecond fails the call with `MassiveError` naming the source,
         rather than being relabelled; so does a REST bar of several days or longer not stamped at
-        00:00 UTC, or a week not stamped on its Monday or a month, quarter, or year not on its 1st.
+        00:00 UTC, or a week not stamped on its Sunday or a month, quarter, or year not on its 1st.
         The day cut of live REST data is not verified yet: if it follows those samples, crypto 1-day
         bars come only from the flat files (`source=dm.HistorySource.FLAT_FILES`).
         `HistorySource.AUTO` picks the source as for every other dataset; the check keeps the bars
         of both sources the same UTC days. `history()` keeps only bars whose whole window lies
-        inside the requested range and has ended; weeks run Monday to Sunday and months are whole
-        calendar months.
+        inside the requested range and has ended; weeks run Sunday to Saturday, as Massive starts
+        them, and months are whole calendar months.
 
         `dm.ALL` streams every pair. Its `history()` reads the flat files for 1-minute and
         1-day bars, and the grouped-daily endpoint, one request per day, for 1-day bars over

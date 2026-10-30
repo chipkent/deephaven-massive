@@ -41,7 +41,7 @@ from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit
-from deephaven_massive._namespaces.base import build_query
+from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._query import HistoryQuery
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns

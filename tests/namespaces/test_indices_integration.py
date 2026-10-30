@@ -92,6 +92,12 @@ def _raw_requests(
     )
 
 
+_SNAPSHOT_PATHS = frozenset({"/v3/snapshot/indices", "/v3/snapshot"})
+"""The raw requests that need Indices Starter, left out with Indices on Basic."""
+
+_BASIC_LIBRARY_CALL = "indices.daily_open_close fetch()"
+"""The one library call made with Indices on Basic."""
+
 _TICKER_KEYS = ("T", "ticker", "symbol", "underlying")
 
 
@@ -129,12 +135,13 @@ def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
 
 
 @pytest.mark.needs("indices:basic")
-@pytest.mark.settles("index ticker spelling")
-@pytest.mark.requests(14)
+@pytest.mark.settles("44")
+@pytest.mark.requests(5)
 @pytest.mark.timeout(110)
 def test_index_ticker_spelling_on_every_index_endpoint(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     index_symbol: str,
     recent_monday: date,
     live_rest: RestClient,
@@ -148,12 +155,19 @@ def test_index_ticker_spelling_on_every_index_endpoint(
     open-close, the indices snapshot, the unified
     snapshot, and an indicator. Records the ticker keys of the body and of the first row,
     then the library's `Symbol` for the same datasets. The two snapshots need Indices
-    Starter; on Basic their lines say "not entitled" and the rest still settle. Reading it: an
+    Starter. With Indices on Basic, which allows 5 requests a minute, it leaves them out and
+    reads the library's `daily_open_close` only, 5 requests in all: the library's `/prev` is
+    checked by the encoded-path test, and its indicator line is left out. Reading it: an
     endpoint whose rows drop `I:` is one the library must read back with the prefix; the
     library's `Symbol` column shows whether it already does.
     """
     answered = 0
+    basic = "indices" in classes_on_basic
+    if basic:
+        evidence("Indices on Basic: the snapshots and the library's other lines are not read")
     for path, path_params, query in _raw_requests(index_symbol, recent_monday):
+        if basic and path in _SNAPSHOT_PATHS:
+            continue
         try:
             page = live_rest.get(source(Transport.REST, path), path_params, query, bucket="indices")
         except WireEntitlementError as error:
@@ -184,6 +198,8 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         "indicators.sma fetch()": live_session.indicators.sma(index_symbol, 10, limit=2).fetch,
     }
     for name, call in queries.items():
+        if basic and name != _BASIC_LIBRARY_CALL:
+            continue
         try:
             evidence(f"library {name}: Symbol {[r['Symbol'] for r in table_rows(call())]}")
         except dm.EntitlementError as error:

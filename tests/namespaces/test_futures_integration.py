@@ -30,10 +30,12 @@ from deephaven_massive._massive import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    from tests._live.ticker_lists import SpreadRead
 
 pytestmark = pytest.mark.integration
 
@@ -43,6 +45,12 @@ Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
+SpreadReads: TypeAlias = (
+    "Callable[[Sequence[Mapping[str, Any]]], tuple[list[SpreadRead], list[str]]]"
+)
+SpreadReport: TypeAlias = (
+    "Callable[[Sequence[Mapping[str, Any]], Mapping[str, Sequence[Mapping[str, Any]]]], list[str]]"
+)
 
 _PRODUCTS = ("ES", "NQ", "CL", "NG", "GC", "SI", "ZN", "ZC", "6E")
 """Products of all four venues whose schedules the weekday check reads."""
@@ -53,6 +61,7 @@ _SCHEDULE_LIMIT = 20_000
 _AGGS = "/futures/v1/aggs/{ticker}"
 _SNAPSHOT = "/futures/v1/snapshot"
 _CONTRACTS = "/futures/v1/contracts"
+_PRODUCTS_PATH = "/futures/v1/products"
 _SCHEDULES = "/futures/v1/schedules"
 
 _CONTRACT_SHAPE = re.compile(r"[A-Z0-9]+?[FGHJKMNQUVXZ]\d{1,2}")
@@ -148,12 +157,13 @@ def test_where_the_futures_snapshot_carries_the_ticker(
 
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("29")
-@pytest.mark.requests(8)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_the_session_after_a_holiday_and_year_candles(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    classes_on_basic: frozenset[str],
     recent_holiday: Callable[[str], date],
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
@@ -166,10 +176,12 @@ def test_the_session_after_a_holiday_and_year_candles(
     Records the ES schedule around the holiday, the last minute bar before the session after
     it and that session's first minute bars (read raw, from the Friday before), the library's
     minute bars of that session, and the contract's 1-year candles from January 1 and from
-    mid-June of the year before. Reading it: a session opening at or before the previous
-    regular open, with its bars kept by the library, confirms the 4-day margin covers it; a
-    candle of the year before returned for the mid-year filter means `window_start` filters
-    match the candle's start (snap), its absence that they do not.
+    mid-June of the year before. With Futures on Basic, which allows 5 requests a minute, it
+    leaves out the library's minute bars and sends 4 raw requests. Reading it: a session
+    opening at or before the previous regular open, with its bars kept by the library,
+    confirms the 4-day margin covers it; a candle of the year before returned for the mid-year
+    filter means `window_start` filters match the candle's start (snap), its absence that they
+    do not.
     """
     holiday = recent_holiday("martin luther king day")
     session_day = holiday + timedelta(days=1)
@@ -205,11 +217,14 @@ def test_the_session_after_a_holiday_and_year_candles(
         )
     for bar in session[:3]:
         evidence(f"first minute bars of {session_day}: {instant_text(int(bar['window_start']))}")
-    minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
-    evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
-    if minutes:
-        evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")
-        evidence(f"    last {instant_text(minutes[-1]['TimestampStart'])}")
+    if "futures" in classes_on_basic:
+        evidence(f"Futures on Basic: the library's minute bars of {session_day} are not read")
+    else:
+        minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
+        evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
+        if minutes:
+            evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")
+            evidence(f"    last {instant_text(minutes[-1]['TimestampStart'])}")
     year = holiday.year - 1
     for start in (date(year, 1, 1), date(year, 6, 15)):
         candles = _aggregates(
@@ -268,12 +283,13 @@ def test_futures_sessions_end_only_on_weekdays(
 
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("40")
-@pytest.mark.requests(10)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    classes_on_basic: frozenset[str],
     recent_month: tuple[date, date],
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
@@ -289,7 +305,9 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     by side. Reading it: compare each 2-session bar's `session_end_date` with the 1-session
     list: its first or its last session is the label. Pairs that stay the same for both
     starts align to a calendar; pairs that shift with the start align to `{from}`, and dates
-    cannot select them. A refused resolution is recorded and the rest still run.
+    cannot select them. A refused resolution is recorded and the rest still run. With Futures
+    on Basic, which allows 5 requests a minute, it leaves out the 1-month bars and the
+    library's 2-session bars and sends the other 5 requests.
     """
     contract = front_contract("ES", recent_month[1])
     first = recent_month[0].replace(day=1)
@@ -298,11 +316,12 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     start = _midnight(first)
     end = _midnight(recent_month[1] + timedelta(days=1))
     later_month = _midnight((first + timedelta(days=32)).replace(day=1))
+    basic = "futures" in classes_on_basic
     requests = (
         ("1session", start),
         ("2session", start),
         ("2session", start + timedelta(days=2)),
-        ("1month", start),
+        *(() if basic else (("1month", start),)),
         ("2month", start),
         ("2month", later_month),
     )
@@ -317,6 +336,10 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
             f"{contract} {resolution} from {since:%Y-%m-%d}: {len(bars)} bars; "
             f"(window_start, session_end_date) {labels}"
         )
+    if basic:
+        evidence("Futures on Basic: the 1-month bars and the library's 2-session bars are not read")
+        assert shown
+        return
     library = table_rows(
         live_session.futures.bars(contract, dm.Timespan.SESSION, multiplier=2).history(start, end)
     )
@@ -329,7 +352,7 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("futures ticker shapes")
+@pytest.mark.settles("47")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_shapes_of_futures_contract_tickers(
@@ -339,23 +362,73 @@ def test_shapes_of_futures_contract_tickers(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Which shapes futures contract tickers take: one- or two-digit years, and spreads.
+    """Which shapes single futures contract tickers take: one- or two-digit years.
 
     Records one page of NG contracts with the tickers outside a product code, a month letter,
-    and a one- or two-digit year, and one page of combo (spread) tickers. Reading it: every
-    single contract inside that shape confirms the ticker grammar; anything else extends it,
-    or is left to the handling of unknown symbols.
+    and a one- or two-digit year, and the library's `contracts` of NG. Reading it: every
+    single contract inside that shape confirms the ticker grammar (a year is never rewritten,
+    so `ESZ25` is not `ESZ5`); anything else extends it, or is left to the handling of unknown
+    symbols. Spread tickers are the next test's.
     """
     singles = _page(live_rest, _CONTRACTS, query={"product_code": "NG", "limit": 1000})
-    combos = _page(live_rest, _CONTRACTS, query={"type": "combo", "limit": 50})
     tickers = sorted({str(row.get("ticker")) for row in singles})
     odd = [ticker for ticker in tickers if not _CONTRACT_SHAPE.fullmatch(ticker)]
     evidence(f"NG contracts: {len(tickers)} tickers, e.g. {tickers[:10]} ... {tickers[-10:]}")
     evidence(f"NG tickers outside letters, a month code, and a 1-2 digit year: {odd}")
-    evidence(f"combo (spread) tickers: {sorted({str(row.get('ticker')) for row in combos})}")
     library = table_rows(live_session.futures.contracts(product_code="NG", limit=20).fetch())
     evidence(f"library contracts(NG): Ticker {[r['Ticker'] for r in library]}")
     assert tickers
+
+
+@pytest.mark.needs("futures:basic")
+@pytest.mark.settles("48")
+@pytest.mark.requests(5)
+@pytest.mark.timeout(100)
+def test_forms_of_futures_spread_tickers_on_every_venue(
+    live_rest: RestClient,
+    *,
+    futures_spread_reads: SpreadReads,
+    futures_spread_report: SpreadReport,
+    evidence: Evidence,
+) -> None:
+    """Which forms futures spread (combo) tickers take on each venue, and how they name their legs.
+
+    Massive documents no grammar for spreads; the library accepts exactly the forms its samples
+    show (`GCQ6-GCZ6`, `BOB 02-01 U6`, `CL:BF Q6-U6-V6`, `CL:BZ U6-V6`, `6A:XF:AUDUSD:Q6`) and
+    builds no spread from its legs. Reads every combo product (`/futures/v1/products?type=combo`,
+    one page of up to 50,000), then, for each of the four exchanges (CME, CBOT, NYMEX,
+    COMEX), one page of up to 1,000 combo contracts (`/futures/v1/contracts?type=combo`) of
+    two of its single products (whose calendar spreads may carry their legs' product code)
+    and up to 20 of its combo products, taken in turn from each strategy type. On a paid
+    plan it also reads the combo contracts of any other venue the products name; with
+    Futures on Basic, which allows 5 requests a minute, those are left out and named, so
+    the test sends 5 requests.
+
+    Records each venue's combo products by strategy type, and, per venue read, every ticker
+    form (each run of letters written `A`, each run of digits `9`) with its count, how many
+    of its tickers `canonical_symbol_future_spread` accepts, and examples with their contract
+    name, product code, and the legs written out whole in the ticker; then every ticker the
+    library refuses. Reading it: forms the library accepts in full confirm its spread
+    grammar; a refused form must join the grammar (or stay a ticker kept as written), and the
+    names and legs say whether a builder from legs could produce each form.
+    """
+    products = _page(live_rest, _PRODUCTS_PATH, query={"type": "combo", "limit": 50_000})
+    reads, left_out = futures_spread_reads(products)
+    contracts = {
+        read.venue: _page(
+            live_rest,
+            _CONTRACTS,
+            query={"type": "combo", "product_code.any_of": list(read.product_codes), "limit": 1000},
+        )
+        for read in reads
+    }
+    for read in reads:
+        evidence(f"{read.venue} combo contracts read for products {list(read.product_codes)}")
+    if left_out:
+        evidence(f"Futures on Basic: the combo contracts of {left_out} are not read")
+    for line in futures_spread_report(products, contracts):
+        evidence(line)
+    assert products, "Massive listed no combo product"
 
 
 _CHICAGO = ZoneInfo("America/Chicago")

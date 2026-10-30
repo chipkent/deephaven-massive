@@ -7,7 +7,7 @@ is an OpenAPI document whose paths are its channels) into an `Operation`, the fa
 to which matters, and it describes the difference between two operations in words. `drift`
 decides which differences are drift of which kind, and words the report around them.
 
-**What is compared.** An operation's status (`rest.path_status`), its parameters (location,
+**What is compared.** An operation's status (`rest_sources.path_status`), its parameters (location,
 type, whether required), and its fields: the dotted keys below its 200 JSON response
 (`results[].day.c`), each with a semantic type signature (`type_text`: type, format, allowed
 values, array items, object properties, choice branches), its unit tag
@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, NamedTuple
 
-from deephaven_massive._massive.refresh import rest
+from deephaven_massive._massive.refresh import rest_sources
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.openapi import OpenApi, properties, required
 
@@ -318,7 +318,7 @@ def _operation(spec: OpenApi, path: str, node: Json) -> Operation | str:
     except RefreshError as error:
         return "; ".join(problem.message for problem in error.problems)
     return Operation(
-        status=rest.path_status(item) or "current",
+        status=rest_sources.path_status(item) or "current",
         parameters=dict(parameters),
         fields=fields,
         events=events,

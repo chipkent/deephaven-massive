@@ -35,18 +35,19 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily
-from deephaven_massive._ingest import poll
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import forex
-from deephaven_massive._namespaces.base import Namespace, query_class
+from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._query import (
     HistoryQuery,
     Query,
     QueryBase,
     StreamHistoryQuery,
     StreamQuery,
+    query_class,
 )
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables import poll
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply
 

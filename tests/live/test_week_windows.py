@@ -11,9 +11,10 @@ from tests._live import week_windows
 from tests._live.calendar import NEW_YORK
 
 _HOUR = 3_600_000
-_MONDAY = int(datetime(2026, 9, 21, tzinfo=UTC).timestamp() * 1000)
+_DAY = 24 * _HOUR
+_SUNDAY = int(datetime(2026, 9, 20, tzinfo=UTC).timestamp() * 1000)
 _HOURS: list[dict[str, Any]] = [
-    {"t": _MONDAY - 3 * 24 * _HOUR + n * _HOUR, "v": float(n + 1)} for n in range(24 * 14)
+    {"t": _SUNDAY - 3 * _DAY + n * _HOUR, "v": float(n + 1)} for n in range(24 * 14)
 ]
 """Hour bars of rising volume, so every candidate window has a volume of its own."""
 
@@ -24,45 +25,70 @@ def _week(start_ms: int) -> float:
     )
 
 
-def test_the_candidates_mark_monday_midnight_in_the_class_zone() -> None:
-    found = week_windows.candidates(_MONDAY, UTC)
+def test_the_candidates_mark_sunday_midnight_in_the_class_zone() -> None:
+    found = week_windows.candidates(_SUNDAY, UTC)
     assert len(found) == 21
     library = [label for label, _, is_library in found if is_library]
-    assert library == ["Mon 09-21 00:00 UTC"]
+    assert library == ["Sun 09-20 00:00 UTC"]
     new_york = [
-        label for label, _, is_library in week_windows.candidates(_MONDAY, NEW_YORK) if is_library
+        label for label, _, is_library in week_windows.candidates(_SUNDAY, NEW_YORK) if is_library
     ]
-    assert new_york == ["Mon 09-21 00:00 New York"]
+    assert new_york == ["Sun 09-20 00:00 New York"]
 
 
 def test_the_library_week_is_closest_when_it_is_the_bucket() -> None:
-    scored = week_windows.score(_MONDAY, _week(_MONDAY), _HOURS, zone=UTC)
-    assert scored[0] == (0.0, "Mon 09-21 00:00 UTC", True)
+    scored = week_windows.score(_SUNDAY, _week(_SUNDAY), _HOURS, zone=UTC)
+    assert scored[0] == (0.0, "Sun 09-20 00:00 UTC", True)
     assert week_windows.library_is_closest(scored)
 
 
-def test_a_sunday_evening_bucket_is_not_the_library_week() -> None:
-    sunday_evening = _MONDAY - 7 * _HOUR  # 17:00 New York, daylight time
-    scored = week_windows.score(_MONDAY, _week(sunday_evening), _HOURS, zone=UTC)
-    assert scored[0][1] == "Sun 09-20 17:00 New York"
+def test_a_monday_bucket_is_not_the_library_week() -> None:
+    monday = _SUNDAY + _DAY
+    scored = week_windows.score(_SUNDAY, _week(monday), _HOURS, zone=UTC)
+    assert scored[0][1] == "Mon 09-21 00:00 UTC"
     assert not week_windows.library_is_closest(scored)
 
 
 def test_a_tie_counts_for_the_library_week() -> None:
     # A stock-like fortnight: trading on weekday afternoons only, so the windows that start
-    # at Monday 00:00 UTC and at Monday 00:00 New York hold the same hours.
-    day = 24 * _HOUR
+    # at Sunday 00:00 New York and at Monday 00:00 New York hold the same hours.
+    monday = _SUNDAY + _DAY
     hours = [
-        {"t": _MONDAY + d * day + h * _HOUR, "v": float(d * 10 + h)}
+        {"t": monday + d * _DAY + h * _HOUR, "v": float(d * 10 + h)}
         for d in range(14)
         if d % 7 < 5
         for h in range(14, 21)
     ]
-    volume = float(sum(h["v"] for h in hours if h["t"] < _MONDAY + week_windows.WEEK_MS))
-    scored = week_windows.score(_MONDAY, volume, hours, zone=NEW_YORK)
+    volume = float(sum(h["v"] for h in hours if h["t"] < monday + week_windows.WEEK_MS))
+    scored = week_windows.score(_SUNDAY, volume, hours, zone=NEW_YORK)
     tied = [label for error, label, _ in scored if error == 0.0]
-    assert "Mon 09-21 00:00 UTC" in tied
+    assert "Sun 09-20 00:00 New York" in tied
     assert "Mon 09-21 00:00 New York" in tied
+    assert week_windows.library_is_closest(scored)
+
+
+def test_the_stock_week_of_the_live_check_is_its_sunday_week_of_day_bars() -> None:
+    # AAPL in the live check of 2026-10-30: the week bar stamped Sunday 2026-10-18 04:00 UTC
+    # (00:00 New York time) holds exactly the volume of the day bars of Monday to Friday.
+    stamp = int(datetime(2026, 10, 18, 4, tzinfo=UTC).timestamp() * 1000)
+    volumes = {
+        12: 25900599.107368,
+        13: 38983839.306983,
+        14: 50061053.04604,
+        15: 39767256.151435,
+        16: 59946368.513045,
+        19: 34573181.500186,
+        20: 35851382.759126,
+        21: 35614126.795002,
+        22: 46898875.748938,
+        23: 39539690.012018,
+    }
+    days = [
+        {"t": int(datetime(2026, 10, day, 4, tzinfo=UTC).timestamp() * 1000), "v": volume}
+        for day, volume in volumes.items()
+    ]
+    scored = week_windows.score(stamp, 192477256.81527, days, zone=NEW_YORK)
+    assert scored[0][0] <= week_windows.MATCH
     assert week_windows.library_is_closest(scored)
 
 

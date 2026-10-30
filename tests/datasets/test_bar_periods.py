@@ -121,12 +121,12 @@ def test_day_bars_of_a_range_of_instants_must_be_whole_days() -> None:
 
 
 def test_week_bars_run_monday_to_friday_and_skip_weekends() -> None:
-    # The week of 2025-03-03 (Monday) to 03-07 (Friday).
+    # The week of 2025-03-03 (Monday) to 03-07 (Friday), which Massive starts on Sunday 03-02.
     week = stock_bars(date(2025, 3, 3), date(2025, 3, 7), Timespan.WEEK)
-    assert kept(week, ny(date(2025, 3, 3)))
-    # A bar Massive stamps on the Sunday before its week names that week.
+    assert week == TimeRange(ny(date(2025, 3, 2)), ny(date(2025, 3, 9)))
     assert kept(week, ny(date(2025, 3, 2)))
-    assert not kept(week, ny(date(2025, 3, 10)))
+    assert not kept(week, ny(date(2025, 3, 1)))
+    assert not kept(week, ny(date(2025, 3, 9)))
     # A range from a Saturday to a Sunday holds the whole week between; the weekend days
     # around it hold no bar of their own.
     weekend = stock_bars(date(2025, 3, 1), date(2025, 3, 9), Timespan.WEEK)
@@ -134,14 +134,14 @@ def test_week_bars_run_monday_to_friday_and_skip_weekends() -> None:
     # A range from Tuesday holds no whole week of the 3rd, nor a week ending on Thursday.
     assert stock_bars(date(2025, 3, 4), date(2025, 3, 7), Timespan.WEEK).empty
     assert stock_bars(date(2025, 3, 3), date(2025, 3, 6), Timespan.WEEK).empty
-    # The kept starts, and the request, begin on the Saturday before the first whole week.
+    # The kept starts, and the request, begin on the Sunday of the first whole week.
     assert stock_bars(date(2025, 3, 1), date(2025, 3, 21), Timespan.WEEK).start == ny(
-        date(2025, 3, 1)
+        date(2025, 3, 2)
     )
     # Two-week bars: the last one to fit starts a week before the range's last week.
     two = stock_bars(date(2025, 3, 3), date(2025, 3, 21), Timespan.WEEK, multiplier=2)
-    assert kept(two, ny(date(2025, 3, 10)))
-    assert not kept(two, ny(date(2025, 3, 17)))
+    assert kept(two, ny(date(2025, 3, 9)))
+    assert not kept(two, ny(date(2025, 3, 16)))
 
 
 def test_mlk_week_is_still_monday_to_friday() -> None:
@@ -165,14 +165,14 @@ def test_good_friday_2024_months_and_weeks() -> None:
     assert stock_bars(date(2024, 3, 25), date(2024, 3, 28), Timespan.WEEK).empty
 
 
-def test_crypto_weeks_run_monday_to_sunday() -> None:
+def test_crypto_weeks_run_sunday_to_saturday() -> None:
+    # Massive starts a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check).
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 8)).instants(UTC)  # Monday to Saturday
     short = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
     assert short.empty
-    span = DaySpan(date(2025, 3, 3), date(2025, 3, 9)).instants(UTC)
+    span = DaySpan(date(2025, 3, 2), date(2025, 3, 8)).instants(UTC)  # Sunday to Saturday
     week = bar_starts(AssetClass.CRYPTO, span, timespan=Timespan.WEEK, multiplier=1)
-    assert week == TimeRange(utc(date(2025, 3, 3)), utc(date(2025, 3, 10)))
-    assert week.start == utc(date(2025, 3, 3))
+    assert week == TimeRange(utc(date(2025, 3, 2)), utc(date(2025, 3, 9)))
 
 
 @pytest.mark.parametrize(
@@ -371,12 +371,17 @@ def test_the_last_trading_day_allows_a_weekday_more_and_one_per_five_sessions() 
 
 def test_bar_days_cover_each_period_s_window() -> None:
     sunday, monday = date(2025, 3, 2), date(2025, 3, 3)
+    # A stock week stamped on its Sunday covers its Monday to Friday; a crypto or index week
+    # its whole Sunday-to-Saturday calendar week.
     stock_week = (monday, date(2025, 3, 8))
     assert bar_days(AssetClass.STOCKS, sunday, timespan=Timespan.WEEK, multiplier=1) == stock_week
-    assert bar_days(AssetClass.STOCKS, monday, timespan=Timespan.WEEK, multiplier=1) == stock_week
-    assert bar_days(AssetClass.CRYPTO, monday, timespan=Timespan.WEEK, multiplier=2) == (
-        monday,
-        date(2025, 3, 17),
+    assert bar_days(AssetClass.CRYPTO, sunday, timespan=Timespan.WEEK, multiplier=2) == (
+        sunday,
+        date(2025, 3, 16),
+    )
+    assert bar_days(AssetClass.INDICES, sunday, timespan=Timespan.WEEK, multiplier=1) == (
+        sunday,
+        date(2025, 3, 9),
     )
     assert bar_days(AssetClass.STOCKS, monday, timespan=Timespan.DAY, multiplier=3) == (
         monday,
@@ -447,10 +452,11 @@ def test_forex_periods_keep_their_weekends() -> None:
     assert kept(
         forex_bars(date(2025, 6, 1), date(2025, 6, 30), Timespan.MONTH), utc(date(2025, 6, 1))
     )
-    # Weeks are calendar weeks, Monday to Sunday.
-    assert forex_bars(date(2025, 3, 3), date(2025, 3, 7), Timespan.WEEK).empty
-    week = forex_bars(date(2025, 3, 3), date(2025, 3, 9), Timespan.WEEK)
-    assert week == TimeRange(utc(date(2025, 3, 3)), utc(date(2025, 3, 10)))
+    # Weeks are calendar weeks, Sunday to Saturday, as Massive stamps them.
+    assert forex_bars(date(2025, 3, 3), date(2025, 3, 9), Timespan.WEEK).empty
+    week = forex_bars(date(2025, 3, 2), date(2025, 3, 8), Timespan.WEEK)
+    assert week == TimeRange(utc(date(2025, 3, 2)), utc(date(2025, 3, 9)))
+
     quarters = forex_bars(date(2024, 1, 1), date(2024, 3, 29), Timespan.QUARTER)
     assert quarters.empty
 

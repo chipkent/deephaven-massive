@@ -3,11 +3,14 @@
 Massive sells one subscription per asset class and rate-limits each one on its Basic plan, so
 a raw request a live test sends takes its permit from its class's bucket of the run's rate
 governor. The same reading of a path names the class of a refused request, whose plan decides
-whether a history refusal is expected (`plans.history_verdict`).
+whether a history refusal is expected (`plans.history_verdict`). `market_lookup` chooses the
+class whose ticker lookups (`/v3/reference/tickers?market=...`) a rate-limit check spends a
+minute of, to see whether Massive charges a lookup filtered by a class's market to that class.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
@@ -76,3 +79,48 @@ def class_of_path(path: str) -> str | None:
     if named is not None:
         return named
     return "stocks" if path.startswith(_STOCK_PATHS) else None
+
+
+TICKER_MARKETS: Final = {
+    "indices": ("indices",),
+    "currencies": ("fx", "crypto"),
+    "stocks": ("stocks",),
+}
+"""The markets of `/v3/reference/tickers` that list each class's tickers, by class, in the order
+a market lookup check prefers the class: the one a run needs least first. Options and futures
+tickers are listed by endpoints of their own."""
+
+
+@dataclass(frozen=True)
+class MarketLookup:
+    """The class a market lookup check spends, and the markets it looks tickers up in.
+
+    Attributes:
+        name: The class on Basic whose minute the check spends, such as `"indices"`.
+        markets: The class's own markets (`TICKER_MARKETS`), such as `("fx", "crypto")`.
+        other_market: A market of another class, the check's control: its lookup is never
+            charged to the spent class.
+    """
+
+    name: str
+    markets: tuple[str, ...]
+    other_market: str
+
+
+def market_lookup(tiers: Mapping[str, str]) -> MarketLookup | None:
+    """Choose the class whose market-filtered ticker lookups a rate-limit check tests.
+
+    Args:
+        tiers: The plan of each class, such as `LivePlans.tiers`.
+
+    Returns:
+        The first class of `TICKER_MARKETS` the key holds on Basic, with its markets and the
+        first market of the next class in that order (wrapping around); None when none of
+        them is on Basic.
+    """
+    names = list(TICKER_MARKETS)
+    for index, name in enumerate(names):
+        if tiers.get(name) == "basic":
+            other = names[(index + 1) % len(names)]
+            return MarketLookup(name, TICKER_MARKETS[name], TICKER_MARKETS[other][0])
+    return None

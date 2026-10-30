@@ -2,7 +2,7 @@
 
 A live table is fed by Deephaven's `TablePublisher`: it adds rows to a blink table and can fail
 the table, which fails every table derived from it too. The library's WebSocket streams
-(`_tables/stream.py`) and `poll()` tables (`_ingest/poll.py`) create theirs with
+(`_tables/stream.py`) and `poll()` tables (`_tables/poll.py`) create theirs with
 `blink_publisher`, which returns the blink table and a `BlinkPublisher`, never with Deephaven's
 `table_publisher` directly.
 

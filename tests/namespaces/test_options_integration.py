@@ -66,6 +66,10 @@ _SNAPSHOT = "/v3/snapshot"
 _UNDERLYINGS = ("SPX", "I:SPX", "SPXW", "NDX", "NDXP", "VIX", "VIXW", "BRK.B", "BRKB")
 """Underlyings whose spelling the options endpoints may not agree on."""
 
+_BASIC_UNDERLYINGS = ("SPX", "I:SPX", "BRK.B", "BRKB")
+"""The underlyings read with Options on Basic, one contracts request each: an index with and
+without its prefix, and `BRK.B` with and without its dot."""
+
 _SNAPSHOT_PLAN = "Options Starter ($29/month)"
 """The plan of the chain and unified snapshots of options."""
 
@@ -187,13 +191,14 @@ def _root_contracts(
 
 
 @pytest.mark.needs("options:basic")
-@pytest.mark.settles("index underlying spelling", "BRK.B underlying")
-@pytest.mark.requests(45)
+@pytest.mark.settles("45")
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_underlying_spelling_on_the_options_endpoints(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
@@ -203,20 +208,38 @@ def test_underlying_spelling_on_the_options_endpoints(
     full page of the contracts reference (the roots it lists and the `underlying_ticker` values),
     one page of the chain snapshot (`underlying_asset.ticker`), the unified snapshot's
     `underlying_asset.ticker` of one contract, and the library's `chain()` and `contracts()`.
-    Reading it: the spelling that answers is the one the library must send for `underlying=`;
-    a root such as `SPXW` listed under `SPX` means roots and underlyings differ. The chain path
-    sends `I:SPX` percent-encoded, so an `I:SPX` chain result counts only if the encoded-colon
-    check of the indices tests passes.
+    With Options on Basic, which has no snapshots and allows 5 requests a minute, it records
+    only the contracts page of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`, which still shows which
+    spelling of an index and of `BRK.B` the reference answers. Reading it: the spelling that
+    answers is the one the library must send for `underlying=`; a root such as `SPXW` listed
+    under `SPX` means roots and underlyings differ. The chain path sends `I:SPX`
+    percent-encoded, so an `I:SPX` chain result counts only if the encoded-colon check of the
+    indices tests passes.
     """
     answered = 0
     options = live_session.options
-    for underlying in _UNDERLYINGS:
+    basic = "options" in classes_on_basic
+    if basic:
+        evidence(
+            "Options on Basic: the contracts reference of "
+            f"{', '.join(_BASIC_UNDERLYINGS)} only; the snapshots need {_SNAPSHOT_PLAN}"
+        )
+    for underlying in _BASIC_UNDERLYINGS if basic else _UNDERLYINGS:
         contracts = _raw(
             live_rest,
             _CONTRACTS,
             params={"underlying_ticker": underlying, "limit": _CONTRACT_PAGE},
             evidence=evidence,
         )
+        roots = sorted({_root(str(r.get("ticker", ""))) for r in contracts})
+        spelled = sorted({str(r.get("underlying_ticker")) for r in contracts})
+        evidence(
+            f"{underlying}: contracts {len(contracts)} rows; roots {roots}; "
+            f"underlying_ticker {spelled}"
+        )
+        if basic:
+            answered += bool(contracts)
+            continue
         chain = _raw(
             live_rest,
             _CHAIN,
@@ -224,12 +247,6 @@ def test_underlying_spelling_on_the_options_endpoints(
             evidence=evidence,
         )
         answered += bool(contracts) + bool(chain)
-        roots = sorted({_root(str(r.get("ticker", ""))) for r in contracts})
-        spelled = sorted({str(r.get("underlying_ticker")) for r in contracts})
-        evidence(
-            f"{underlying}: contracts {len(contracts)} rows; roots {roots}; "
-            f"underlying_ticker {spelled}"
-        )
         chained = sorted({str(r.get("underlying_asset", {}).get("ticker")) for r in chain})
         evidence(f"{underlying}: chain {len(chain)} rows; underlying_asset.ticker {chained}")
         if contracts:
@@ -261,7 +278,7 @@ def test_underlying_spelling_on_the_options_endpoints(
 
 
 @pytest.mark.needs("options:starter")
-@pytest.mark.settles("adjusted deliverables")
+@pytest.mark.settles("46")
 @pytest.mark.timeout(400)
 def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
@@ -605,29 +622,32 @@ def test_option_day_bar_stamps_of_the_day_file(
 
 @pytest.mark.needs("options:basic", "stocks:basic")
 @pytest.mark.settles("57")
-@pytest.mark.requests(10)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_option_bars_across_the_underlyings_split(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    classes_on_basic: frozenset[str],
     recent_splits: Callable[[dm.MassiveSession], list[Any]],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Whether option bars are split-adjusted for their underlying's split.
 
-    Finds the year's most recent forward splits (`m.stocks.splits`) and, for the first whose
-    underlying lists a call as of the execution date expiring a week or more after it, records
-    that contract's day bars from three days before the split to two days after, with
-    `adjusted=true` and `adjusted=false`. Reading it: prices before the split that differ by
-    its ratio mean options are adjusted in full like stocks; equal prices, or no bars before
-    the split under the post-split ticker, mean the contract was renamed instead, and the
-    docstrings must say so. Skips when no recent split has a listed option.
+    Finds the year's most recent forward splits (`m.stocks.splits`) and, for the first of
+    three (one with Options on Basic, two contracts requests each) whose underlying lists a
+    call as of the execution date expiring a week or more after it, records that contract's
+    day bars from three days before the split to two days after, with `adjusted=true` and
+    `adjusted=false`. Reading it: prices before the split that differ by its ratio mean options
+    are adjusted in full like stocks; equal prices, or no bars before the split under the
+    post-split ticker, mean the contract was renamed instead, and the docstrings must say so.
+    Skips when no recent split tried has a listed option.
     """
     contracts = source(Transport.REST, _CONTRACTS)
     found = None
-    for split in recent_splits(live_session)[:3]:
+    tried = 1 if "options" in classes_on_basic else 3
+    for split in recent_splits(live_session)[:tried]:
         query = {
             "underlying_ticker": split.symbol,
             "as_of": split.executed,
