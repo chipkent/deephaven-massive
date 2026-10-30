@@ -131,12 +131,15 @@ These prevent deadlocks and leaks.
   it, make no Deephaven call, network call, or blocking wait. Table operations such as
   `where_in`, `last_by`, `Table.snapshot()`, and `deephaven.arrow.to_table` may take the UG lock,
   so never run one under `registry_lock`.
+- **Release refreshing tables under the UG lock**: every liveness scope through `release_scope`,
+  never a bare `scope.release()`, and never under a library lock. Where the lock is off-limits (a
+  listener, a shutdown callback, a publish lock), hand the scope to `SessionCore.release_later`.
 - **Never block in a table listener.** It runs on a UG thread holding the UG lock: compute the
   diff, hand it to a worker, return. No table operations, I/O, or waits on library threads.
 - **The console holds the UG lock.** Deephaven runs every console command under the exclusive
   UG lock, so every call must work there: only UG threads are refused, and a call holding the
   lock never waits for an update cycle or on a thread that may need the lock (the diagnostics
-  writer, a poller, another caller's stream open).
+  writer, a poller, another caller's stream open, the reaper).
 - **Every live result has its own liveness scope.** Create its tables inside its `LivenessScope`
   on the caller thread; a refreshing table made outside an explicit scope lives as long as the
   console session.

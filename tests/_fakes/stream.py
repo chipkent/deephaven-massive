@@ -80,7 +80,7 @@ class FakeStreamTransport:
                 f"massive.{spec.name}#{stream_id}",
                 col_defs(schema),
                 on_shutdown=lambda: self._on_shutdown(stream_id),
-                defer=core.defer,
+                release_later=core.release_later,
             )
         with self._lock:
             self.opened.append((spec.name, channel))

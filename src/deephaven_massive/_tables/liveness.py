@@ -16,11 +16,12 @@ a `ResultRecord`:
    (garbage collection), `ResultRegistry.release` (`m.release(table)`). Each flips the
    record's once-only `released` flag under the registry lock and, if it was the first,
    submits a job to the `Reaper`.
-4. The `Reaper`, one daemon thread per session, runs the job: it releases the result scope and
-   then calls the record's `on_released` callback, which for a stream decrements the stream's
-   held-result count (and at zero releases the stream scope), for a `poll()` table marks its
-   row released, and for a diagnostics view drops the session's count of held views. A
-   failing job is logged at ERROR and the thread carries on.
+4. The `Reaper`, one daemon thread per session, runs the job: it releases the result scope
+   (under the update graph's shared lock, `release_scope`) and then calls the record's
+   `on_released` callback, which for a stream decrements the stream's held-result count (and at
+   zero releases the stream scope), for a `poll()` table marks its row released, and for a
+   diagnostics view drops the session's count of held views. A failing job is logged at ERROR
+   and the thread carries on.
 
 Releasing a result scope drops the library's liveness reference only. A table the user derived
 from the result, an open UI panel, or a user liveness scope keeps the Java table alive, and with
@@ -35,10 +36,16 @@ graph's own threads, and `holds_update_graph_lock` tells whether the calling thr
 update graph's lock, as every Deephaven console command does, so it must wait for nothing that
 needs the lock.
 
+**Every release holds the update graph's lock.** Releasing a scope can drop the last reference
+to a refreshing table, which destroys it. The library releases every scope through
+`release_scope`, which holds the update graph's shared lock, so a destroy never overlaps an
+update cycle (see `release_scope` for the crash that prevents).
+
 Threading: `make_result` runs on the caller thread (liveness scopes are thread-local). The
 registry's state is guarded by the session's `registry_lock`, a leaf lock under which no
 Deephaven call is made. Scope releases happen on the reaper thread inside the session's
-`ExecutionContext`.
+`ExecutionContext`, under the update graph's shared lock and outside `registry_lock`: the lock
+order is the update graph's lock, then `registry_lock`.
 """
 
 from __future__ import annotations
@@ -73,6 +80,7 @@ __all__ = [
     "make_result",
     "new_scope",
     "refuse_update_graph_thread",
+    "release_scope",
 ]
 
 logger = logging.getLogger(__name__)
@@ -145,7 +153,7 @@ def holds_update_graph_lock(exec_ctx: ExecutionContext) -> bool:
 def new_scope() -> LivenessScope:
     """Create a library-owned liveness scope.
 
-    The caller owns the scope and must eventually call `release()` on it exactly once.
+    The caller owns the scope and must eventually release it exactly once, with `release_scope`.
 
     Returns:
         A new, open-for-business `LivenessScope`.
@@ -153,16 +161,60 @@ def new_scope() -> LivenessScope:
     return _LIVENESS_SCOPE()
 
 
-def make_result(build: Callable[[], Table]) -> tuple[Table, LivenessScope]:
-    """Build one live result inside its own new result scope.
+def release_scope(exec_ctx: ExecutionContext, scope: LivenessScope) -> None:
+    """Release a liveness scope while holding the update graph's shared lock.
 
-    Must run on the caller thread: Deephaven's liveness scope stack is thread-local, and the
-    tables `build` creates are managed by whichever scope is on top of it. `build` runs with
-    the new scope on top, so the result is managed by that scope and not by the console's query
-    scope. If `build` raises, even `KeyboardInterrupt`, the scope is released and the exception
-    propagates.
+    The library's only way to release a scope. Releasing one can drop the last reference to a
+    refreshing table, and Deephaven then destroys the table on the releasing thread. While the
+    shared lock is held no update cycle runs, so the destroy completes between two cycles and
+    never overlaps one. That matters for a blink table whose publisher has a failure queued:
+    destroyed by a thread that does not hold the lock, its adapter can run once more after it
+    delivered the failure and deliver it a second time, and Deephaven's fatal-error handler then
+    exits the process. A destroy runs the table's shutdown callback on this thread, under the
+    lock; the library's callbacks only update registries and queue work, so they never wait.
+
+    It blocks while an update cycle runs, and for as long as another thread holds the exclusive
+    lock (a console command), but it cannot deadlock: no thread that holds the update graph's
+    lock waits for a thread that releases a scope. A thread that already holds either lock, such
+    as a console command's, takes it again at once. An asynchronous exception (a
+    `KeyboardInterrupt`) that lands just after the lock is taken, before the `try`, would leave
+    it held, as with Deephaven's own `shared_lock`; only a caller thread can receive one.
+
+    Never call it on an update-graph thread (in a listener or a shutdown callback, queue the
+    release on the reaper instead), under `registry_lock`, or under any other library lock that
+    a holder of the update graph's lock may wait for, such as a stream's publish lock: the
+    update graph's lock comes first.
 
     Args:
+        exec_ctx: The session's execution context, entered (through a fresh wrapper) for the
+            release; its update graph's shared lock is taken.
+        scope: The scope to release, once; releasing it again raises Deephaven's `DHError`.
+    """
+    # The Java lock itself: `deephaven.update_graph.shared_lock` would wrap the release's own
+    # error in a second `DHError`.
+    lock = exec_ctx.update_graph.j_update_graph.sharedLock()
+    with entered(exec_ctx):
+        lock.lock()
+        try:
+            scope.release()
+        finally:
+            lock.unlock()
+
+
+def make_result(
+    exec_ctx: ExecutionContext, build: Callable[[], Table]
+) -> tuple[Table, LivenessScope]:
+    """Build one live result inside its own new result scope.
+
+    Must run on the caller thread, inside the session's execution context: Deephaven's liveness
+    scope stack is thread-local, and the tables `build` creates are managed by whichever scope
+    is on top of it. `build` runs with the new scope on top, so the result is managed by that
+    scope and not by the console's query scope. If `build` raises, even `KeyboardInterrupt`,
+    the scope is released (`release_scope`) and the exception propagates.
+
+    Args:
+        exec_ctx: The session's execution context, whose update graph's lock the release of a
+            failed build takes.
         build: Creates the result, a new table, for example
             `lambda: blink_to_append_only(stream.blink)`. A wrapper of an existing Java table
             creates no liveness reference, so `build` never returns one.
@@ -175,7 +227,7 @@ def make_result(build: Callable[[], Table]) -> tuple[Table, LivenessScope]:
         with scope.open():
             result = build()
     except BaseException:  # also KeyboardInterrupt: the scope must not leak
-        scope.release()
+        release_scope(exec_ctx, scope)
         raise
     return result, scope
 
@@ -456,7 +508,8 @@ class ResultRegistry:
 
     One instance per session. Its dictionary and every record's `released` flag are guarded
     by the session's `registry_lock`, which is a leaf lock: nothing here calls Deephaven while
-    holding it. Releases run on the session's `Reaper`.
+    holding it. Releases run on the session's `Reaper`, under the update graph's shared lock
+    (`release_scope`) and outside `registry_lock`.
 
     The collection finalizer takes no lock at all: it only submits a job to the reaper, which
     takes the lock there. Garbage collection can run a finalizer on any thread at any
@@ -468,15 +521,18 @@ class ResultRegistry:
     `release()` of the same table finds it and does nothing.
     """
 
-    __slots__ = ("_ids", "_lock", "_reaper", "_results", "_retired")
+    __slots__ = ("_exec_ctx", "_ids", "_lock", "_reaper", "_results", "_retired")
 
-    def __init__(self, lock: threading.RLock, reaper: Reaper) -> None:
+    def __init__(self, lock: threading.RLock, reaper: Reaper, exec_ctx: ExecutionContext) -> None:
         """Create an empty registry.
 
         Args:
             lock: The session's `registry_lock`.
             reaper: The session's reaper.
+            exec_ctx: The session's execution context, whose update graph's lock every release
+                of a result scope takes.
         """
+        self._exec_ctx = exec_ctx
         self._lock = lock
         self._reaper = reaper
         self._results: dict[int, ResultRecord] = {}
@@ -611,14 +667,16 @@ class ResultRegistry:
             if idle:  # the session is gone and this was its last result
                 self._reaper.stop()
 
-    @staticmethod
-    def _reap(record: ResultRecord) -> None:
-        """Release the result scope, then notify the owner even if the release failed.
+    def _reap(self, record: ResultRecord) -> None:
+        """Release the result scope under the lock, then notify the owner even if that failed.
+
+        The owner's callback runs once the update graph's lock is let go: for a stream it takes
+        `registry_lock`, and at zero holds it releases the stream scope, taking the lock again.
 
         Args:
             record: The record being released.
         """
         try:
-            record.scope.release()
+            release_scope(self._exec_ctx, record.scope)
         finally:
             record.on_released()

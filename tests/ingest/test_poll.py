@@ -247,7 +247,7 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     spec = _session.CATALOG.by_name["reference.related_companies"]
     schema = _session.CATALOG.dataset_schema(spec)
     assert {*spec.poll_keys, "TimestampInsert"} == set(schema.column_names)
-    deferred: list[Callable[[], None]] = []  # nothing fails the table: it stays empty
+    deferred: list[LivenessScope] = []  # nothing fails the table: it stays empty
     scope = new_scope()
     with scope.open():
         table, publisher = poll.build_table(
@@ -256,7 +256,7 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
             PollMode.UPSERT,
             stream_id=1,
             on_shutdown=threading.Event().set,
-            defer=deferred.append,
+            release_later=deferred.append,
         )
 
     def cycle(arrived: int, *pairs: tuple[str, str]) -> None:

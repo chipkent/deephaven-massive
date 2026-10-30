@@ -837,12 +837,26 @@ return result
   so taking `registry_lock` there could deadlock. The reaper job then flips the record's
   once-only `released` flag under `registry_lock` and, if it was not already set, releases the
   result.
-- **Reaper thread.** One daemon thread per session. It takes records off the queue, calls
-  `scope.release()`, decrements the stream's held-result count, and at zero releases the stream
-  scope. Each job runs inside `try`/`except Exception`; a failure is logged at ERROR and the
-  thread continues. It also runs the closers of a session freed without `close()`
-  ([section 6](#6-massivesession-and-lifecycle)), the jobs the shutdown callback and a failed
-  watchlist queue (below), and the final release of a session that leaves the live set.
+- **Reaper thread.** One daemon thread per session. It takes records off the queue, releases
+  the result scope (under the UG lock, below), decrements the stream's held-result count, and at
+  zero releases the stream scope. Each job runs inside `try`/`except Exception`; a failure is
+  logged at ERROR and the thread continues. It also runs the closers of a session freed without
+  `close()` ([section 6](#6-massivesession-and-lifecycle)), the jobs the shutdown callback and a
+  failed watchlist queue (below), the pin releases (`SessionCore.release_later`), and the final
+  release of a session that leaves the live set.
+- **Every release holds the UG lock.** Releasing a scope can drop the last reference to a
+  refreshing table, and Deephaven destroys the table on the releasing thread. The library
+  releases every liveness scope through `release_scope` (`_tables/liveness.py`), which enters
+  the session's execution context and holds the UG shared lock for the release: no update
+  cycle runs meanwhile, so a destroy never lands between a blink table's two cycles (below).
+  The release runs outside `registry_lock` and every other library lock, never on a UG thread,
+  and never under a stream's or a poller's publish lock, which a console command may take while
+  it holds the exclusive lock. A thread that may not take the lock (a shutdown callback, a
+  listener, the holder of a publish lock) hands the scope to `SessionCore.release_later`, which
+  queues the release on the reaper. The reaper and the diagnostics writer may now wait for a
+  console command to end, which is not a deadlock: no thread that holds the UG lock waits for
+  them (section 18.3). The test suite wraps `LivenessScope.release` and fails any test in which
+  library code releases a scope without the lock; the suite runs every branch of the library.
 - **The live set.** A module-level dictionary of session cores, under its own leaf lock (taken
   only under `registry_lock`, never the other way round). A core is in it exactly while its
   stream registry, its `poll()` registry, or its count of held diagnostics tables is non-empty;
@@ -901,9 +915,17 @@ return result
   the delivery closes the adapter, on the update-graph thread inside the cycle, and no second
   run follows. The shutdown callback that close runs queues the pin's release on the session's
   reaper (a Deephaven call, which the callback must not make itself). A table that is already
-  being destroyed, already shut down, or already pinned by an earlier failure gets no failure.
-  The pin cannot cover a failure the adapter queues itself (`deliverUpdate`), which only a
-  Deephaven fix can.
+  being destroyed, already shut down, or already pinned by an earlier failure gets no failure;
+  its unused scope, which manages nothing, goes to the reaper too, because `publish_failure`
+  runs under the owner's publish lock and so releases nothing itself. The pin cannot cover a
+  failure the adapter queues itself (`deliverUpdate`), which only a Deephaven fix can.
+  The library's own releases hold the UG lock (above), so they never destroy a table between
+  two cycles, but the pin stays: Deephaven releases without the lock where the library cannot
+  reach. A gRPC thread drops a released export's reference when a user closes a UI panel
+  (`SessionState.ExportObject` calls `dropReference` with no lock), the liveness-cleanup thread
+  drops a collected table's references, and a user's thread may release a derived table. Any
+  of them can drop the last reference to the blink table while its failure is queued: a panel
+  showing `result.where(...)`, closed after `m.release(result)` just as the stream fails, does.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
   either may come last. A stream's registry record is deleted only once both have happened:
@@ -911,7 +933,8 @@ return result
   showing its row count and a late failure, even for a released stream a derived table keeps
   alive. Its key maps to it only while it is opening or held, not failed, and not shut down,
   so no verb ever reuses a dead table.
-- **Shutdown callback.** It usually runs on the reaper thread, but it may run on a UG thread, a
+- **Shutdown callback.** It usually runs on the reaper thread (under the UG shared lock that the
+  reaper's release holds), but it may run on a UG thread, a
   gRPC thread if the UI held the last reference, or Deephaven's liveness-cleanup thread when
   the JVM collected the last derived table. It does exactly two things:
   `SessionCore.stream_shut_down(stream_id)`, which under `registry_lock` unmaps the stream's
@@ -3740,8 +3763,8 @@ without the GIL.
 | poller, one per `poll()` table, plus a `ThreadPoolExecutor(max_concurrency)` for fan-out | library | REST calls, waiting in the governor for a slot or a pause (ended by its stop token); `Table.snapshot()` of a reactive symbol table; `publisher.add` | run inside a listener |
 | REST fan-out, a `ThreadPoolExecutor(min(max_concurrency, calls))` per static read that makes several calls (`fetch()` per symbol, REST `history()`), ended before the read returns | library | one call each: its pages through the session's `RestClient`, waiting in the governor for a slot or a pause; each page first checks the read's `Cancel` token, which the read sets on its first failure or an interrupt, so the other calls stop after the page already on the wire | take `registry_lock`; call Deephaven; outlive the read |
 | flat-file reader, a `ThreadPoolExecutor(min(max_concurrency, keys))` per `history()` call, ended before the call returns | library | S3 requests through the session's `FlatFileClient`; Arrow CSV parsing (Arrow's own I/O threads read ahead from the response stream); `deephaven.arrow.to_table` of static tables, inside the session's execution context; checks the call's cancel event and the client's closed flag before each request and after each block | take `registry_lock`; outlive the call |
-| reaper, one per session | library | `scope.release()`; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
-| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change | anything else |
+| reaper, one per session | library | scope releases (`release_scope`, under the UG shared lock, outside every library lock): results, streams, and failure pins; stream held-result counts; for a session freed without `close()`, the session's closers, which close the connections no other session leases and wait up to `JOIN_TIMEOUT` (5 s) for each one's threads; stopping a shut-down stream's watchlist listener; failing a stream whose watchlist failed; usually the final release of a core that left the live set | anything else |
+| diagnostics writer, one per session | library | applies row snapshots from its queue to the `connections()` and `streams()` input tables: each batch coalesced to the latest row per key, one `add` per table; pulls the `rate_limits()` rows from the session's governor when told it changed, and when its queue wait times out at the rows' next time-driven change; at exit, releases the tables' scope under the UG shared lock | anything else |
 | crypto pairs, one per session, started by the first crypto watchlist change | library | reads Massive's crypto ticker list (REST requests, once per session, charged to the `currencies` bucket) for each crypto ticker a symbol table adds that the session's connection group has not looked up (the group keeps the pairs, vendor facts shared by its sessions); then posts the change to the connection's loop, or fails the stream (`Flusher.fail`); changes run one at a time, in order | hold `registry_lock` or the group's lock across the request; call Deephaven |
 | UG thread (Deephaven) | Deephaven | watchlist listeners (`listen`): compute symbol adds and removes and hand them to a worker; a watchlist row that is not canonical, or a failed watchlist, queues the stream's failure on the reaper | Deephaven table operations; blocking I/O; waiting on library threads |
 | Java-originated (shutdown callback, UI export release, liveness cleanup) | Deephaven | `SessionCore.stream_shut_down` and `SessionCore.poll_shut_down` (under the registry lock: unmap the key; delete the record, or mark it for the last hold to delete); queuing work on the reaper; `call_soon_threadsafe` | sends; JVM calls; joins; blocking |
@@ -3846,8 +3869,8 @@ checks that every `threading.Thread` has a `name` and every `ThreadPoolExecutor`
   so two threads entering one shared wrapper at once make the first to exit install the other
   thread's previous (empty) context on itself.
 - `LivenessScopeStack` is thread-local, so result scopes are opened and closed on the caller
-  thread. `release()` runs on the reaper thread, which is allowed: the tracker is synchronized and
-  drains on the releasing thread.
+  thread. `release()` runs on the reaper thread under the UG shared lock, which is allowed: the
+  tracker is synchronized and drains on the releasing thread.
 
 ### 18.3 Lock order
 
@@ -3858,20 +3881,21 @@ directly or through auto-locking in `Table.snapshot()`, `where_in`, `last_by`, o
 registry deadlock. Verbs called on the UG thread raise `ValueError`.
 
 **A caller holding the UG lock never waits on a thread that may need the UG lock or an update
-cycle** (the diagnostics writer, a poller, another caller's stream open). The caller may hold
-the UG lock
-without being a UG thread: the console holds the exclusive lock for every command, and a user
-thread may hold the shared lock. No update cycle runs meanwhile, and any other thread that needs
-the lock blocks, so a wait on such a thread could never end. Which library threads can need the
-lock: the diagnostics writer (`InputTable.add` waits for the cycle that applies it), a poller
-(`Table.snapshot()` of a watchlist), and another caller's stream open (starting a watchlist's
-listener, reading a crypto watchlist). The flush threads, the WebSocket client threads, the
-REST and flat-file reader pools, the reaper, and the crypto-pairs and futures-schedule workers
-never need it: they call no Deephaven operation that locks (static tables, `publisher.add` of
-a static table, `publish_failure`, listener removal). So on a thread that holds the lock
-(`holds_update_graph_lock`, checked outside `registry_lock`, since it is a Java call), a verb
-takes over the key of a stream still opening on another thread instead of waiting for it
-([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), and `close()` waits for
+cycle** (the diagnostics writer, a poller, another caller's stream open, the reaper). The
+caller may hold the UG lock without being a UG thread: the console holds the exclusive lock
+for every command, and a user thread may hold the shared lock. No update cycle runs meanwhile,
+and any other thread that needs the lock blocks, so a wait on such a thread could never end.
+Which library threads can need the lock: the diagnostics writer (`InputTable.add` waits for the cycle that applies it, and its exit
+releases the tables' scope under the shared lock), a poller (`Table.snapshot()` of a
+watchlist), another caller's stream open (starting a watchlist's listener, reading a crypto
+watchlist), and the reaper (every scope release takes the shared lock; nothing joins the reaper
+or waits for its jobs). The flush threads, the WebSocket client threads, the REST and flat-file
+reader pools, and the crypto-pairs and futures-schedule workers never need it: they call no
+Deephaven operation that locks (static tables, `publisher.add` of a static table,
+`publish_failure`, which hands every scope it would release to the reaper, listener removal).
+So on a thread that holds the lock (`holds_update_graph_lock`, checked outside `registry_lock`,
+since it is a Java call), a verb takes over the key of a stream still opening on another thread
+instead of waiting for it ([section 6.1](#61-how-a-live-table-is-kept-alive-and-released)), and `close()` waits for
 neither the diagnostics writer nor the cycle that applies the final rows. It does not join the
 connections it closes or the futures-schedule worker either, though none of those threads
 needs the lock: while it waits no live table updates, and against an unresponsive server each
