@@ -1346,14 +1346,25 @@ listener. Fan-out endpoints issue one request per symbol per cycle under `max_co
 
 **`last_by()`.** Returns `blink.last_by(keys)` with the default key `Symbol`. With a reactive
 `Table` as symbols and `Symbol` among the keys, the result is
-`blink.last_by(keys).where_in(symbol_table, "Symbol")`, so rows of removed symbols are evicted
-from the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
+`watched_rows(blink.last_by(keys), symbol_table)`, so rows of removed symbols are evicted from
+the result. The underlying `last_by` state keeps every symbol ever seen: a symbol that is
 removed and re-added shows its stale row until its next tick. With keys that span symbols (for
-example `by="Exchange"`) the filter comes first, `blink.where_in(symbol_table,
-"Symbol").last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
+example `by="Exchange"`) the filter comes first, `watched_rows(blink,
+symbol_table).last_by(keys)`: filtering after the aggregation would drop a whole group whenever its
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
 watched when the row arrived, and keeps it after that symbol is removed until a watched symbol
 ticks in the group.
+`watched_rows` (`_tables/watchlist.py`) keeps what `where_in(symbol_table, "Symbol")` keeps, but
+builds it from a join: `natural_join` of the table with the symbol table's distinct symbols,
+marked in a hidden column, then a match filter on the mark. Deephaven 42.7's `where_in` delivers
+a failure of each of its two tables to its result, and a second failure trips an assertion
+whose fatal-error handler calls `System.exit`: verified for both tables failing in one update
+cycle, and for the symbol table failing before the filtered one. A failed symbol table fails
+its stream (below), and the stream's failure always follows the symbol table's, so a
+`where_in` here ended the process every time a reactive `last_by()`'s symbol table failed, or
+the session closed while one ran over another of its live tables. A join forwards the first
+failure of its two tables and ignores the second; so do `merge` and `aj` (verified the same
+way). A blink table stays a blink table through the join and the filter.
 `last_by()` never seeds from REST. The last-trade and last-quote endpoints (the one-row
 datasets of [section 7.5](#75-one-row-datasets)) are absent from Starter and base Business
 plans, so a seed would behave differently per tier; `snapshots(symbols).poll(n)` is the
@@ -1535,7 +1546,7 @@ never reads `__doc__` at run time, so `python -OO` changes nothing.
   Nothing in `BlinkTableTools` or `RingTableTools` copies attributes, so an append-only or
   ring table derived from a described blink table would lose them. The verb therefore calls
   `describe()` last: on the blink copy for `blink()`, on the append-only or ring table, on the
-  `last_by` table after any `where_in`, on the `poll()` table (the shape derived from its
+  `last_by` table after any symbol-table filter, on the `poll()` table (the shape derived from its
   publisher's blink table), and on the static table of `fetch()` and `history()`.
 - **Threading and liveness.** `describe()` makes a new table, so it runs where every result
   table is made: on the caller thread, inside the result's `LivenessScope`
@@ -2386,8 +2397,8 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   A stream also refuses a row whose topic cannot be built. A symbol table that **fails** (a
   `canonicalize_symbols` table under `RAISE` that met a bad row) fails the result too: the
   watch's error callback queues the stream's failure on the reaper, and `read_symbols` refuses a failed table, so a
-  `poll()` table fails on its next cycle. `last_by()` filters with `where_in` against the table
-  itself.
+  `poll()` table fails on its next cycle. `last_by()` filters against the table itself, with
+  `watched_rows`.
 - **Datasets kept as written.** A dataset whose symbols are a third party's global tickers
   rather than Massive's US-market ones declares `DatasetSpec.symbols_as_written`: its
   `symbols`, the rows of its symbol table, and its rows' symbols are taken exactly as Massive
