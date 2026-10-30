@@ -102,6 +102,11 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the
   it, and what each argument means, with no internal shorthand.
 - No planning references in code, comments, tests or messages:
   `git diff origin/main...HEAD -- src tests scripts .github | grep -nE '^\+.*(DESIGN|PLAN|§)'`.
+- The PR title and every commit subject on the branch (`git log origin/main..HEAD --format=%s`)
+  meet the Title section of `docs/dev/pull-requests.md`: a type, then one specific idea in the
+  imperative, at most 60 characters, the effect rather than the technique, and no internal
+  names or jargon. Count with `printf %s "<title>" | wc -c`. Fix the PR title with
+  `gh pr edit <n> --title`, and the last unpushed commit subject with `git commit --amend`.
 - The PR description meets `docs/dev/pull-requests.md`: read that page, then go through its
   "Checklist before a push". The common misses: file or function names in the Summary, a
   missing section instead of "None", review labels or first-person narration, no issue line.

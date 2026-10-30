@@ -1,9 +1,68 @@
-# Pull request descriptions
+# Pull request titles and descriptions
 
 The owner reads every pull request description to decide whether to merge it. Write it as an
 editor would leave it: the big picture first, plain words, short sentences, every term defined,
 and no process narrative. `.github/pull_request_template.md` holds the skeleton; this page is
-the standard it points to.
+the standard it points to. The title comes first, because more people read it than anything
+else in the PR.
+
+## Title
+
+The title is the one line most readers ever see: in `git log`, in release notes, and in the PR
+list. The owner squash-merges, so the title also becomes the commit subject on `main`, and the
+same rules apply to every commit subject you write. Write it as an editor would: one short
+phrase, in words a newcomer to the project knows, that says what changes for a user or a
+developer.
+
+- **Type, then the imperative.** Start with the Conventional Commits type (`feat:`, `fix:`,
+  `docs:`, `test:`, `refactor:`, `ci:`, `chore:`), then a lowercase verb in the imperative
+  mood, as in an instruction: "add", "stop", "log", not "adds", "added", or a noun phrase. No
+  trailing period. The only scope in use is `chore(deps):` for dependency changes.
+- **Pick the type by what changes.** Library code that changes no behavior is `refactor:`,
+  even when it fixes a broken project rule. A change only to the tests is `test:`, only to CI
+  is `ci:`, only to documentation is `docs:`, and only to tooling is `chore:`.
+- **Short.** Aim for 50 characters, type included, and never exceed 60. GitHub appends
+  ` (#123)` to the squash commit; the limit counts the title without it.
+- **Specific.** A reader must know which behavior changed without opening the PR. "fix: handle
+  errors" and "feat: improve logging" say nothing; empty verbs such as "update", "improve",
+  "handle", and "fix" need a concrete object, or give way to the behavior that is now right.
+- **One idea.** No clauses chained with commas, and no "and" or "so" joining two actions.
+  When the PR does more than one thing, name the one a user meets first and let the
+  description carry the rest; when the things are unrelated, they belong in separate PRs.
+- **The effect, not the technique.** Say what is different afterwards ("stop a failed live
+  table from crashing the server"), not how the code gets there ("deliver a stream failure
+  once"). For a refactor, the effect is what a developer reading the code now finds.
+- **Plain words.** No internal module, class, function, or variable names, and no project
+  jargon, unless the name is public API a user calls (`history()`, `fetch()`). A word only the
+  code knows ("wire client", "enum member", "channel") does not belong in a title.
+- **Keep it current.** When the scope of the PR changes, retitle it (`gh pr edit <n> --title`).
+
+### Before and after
+
+Real titles from this project, and how an editor would rewrite them:
+
+| Before | After |
+|---|---|
+| `fix: deliver a stream failure once, so a released table cannot exit the process` | `fix: stop a failed live table from crashing the server` |
+| `feat: each read gives up on its own, reference data has its own limit, learned limits end with the key's sessions` | `feat: stop one busy session from failing another's calls` |
+| `fix: refuse parallel runs from the tests they select, not the -m text` | `test: never run live tests in parallel` |
+| `feat: the wire clients log each exchange and the rows they cannot read` | `feat: log each request to Massive and its reply` |
+| `fix: key a non-bar dataset's channel and flat-file prefix by an enum member` | `refactor: stop using None to mean a dataset has no bars` |
+
+What changed in each:
+
+1. The first chained a technique to its consequence. The rewrite names the consequence a user
+   would notice, the server going down, in words the user knows.
+2. The second packed three rule changes into one line, in the code's terms. The rewrite names
+   the problem a user stops hitting, one session's rate-limit trouble failing another's calls;
+   the description lists all three changes.
+3. The third described how the check works (`-m` is a pytest option). The rewrite states the
+   rule the check enforces, and the type becomes `test:` because only the test suite changed.
+4. The fourth used the code's names ("wire clients", "exchange"). The rewrite says what lands
+   in the log, in plain words.
+5. The fifth was a `fix:` no user could see, written in the code's vocabulary. The rewrite is a
+   `refactor:` that names what a developer stops finding in the code: Python's `None` standing
+   for "this dataset has no price bars", as with trades and quotes.
 
 ## The two readers
 
@@ -98,8 +157,9 @@ For a hypothetical PR:
 
 ## Checklist before a push
 
-Read the description twice, once as each reader, and confirm:
+Read the title and the description twice, once as each reader, and confirm:
 
+- the title meets every rule under Title and still names what the PR does;
 - the Summary alone lets either reader explain the PR to someone else, and it names no file,
   internal function, review label, or decision number;
 - the sections above are present, in order; Decisions lists every departure from the plan with
