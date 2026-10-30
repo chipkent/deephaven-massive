@@ -581,8 +581,8 @@ class Query(QueryBase):
 
         Raises:
             ValueError: If the query is a feed's and has neither `start` nor `limit`, if
-                `interval` is not
-                positive, or if a parameter or symbol is refused as described above.
+                `interval` is not positive, or if a parameter or symbol is refused as described
+                above.
         """
         period = _interval(interval)
         chosen = self._spec.poll_mode if mode is None else _require_enum(mode, PollMode, "mode")

@@ -7,7 +7,6 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
   `Transport`, `AssetClass`, and `Family`.
 - **streams**: one row per stream (a live subscription with its own publisher) and per `poll()`
   table, with the `repr` of the query that opened it in `Query`. Keyed by `StreamId`.
-
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
