@@ -462,6 +462,16 @@ def test_an_append_identity_is_never_empty_and_revisions_never_repeat_poll_keys(
     assert change(EXCHANGES, revision_keys=("Name",)).revision_keys == ("Name",)
 
 
+def test_rows_several_symbols_return_are_found_by_poll_keys() -> None:
+    # A row that answers several symbols' requests is kept once, by its poll keys, which
+    # must exist and never be null.
+    with pytest.raises(ValueError, match=r"reference.exchanges: a dataset whose symbols overlap"):
+        change(EXCHANGES, poll_keys=(), revision_keys=("Name",), symbols_overlap=True)
+    with pytest.raises(ValueError, match=r"symbols overlap cannot have nullable_poll_keys"):
+        change(EXCHANGES, nullable_poll_keys={"Id": "absent"}, symbols_overlap=True)
+    assert change(EXCHANGES, symbols_overlap=True).symbols_overlap
+
+
 def test_a_fanout_key_that_is_no_instrument_comes_from_the_rows() -> None:
     bad = SourceKeys(fanout=KeySpec("filer_cik", from_request=True, instrument=False))
     with pytest.raises(ValueError, match=r"no instrument keeps a column of the rows"):
@@ -1501,6 +1511,19 @@ NEWS = DatasetSpec(
             "published_utc_lte",
             "2025-06-02T12:00:00Z",
             datetime(2025, 6, 2, 12, tzinfo=UTC),
+        ),
+        # Text finer than a microsecond rounds outward: an upper bound up, any other down.
+        (
+            NEWS,
+            "published_utc_lt",
+            "2025-01-02T14:30:00.000000500Z",
+            datetime(2025, 1, 2, 14, 30, 0, 1, tzinfo=UTC),
+        ),
+        (
+            NEWS,
+            "published_utc_gte",
+            "2025-01-02T14:30:00.000000500Z",
+            datetime(2025, 1, 2, 14, 30, tzinfo=UTC),
         ),
         # A calendar-date parameter keeps the day.
         (OPTION_CONTRACTS, "expiration_date_gt", "2026-01-16", date(2026, 1, 16)),
