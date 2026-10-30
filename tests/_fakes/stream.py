@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import StreamHandle, new_scope
-from deephaven_massive._tables.stream import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 
 if TYPE_CHECKING:
     from collections.abc import Callable

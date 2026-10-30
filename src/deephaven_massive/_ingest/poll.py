@@ -88,7 +88,7 @@ from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
 from deephaven_massive._tables.liveness import entered, make_result
-from deephaven_massive._tables.stream import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import read_symbols
 
 if TYPE_CHECKING:

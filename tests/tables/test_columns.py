@@ -18,7 +18,6 @@ from deephaven import dtypes, merge, new_table
 from deephaven.column import double_col, string_col
 from deephaven.execution_context import ExecutionContext
 from deephaven.stream import blink_to_append_only
-from deephaven.stream.table_publisher import table_publisher
 from deephaven.table import Table
 from deephaven.table_factory import ring_table
 
@@ -36,6 +35,7 @@ from deephaven_massive._tables.columns import (
     dh_type,
 )
 from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.publisher import blink_publisher
 
 TIMEOUT = 10.0
 
@@ -142,10 +142,14 @@ class Stream:
 
     def __init__(self) -> None:
         self.shutdown = threading.Event()
+        self.deferred: list[Callable[[], None]] = []  # a failure's pin release, as on the reaper
         self.scope = new_scope()
         with self.scope.open():
-            self.blink, self.publisher = table_publisher(
-                "massive.test", col_defs(SCHEMA), on_shutdown_callback=self.shutdown.set
+            self.blink, self.publisher = blink_publisher(
+                "massive.test",
+                col_defs(SCHEMA),
+                on_shutdown=self.shutdown.set,
+                defer=self.deferred.append,
             )
 
 
@@ -249,7 +253,9 @@ def test_a_failed_blink_table_cannot_be_described(dh_exec_ctx: ExecutionContext)
         describe(stream.blink, SPEC, SCHEMA)
     scope.release()
     stream.scope.release()
-    assert stream.shutdown.wait(TIMEOUT)
+    assert stream.shutdown.wait(TIMEOUT)  # the failure's delivery shut it down
+    for release in stream.deferred:
+        release()
 
 
 def test_a_description_of_a_missing_column_fails(dh_exec_ctx: ExecutionContext) -> None:

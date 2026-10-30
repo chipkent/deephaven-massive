@@ -141,9 +141,10 @@ These prevent deadlocks and leaks.
   console session.
 - **Streams tear down from the blink table's `on_shutdown_callback`**: topic reference counts and
   flush routing are released there, not when a result record is released. The callback only
-  updates the registry and calls `call_soon_threadsafe`; it never sends and never calls Java.
+  updates the registry, queues a failure's pin release on the reaper, and calls
+  `call_soon_threadsafe`; it never sends and never calls Java.
 - **Fail a blink table only through `BlinkPublisher`.** Library code creates every publisher
-  with `blink_publisher` (`_tables/stream.py`), never with `table_publisher`. Deephaven queues
+  with `blink_publisher` (`_tables/publisher.py`), never with `table_publisher`. Deephaven queues
   a published failure until the next update cycle; if another thread destroys the table
   meanwhile, Deephaven can deliver the failure twice and exit the process. `publish_failure`
   pins the table until the failure has been delivered.
@@ -158,8 +159,9 @@ These prevent deadlocks and leaks.
   so test modules may import `deephaven` at module level. Under `-n`, each xdist worker starts
   one and the controller starts none; `-n` with the live tests is refused. Never start or stop
   another `Server` in that process (a subprocess may). Read the comments on its `trylast` hook
-  and JVM shutdown block before touching either. An `hs_err_pid*.log` file is a JVM crash:
-  investigate it.
+  and JVM shutdown block before touching either. An `hs_err_pid*.log` file is a JVM crash, and
+  a `jvm_fatal_pid*.log` file holds the message of a JVM fatal error that exited the process:
+  investigate either.
 - The JVM raises SIGSEGV on purpose: never call `faulthandler.enable()` once it runs. Any process
   that starts a `Server` leaves through `os._exit`, as `scripts/render_reference.py` does.
 - Take the execution context, table helpers, and fakes from fixtures (`dh_exec_ctx`,

@@ -194,32 +194,53 @@ def pytest_configure(config: pytest.Config) -> None:
     cycle = int(jpy.cast(j_update_graph, periodic).getTargetCycleDurationMillis())
     if cycle != _CYCLE_MILLIS:
         raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
-    _copy_jvm_fatal_errors_to_stderr()
+    _record_jvm_fatal_errors()
 
 
-def _copy_jvm_fatal_errors_to_stderr() -> None:
-    """Make Deephaven's fatal errors write their message to file descriptor 2 as well.
+def _record_jvm_fatal_errors() -> None:
+    """Record the message of every Deephaven fatal error in a file and on file descriptor 2.
 
     A fatal error inside the JVM, such as a failed assertion on an update-graph thread, ends
     the process: Deephaven's fatal-error handler prints a message and calls `System.exit(1)`.
     The embedded server forwards Java's standard error to Python's `sys.stderr`, which during a
-    test is pytest's capture buffer, so the message dies with the process and the run ends
-    with exit code 1, no summary, and no clue. This adds an interceptor to the handler that
-    writes the message and the Java stack trace straight to file descriptor 2. CI runs pytest
-    with `--capture=sys`, which leaves that descriptor alone, so the message reaches the job
-    log; a local run with the default `--capture=fd` still loses it, and `-s` shows it.
+    test is pytest's capture buffer, so the message dies with the process and the run ends with
+    exit code 1, no summary, and no clue. This adds an interceptor to the handler that writes the
+    message and the Java stack trace to `jvm_fatal_pid<pid>.log` in the repository root, next to
+    the JVM's `hs_err` crash logs (CI uploads both when a job fails), and to file descriptor 2.
+    The file works in every capture mode and in pytest-xdist workers; the descriptor reaches the
+    job log because CI runs pytest with `--capture=sys`, which leaves it alone. The interceptor
+    runs before the handler exits the process, so it never raises: whatever goes wrong while it
+    writes is dropped, and the exit still happens.
     """
     jpy = importlib.import_module("jpy")
     jcompat = importlib.import_module("deephaven.jcompat")
     traces = jpy.get_type("org.apache.commons.lang3.exception.ExceptionUtils")
+    path = Path(__file__).resolve().parent.parent / f"jvm_fatal_pid{os.getpid()}.log"
 
     def intercept(message: str, throwable: object, _uncaught: bool) -> None:
-        trace = traces.getStackTrace(throwable)
-        os.write(2, f"JVM fatal error, the process exits: {message}\n{trace}".encode())
+        with contextlib.suppress(BaseException):
+            trace = traces.getStackTrace(throwable)
+            text = f"JVM fatal error, the process exits: {message}\n{trace}"
+            data = text.encode(errors="replace")
+            with contextlib.suppress(BaseException):
+                path.write_bytes(data)
+            _write_all(2, data)
 
     interceptor = jpy.get_type("io.deephaven.util.process.FatalErrorReporter$Interceptor")
     process = jpy.get_type("io.deephaven.util.process.ProcessEnvironment")
     process.getGlobalFatalErrorReporter().addInterceptor(jcompat.j_lambda(intercept, interceptor))
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write all of `data` to a file descriptor, however many writes it takes.
+
+    Args:
+        fd: The descriptor.
+        data: The bytes.
+    """
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
 
 
 # --- JVM shutdown workaround -------------------------------------------------------------------

@@ -45,7 +45,7 @@ from deephaven_massive._query import (
     StreamQuery,
 )
 from deephaven_massive._tables.liveness import entered, new_scope
-from deephaven_massive._tables.stream import BlinkPublisher
+from deephaven_massive._tables.publisher import BlinkPublisher
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.stream import FakeStreamTransport

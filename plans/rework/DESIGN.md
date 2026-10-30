@@ -314,8 +314,9 @@ _tables/                 the Deephaven side: tables, liveness, library threads
                          (section 10)
   symbols.py             canonicalize_symbols(), the table form of the symbol converters
                          (section 10)
-  stream.py              streams, publishers, flush thread, fan-out, bound-failure routing
-                         (section 14)
+  publisher.py           blink_publisher(), BlinkPublisher: the publisher of every blink
+                         table, whose failure pins the table until it is delivered (section 6.1)
+  stream.py              streams, flush thread, fan-out, bound-failure routing (section 14)
 _ingest/                 the only holder of wire clients
   __init__.py            docstring only
   clients.py             SessionClients: the session's wire clients and connections, the ports
@@ -730,9 +731,11 @@ These facts are verified in `deephaven-core` `main`:
   next run delivers the failure, its own close does nothing, and if the destroying thread has
   not yet called `removeSource` when the cycle after that starts, the adapter runs again and
   delivers the same failure a second time. `BaseTable.notifyListenersOnError` asserts the
-  table has not failed yet, and the fatal-error handler calls `System.exit(1)`. Forced with a
-  debugger pause before `removeSource`, it crashes on the first try; under load it happens about
-  once in 1,500 to 4,500 failures whose result is released at once.
+  table has not failed yet, and the fatal-error handler calls `System.exit(1)`. A failure the
+  adapter queues itself (`deliverUpdate` when `notifyListeners` throws) races a destroy the same
+  way. With a debugger pausing the destroying thread before `removeSource`, the process exits
+  on the first or second failure. Unforced, under heavy load (eight test processes beside 20 CPU
+  burners), 3 in 100,000 failures whose result is released at once ended the process.
 - `LivenessScopeStack` is thread-local. `LivenessScope.release()` decrements the scope's count,
   and referents are dropped on the thread that releases.
 - `deephaven.liveness_scope.LivenessScope` exposes `open()`, `manage()`, `unmanage()`, and
@@ -847,13 +850,15 @@ return result
   (`SessionCore.fail_stream`) before its table is failed (`publish_failure`), so a verb that
   meets the failed table always finds the failure to name.
 - **A failure pins its table.** Every blink table the library feeds (a stream's, a `poll()`
-  table's) is created by `blink_publisher` (`_tables/stream.py`), whose
+  table's) is created by `blink_publisher` (`_tables/publisher.py`), whose
   `BlinkPublisher.publish_failure` first makes a new liveness scope manage the table, then
   publishes the failure. While the failure is queued nothing can destroy the table, so only
   the delivery closes the adapter, on the update-graph thread inside the cycle, and no second
   run follows. The shutdown callback that close runs queues the pin's release on the session's
   reaper (a Deephaven call, which the callback must not make itself). A table that is already
-  being destroyed cannot be pinned and gets no failure.
+  being destroyed, already shut down, or already pinned by an earlier failure gets no failure.
+  The pin cannot cover a failure the adapter queues itself (`deliverUpdate`), which only a
+  Deephaven fix can.
 - **Record lifetime.** Holds and the shutdown callback run on different clocks (a
   `publish_failure` shuts the blink table down at once, while results are still held), so
   either may come last. A stream's registry record is deleted only once both have happened:

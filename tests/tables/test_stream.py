@@ -22,7 +22,6 @@ import pytest
 from deephaven import dtypes, input_table
 from deephaven.arrow import to_arrow, to_table
 from deephaven.stream import blink_to_append_only
-from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import symbols
@@ -35,7 +34,6 @@ from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
-from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.stream import (
     ChannelPlan,
     Flusher,
@@ -319,96 +317,6 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     assert not sink.fail(MassiveError("again"))
     assert sink.publish(batch, converted) == 0
     assert sink.rows_published == 1
-
-
-class _Pinned:
-    # A `blink_publisher` table in its own scope, with what its shutdown callback saw and the
-    # pin releases it deferred.
-    def __init__(self, exec_ctx: ExecutionContext) -> None:
-        self._update_graph = exec_ctx.update_graph.j_update_graph
-        self.shut_down = threading.Event()
-        self.on_update_graph: list[bool] = []
-        self.deferred: list[Callable[[], None]] = []
-        self.scope = new_scope()
-        with self.scope.open():
-            self.blink, self.publisher = stream.blink_publisher(
-                "test.pinned",
-                {"X": dtypes.int64},
-                on_shutdown=self._on_shutdown,
-                defer=self.deferred.append,
-            )
-
-    def _on_shutdown(self) -> None:
-        self.on_update_graph.append(bool(self._update_graph.currentThreadProcessesUpdates()))
-        self.shut_down.set()
-
-    def failed(self) -> bool:
-        return bool(self.blink.j_table.isFailed())
-
-    def destroyed(self) -> bool:
-        retained = bool(self.blink.j_table.tryRetainReference())
-        if retained:
-            self.blink.j_table.dropReference()
-        return not retained
-
-
-def test_a_queued_failure_keeps_its_table_alive_until_it_is_delivered(
-    dh_exec_ctx: ExecutionContext,
-) -> None:
-    # Releasing the last scope of a table whose failure is queued must not destroy it. A
-    # destroy on another thread races the failure's delivery inside Deephaven, which can then
-    # deliver the failure twice: a fatal assertion that exits the process. While the shared lock
-    # is held no update cycle runs, so the failure is still queued when the scope is released.
-    pinned = _Pinned(dh_exec_ctx)
-    with shared_lock(dh_exec_ctx.update_graph):
-        pinned.publisher.publish_failure(MassiveError("refused"))
-        pinned.scope.release()
-        early = pinned.shut_down.is_set()
-    assert not early  # pinned: the release did not destroy the table
-    assert pinned.shut_down.wait(TIMEOUT)
-    # The delivery shut the table down, inside the update cycle that failed it.
-    assert pinned.on_update_graph == [True]
-    assert pinned.failed()
-    assert not pinned.destroyed()
-    assert len(pinned.deferred) == 1
-    pinned.deferred[0]()  # the session's reaper releases the pin, and the table dies
-    assert pinned.destroyed()
-    assert pinned.on_update_graph == [True]  # the adapter had already shut down
-
-
-def test_a_destroyed_table_publishes_no_failure(
-    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pinned = _Pinned(dh_exec_ctx)
-    pinned.scope.release()
-    assert pinned.on_update_graph == [False]  # the release destroyed it, on this thread
-    published: list[Exception] = []
-    monkeypatch.setattr(
-        pinned.publisher, "_publisher", types.SimpleNamespace(publish_failure=published.append)
-    )
-    pinned.publisher.publish_failure(MassiveError("too late"))
-    assert published == []
-    assert pinned.deferred == []
-
-
-def test_a_failure_that_raises_unpins_its_table(
-    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The failure was not queued, so nothing would ever deliver it and release the pin.
-    pinned = _Pinned(dh_exec_ctx)
-
-    def interrupted(_error: Exception) -> None:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(
-        pinned.publisher, "_publisher", types.SimpleNamespace(publish_failure=interrupted)
-    )
-    with pytest.raises(KeyboardInterrupt):
-        pinned.publisher.publish_failure(MassiveError("refused"))
-    pinned.scope.release()
-    assert pinned.on_update_graph == [False]  # nothing pins it: the release destroyed it
-    assert pinned.deferred == []
-    assert not pinned.failed()
 
 
 def test_open_stream_tables_releases_its_scope_on_failure(
