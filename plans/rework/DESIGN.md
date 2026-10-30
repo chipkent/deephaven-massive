@@ -2915,12 +2915,13 @@ replies; the live integration test must retire this note before 1.0.
 Each connection is one `_massive.WsClient` ([section 19.2](#192-the-websocket-client)) bound to
 one `wss://host/path`. The client runs on its own daemon thread with its own asyncio loop, and
 owns everything about the wire: the socket, authentication, frame encoding and decoding,
-reconnecting with backoff, and closing. `_ingest/ws.py` owns everything the library decides: the
+reconnecting with backoff, and closing. `_ingest/ws_connection.py` owns everything the library
+decides: the
 desired topics, the acknowledgements, the watchdogs, the routing, and the connection's
 diagnostics. Both run on the client's loop thread; other threads reach a connection only through
 `loop.call_soon_threadsafe` with plain data, and through `WsClient.close()`.
 
-The client reports to `_ingest/ws.py` through four callbacks, each called on the loop thread, in order:
+The client reports to `_ingest/ws_connection.py` through four callbacks, each called on the loop thread, in order:
 
 - `on_open(generation)`: Massive accepted the key (`auth_success`) on a new socket. A
   **generation** is one authenticated socket; the number increases by one per `on_open`.
@@ -2941,15 +2942,15 @@ The client reports to `_ingest/ws.py` through four callbacks, each called on the
   `CLOSED` are terminal, and exactly one of them is reported. The client is the only owner of
   `WAITING_SLOT`; the library displays what it reports.
 
-`_ingest/ws.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
+`_ingest/ws_connection.py` parses no frame text. Before it first subscribes a channel on a connection, it calls
 the client's loop-thread method `set_required(channel, keys, *, symbol=None)`: `keys` is a
-`frozenset` of long-form key columns, built by `_ingest/ws.py` from the `KeySpec`s that the channel's
+`frozenset` of long-form key columns, built by `_ingest/ws_connection.py` from the `KeySpec`s that the channel's
 dataset declares for that channel's source, excluding `from_request` keys, and `symbol` is the
 long-form column of the channel's `symbol` key (`None` when it declares none). The client keeps
 both across generations and hands them to the decoder, so a row missing one of those keys is a
 `Reject` carrying the row's raw symbol, while any other absent field becomes null. A channel
 with no entry has no required keys and no symbol. Wire symbols are never rewritten in
-`_massive`: the flush thread reads the rows' symbols with `WireSymbols` and `_ingest/ws.py`
+`_massive`: the flush thread reads the rows' symbols with `WireSymbols` and `_ingest/ws_connection.py`
 reads a reject's with `canonical_from_wire` (both in `_datasets/wire_symbols.py`) when they route
 them, and topics use the wire's own form, as the subscribe frames do. It
 then calls the loop-thread methods `subscribe(generation, topics)` and
@@ -4545,7 +4546,7 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
 
 ### 19.2 The WebSocket client
 
-`_massive.WsClient` is one object per connection (one `wss://host/path`), created by `_ingest/ws.py`
+`_massive.WsClient` is one object per connection (one `wss://host/path`), created by `_ingest/ws_connection.py`
 and run on its own daemon thread under `asyncio.run`. Its interface and callbacks are those of
 [section 13.3](#133-connection-and-subscription-protocol). **Apart from `start()` (called once by
 its creator, before the loop thread exists), `close()`, and `join(timeout)`, every method must be
@@ -5357,7 +5358,7 @@ known to the WebSocket decoder only, and an extra key's value, so a WARNING can 
 outside equality and the `repr`). A decoder never raises for drift; REST and flat files raise
 `WireError` for a bad value, and WebSocket returns `Reject`s. **Policy** is in the library: the
 session's `DriftRegistry` in `_tables/diagnostics.py` (a leaf lock, WARNINGs logged after release) and the
-routing in `_ingest/rest.py`, `_tables/poll.py`, `_ingest/ws.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
+routing in `_ingest/rest.py`, `_tables/poll.py`, `_ingest/ws_connection.py`, `_tables/stream.py`, and `_ingest/flatfiles.py`.
 
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|

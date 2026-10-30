@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
-from deephaven_massive._ingest import ws
+from deephaven_massive._ingest import ws, ws_connection
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import StreamQuery
 from deephaven_massive._tables.transports import HostDecision
@@ -376,7 +376,7 @@ class WsSession:
         assert isinstance(q, StreamQuery)
         return q
 
-    def connection(self, url: str = "wss://socket.test/stocks") -> ws.Connection:
+    def connection(self, url: str = "wss://socket.test/stocks") -> ws_connection.Connection:
         """Return the session's connection to `url`.
 
         Returns:
@@ -415,7 +415,7 @@ class WsSession:
         for connection in connections:
             connection.flusher.flush()
 
-    def on_loop(self, connection: ws.Connection, action: Callable[[], object]) -> object:
+    def on_loop(self, connection: ws_connection.Connection, action: Callable[[], object]) -> object:
         """Run `action` on the connection's loop thread and wait for it.
 
         Returns:
