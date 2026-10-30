@@ -35,7 +35,8 @@ uv build                                 # sdist and wheel
    check. When a hook fails, fix the cause.
 3. **Branches and commits.** Branches are `<type>/<topic>`, cut from `origin/main` after
    `git fetch`. Commits and PR titles follow Conventional Commits: `feat:`, `fix:`, `docs:`,
-   `test:`, `refactor:`, `ci:`, `chore:`.
+   `test:`, `refactor:`, `ci:`, `chore:`, and their wording meets the Title section of
+   `docs/dev/pull-requests.md`.
 4. **Check, review, push.** Before opening a PR and before every push to one, get
    `./scripts/check.sh` (full) green, run the `pre-push-review` skill, and fix its findings. Every
    CI job must pass, the required free-threaded 3.14t job too: locking must work without the GIL.
