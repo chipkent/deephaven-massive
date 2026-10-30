@@ -39,7 +39,11 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._datasets.schema import RAW_SYMBOL, TRANSPORT_LABELS
+from deephaven_massive._datasets.column_descriptions import (
+    RAW_SYMBOL,
+    TRANSPORT_LABELS,
+    TRANSPORT_ORDER,
+)
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import Transport
 
@@ -55,10 +59,6 @@ __all__ = ["COMMAND", "SyncResult", "anchor", "call_path", "column_changes", "re
 
 COMMAND: Final = "uv run python scripts/render_reference.py"
 """The command that regenerates the column reference, run from the repository root."""
-
-_TRANSPORT_ORDER: Final = (Transport.REST, Transport.FLAT_FILES, Transport.WS)
-"""The order of the transports in a **Supplied by** cell and of the wire-field columns, the
-order of `Column.supplied_by`."""
 
 _WIRE_HEADINGS: Final[Mapping[Transport, str]] = {
     Transport.REST: "REST field",
@@ -268,7 +268,7 @@ def _section(spec: DatasetSpec, catalog: Catalog, provenance: Provenance) -> lis
         The section's lines, without a trailing blank line.
     """
     used = {transport for transport, _ in spec.sources}
-    wire = [transport for transport in _TRANSPORT_ORDER if transport in used]
+    wire = [transport for transport in TRANSPORT_ORDER if transport in used]
     header = [
         "Column",
         "Deephaven type",

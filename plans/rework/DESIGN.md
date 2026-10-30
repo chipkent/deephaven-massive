@@ -1358,7 +1358,7 @@ Each dataset column has one description, chosen by the rule of
 [section 19.4](#194-generated-schemas) from the field descriptions in `spec/descriptions.json`
 (the vendor's, corrected where they are clearly wrong). It reaches users through three outlets,
 all generated from the same dataset schema, so they can never disagree. All three spell the
-transports one way, `REST`, `flat files`, and `WebSocket` (`schema.TRANSPORT_LABELS`): the
+transports one way, `REST`, `flat files`, and `WebSocket` (`column_descriptions.TRANSPORT_LABELS`): the
 key-column descriptions of [section 19.4](#194-generated-schemas) rule 3, `columns()`'s
 `SuppliedBy`, and the column reference's **Supplied by**, so a filter copied from a page
 (``cols.where("SuppliedBy = `WebSocket`")``) works on `columns()`. The `Transport` enum values
@@ -3414,7 +3414,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
   ([section 7.4](#74-column-descriptions)).
 - **Fan-out per flush.** Per connection and per channel, the flush thread drains the channel's
   row buffer once. The rows arrive keyed by long-form column; the flush renames them
-  (`rename` in `_datasets/schema.py`), converts them (`_datasets/timestamps.py`), builds one
+  (`rename` in `_datasets/source_columns.py`), converts them (`_datasets/timestamps.py`), builds one
   Arrow batch in the dataset schema, and fills its time columns (`row_times.TimeRule`), each
   row's `TimestampInsert` the instant its frame arrived (each frame is buffered with that
   instant) and a futures row's `Date` corrected by the connection group's schedule calendar
@@ -3645,7 +3645,7 @@ to nanoseconds (for bars, the starts of the bars whose whole window fits; not ap
 futures trades, quotes, and session bars named by date, whose files hold exactly the requested
 sessions), and, on the surviving rows only, the rename to long-form names and
 parsing of the list columns (`Conditions`, `Indicators`). `_ingest/flatfiles.py` then applies
-`rename` in `_datasets/schema.py` and the `_datasets/timestamps.py` routine, and moves each
+`rename` in `_datasets/source_columns.py` and the `_datasets/timestamps.py` routine, and moves each
 1-day bar's stamp to 00:00 of its day in the class day zone, refusing a stamp it does not know
 (`row_times.day_starts`). No block is converted
 to Python objects. A
@@ -5289,7 +5289,7 @@ carry no description gets `""`, and nothing fails. A column of nested values kep
 (`json-text`) ends its description with "The column holds Massive's nested value as JSON text."
 The sentences of rule 2 and the notes
 are the library's statements about its own columns, not hand input about Massive,
-so they live in `_datasets/schema.py`, not in `refresh/`.
+so they live in `_datasets/column_descriptions.py`, not in `refresh/`.
 
 **Derived columns.** Two columns no source carries are computed by every transport from the
 symbols it reads, and follow the leading key columns with the library's own description and
@@ -5854,7 +5854,7 @@ document already reflects them.
     and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
     its wire key, the lexicon of its shape, and `NAMES`; each `DatasetSpec` declares the key
-    columns its sources carry, and `rename` in `_datasets/schema.py` maps them to `Symbol`, `Timestamp`, and
+    columns its sources carry, and `rename` in `_datasets/source_columns.py` maps them to `Symbol`, `Timestamp`, and
     `Underlying`. Names are never derived from descriptions, and the refresh gates and the catalog
     gates fail on a wrong name, type, unit, or merge ([section 19.4](#194-generated-schemas)). The
     final names: `av` → `AccumulatedVolume`, `op` → `OfficialOpen` (2026-10-27: a neutral name

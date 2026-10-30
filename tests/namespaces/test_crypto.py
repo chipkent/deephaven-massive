@@ -31,7 +31,7 @@ from deephaven.table_listener import TableUpdate, listen
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.schema import required_fields
+from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily
 from deephaven_massive._massive import (

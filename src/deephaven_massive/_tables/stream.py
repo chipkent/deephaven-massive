@@ -5,7 +5,7 @@ The WebSocket transport (`_ingest/ws.py`) owns the connections and decides which
 subscribed; this module owns everything that touches Deephaven for a stream:
 
 - `ChannelPlan`, how one dataset reads one channel: the channel's generated columns, renamed
-  for the dataset (`schema.rename`), their wire types, the dataset's merged schema, and the
+  for the dataset (`source_columns.rename`), their wire types, the dataset's merged schema, and the
   required keys and symbol column the wire client checks (`set_required`). Pure; built once
   per (dataset, channel).
 - `open_stream_tables`, which creates a stream's liveness scope and, inside it, the publisher
@@ -71,15 +71,9 @@ import pyarrow.compute as pc
 from deephaven import new_table
 from deephaven.column import string_col
 
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.row_times import TimeRule, time_column
-from deephaven_massive._datasets.schema import (
-    OPTION_ROOT,
-    RAW_SYMBOL,
-    key_column,
-    rename,
-    required_fields,
-    widen,
-)
+from deephaven_massive._datasets.source_columns import key_column, rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
     WireSymbols,
@@ -292,7 +286,7 @@ class ChannelPlan:
                 stream routes rows by symbol, so it cannot read such a channel.
 
         An unknown source raises the `KeyError` of `Catalog.source`, and a bad key declaration
-        the `ValueError` of `schema.rename`.
+        the `ValueError` of `source_columns.rename`.
         """
         asset_class = cast("AssetClass", spec.asset_class)
         key = f"{asset_class.value}/{channel}"

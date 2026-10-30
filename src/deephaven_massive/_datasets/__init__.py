@@ -3,10 +3,15 @@
 The modules here describe datasets without performing I/O, starting threads, or calling
 Deephaven:
 
-- `catalog`: the frozen `DatasetSpec` of every dataset, the `Catalog` that holds them by name,
-  and the filter-parameter rules;
-- `schema`: the closed set of column types, the `Schema` of each dataset kind, and the
-  flattening of REST models into rows;
+- `catalog`: the frozen `DatasetSpec` of every dataset, and the `Catalog` that holds them by
+  name;
+- `filters`: the `filters=` rules, the keys a dataset takes and the values it sends;
+- `schema`: the closed set of column types, the `Schema` of each dataset, and the merge of a
+  kind's sources into it;
+- `source_columns`: the columns one source contributes to one dataset, after the key rename;
+- `column_descriptions`: the description of every dataset column, and the spelling and order
+  of the transports;
+- `column_reference`: the generated column reference pages, and their sync;
 - `request`: the `Request` record a verb hands to a transport, and the other plain records of a
   request;
 - `timestamps`: the declared unit of every timestamp field and its conversion to nanoseconds;

@@ -51,8 +51,8 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   paced requests cannot all start within a minute logs its least duration at INFO, and a
   `poll()` whose cycles need more paced requests than its interval allows logs one WARNING.
 - **Rows.** Each page's rows go through `_massive.to_batch` (strict decoding against the path's
-  generated fields), then `schema.rename`'s column mapping for the dataset, the timestamp
-  routine of `_datasets/timestamps.py`, and the lattice widening of `schema.widen`, into one
+  generated fields), then `source_columns.rename`'s column mapping for the dataset, the timestamp
+  routine of `_datasets/timestamps.py`, and the lattice widening of `source_columns.widen`, into one
   Arrow batch of the dataset's merged schema. Only one page of decoded rows is held at a time.
   A row that carries an `error` (a ticker the plan does not include) keeps its `Error` and
   `Message` columns and is logged once.
@@ -99,8 +99,9 @@ from urllib.parse import urlsplit
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._datasets.catalog import filter_key, takes_instants
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
+from deephaven_massive._datasets.filters import filter_key, takes_instants
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import (
     DATE,
@@ -111,13 +112,7 @@ from deephaven_massive._datasets.row_times import (
     time_rule,
     within,
 )
-from deephaven_massive._datasets.schema import (
-    OPTION_ROOT,
-    RAW_SYMBOL,
-    rename,
-    required_fields,
-    widen,
-)
+from deephaven_massive._datasets.source_columns import rename, required_fields, widen
 from deephaven_massive._datasets.symbols import (
     SymbolTable,
     WireSymbols,
@@ -171,7 +166,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DaySpan, TimeRange
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._datasets.schema import ColumnType, SourceColumn
+    from deephaven_massive._datasets.schema import ColumnType
+    from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._massive import DriftSample, Patience, RestClient, RestPath
@@ -354,7 +350,7 @@ def _axis_query(
 ) -> dict[str, object]:
     """Return the time-axis parameters of a request, by wire name.
 
-    An instant parameter (`catalog.takes_instants`: a timestamp, or a date parameter whose
+    An instant parameter (`filters.takes_instants`: a timestamp, or a date parameter whose
     row field is an instant, such as `published_utc`) gets an instant
     (`dates.instant_bound`): a date bound becomes the start of its day in the request's day
     zone, an upper one the start of the next day, so a date never leaves the day boundary to
@@ -406,8 +402,8 @@ def _filter_days(
 ) -> dict[str, object]:
     """Return the query with each date on an instant range filter as its day's bound.
 
-    `Catalog.check_filters` keeps a date given to a range filter of a parameter that compares
-    instants (`catalog.takes_instants`, such as `last_updated.gte`), because its day zone
+    `filters.check_filters` keeps a date given to a range filter of a parameter that compares
+    instants (`filters.takes_instants`, such as `last_updated.gte`), because its day zone
     depends on the request's symbols. Here it becomes the instant that keeps the filter's
     calendar meaning (`dates.instant_bound`): `.gte` a day is from its start, `.lt` a day
     before its start, `.gt` a day after its end, and `.lte` a day up to its end. The check

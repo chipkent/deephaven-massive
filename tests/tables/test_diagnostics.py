@@ -41,6 +41,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     as_row,
     describe_symbols,
+    pascal_case,
     shown_query,
 )
 from deephaven_massive._tables.liveness import new_scope
@@ -905,3 +906,17 @@ def test_a_long_query_is_cut_like_the_symbol_list() -> None:
     long = "<StreamHistoryQuery stocks.trades symbols=(" + "'AAPL', " * 100 + ")>"
     assert shown_query(long) == long[: QUERY_SHOWN - 1] + "…"
     assert len(shown_query(long)) == QUERY_SHOWN
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("sip_timestamp", "SipTimestamp"),
+        ("last_trade.sip_timestamp", "LastTradeSipTimestamp"),
+        ("id", "Id"),
+        ("filer_cik", "FilerCik"),
+        ("alreadyCamel", "AlreadyCamel"),
+    ],
+)
+def test_pascal_case(path: str, expected: str) -> None:
+    assert pascal_case(path) == expected

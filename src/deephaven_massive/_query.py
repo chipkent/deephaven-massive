@@ -57,6 +57,7 @@ from deephaven.table_factory import ring_table
 from deephaven_massive._config import require_positive_int, require_positive_number
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.history_source import (
     Alternative,
@@ -66,7 +67,6 @@ from deephaven_massive._datasets.history_source import (
     partition_dates,
     rest_history_problem,
 )
-from deephaven_massive._datasets.schema import TRANSPORT_LABELS
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
 from deephaven_massive._enums import (
     HistorySource,
