@@ -35,9 +35,9 @@ Open `latest` from the console's variable list, or click its name in the output,
 
 Streaming crypto needs a paid Currencies plan. On a free plan the call, or the table soon
 after, fails with an `EntitlementError` saying the plan does not include the stream: the free
-plans read through REST only. A free plan can still make a live table, one that asks Massive again on a timer.
-This one re-reads the day's Apple headlines every five minutes, and adds each new article as
-it appears:
+plans read through REST only. A free plan can still make a live table, one that asks Massive
+again on a timer. This one re-reads the day's Apple headlines every five minutes, and adds
+each new article as it appears:
 
 ```python
 from deephaven.time import dh_today
@@ -72,7 +72,8 @@ traded.
 
 The dates can be text, Python `date` and `datetime` values, or Deephaven's own time values.
 That lets you take a range straight from another table. This finds the minute of 29 October
-2026 when Apple traded the most shares, then reads every trade inside that minute:
+2026 when Apple traded the most shares, then reads every trade inside that minute (reading
+individual trades needs a Stocks plan that includes them):
 
 ```python
 minutes = m.stocks.bars("AAPL").history("2026-10-29", "2026-10-29")

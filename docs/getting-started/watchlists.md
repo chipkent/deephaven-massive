@@ -88,16 +88,19 @@ run late.
 
 Every row must hold Massive's exact ticker: `C:EURUSD`, not `EUR/USD`; `BRK.B`, not Yahoo's
 `BRK-B`. The library never rewrites a watchlist, so what the table says is exactly what is
-streamed and matched. When the current rows include one that is not Massive's spelling, the
-verb raises `ValueError` and names it.
+streamed and matched.
 
-A row added later that is not Massive's spelling is skipped. The table keeps running, the
-library logs the value once, and `m.streams()` lists it in the stream's `Error` column. Fix or
-delete the row and the problem clears; a fixed row subscribes. A watchlist whose every row is
-bad is refused with `ValueError`, rather than starting an empty stream. To fail the table on
-a bad row instead, create the session with
+A row that is not Massive's spelling is skipped, whether it was there when you called the verb
+or arrived later. The table keeps running without it, the library logs the value once, and
+`m.streams()` lists it in the stream's `Error` column. Fix or delete the row and the problem
+clears; a fixed row subscribes. A watchlist whose every row is bad is refused with
+`ValueError`, rather than starting an empty stream.
+
+To be strict instead, create the session with
 `dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)`, or set the environment variable
-`DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS=raise`.
+`DEEPHAVEN_MASSIVE_NONCANONICAL_SYMBOLS=raise`. Then a bad row present at the call raises
+`ValueError`, and one added later fails the table. Symbols you pass in code, as a string or a
+list, are always checked strictly: a bad one raises `ValueError` at once.
 
 To accept other spellings, convert the table first. `dm.canonicalize_symbols` returns a table
 whose `Symbol` column holds Massive's tickers, converted row by row as rows arrive:
