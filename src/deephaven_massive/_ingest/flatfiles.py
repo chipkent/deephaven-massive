@@ -156,6 +156,7 @@ from deephaven_massive._errors import (
     from_wire,
 )
 from deephaven_massive._massive import (
+    Cancel,
     ReadColumn,
     ReadPlan,
     Transport,
@@ -590,6 +591,7 @@ class FlatFileHistory:
         *,
         dates: Sequence[date],
         call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the rows of `window` from the dataset's flat files, as one static table.
 
@@ -599,7 +601,9 @@ class FlatFileHistory:
         before this method returns. If any read fails, or this thread is interrupted, every
         other read stops at its next block, reads that have not started are cancelled, and the
         failure of the earliest file is raised. Closing the session stops the reads the same
-        way. Logs `source=S3 files=<n> skipped=<dates>` at INFO.
+        way, and so does setting a background read's `stop` token, after which the call raises
+        `MassiveError("<dataset> history: the read was cancelled")` once the pool has drained.
+        Logs `source=S3 files=<n> skipped=<dates>` at INFO.
 
         Args:
             spec: The dataset.
@@ -609,6 +613,8 @@ class FlatFileHistory:
             dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
             call: The call's id (`SessionCore.next_stream_id`), which names its reader threads
                 (`"massive #1 call-9 files_0"`).
+            stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`);
+                None when only the session's close should stop the reads.
 
         Returns:
             A static table in the dataset's schema: the files' rows in date order (and, for
@@ -646,7 +652,15 @@ class FlatFileHistory:
         keys = _keys(prefix, request.venues, dates)
         roll = prefix if _ends_at_an_instant(spec, window) else None
         threads = f"{self._core.thread_prefix} call-{call} files"
-        return self._read(spec, transform, keys, last=dates[-1], roll=roll, threads=threads)
+        return self._read(
+            spec,
+            transform,
+            keys,
+            last=dates[-1],
+            roll=roll,
+            threads=threads,
+            stop=cast("Cancel | None", stop),
+        )
 
     def _read(
         self,
@@ -657,6 +671,7 @@ class FlatFileHistory:
         last: date,
         roll: str | None = None,
         threads: str,
+        stop: Cancel | None = None,
     ) -> Table:
         """Read files on a pool of reader threads and merge their rows into one static table.
 
@@ -677,11 +692,17 @@ class FlatFileHistory:
                 missing files that ends a venue's keys holds a weekday, the next existing
                 session file is read too (`_roll_forward`). None reads only `keys`.
             threads: The name prefix of the reader threads, such as `"massive #1 call-9 files"`.
+            stop: A background read's stop token, which the call's cancel event follows; once
+                it is set, the call raises `MassiveError` naming the cancellation after the
+                pool has drained. None for none.
 
         Returns:
             The merged table.
+
+        Raises:
+            MassiveError: If `stop` was set: the read was cancelled.
         """
-        cancel = threading.Event()
+        cancel = Cancel(*(() if stop is None else (stop,)))
         workers = min(self._core.config.max_concurrency, len(keys))
         with ThreadPoolExecutor(workers, threads) as pool:
             futures = [pool.submit(self._read_key, transform, key, cancel=cancel) for key in keys]
@@ -690,9 +711,12 @@ class FlatFileHistory:
             finally:
                 cancel.set()
                 pool.shutdown(cancel_futures=True)
+        cancel.close()  # a parent keeps each child until then
         # A request already past its check when the session closed may have been answered with
         # any outcome (a row, a missing file, a refusal): report the close instead.
         self._check_open()
+        if stop is not None and stop.is_set():  # the reads stopped early: report no result
+            raise MassiveError(f"{spec.name} history: the read was cancelled")
         parts = [_outcome(future) for future in futures]
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
         _warn_if_none_exist(spec, keys, missing)
