@@ -3684,6 +3684,33 @@ and pool named, no logging call under a leaf lock).
   `404 NoSuchKey`, and S3's `request_id`.
 - Each `DriftReport` carries a sample per drifted key ([section 19.5](#195-runtime-drift)).
 
+**What the library logs.** Above the wire, each layer adds what it knows:
+
+- A schema-drift WARNING names, after the dataset, transport, and field, where the payload came
+  from (the REST path, the WebSocket URL and channel, or the flat file), the symbol of the first
+  row that showed it (a WebSocket sample's, else the per-symbol REST request's), and an extra
+  field's first value: `stocks.trades: WS field 'zz' is not in the schema; it is dropped
+  (schema drift) at wss://delayed.massive.com/stocks channel T; symbol AAPL; first value 1`.
+- A failed `fetch()` or `history()` logs `call <id> failed after <s> s: <message>` at ERROR
+  once, from the call itself, whatever its source; a transport that gives up logs only a
+  WARNING.
+- A stream's open, reuse, each released hold, and its shutdown (with its route and topics) log
+  at DEBUG with its stream id; so do a reactive symbol table's changes, each subscription step
+  (with the desired, acknowledged, and deferred counts), and each `poll()` cycle (requests,
+  rows read and published, and time). A `poll()` failure's ERROR names its stream id.
+- A rejected WebSocket row logs at DEBUG with the streams it fails and its whole raw text; a
+  row with no valid symbol logs at ERROR with the reason (no symbol, or the raw one and why it
+  is not valid).
+- Each WebSocket connection logs a DEBUG summary every 60 s from its loop: data batches and rows
+  per channel, rejected rows, the acknowledged topics, pending and unacknowledged counts, and
+  how long ago each channel last had data, so a stall is visible though nothing failed. The
+  timer always runs; the line is built only when DEBUG is on.
+- A flat-file `history()` whose every trading day's file is missing (two or more) logs a
+  WARNING that the bucket, prefix, or venue may be wrong, before the per-day holiday lines.
+- Nothing is logged while `registry_lock` or another leaf lock is held, and nothing in a blink
+  table's shutdown callback: the shutdown line comes from the connection's loop, which releases
+  the route.
+
 **The rules every change follows** live in the `_debug_log` module docstring, beside the switch,
 with the checks that enforce them: ruff's `G` and `LOG` rules, the logging rules of
 `tests/test_layout.py`, the planted-secret test, and the thread-name tests.
@@ -5120,7 +5147,7 @@ routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/strea
 
 | Case | REST (`rest/batch.py`) | WebSocket (`ws/protocol.py`) | Flat files (`flatfiles/reader.py`) | Library |
 |---|---|---|---|---|
-| **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field). Shown in `SchemaDrift`. |
+| **Extra field** | key not in the path's fields | key not in the channel's fields | header not in the documented headers | Dropped. WARNING once per (dataset, transport, field), naming where it was seen, the first symbol, and the first value ([section 17.1](#171-the-log)). Shown in `SchemaDrift`. |
 | **Unknown envelope status** | a `status` outside `OK`, `DELAYED`, `success`, `ERROR`, `NOT_AUTHORIZED`: the rows are kept, `Page.drift.statuses` | | | WARNING once per (path, status). Never a failure. |
 | **Missing required key** (a key the dataset declares for this source, not `from_request`; a dataset that declares no key has none) | `WireError` naming the key | `Reject(channel, symbol or None, WireError)` | `WireError` before the first block | Loud failure. |
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |

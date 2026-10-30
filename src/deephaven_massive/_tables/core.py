@@ -994,6 +994,18 @@ class SessionCore:
                     continue
                 if isinstance(claim, int):
                     claim = self._open(spec, request, channel=channel, stream_id=claim)
+                    logger.debug(
+                        "stream %d opened: %s channel %s on %s%s",
+                        claim.stream_id,
+                        spec.name,
+                        channel,
+                        claim.host,
+                        claim.path,
+                    )
+                else:
+                    logger.debug(
+                        "stream %d reused: %s channel %s", claim.stream_id, spec.name, channel
+                    )
                 for _, ready in holds:  # inside the try: an interrupt here still cleans up
                     if ready is not None:
                         ready.set()
@@ -1197,6 +1209,12 @@ class SessionCore:
             if opened:
                 self.diagnostics.write(row)
             self._sync_live()
+        logger.debug(
+            "stream %d: a hold released, %d left%s",
+            stream_id,
+            held,
+            "; its stream scope is released" if not held and opened else "",
+        )
         if not held and state.handle is not None:
             with entered(self.exec_ctx):
                 state.handle.scope.release()

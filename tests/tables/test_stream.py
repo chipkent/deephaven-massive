@@ -760,7 +760,7 @@ def test_drift_is_reported_for_the_streams_of_the_channel(
     sink, _ = make_sink(massive_session._core, ALL)
     flusher.routes.add("T", sink)
     with caplog.at_level(logging.WARNING):
-        flusher.drift("T", DriftReport(extra=frozenset({"zz"})))
+        flusher.drift("T", DriftReport(extra=frozenset({"zz"})), where="wss://h/stocks channel T")
         flusher.flush()
     assert "test.trades: WS field 'zz' is not in the schema" in caplog.text
 
@@ -787,7 +787,9 @@ def test_a_sink_whose_session_is_gone_reports_nothing(
     monkeypatch.setattr(sink, "_core", lambda: None)
     flusher.routes.add("T", sink)
     flusher.rows("T", [trade("AAPL")])
-    flusher.drift("T", DriftReport(extra=frozenset({"zz"})))
+    flusher.drift(
+        "T", DriftReport(extra=frozenset({"zz"})), where="wss://socket.test/stocks channel T"
+    )
     flusher.flush()
     assert sink.rows_published == 1
     sink.fail_later("never queued")

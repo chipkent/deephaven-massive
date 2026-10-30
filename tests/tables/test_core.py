@@ -1582,6 +1582,26 @@ def test_stream_drift_recorded_during_the_open_is_kept(
     massive_session.release(result)
 
 
+def test_the_stream_lifecycle_is_logged(
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    q = stream_query(massive_session)
+    with caplog.at_level(logging.DEBUG, logger=_core.__name__):
+        first = q.blink()
+        second = q.append_only()
+        massive_session.release(first)
+        massive_session.release(second)
+        assert fake_streams.shutdown[1].wait(TIMEOUT)  # the last release has run
+    assert [m for m in caplog.messages if m.startswith("stream 1")] == [
+        "stream 1 opened: test.trades channel T on socket.test/stocks",
+        "stream 1 reused: test.trades channel T",
+        "stream 1: a hold released, 1 left",
+        "stream 1: a hold released, 0 left; its stream scope is released",
+    ]
+
+
 # --- The live set, failing on close, diagnostics views, and dying threads -----------------------
 
 

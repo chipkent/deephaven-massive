@@ -695,6 +695,7 @@ class FlatFileHistory:
         self._check_open()
         parts = [_outcome(future) for future in futures]
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
+        _warn_if_none_exist(spec, keys, missing)
         self._skip_missing(spec, missing, last=last)
         logger.info(
             "%s history: source=S3 files=%d skipped=%s",
@@ -913,7 +914,11 @@ class FlatFileHistory:
                 self._check(cancel)
                 try:
                     return self._gather(
-                        batches, transform, limit=_TABLE_BLOCKS * plan.block_size, cancel=cancel
+                        batches,
+                        transform,
+                        limit=_TABLE_BLOCKS * plan.block_size,
+                        cancel=cancel,
+                        where=file.location,
                     )
                 except pa.ArrowException as error:
                     raise MassiveError(f"cannot read {file.location}: {error}") from error
@@ -937,6 +942,7 @@ class FlatFileHistory:
         *,
         limit: int,
         cancel: threading.Event,
+        where: str,
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
@@ -949,6 +955,8 @@ class FlatFileHistory:
             transform: The request's block transform.
             limit: The bytes of surviving rows that make one table.
             cancel: The call's cancel event, checked after each block.
+            where: The file's location (`s3://<bucket>/<key> at <endpoint>`), for the drift
+                WARNING.
 
         Returns:
             The file's tables, in file order.
@@ -960,7 +968,9 @@ class FlatFileHistory:
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
                 if not reported:  # every batch of a file carries the same report
-                    self._core.drift.report(transform.dataset, Transport.FLAT_FILES, drift)
+                    self._core.drift.report(
+                        transform.dataset, Transport.FLAT_FILES, drift, where=where
+                    )
                     reported = True
                 rows = transform.apply(batch, received=time.time_ns())
                 if rows.num_rows:
@@ -1014,6 +1024,33 @@ class FlatFileHistory:
             logger.warning(
                 "%s: %s does not exist; skipping %s (a market holiday?)", spec.name, key.key, day
             )
+
+
+def _warn_if_none_exist(spec: DatasetSpec, keys: Sequence[_Key], missing: Sequence[_Key]) -> None:
+    """Warn when not one of several trading days' files exists: the address may be wrong.
+
+    Each missing trading day's file is otherwise skipped as a likely holiday, so a wrong prefix,
+    bucket, or venue would read as a run of holidays and return an empty table quietly. Two
+    or more trading days' files, all missing, are logged at WARNING with the count and where
+    they were looked for.
+
+    Args:
+        spec: The dataset.
+        keys: Every file the call read, in date order.
+        missing: The files S3 reported as missing.
+    """
+    trading = [key for key in keys if is_trading_day(spec.asset_class, key.day)]
+    absent = set(missing)
+    if len(trading) > 1 and all(key in absent for key in trading):
+        logger.warning(
+            "%s: 0 of %d trading days' files exist (%s..%s, first looked for at %s); "
+            "the bucket, prefix, or venue may be wrong",
+            spec.name,
+            len(trading),
+            trading[0].day.isoformat(),
+            trading[-1].day.isoformat(),
+            trading[0].key,
+        )
 
 
 def _released(error: WireError) -> WireError:

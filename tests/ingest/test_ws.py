@@ -355,7 +355,13 @@ def test_a_row_without_a_symbol_fails_only_the_all_streams(
     ws_session.flush()
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
-    assert caplog.text.count("has no valid symbol; failing the channel's ALL streams") == 2
+    assert caplog.text.count("; failing the channel's ALL streams") == 2
+    # Each line says why the row has no symbol: none at all, or the raw one that is not valid.
+    assert "a T row has no valid symbol (it has none)" in caplog.text
+    assert (
+        "a T row has no valid symbol ('not a symbol' is not a spelling the library reads)"
+        in caplog.text
+    )
     del aapl, every
 
 
@@ -2906,6 +2912,70 @@ def test_buffered_rows_are_shown_until_they_are_published(
     ws_session.session.release(result)
 
 
+# --- logging -------------------------------------------------------------------------------------
+
+_URL = "wss://socket.test/stocks"
+
+
+def test_the_connection_logs_drift_rejects_and_a_summary(
+    ws_session: WsSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    other = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.MSFT")
+    connection = ws_session.connection()
+    first = ws_session.on_loop(connection, lambda: connection._summary)
+    assert first is not None  # the first generation started the summary's timer
+    with caplog.at_level(logging.DEBUG):
+        ws_session.send(trade("AAPL", zz=1), trade("AAPL", p="bad"))
+        ws_session.flush()
+        ws_session.unsubscribed("T.AAPL")  # the reject failed stream 1, which let its topic go
+        ws_session.on_loop(connection, connection._summarize)
+    # Each summary starts the next window's timer.
+    assert ws_session.on_loop(connection, lambda: connection._summary) is not first
+    assert f"(schema drift) at {_URL} channel T; symbol AAPL; first value 1" in caplog.text
+    [rejected] = [m for m in caplog.messages if "a rejected row fails" in m]
+    assert rejected.startswith(f"{_URL} channel T: a rejected row fails streams [1]: ")
+    assert rejected.endswith('"p":"bad","q":1,"t":1700000000000,"s":100,"z":3,"ds":"100"}')
+    [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
+    assert summary.startswith(
+        f"{_URL}: last 60 s: 1 data batches, rows T=1, 1 rejected; 1 of 1 topics acknowledged "
+        "['T.MSFT'], 0 pending, 0 with no acknowledgement; last data T "
+    )
+    assert summary.endswith(" s ago; state CONNECTED, 0 reconnects")
+    # The next window starts empty; with DEBUG off the summary is counted but not logged.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        ws_session.on_loop(connection, connection._summarize)
+    assert "1 data batches" not in caplog.text
+    assert "0 data batches, rows none, 0 rejected" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        ws_session.on_loop(connection, connection._summarize)
+    assert "last 60 s" not in caplog.text
+    del result, other
+
+
+def test_symbol_changes_and_shutdowns_are_logged(
+    ws_session: WsSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    with caplog.at_level(logging.DEBUG, logger=ws.__name__):
+        result = ws_session.query(TRADES, watchlist).append_only()
+        ws_session.subscribed("T.AAPL")
+        watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+        ws_session.subscribed("T.MSFT")
+        ws_session.session.release(result)
+        ws_session.unsubscribed("T.AAPL")  # the stream shut down and released its topics
+    assert "stream 1: its symbol table added ['MSFT'] and removed []" in caplog.messages
+    assert (
+        f"stream 1 shut down: its route is removed and 2 topics released on {_URL}"
+        in caplog.messages
+    )
+
+
 # --- thread names --------------------------------------------------------------------------------
 
 _DIVIDENDS_PATH = "/stocks/v1/dividends"
@@ -2992,3 +3062,17 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     assert polls[1] == f"{polls[0]} rest_0"
     custom_session.session.release(result)
     custom_session.session.release(table)
+
+
+def test_a_reconnect_keeps_the_one_summary_timer(
+    ws_session: WsSession, fake_ws_server: FakeMassiveServer
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    first = ws_session.on_loop(connection, lambda: connection._summary)
+    assert first is not None
+    fake_ws_server.close()  # the client reconnects: a second generation opens
+    ws_session.wait(lambda s: s.opens == 2)
+    assert ws_session.on_loop(connection, lambda: connection._summary) is first
+    del result

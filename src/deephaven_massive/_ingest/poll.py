@@ -501,7 +501,9 @@ class Poller:
             return self._carry_on(core, error)
         except Exception as error:  # a defect: logged with its trace, and the next cycle runs
             if not self._stop.is_set():
-                logger.exception("%s poll(): the cycle failed", self._spec.name)
+                logger.exception(
+                    "%s poll() stream %d: the cycle failed", self._spec.name, self._stream_id
+                )
             return self._carry_on(core, error)
 
     def _publish_cycle(self, core: SessionCore, pool: ThreadPoolExecutor) -> bool:
@@ -514,6 +516,7 @@ class Poller:
         Returns:
             False if the poller was stopped while it read, so nothing was published.
         """
+        began = self._clock.monotonic()
         symbols = self._symbols()
         record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST.value)
         table, requests = self._read(
@@ -521,7 +524,17 @@ class Poller:
         )
         if self._stop.is_set():
             return False
-        self._published += self._publish(table)
+        published = self._publish(table)
+        self._published += published
+        logger.debug(
+            "stream %d: %s poll() cycle: %d requests, %d rows read, %d published in %.3f s",
+            self._stream_id,
+            self._spec.name,
+            requests,
+            table.num_rows,
+            published,
+            self._clock.monotonic() - began,
+        )
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=requests,
@@ -547,7 +560,7 @@ class Poller:
         if self._stop.is_set():
             return False
         if isinstance(error, MassiveError):
-            logger.error("%s poll(): %s", self._spec.name, error)
+            logger.error("%s poll() stream %d: %s", self._spec.name, self._stream_id, error)
         core.update_streams({self._stream_id: StreamUpdate(error=str(error))})
         return True
 
@@ -706,7 +719,9 @@ class Poller:
                 return False
             closed = core.fail_stream(self._stream_id, str(error))
             if closed is None:
-                logger.error("%s poll() failed: %s", self._spec.name, error)
+                logger.error(
+                    "%s poll() stream %d failed: %s", self._spec.name, self._stream_id, error
+                )
             self._publisher.publish_failure(
                 error if closed in (None, str(error)) else MassiveError(closed)
             )

@@ -1046,6 +1046,7 @@ def test_crypto_trades_every_day(
     with pytest.raises(dm.MassiveError, match=r"2025-03-02 is not yet published .*holiday"):
         q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
     clock(NOW)
+    caplog.clear()
     # ... or if that weekend day was a holiday, which warns like a missing weekday.
     put(
         "global_crypto/trades_v1/2025/03/2025-03-02.csv.gz",
@@ -1675,7 +1676,11 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
         "MassiveConfig s3_bucket and s3_endpoint_url"
     )
     assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
-    assert caplog.messages == []
+    # Not skipped as holidays: the call fails, and its failure is logged with its id.
+    [failed] = caplog.messages
+    assert re.fullmatch(
+        rf"call 1 failed after \d+\.\d{{3}} s: {re.escape(str(info.value))}", failed
+    )
 
 
 def test_a_range_without_any_file_is_an_empty_table(
@@ -1688,8 +1693,43 @@ def test_a_range_without_any_file_is_an_empty_table(
     assert t.size == 0
     assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert caplog.messages == [
+        (
+            "stocks.trades: 0 of 2 trading days' files exist (2025-03-03..2025-03-04, first "
+            f"looked for at {TRADES_0303}); the bucket, prefix, or venue may be wrong"
+        ),
         f"stocks.trades: {TRADES_0303} does not exist; skipping 2025-03-03 (a market holiday?)",
         f"stocks.trades: {TRADES_0304} does not exist; skipping 2025-03-04 (a market holiday?)",
+    ]
+
+
+def test_one_missing_trading_day_is_only_a_holiday(
+    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Saturday, Sunday, and one Monday: a single missing trading day says nothing of the address.
+    q = query(session, STOCK_TRADES, symbols=dm.ALL)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES)
+    assert caplog.messages == [
+        f"stocks.trades: {TRADES_0303} does not exist; skipping 2025-03-03 (a market holiday?)"
+    ]
+
+
+def test_a_crypto_weekend_without_files_warns_about_the_address(
+    *, session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Crypto trades every day, so a Saturday and a Sunday are two trading days.
+    saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
+    sunday = "global_crypto/trades_v1/2025/03/2025-03-02.csv.gz"
+    q = query(session, CRYPTO_TRADES, symbols=dm.ALL)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
+    assert caplog.messages == [
+        (
+            "crypto.trades: 0 of 2 trading days' files exist (2025-03-01..2025-03-02, first "
+            f"looked for at {saturday}); the bucket, prefix, or venue may be wrong"
+        ),
+        f"crypto.trades: {saturday} does not exist; skipping 2025-03-01 (a market holiday?)",
+        f"crypto.trades: {sunday} does not exist; skipping 2025-03-02 (a market holiday?)",
     ]
 
 
@@ -2440,8 +2480,10 @@ def missing_header(name: str) -> str:
 
 
 def drift_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # Each WARNING ends with the file that showed the drift first, which for a call of several
+    # files depends on which reader finished first; the file is checked where only one is read.
     return [
-        r.getMessage()
+        r.getMessage().split(" at s3://", 1)[0]
         for r in caplog.records
         if r.name == DRIFT_LOGGER and r.levelno == logging.WARNING
     ]
@@ -2595,6 +2637,8 @@ def test_a_file_with_a_header_and_no_rows_still_reports_its_drift(
         t = q.history("2025-03-03", "2025-03-03")
     assert rows(t) == []
     assert drift_warnings(caplog) == [extra_header("halted")]
+    # The WARNING names the file, so the log says where to look.
+    assert caplog.messages == [f"{extra_header('halted')} at {LOCATION.format(TRADES_0303)}"]
 
 
 def test_an_empty_file_is_a_massive_error(*, session: dm.MassiveSession, fake_s3: FakeS3) -> None:

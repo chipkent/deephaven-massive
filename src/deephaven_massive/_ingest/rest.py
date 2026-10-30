@@ -167,7 +167,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
-    from deephaven_massive._massive import Patience, RestClient, RestPath
+    from deephaven_massive._massive import DriftSample, Patience, RestClient, RestPath
     from deephaven_massive._tables.core import SessionCore
     from deephaven_massive._tables.diagnostics import DriftRegistry
 
@@ -825,6 +825,7 @@ class _Converter:
         batches: list[pa.RecordBatch] = []
         extra: set[str] = set()
         missing: set[str] = set()
+        samples: dict[str, DriftSample] = {}
         kept = [] if self.projected else flagged
         for part, required in ((good, self.required), (kept, self.required_on_error)):
             if not part:
@@ -838,7 +839,9 @@ class _Converter:
                 raise RowDataError(str(error)) from error
             extra |= drift.extra
             missing |= drift.missing
-        return batches, DriftReport(extra=frozenset(extra), missing=frozenset(missing)), flagged
+            samples = {**drift.samples, **samples}  # the first part's sample of a key wins
+        drift = DriftReport(extra=frozenset(extra), missing=frozenset(missing), samples=samples)
+        return batches, drift, flagged
 
     def _apply(self, batch: pa.RecordBatch, symbol: str | None) -> pa.RecordBatch:
         """Turn one decoded batch into a batch of the dataset's schema.
@@ -1425,7 +1428,9 @@ class RestReader:
                 self.drift.report_statuses(template, page.drift.statuses)
                 self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
                 batches, drift, flagged = converter.convert(page.rows, call.symbol)
-                self.drift.report(spec.name, Transport.REST, drift)
+                self.drift.report(
+                    spec.name, Transport.REST, drift, where=f"GET {template}", symbol=call.symbol
+                )
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
@@ -1936,7 +1941,7 @@ class RestEndpoints:
                 )
             )
             future.set_exception(failure)
-            _report(failure)
+            _report_host_failure(failure)
             self._core.diagnostics.write(
                 ConnectionRow(
                     transport=Transport.REST,
@@ -2060,26 +2065,21 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Raises:
-            MassiveError: Logged at ERROR first: `AuthenticationError` (HTTP 401),
-                `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row
-                that breaks the schema, and `MassiveError` itself for any other failure (a
-                rate limit as `"rate limited: ..."`, a closed session as `"... is closed"`).
+        Errors, which the verb's call logs at ERROR: `AuthenticationError` (HTTP 401),
+        `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`), `RowDataError` for a row that breaks
+        the schema, and `MassiveError` itself for any other failure (a rate limit as `"rate
+        limited: ..."`, a closed session as `"... is closed"`).
 
         A parameter a path does not take raises the `ValueError` of `_base` before any request:
         every path is planned before the first one is read.
         """
         reader = self._reader(f"call-{call}")
-        try:
-            table, _ = reader.read_fetch(
-                spec,
-                request,
-                symbols=request.symbols,
-                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
-            )
-        except MassiveError as error:
-            _report(error)
-            raise
+        table, _ = reader.read_fetch(
+            spec,
+            request,
+            symbols=request.symbols,
+            pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+        )
         return self._static(spec, table)
 
     def history(
@@ -2112,11 +2112,10 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Raises:
-            MassiveError: As `fetch` raises it, logged at ERROR first; for a bar of a day or
-                longer stamped at a time or on a day Massive is not known to use for its class;
-                for a page whose `adjusted` echo differs from the request; and for a symbol
-                whose later page answers HTTP 404, its data cut short.
+        Errors: as `fetch` raises them, and `MassiveError` for a bar of a day or longer stamped
+        at a time or on a day Massive is not known to use for its class, for a page whose
+        `adjusted` echo differs from the request, and for a symbol whose later page answers
+        HTTP 404, its data cut short.
         """
         reader = self._reader(f"call-{call}")
         if isinstance(request.symbols, _All):
@@ -2143,20 +2142,16 @@ class RestEndpoints:
             shape=shape,
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
-        try:
-            table, requests = reader.read(
-                spec,
-                rest_path,
-                calls,
-                request=request,
-                limit=None,
-                window=window,
-                remedy=_history_remedy(request),
-                patience=reader.patience(),
-            )
-        except MassiveError as error:
-            _report(error)
-            raise
+        table, requests = reader.read(
+            spec,
+            rest_path,
+            calls,
+            request=request,
+            limit=None,
+            window=window,
+            remedy=_history_remedy(request),
+            patience=reader.patience(),
+        )
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
         return self._static(spec, table)
 
@@ -2295,11 +2290,11 @@ def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) 
     return [call_bucket(spec, path.template, call) for path, calls in planned for call in calls]
 
 
-def _report(error: MassiveError) -> None:
-    """Log a failure at ERROR with exactly the text its exception carries.
+def _report_host_failure(error: MassiveError) -> None:
+    """Log a failed host decision at ERROR with exactly the text its exception carries.
 
-    The exception itself propagates to the caller, whose traceback shows where it came from,
-    so the record holds the message alone: the HTTP status, the path, and the request id.
+    No verb call owns a host decision (every caller waiting for it shares the failure), so the
+    record holds the message alone, which names the asset class, the request, and its status.
 
     Args:
         error: The failure.

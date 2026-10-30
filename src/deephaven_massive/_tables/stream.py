@@ -817,10 +817,12 @@ class _Drift:
     Attributes:
         channel: The channel.
         drift: The frame's drift for the channel.
+        where: The connection's URL and the channel, for the drift WARNING.
     """
 
     channel: str
     drift: DriftReport
+    where: str
 
 
 class Flusher:
@@ -977,14 +979,16 @@ class Flusher:
         """
         self._control.put(_Fail(tuple(stream_ids), error))
 
-    def drift(self, channel: str, drift: DriftReport) -> None:
+    def drift(self, channel: str, drift: DriftReport, *, where: str) -> None:
         """Ask the flush thread to report a channel's drift for the streams on it. Never blocks.
 
         Args:
             channel: The channel.
             drift: The frame's drift for the channel.
+            where: Where the frame came from, such as `"wss://delayed.massive.com/stocks
+                channel T"`, named in the drift WARNING.
         """
-        self._control.put(_Drift(channel, drift))
+        self._control.put(_Drift(channel, drift, where))
 
     def _run(self) -> None:
         """Flush every interval until `stop()`; a failing flush is logged and the next one runs.
@@ -1053,7 +1057,7 @@ class Flusher:
                     self._publish(rows, sinks, arrived=arrived, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
-                    self._report_drift(routes.get(item.channel, ()), item.drift)
+                    self._report_drift(routes.get(item.channel, ()), item.drift, where=item.where)
             _report_updates(updates)
             if self._shown:  # forget the misses of streams no longer routed
                 live = {sink.stream_id for sinks in routes.values() for sink in sinks}
@@ -1155,16 +1159,17 @@ class Flusher:
                 )
 
     @staticmethod
-    def _report_drift(sinks: tuple[StreamSink, ...], drift: DriftReport) -> None:
+    def _report_drift(sinks: tuple[StreamSink, ...], drift: DriftReport, *, where: str) -> None:
         """Log a channel's drift once per session, dataset, and field; add it to each stream's row.
 
         Args:
             sinks: The channel's streams.
             drift: The drift.
+            where: The connection's URL and the channel.
         """
         live = [(core, sink) for sink in sinks if (core := sink.core()) is not None]
         for core, dataset in dict.fromkeys((core, sink.plan.dataset) for core, sink in live):
-            core.drift.report(dataset, Transport.WS, drift)
+            core.drift.report(dataset, Transport.WS, drift, where=where)
         for core, sink in live:
             core.record_stream_drift(sink.stream_id, Transport.WS.value, drift)
 

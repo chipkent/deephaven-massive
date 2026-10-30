@@ -22,7 +22,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._massive import DriftReport, Transport
+from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables.diagnostics import (
     CONNECTIONS,
     RATE_LIMITS,
@@ -488,9 +488,14 @@ def test_schema_drift_reaches_both_tables(
 DRIFT_LOGGER = "deephaven_massive._tables.diagnostics"
 
 
+# Where the drift was seen, as a transport names it in the WARNING.
+WHERE = "GET /v3/trades/{stockTicker}"
+
+
 def extra(dataset: str, transport: str, field: str) -> str:
     return (
-        f"{dataset}: {transport} field {field!r} is not in the schema; it is dropped (schema drift)"
+        f"{dataset}: {transport} field {field!r} is not in the schema; it is dropped "
+        f"(schema drift) at {WHERE}"
     )
 
 
@@ -513,14 +518,21 @@ def test_drift_warns_once_per_dataset_transport_and_field(
     drift = DriftReport(extra=frozenset({"halted"}), missing=frozenset({"trf_id"}))
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
         for _ in range(3):
-            registry.report("stocks.trades", Transport.FLAT_FILES, drift)
-        registry.report("stocks.trades", Transport.FLAT_FILES, DriftReport())
+            registry.report("stocks.trades", Transport.FLAT_FILES, drift, where=WHERE)
+        registry.report("stocks.trades", Transport.FLAT_FILES, DriftReport(), where=WHERE)
         # Another transport, or another dataset, is another warning.
-        registry.report("stocks.trades", Transport.REST, DriftReport(extra=frozenset({"halted"})))
-        registry.report("stocks.quotes", Transport.FLAT_FILES, DriftReport(extra=drift.extra))
+        registry.report(
+            "stocks.trades", Transport.REST, DriftReport(extra=frozenset({"halted"})), where=WHERE
+        )
+        registry.report(
+            "stocks.quotes", Transport.FLAT_FILES, DriftReport(extra=drift.extra), where=WHERE
+        )
     assert drift_warnings(caplog) == [
         extra("stocks.trades", "FLAT_FILES", "halted"),
-        "stocks.trades: FLAT_FILES field 'trf_id' is missing; it reads as null (schema drift)",
+        (
+            "stocks.trades: FLAT_FILES field 'trf_id' is missing; it reads as null "
+            f"(schema drift) at {WHERE}"
+        ),
         extra("stocks.trades", "REST", "halted"),
         extra("stocks.quotes", "FLAT_FILES", "halted"),
     ]
@@ -530,7 +542,7 @@ def test_drift_warnings_are_sorted_within_a_report(caplog: pytest.LogCaptureFixt
     registry = DriftRegistry()
     drift = DriftReport(extra=frozenset({"b", "a"}), missing=frozenset({"d", "c"}))
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        registry.report("stocks.trades", Transport.WS, drift)
+        registry.report("stocks.trades", Transport.WS, drift, where=WHERE)
     assert [message.split("'")[1] for message in drift_warnings(caplog)] == ["a", "b", "c", "d"]
 
 
@@ -539,7 +551,9 @@ def test_drift_ignores_statuses_in_report_and_warns_per_path_and_status(
 ) -> None:
     registry = DriftRegistry()
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        registry.report("stocks.trades", Transport.REST, DriftReport(statuses=frozenset({"X"})))
+        registry.report(
+            "stocks.trades", Transport.REST, DriftReport(statuses=frozenset({"X"})), where=WHERE
+        )
         assert drift_warnings(caplog) == []
         registry.report_statuses("/v3/trades/{stockTicker}", frozenset({"PARTIAL", "MAYBE"}))
         registry.report_statuses("/v3/trades/{stockTicker}", frozenset({"PARTIAL"}))
@@ -590,7 +604,7 @@ def test_drift_warns_once_across_racing_threads(caplog: pytest.LogCaptureFixture
     def report() -> None:
         start.wait(TIMEOUT)
         for _ in range(50):
-            registry.report("stocks.trades", Transport.FLAT_FILES, drift)
+            registry.report("stocks.trades", Transport.FLAT_FILES, drift, where=WHERE)
             registry.record(1, "REST", drift)
 
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
@@ -656,7 +670,7 @@ def test_the_lock_makes_the_check_and_the_update_one_step(
     texts: list[str | None] = []
 
     def report() -> None:
-        registry.report("stocks.trades", Transport.FLAT_FILES, drift)
+        registry.report("stocks.trades", Transport.FLAT_FILES, drift, where=WHERE)
         texts.append(registry.record(1, "REST", drift))
 
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
@@ -667,6 +681,37 @@ def test_the_lock_makes_the_check_and_the_update_one_step(
             thread.join(TIMEOUT)
     assert drift_warnings(caplog) == [extra("stocks.trades", "FLAT_FILES", "halted")]
     assert sorted(texts, key=str) == [None, "REST:halted+"]
+
+
+def test_a_drift_warning_names_where_the_symbol_and_the_first_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registry = DriftRegistry()
+    where = "wss://delayed.massive.com/stocks channel T"
+    drift = DriftReport(
+        extra=frozenset({"vwq", "new"}),
+        missing=frozenset({"x", "y"}),
+        samples={
+            "vwq": DriftSample("AAPL", "182.33"),
+            "new": DriftSample(None, '"a"'),  # no symbol in the sample: the caller's is used
+            "x": DriftSample("MSFT", None),
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        registry.report("stocks.trades", Transport.WS, drift, where=where, symbol="SPY")
+        # Without a sample or a symbol, the WARNING names where alone.
+        registry.report(
+            "stocks.quotes", Transport.WS, DriftReport(extra=frozenset({"q"})), where=where
+        )
+    dropped, null = "is not in the schema; it is dropped", "is missing; it reads as null"
+    at = f"(schema drift) at {where}"
+    assert drift_warnings(caplog) == [
+        f"stocks.trades: WS field 'new' {dropped} {at}; symbol SPY; first value \"a\"",
+        f"stocks.trades: WS field 'vwq' {dropped} {at}; symbol AAPL; first value 182.33",
+        f"stocks.trades: WS field 'x' {null} {at}; symbol MSFT",
+        f"stocks.trades: WS field 'y' {null} {at}; symbol SPY",
+        f"stocks.quotes: WS field 'q' {dropped} {at}",
+    ]
 
 
 # --- Rate limits ---------------------------------------------------------------------------------
