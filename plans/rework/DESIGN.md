@@ -2901,7 +2901,7 @@ stream verb for that class instead of being guessed at.
 to `business.massive.com` with a WARNING. A wrong guess cannot misbehave silently: the server
 either refuses the topic (an explicit `error` that fails that stream and names
 `ws_hosts[AssetClass.STOCKS]`) or serves what the plan includes. A live integration test
-(`tests/ingest/test_hosts_integration.py`, skipped without a key) verifies the host.
+(`tests/ingest/test_host_decision_integration.py`, skipped without a key) verifies the host.
 
 **Indices `V`.** The Value page lists only `wss://business.massive.com/indices`, while its plan
 table says Starter delayed and Advanced real-time, and the indices `A`/`AM` pages list
@@ -3354,7 +3354,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
   naming the path and the verb's way out (`source=dm.HistorySource.FLAT_FILES` for 1-day
   `history()`, requesting 1-day bars for longer ones, `bars(...).history()` for
   `previous_day_bar`;
-  [section 12](#12-timestamp-units-and-day-boundaries)). Bars are stamped before `_keep` drops
+  [section 12](#12-timestamp-units-and-day-boundaries)). Bars are stamped before `keep_window` drops
   the rows outside the window, so an unknown stamp outside it still raises.
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
@@ -5367,7 +5367,7 @@ routing in `_ingest/rest.py`, `_ingest/poll.py`, `_ingest/ws.py`, `_tables/strea
 | **Missing other field** | null | null | a null column of the declared type | A vendor-`required` field or a CSV header: null, WARNING once, `SchemaDrift`. Any other field: null, silently, because JSON omits absent values and the vendor marks almost nothing required. |
 | **Unconvertible value** (the type, the `int64` range, `bool` given as a number, a `long-array` element, `int64` for `long[]`, a `string-array` element that is not text) | `WireError` naming the field, the expected type, and the value (first 200 characters), the whole row logged at DEBUG (first 2,000 characters) | `Reject` for that row's topic; the frame's other rows are delivered | `WireError` naming the header, the type, and Arrow's message | Loud failure. Never coerced: no undeclared conversion is applied. A lattice widening and a named `TYPE_FIXES` conversion ([section 19.4](#194-generated-schemas), for example forex `x` from a decimal string to `long`) are not coercion; a value the named conversion cannot parse fails here. |
 | **Timestamp out of [1990, 2100], or overflow** | in `_datasets/timestamps.py` | in `_datasets/timestamps.py`, in the flush thread as a vectorized mask | in `_datasets/timestamps.py` | Loud failure naming the dataset, the column, the unit, and the value. |
-| **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/hosts.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
+| **Undocumented value of an interpreted field** (`timeframe`) | `_ingest/host_decision.py` | | | `MassiveError` ([section 13.2](#132-host-decision)). |
 | **Symbol spelling the library cannot read** (`canonical_from_wire` returns None) | `RowDataError` naming the spelling | the row is dropped and fails every stream of the dataset on the channel | `MassiveError` naming the spelling | Under `UnknownSymbols.FAIL`, the default, a loud failure whose message names the switch; under `WARN`, the row is kept with a null `Symbol` and the text in `RawSymbol`, WARNING once per spelling (at most 100). |
 
 **A loud failure** depends on the verb: static verbs (`fetch()`, `history()`) raise
@@ -6306,9 +6306,9 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 2 | Unit of REST forex `/v1/last_quote` `timestamp`, crypto `/v1/last` `timestamp`, and forex `/v1/conversion` `last.timestamp` | Registered as ms (`unverified-ms`); the spec tags all three fields `IMilliseconds`, which agrees; the overflow check and the [1990, 2100] bound raise `MassiveError` on a mismatch | `tests/datasets/test_timestamps.py`: ms and ns fixtures; the out-of-range path raises | `tests/datasets/test_timestamps_integration.py`: one request each; the converted `Instant` is within 1 day of now |
 | 3 | Unit of WebSocket `FMV` `t` (documented ns, sample ms) | Magnitude rule for FMV only; logged once | `tests/datasets/test_timestamps.py`: both magnitudes convert correctly | `tests/namespaces/test_crypto_integration.py` (Currencies Business): one FMV frame converts to a current `Instant` |
 | 4 | Futures flat files keyed by session date | Check every block of every futures file against its key; fail loudly otherwise | `tests/massive/flatfiles/test_reader.py`: matching and mismatching fixtures | `tests/ingest/test_flatfiles_integration.py` (S3 credentials): one key per venue |
-| 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_hosts.py`: both replies | `tests/ingest/test_hosts_integration.py`: subscribe `V.I:SPX` on the resolved host |
-| 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_hosts.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_hosts_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
-| 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_hosts.py`: with and without the fields | `tests/ingest/test_hosts_integration.py`: record which fields the live payload carries |
+| 5 | Indices `V` host (`business.` on the page; `socket.`/`delayed.` in the plan table) | `V` uses the class TICK host; a refusal names `ws_hosts[AssetClass.INDICES]` and `business.massive.com` | `tests/ingest/test_host_decision.py`: both replies | `tests/ingest/test_host_decision_integration.py`: subscribe `V.I:SPX` on the resolved host |
+| 6 | TICK host for a base Business key | `business.massive.com` with a WARNING | `tests/ingest/test_host_decision.py`: the snapshot shape with `fmv` and no trades/quotes resolves to `business.` | `tests/ingest/test_host_decision_integration.py` (Business key): `AM.AAPL` is acknowledged on the resolved host |
+| 7 | Futures snapshot `timeframe` fields (in the OpenAPI spec; absent from the documentation page) | Absence yields `socket.` with `Recency=UNKNOWN` and the explicit-verdict rule | `tests/ingest/test_host_decision.py`: with and without the fields | `tests/ingest/test_host_decision_integration.py`: record which fields the live payload carries |
 | 8 | Exact text of the delayed-key verdict message ("real-time") | Case-insensitive substring match; limited to `Recency=UNKNOWN`, whole-step refusal, unpinned host | `tests/ingest/test_ws.py`: verdict and non-verdict messages | `tests/ingest/test_ws_integration.py` (delayed key): subscribe on `socket.` and capture the message |
 | 9 | Unsubscribe acknowledgements | Not awaited; topics are removed immediately | `tests/ingest/test_ws.py`: removal without an acknowledgement | `tests/massive/ws/test_client_integration.py`: record whether an acknowledgement arrives |
 | 10 | Subscribe frame size limit | At most 1,000 topics per frame | `tests/ingest/test_ws.py`: 2,500 topics produce three frames | `tests/massive/ws/test_client_integration.py`: a 1,000-topic frame is acknowledged |

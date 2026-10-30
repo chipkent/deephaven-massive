@@ -2913,7 +2913,7 @@ def stamped_bar() -> Callable[[Mapping[str, Any]], StampedBar]:
 
     Returns:
         A function mapping a row to its stamp in epoch milliseconds and its open, high, low,
-        close, and volume (see `_stamped`).
+        close, and volume (see `stamped`).
     """
     return _stamped
 

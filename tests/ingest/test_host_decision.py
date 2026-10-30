@@ -8,20 +8,20 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._ingest.hosts import (
+from deephaven_massive._ingest.host_decision import (
     BUSINESS_HOST,
     DELAYED_HOST,
     REALTIME_HOST,
     SNAPSHOT_PROBES,
+    HostDecisionCache,
     SnapshotProbe,
     decide,
-    is_error_row,
 )
 from deephaven_massive._massive import Transport, source
 from deephaven_massive._tables.transports import HostDecision
 
 TICK, FMV = ChannelFamily.TICK, ChannelFamily.FMV
-LOGGER = "deephaven_massive._ingest.hosts"
+LOGGER = "deephaven_massive._ingest.host_decision"
 
 Load = Callable[[str, str], bytes]
 
@@ -40,7 +40,7 @@ class Snapshot:
 @pytest.fixture
 def snapshot(load_fixture: Load) -> Callable[[str], Snapshot]:
     def make(name: str) -> Snapshot:
-        body = json.loads(load_fixture("ingest/hosts", name))
+        body = json.loads(load_fixture("ingest/host_decision", name))
         return Snapshot(body["results"])
 
     return make
@@ -199,14 +199,12 @@ def test_a_nested_timeframe_under_a_scalar_is_absent() -> None:
     assert run(AssetClass.STOCKS, fetch).recency is Recency.DELAYED
 
 
-@pytest.mark.parametrize(
-    ("row", "flagged"),
-    [
-        ({"ticker": "SPY", "error": "NOT_ENTITLED", "message": "no"}, True),
-        ({"ticker": "SPY", "message": "a note"}, False),
-        ({"ticker": "SPY", "error": None}, False),
-        ({"ticker": "SPY"}, False),
-    ],
-)
-def test_an_error_row_is_one_whose_error_is_set(row: dict[str, object], flagged: bool) -> None:
-    assert is_error_row(row) is flagged
+def test_forgetting_keeps_a_newer_decision() -> None:
+    cache = HostDecisionCache()
+    key = (AssetClass.STOCKS, ChannelFamily.TICK)
+    old, _ = cache.host_future(key)
+    cache.forget_host(key, old)
+    new, created = cache.host_future(key)
+    assert created
+    cache.forget_host(key, old)  # not the current one: kept
+    assert cache.host_future(key) == (new, False)

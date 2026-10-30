@@ -32,7 +32,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
-from deephaven_massive._ingest import futures_calendar, hosts, poll, ws
+from deephaven_massive._ingest import futures_calendar, host_decision, poll, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, StreamUpdate
 from deephaven_massive._tables.liveness import new_scope
@@ -3041,7 +3041,7 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
         readers.append(cast("Any", fetch).func.__self__.threads)
         return REALTIME
 
-    monkeypatch.setattr(hosts, "decide", decide)
+    monkeypatch.setattr(host_decision, "decide", decide)
     core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     prefix, group = core.thread_prefix, custom_session.connections.group.label
     assert re.fullmatch(r"massive #\d+", prefix), prefix
