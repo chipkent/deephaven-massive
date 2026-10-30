@@ -5889,13 +5889,15 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
     release may surface new findings; the next PR fixes them (or proposes an ignore for owner
     approval).
   - `preview = true` with `explicit-preview-rules = true`, enabling only the preview rules
-    selected by name: `DOC201`, `DOC501`, and `DOC502` (docstring Returns and Raises sections
-    must match the code), and `PLR0904`, `PLR0914`, and `PLR0916` (the Pylint limits on public
+    selected by name: `DOC201` and `DOC501` (docstring Returns and Raises sections must cover
+    the code), and `PLR0904`, `PLR0914`, and `PLR0916` (the Pylint limits on public
     methods, local variables, and boolean expressions, which are still preview rules). Preview
     also switches some stable rules to their preview behavior.
   - Global ignores: `COM812`, which conflicts with `ruff format` (it is the only one of ruff's
     documented formatter-overlap rules that reports anything on formatted code; the others stay
-    enabled), plus `TRY003`, `EM101`, `EM102`, `PLR0913`, and `CPY001`.
+    enabled), plus `TRY003`, `EM101`, `EM102`, `PLR0913`, `CPY001`, and `DOC502` (many functions raise
+    through helpers, which it cannot follow; `tests/test_errors.py` checks the public API's
+    Raises sections in both directions instead).
   - Enforced on purpose: `E501` at 100 columns, `ANN401` (no `Any`), the `TC` import rules,
     `SLF001` in `src/`, `C901` at a maximum of 12, the Pylint size limits (`PLR0904` and
     `PLR0911`–`PLR0916`, except `PLR0913` above), and `PLR0917` with `max-positional-args = 3`.
