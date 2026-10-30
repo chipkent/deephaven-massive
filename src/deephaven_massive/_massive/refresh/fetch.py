@@ -43,10 +43,11 @@ a sibling directory and swaps it in through a backup directory, so a failed fetc
 old snapshot untouched.
 
 The network is reached only through the `get` callable that `fetch` receives. The default,
-`HttpGetter`, uses urllib3 with the CA bundle and proxy of `net.http`, sends the library's
-`User-Agent`, and follows no redirects. It retries only HTTP 429, which the documentation host
-answers to a burst of page requests (see `HttpGetter`); any other failure stops the fetch, and
-a person reruns the command. Tests pass a dictionary-backed `get` instead.
+`HttpGetter`, uses urllib3 with the CA bundle and proxy of `net.http` (sending a user and
+password in the proxy URL as `Proxy-Authorization`, as the REST client does), sends the
+library's `User-Agent`, and follows no redirects. It retries only HTTP 429, which the
+documentation host answers to a burst of page requests (see `HttpGetter`); any other failure
+stops the fetch, and a person reruns the command. Tests pass a dictionary-backed `get` instead.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ from typing import TYPE_CHECKING
 import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT, http
+from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.refresh import docs, knowledge_base, snapshot
 
 if TYPE_CHECKING:
@@ -91,7 +93,7 @@ LLMS_URL = "https://massive.com/docs/llms.txt"
 _TIMEOUT = urllib3.Timeout(connect=10.0, read=60.0)
 _HTTP_OK = 200
 _HTTP_TOO_MANY_REQUESTS = 429
-# The waits before each retry of a 429 without a numeric Retry-After, in seconds; a 429 after
+# The waits before each retry of a 429 without a usable Retry-After, in seconds; a 429 after
 # the last wait fails.
 _RATE_LIMIT_WAITS = (2.0, 4.0, 8.0, 16.0, 32.0)
 # The longest wait obeyed, in seconds, whatever Retry-After asks.
@@ -167,14 +169,17 @@ class HttpGetter:
 
     One urllib3 pool is kept per host, so the hundred-odd documentation pages reuse their
     connections until `close()` (or the end of a `with` block) closes them. The proxy for a
-    host is decided once, from `net.http.https_proxy`, when the host is first requested.
-    Instances are used by one thread, the refresh command's.
+    host is decided once, from `net.http.https_proxy`, when the host is first requested; a
+    user and password in the proxy URL go to the proxy as `Proxy-Authorization`
+    (`net.http.proxy_credentials`), and the pool holds the URL without them, so no error
+    quotes the password. Instances are used by one thread, the refresh command's.
 
     The documentation host answers a burst of page requests with HTTP 429. A 429 is the one
-    answer that is retried: the getter waits the `Retry-After` seconds when the server sends
-    a number (never more than 60), else 2, 4, 8, 16, then 32 seconds, and gives up after five
-    waits. Every other
-    failure fails at once; a person reruns the command.
+    answer that is retried: the getter waits what the `Retry-After` header asks, in either of
+    its forms (seconds or an HTTP date, read by `net.retry.retry_after_seconds`, which logs an
+    unusable value at WARNING) and never more than 60 seconds, else 2, 4, 8, 16, then 32
+    seconds, and gives up after five waits. Every other failure fails at once; a person reruns
+    the command.
 
     Example:
         ::
@@ -221,16 +226,22 @@ class HttpGetter:
 
         Returns:
             A `ProxyManager` when `net.http.https_proxy(host)` names a proxy, else a plain
-            `PoolManager`, both verifying certificates with `net.http.ssl_context()` for urllib3.
+            `PoolManager`, both verifying certificates with `net.http.ssl_context()` for urllib3,
+            the proxy's own certificate included when it is an HTTPS proxy.
         """
         if host not in self._pools:
             proxy = http.https_proxy(host)
             context = http.ssl_context(http.TlsConsumer.URLLIB3)
-            self._pools[host] = (
-                urllib3.ProxyManager(proxy, ssl_context=context)
-                if proxy
-                else urllib3.PoolManager(ssl_context=context)
-            )
+            if proxy:
+                proxy_url, proxy_headers = http.proxy_credentials(proxy)
+                self._pools[host] = urllib3.ProxyManager(
+                    proxy_url,
+                    proxy_headers=proxy_headers,
+                    proxy_ssl_context=context,
+                    ssl_context=context,
+                )
+            else:
+                self._pools[host] = urllib3.PoolManager(ssl_context=context)
         return self._pools[host]
 
     def __call__(self, url: str) -> bytes:
@@ -266,9 +277,8 @@ class HttpGetter:
             wait = next(waits, None)
             if response.status != _HTTP_TOO_MANY_REQUESTS or wait is None:
                 raise FetchError(f"GET {url} answered HTTP {response.status}")
-            retry_after = response.headers.get("Retry-After", "")
-            asked = float(retry_after) if retry_after.isdigit() else wait
-            self._sleep(min(asked, _MAX_WAIT))
+            asked = retry_after_seconds(response.headers.get("Retry-After"), time.time())
+            self._sleep(min(wait if asked is None else asked, _MAX_WAIT))
 
 
 def _download(get: Callable[[str], bytes]) -> list[snapshot.VendorFile]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -8,6 +9,7 @@ from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Self
 
 import pytest
+import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.refresh import fetch, knowledge_base
@@ -219,11 +221,13 @@ class _Server:
     def __init__(self) -> None:
         self.script: list[tuple[int, dict[str, str], bytes]] = []
         self.requests: list[tuple[str, str]] = []
+        self.proxy_authorizations: list[str | None] = []
         server = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 server.requests.append((self.path, self.headers.get("User-Agent", "")))
+                server.proxy_authorizations.append(self.headers.get("Proxy-Authorization"))
                 status, headers, body = server.script.pop(0)
                 self.send_response(status)
                 for name, value in headers.items():
@@ -284,6 +288,20 @@ def test_a_429_waits_the_retry_after_seconds(server: _Server) -> None:
     assert waits == [3.0]
 
 
+@pytest.mark.parametrize(
+    ("header", "wait"),
+    [("Wed, 21 Oct 2015 07:28:00 GMT", 0.0), ("Fri, 31 Dec 9999 23:59:59 GMT", 60.0)],
+)
+def test_a_429_waits_until_the_retry_after_date_capped_at_a_minute(
+    server: _Server, header: str, wait: float
+) -> None:
+    server.script = [(429, {"Retry-After": header}, b""), (200, {}, b"ok")]
+    waits: list[float] = []
+    with fetch.HttpGetter(sleep=waits.append) as getter:
+        assert getter(f"{server.url}/x") == b"ok"
+    assert waits == [wait]
+
+
 def test_a_retry_after_beyond_a_minute_is_capped(server: _Server) -> None:
     server.script = [(429, {"Retry-After": "86400"}, b""), (200, {}, b"ok")]
     waits: list[float] = []
@@ -327,6 +345,25 @@ def test_an_https_proxy_carries_the_request(
     with fetch.HttpGetter() as getter:
         assert getter("http://massive.invalid/docs/llms.txt") == b"via proxy"
     assert server.requests[0][0] == "http://massive.invalid/docs/llms.txt"
+    assert server.proxy_authorizations == [None]
+
+
+def test_a_proxy_user_and_password_go_to_the_proxy_as_proxy_authorization(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # urllib3 never sends the credentials of a proxy URL itself; a percent-encoded password
+    # is decoded first.
+    port = server.url.rpartition(":")[2]
+    monkeypatch.setenv("HTTPS_PROXY", f"http://alice:p%40ss@127.0.0.1:{port}")
+    server.script = [(200, {}, b"via proxy")]
+    with fetch.HttpGetter() as getter:
+        assert getter("http://massive.invalid/docs/llms.txt") == b"via proxy"
+        [pool] = getter._pools.values()
+        assert isinstance(pool, urllib3.ProxyManager)
+        assert "p@ss" not in str(pool.proxy)
+        assert "p%40ss" not in str(pool.proxy)
+    token = base64.b64encode(b"alice:p@ss").decode("ascii")
+    assert server.proxy_authorizations == [f"Basic {token}"]
 
 
 def test_fetch_uses_and_closes_an_http_getter_by_default(
