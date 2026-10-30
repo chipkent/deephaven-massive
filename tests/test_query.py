@@ -285,6 +285,16 @@ def test_a_missing_verb_names_the_dataset_of_the_same_kind_that_has_it(
         "stocks.last_quote has no last_by(); its verbs are fetch(), poll(); use "
         "m.stocks.quotes(...).last_by()"
     )
+    # Intraday bars are read over a range: history() comes first, the previous day after it.
+    assert _missing(m.stocks.bars("AAPL", dm.Timespan.MINUTE), "fetch") == (
+        "stocks.bars has no fetch(); its verbs are blink(), append_only(), ring(), last_by(), "
+        "history(); use history(start, end) for these bars, or "
+        "m.stocks.previous_day_bar(...).fetch() for each symbol's previous day"
+    )
+    assert _missing(m.futures.bars("ESZ5", dm.Timespan.HOUR), "poll") == (
+        "futures.bars has no poll(); its verbs are history(); use history(start, end) for these "
+        "bars"
+    )
     assert _missing(m.indices.previous_day_bar("I:SPX"), "history") == (
         "indices.previous_day_bar has no history(); its verbs are fetch(), poll(); use "
         "m.indices.bars(...).history()"

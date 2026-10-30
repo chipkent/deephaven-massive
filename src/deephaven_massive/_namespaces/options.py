@@ -417,16 +417,16 @@ class _Options(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed options contract.
 
-        One row per contract: its most recent trade, with the columns of `trades()`: price, size,
-        exchange, condition codes, and SIP timestamp (`Timestamp`), its trading day `Date` (ISO
-        `yyyy-MM-dd` text, the New York date of `Timestamp`), and `TimestampInsert`, when the
-        library received it. Served by REST (`/v2/last/trade/{optionsTicker}`) through `fetch()` and
-        `poll()`, one request per contract; `poll()` replaces the table each cycle, keyed by
-        `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last trade when it
-        is new, so a trade between two cycles is never seen (`trades()` streams every one). Some
-        plans lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries
-        each contract's last trade on every plan. A contract with no trade (HTTP 404) is left out,
-        with a WARNING.
+        One row per contract: its most recent trade, with the columns of its kind that its endpoint
+        fills: price, size, exchange, condition codes, and SIP timestamp (`Timestamp`), its trading
+        day `Date` (ISO `yyyy-MM-dd` text, the New York date of `Timestamp`), and `TimestampInsert`,
+        when the library received it. Served by REST (`/v2/last/trade/{optionsTicker}`) through
+        `fetch()` and `poll()`, one request per contract; `poll()` replaces the table each cycle,
+        keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last trade
+        when it is new, so a trade between two cycles is never seen (`trades()` streams every one).
+        Some plans lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)`
+        carries each contract's last trade on every plan. A contract with no trade (HTTP 404) is
+        left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each contract gives one row. `dm.ALL` is
         refused, since the endpoint takes one contract per request: use
@@ -617,17 +617,17 @@ class _Options(Namespace):
         """The previous trading day's open, high, low, close, and volume of options contracts.
 
         One row per contract: its 1-day bar of the previous completed session, which Massive
-        documents as "the prior session's open, high, low, close, and volume", with the columns
-        of `bars()`: its window, from `TimestampStart`, 00:00 New York time of the day, to the
-        exclusive `TimestampEnd`, 00:00 of the next day, its trading day `Date` (ISO
-        `yyyy-MM-dd` text), its prices and volume, and `TimestampInsert`, when the library
-        received it. Served by REST (`/v2/aggs/ticker/{optionsTicker}/prev`) through `fetch()`
-        and `poll()`, one request per contract; `poll()` replaces the table each cycle, keyed
-        by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each new day's bar.
-        Massive stamps the bar at the 16:00 session close (13:00 on a short trading day; 16:15
-        or 13:15 for index options such as SPXW), which is moved to the day's start; any other
-        stamp raises `MassiveError` naming `bars(symbols, dm.Timespan.DAY).history()` for that
-        day. A contract with no bar (HTTP 404) is left out, with a WARNING.
+        documents as "the prior session's open, high, low, close, and volume", with the columns of
+        its kind that its endpoint fills: its window, from `TimestampStart`, 00:00 New York time of
+        the day, to the exclusive `TimestampEnd`, 00:00 of the next day, its trading day `Date` (ISO
+        `yyyy-MM-dd` text), its prices and volume, and `TimestampInsert`, when the library received
+        it. Served by REST (`/v2/aggs/ticker/{optionsTicker}/prev`) through `fetch()` and `poll()`,
+        one request per contract; `poll()` replaces the table each cycle, keyed by `Symbol`, and an
+        explicit `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar at the
+        16:00 session close (13:00 on a short trading day; 16:15 or 13:15 for index options such as
+        SPXW), which is moved to the day's start; any other stamp raises `MassiveError` naming
+        `bars(symbols, dm.Timespan.DAY).history()` for that day. A contract with no bar (HTTP 404)
+        is left out, with a WARNING.
 
         Prices and volumes are adjusted for splits of the underlying when `adjusted` is True,
         the default, as `bars()` describes, and a page whose own `adjusted` differs from the

@@ -55,6 +55,7 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 
 from deephaven_massive._config import require_positive_int, require_positive_number
+from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.history_source import (
@@ -330,43 +331,65 @@ class QueryBase:
     def _missing_verb(self, verb: str) -> str:
         """Say why this query has no `verb`, and what to call instead.
 
-        The alternative, where there is one, is in order: the other datasets of the same kind
-        and asset class that serve the verb (a stream's one-row dataset, such as
-        `stocks.last_trade` for `fetch()` of `stocks.trades`, and back); for `fetch()` or
-        `poll()`, the class's `snapshots` dataset, the current state on every plan; for
-        `history()` of a dataset with a time axis, its `start=` and `end=` arguments; for a
-        stream verb of bars that do not stream, the timespans that do. Reads only
-        the catalog: no request, no Deephaven call.
+        Reads only the catalog: no request, no Deephaven call.
 
         Args:
             verb: The missing verb's name, one of `_VERBS`.
 
         Returns:
-            The `AttributeError` message.
+            The `AttributeError` message: the dataset, the verbs its query has, and the
+            alternative of `_alternative`, where there is one.
+        """
+        has = ", ".join(f"{name}()" for name in _VERBS if hasattr(type(self), name))
+        text = f"{self._spec.name} has no {verb}(); its verbs are {has}"
+        alternative = self._alternative(verb)
+        return text if alternative is None else f"{text}; {alternative}"
+
+    def _alternative(self, verb: str) -> str | None:
+        """Name what serves a verb this query lacks.
+
+        In order: for `fetch()` or `poll()` of intraday bars, `history(start, end)`, then the
+        previous day's bar; the other datasets of the same kind and asset class that serve the
+        verb (a stream's one-row dataset, such as `stocks.last_trade` for `fetch()` of
+        `stocks.trades`, and back); for `fetch()` or `poll()`, the class's `snapshots` dataset,
+        the current state on every plan; for `history()` of a dataset with a time axis, its
+        `start=` and `end=` arguments; for a stream verb of bars that do not stream, the
+        timespans that do.
+
+        Args:
+            verb: The missing verb's name, one of `_VERBS`.
+
+        Returns:
+            The alternative, such as `"use m.stocks.last_trade(...).fetch()"`; None when
+            nothing else serves the verb.
         """
         spec = self._spec
-        has = ", ".join(f"{name}()" for name in _VERBS if hasattr(type(self), name))
-        text = f"{spec.name} has no {verb}(); its verbs are {has}"
         by_name = self._core.catalog.by_name
-        siblings = [
-            other.name
+        siblings = " or ".join(
+            f"m.{other.name}(...).{verb}()"
             for other in by_name.values()
             if other is not spec
             and spec.kind is not None
             and (other.kind, other.group) == (spec.kind, spec.group)
             and _serves(other, verb)
-        ]
+        )
+        timespan = self._request.timespan
+        intraday_bars = spec.is_bars and timespan is not None and intraday(timespan)
+        if verb in ("fetch", "poll") and intraday_bars:
+            # Intraday bars are read over a range; the previous day's bar is another shape.
+            days = f", or {siblings} for each symbol's previous day" if siblings else ""
+            return f"use history(start, end) for these bars{days}"
         if siblings:
-            return f"{text}; use " + " or ".join(f"m.{n}(...).{verb}()" for n in siblings)
+            return f"use {siblings}"
         snapshots = by_name.get(f"{spec.name.partition('.')[0]}.snapshots")
         if verb in ("fetch", "poll") and snapshots is not None:
-            return f"{text}; for each symbol's current state use m.{snapshots.name}(...).{verb}()"
+            return f"for each symbol's current state use m.{snapshots.name}(...).{verb}()"
         if verb == "history" and spec.time_axis is not None:
-            return f"{text}; pass start= and end= to m.{spec.name}(...) instead"
+            return f"pass start= and end= to m.{spec.name}(...) instead"
         if verb in _STREAM_VERBS and spec.is_bars and spec.has_channels:
             spans = " and ".join(f"dm.Timespan.{span.name}" for span in spec.channels)
-            return f"{text}; only bars of {spans} with multiplier=1 stream"
-        return text
+            return f"only bars of {spans} with multiplier=1 stream"
+        return None
 
     def _described(self, table: Table) -> Table:
         """Describe the static table a transport returned, as the verb's result (`describe`).

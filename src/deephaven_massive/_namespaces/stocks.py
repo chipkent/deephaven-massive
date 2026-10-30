@@ -2084,12 +2084,12 @@ class _Stocks(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed stock.
 
-        Each row is one symbol's most recent trade reported to the SIP, with the columns of
-        `trades()`: price, size, exchange, conditions, and the SIP, participant, and TRF timestamps
-        (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd` text, the New York
-        date of `Timestamp`), and `TimestampInsert`, when the library received it. Served by REST
-        (`/v2/last/trade/{stocksTicker}`) through `fetch()` and `poll()`, one request per symbol;
-        `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
+        Each row is one symbol's most recent trade reported to the SIP, with the columns of its kind
+        that its endpoint fills: price, size, exchange, conditions, and the SIP, participant, and
+        TRF timestamps (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd` text,
+        the New York date of `Timestamp`), and `TimestampInsert`, when the library received it.
+        Served by REST (`/v2/last/trade/{stocksTicker}`) through `fetch()` and `poll()`, one request
+        per symbol; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
         `mode=dm.PollMode.APPEND` appends each cycle's last trade when it is new, so a trade between
         two cycles is never seen (`trades()` streams every one). Some plans lack the endpoint (HTTP
         403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's last trade on
@@ -2163,16 +2163,16 @@ class _Stocks(Namespace):
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest national best bid and offer of each US-listed stock.
 
-        Each row is one symbol's most recent NBBO, with the columns of `quotes()`: bid and ask
-        prices, sizes, and exchanges, conditions, indicators, and the SIP and participant timestamps
-        (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd` text, the New York
-        date of `Timestamp`), and `TimestampInsert`, when the library received it. Served by REST
-        (`/v2/last/nbbo/{stocksTicker}`) through `fetch()` and `poll()`, one request per symbol;
-        `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so a quote between
-        two cycles is never seen (`quotes()` streams every one). Some plans lack the endpoint (HTTP
-        403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's last quote on
-        every plan. A symbol with no quote (HTTP 404) is left out, with a WARNING.
+        Each row is one symbol's most recent NBBO, with the columns of its kind that its endpoint
+        fills: bid and ask prices, sizes, and exchanges, conditions, indicators, and the SIP and
+        participant timestamps (`Timestamp` is the SIP time), its trading day `Date` (ISO
+        `yyyy-MM-dd` text, the New York date of `Timestamp`), and `TimestampInsert`, when the
+        library received it. Served by REST (`/v2/last/nbbo/{stocksTicker}`) through `fetch()` and
+        `poll()`, one request per symbol; `poll()` replaces the table each cycle, keyed by `Symbol`,
+        and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so
+        a quote between two cycles is never seen (`quotes()` streams every one). Some plans lack the
+        endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's
+        last quote on every plan. A symbol with no quote (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
         since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
@@ -2328,17 +2328,17 @@ class _Stocks(Namespace):
         """The previous trading day's bar (open, high, low, close, volume) of US stocks.
 
         Each row is one symbol's 1-day bar of the previous completed session, which Massive
-        documents as "the prior session's open, high, low, close, and volume", with the
-        columns of `bars()`: its window, from `TimestampStart`, 00:00 New York time of the day,
-        to the exclusive `TimestampEnd`, 00:00 of the next day, its trading day `Date` (ISO
+        documents as "the prior session's open, high, low, close, and volume", with the columns of
+        its kind that its endpoint fills: its window, from `TimestampStart`, 00:00 New York time of
+        the day, to the exclusive `TimestampEnd`, 00:00 of the next day, its trading day `Date` (ISO
         `yyyy-MM-dd` text), open, high, low, close, volume, VWAP, and trade count, and
         `TimestampInsert`, when the library received it. Served by REST
         (`/v2/aggs/ticker/{stocksTicker}/prev`) through `fetch()` and `poll()`, one request per
         symbol; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar at the
-        16:00 session close (13:00 on a short day), which is moved to the day's start; any
-        other stamp raises `MassiveError` naming `bars(symbols, dm.Timespan.DAY).history()`
-        for that day. A symbol with no bar (HTTP 404) is left out, with a WARNING.
+        `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar at the 16:00
+        session close (13:00 on a short day), which is moved to the day's start; any other stamp
+        raises `MassiveError` naming `bars(symbols, dm.Timespan.DAY).history()` for that day. A
+        symbol with no bar (HTTP 404) is left out, with a WARNING.
 
         Prices are split-adjusted when `adjusted` is True, the default, as `bars()` describes,
         and a page whose own `adjusted` differs from the request raises `MassiveError`.

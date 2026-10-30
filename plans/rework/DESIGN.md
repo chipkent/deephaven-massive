@@ -1444,9 +1444,9 @@ endpoint, with `fetch()` and `poll()` like every `Query`:
   without `adjusted` for indices, whose `dm.ALL` daily bars only the flat files serve). A
   symbol with no data (HTTP 404) is left out with a WARNING, as for every per-symbol path.
 - **The kind's columns.** Each one-row dataset is a member of its kind
-  ([section 19.4](#194-generated-schemas)), so its rows have the columns of the stream and
-  history datasets of the same kind: `m.stocks.last_trade(syms).fetch()` and
-  `m.stocks.trades(syms).history(...)` merge without a column mapping. A kind's group may be
+  ([section 19.4](#194-generated-schemas)), and its rows have the columns of its kind that its
+  endpoint fills, under the kind's names and types, so a column it shares with
+  `m.stocks.trades(syms).history(...)` means the same thing in both. A kind's group may be
   split over several datasets of its class: each source of the group is read by exactly one
   of them, and the merged schema walks the group's sources in their positions, whichever
   dataset reads them, so the columns are in the same order as before the split.
@@ -1476,6 +1476,8 @@ error a reason and an alternative when the attribute is a verb name (`fetch`, `p
 one exists, the dataset of the same kind and class that has the verb
 (`m.stocks.trades(syms).fetch()` names `m.stocks.last_trade(...).fetch()`, and
 `m.stocks.bars(syms, dm.Timespan.DAY).fetch()` names `m.stocks.previous_day_bar(...).fetch()`);
+`fetch()` or `poll()` of intraday bars names `history(start, end)` first, then the previous
+day's bar;
 `fetch()` or `poll()` of a stream dataset with no such sibling names the class's
 `snapshots(...)`, and `history()` of a dataset with a time axis names its `start=` and `end=`
 arguments. Any other missing attribute raises Python's plain `AttributeError`.
@@ -6061,17 +6063,16 @@ document already reflects them.
       patience and keeps sharing the lookup (once console commands can read, issue #206).
     ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
 63. **One-row endpoints are datasets of their own** (2026-10-29; the coordinator decided after
-    an adversarial review by a Deephaven quant user and a library maintainer; the owner may
-    object). The last trade, the last quote, and the previous day's bar become `last_trade`,
-    `last_quote`, and `previous_day_bar`, each with `fetch()` and `poll()`, in every class
-    Massive has them; `fetch()` leaves the stream and daily-bar queries, and with it the
-    `StreamHistoryLatestQuery` and `HistoryLatestQuery` classes and `indices.values.fetch()`,
-    which was the indices snapshot that `m.indices.snapshots` already serves. `fetch()` then
-    always means every row the endpoint returns. The one-row datasets keep their kind's columns,
-    and a missing verb's `AttributeError` names the dataset that has it. Reason: datasets are
-    named by what they are and verbs name table shapes; a new verb such as `latest()` would
-    break the second ([section 7.5](#75-one-row-datasets),
-    [section 7.6](#76-a-verb-a-query-does-not-have)).
+    an adversarial review by a Deephaven quant user and a library maintainer; the owner may object).
+    The last trade, the last quote, and the previous day's bar become `last_trade`, `last_quote`,
+    and `previous_day_bar`, each with `fetch()` and `poll()`, in every class Massive has them;
+    `fetch()` leaves the stream and daily-bar queries, and with it the `StreamHistoryLatestQuery`
+    and `HistoryLatestQuery` classes and `indices.values.fetch()`, which was the indices snapshot
+    that `m.indices.snapshots` already serves. `fetch()` then always means every row the endpoint
+    returns. The one-row datasets have the columns of their kind that their endpoint fills, and a
+    missing verb's `AttributeError` names the dataset that has it. Reason: datasets are named by
+    what they are and verbs name table shapes; a new verb such as `latest()` would break the second
+    ([section 7.5](#75-one-row-datasets), [section 7.6](#76-a-verb-a-query-does-not-have)).
 
 ## 23. Open verification items
 

@@ -126,7 +126,7 @@ LAST_TRADE: Final = DatasetSpec(
     per_symbol=True,
     revision_keys=("Timestamp",),
 )
-"""`m.crypto.last_trade`: each pair's last trade, in the columns of the trades kind."""
+"""`m.crypto.last_trade`: each pair's last trade, in the trades columns its endpoint fills."""
 
 QUOTES: Final = DatasetSpec(
     name="crypto.quotes",
@@ -312,12 +312,12 @@ class _Crypto(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each crypto pair.
 
-        One row per pair: its most recent trade, in the columns of `trades()`: its price, size,
-        exchange ID, conditions, and time (`Timestamp`), its trading day `Date` (ISO `yyyy-MM-dd`
-        text, the UTC date of `Timestamp`), and `TimestampInsert`, when the library received it. The
-        endpoint carries no trade ID and no received time, so those columns are null. Served by REST
-        (`/v1/last/crypto/{from}/{to}`) through `fetch()` and `poll()`, one request per pair;
-        `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
+        One row per pair: its most recent trade, in the columns of its kind that its endpoint fills:
+        its price, size, exchange ID, conditions, and time (`Timestamp`), its trading day `Date`
+        (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`), and `TimestampInsert`, when the
+        library received it. The endpoint carries no trade ID and no received time, so those columns
+        are null. Served by REST (`/v1/last/crypto/{from}/{to}`) through `fetch()` and `poll()`, one
+        request per pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
         `mode=dm.PollMode.APPEND` appends each cycle's last trade when it is new, so a trade between
         two cycles is never seen (`trades()` streams every one). Some plans lack the endpoint (HTTP
         403 raises `EntitlementError`); `snapshots(symbols)` carries each pair's last trade on every
@@ -515,16 +515,15 @@ class _Crypto(Namespace):
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous UTC day's open, high, low, close, and volume of each crypto pair.
 
-        One row per pair: its 1-day bar of the previous completed UTC day, in the columns of
-        `bars()`: open, high, low, close, volume, the volume-weighted average price, and the
-        trade count, its window, from `TimestampStart`, 00:00 UTC, to the exclusive
-        `TimestampEnd`, 00:00 UTC of the next day, its trading day `Date` (ISO `yyyy-MM-dd`
-        text), and `TimestampInsert`, when the library received it. Served by REST
+        One row per pair: its 1-day bar of the previous completed UTC day, in the columns of its
+        kind that its endpoint fills: open, high, low, close, volume, the volume-weighted average
+        price, and the trade count, its window, from `TimestampStart`, 00:00 UTC, to the exclusive
+        `TimestampEnd`, 00:00 UTC of the next day, its trading day `Date` (ISO `yyyy-MM-dd` text),
+        and `TimestampInsert`, when the library received it. Served by REST
         (`/v2/aggs/ticker/{cryptoTicker}/prev`) through `fetch()` and `poll()`, one request per
         pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each new day's bar. Crypto has no corporate actions,
-        so there is no `adjusted` argument. A pair with no bar (HTTP 404) is left out, with a
-        WARNING.
+        `mode=dm.PollMode.APPEND` appends each new day's bar. Crypto has no corporate actions, so
+        there is no `adjusted` argument. A pair with no bar (HTTP 404) is left out, with a WARNING.
 
         A bar stamped at the first or last millisecond of its UTC day starts at 00:00 UTC of
         that day; Massive's documented sample of this endpoint sits at midnight New York time,

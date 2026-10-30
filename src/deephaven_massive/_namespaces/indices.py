@@ -16,7 +16,7 @@ The five datasets and what serves them:
   computed from index values, so their volume columns are always null and they are never
   adjusted: they take no `adjusted`.
 - `indices.previous_day_bar`: each index's 1-day bar of the previous session, from the
-  previous-session aggregates endpoint, in the columns of `indices.bars`.
+  previous-session aggregates endpoint, in the columns of the bars kind that its endpoint fills.
 - `indices.snapshots`: every field of the indices snapshot, one row per index.
 - `indices.daily_open_close`: one index's open, close, high, low, pre-market, and after-hours
   values for one day.
@@ -331,19 +331,19 @@ class _Indices(Namespace):
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous trading day's open, high, low, and close of each index.
 
-        One row per index: its 1-day bar of the previous completed session, which Massive
-        documents as "the prior session's open, high, low, close", in the columns of `bars()`:
-        `Symbol`, its trading day `Date` (ISO `yyyy-MM-dd` text, New York time), its window
-        from `TimestampStart`, 00:00 New York time of the day, to the exclusive
-        `TimestampEnd`, 01:00 New York time the next day, its levels, and `TimestampInsert`,
-        when the library received it; the volume columns are always null, and there is no
-        `adjusted` argument. Served by REST (`/v2/aggs/ticker/{indicesTicker}/prev`) through
-        `fetch()` and `poll()`, one request per index; `poll()` replaces the table each
-        cycle, keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each new
-        day's bar. Massive stamps the bar at the 16:00 session close (13:00 on a short trading
-        day), which is moved to the day's start; any other stamp raises `MassiveError` naming
-        `bars(symbols, dm.Timespan.DAY).history()` for that day. An index with no bar (HTTP
-        404) is left out, with a WARNING.
+        One row per index: its 1-day bar of the previous completed session, which Massive documents
+        as "the prior session's open, high, low, close", in the columns of its kind that its
+        endpoint fills: `Symbol`, its trading day `Date` (ISO `yyyy-MM-dd` text, New York time), its
+        window from `TimestampStart`, 00:00 New York time of the day, to the exclusive
+        `TimestampEnd`, 01:00 New York time the next day, its levels, and `TimestampInsert`, when
+        the library received it; the volume columns are always null, and there is no `adjusted`
+        argument. Served by REST (`/v2/aggs/ticker/{indicesTicker}/prev`) through `fetch()` and
+        `poll()`, one request per index; `poll()` replaces the table each cycle, keyed by `Symbol`,
+        and an explicit `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar
+        at the 16:00 session close (13:00 on a short trading day), which is moved to the day's
+        start; any other stamp raises `MassiveError` naming `bars(symbols,
+        dm.Timespan.DAY).history()` for that day. An index with no bar (HTTP 404) is left out, with
+        a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each index gives one row. `dm.ALL` is refused,
         since the endpoint takes one index per request: use

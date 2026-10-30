@@ -100,7 +100,7 @@ LAST_QUOTE: Final = DatasetSpec(
     per_symbol=True,
     revision_keys=("Timestamp",),
 )
-"""`m.forex.last_quote`: the last quote of each pair, in the columns of the quotes kind."""
+"""`m.forex.last_quote`: each pair's last quote, in the quotes columns its endpoint fills."""
 
 _PREV: Final = "/v2/aggs/ticker/{forexTicker}/prev"
 _RANGE: Final = "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}"
@@ -310,9 +310,9 @@ class _Forex(Namespace):
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest best bid and ask of each currency pair.
 
-        One row per pair: its most recent quote, in the columns of `quotes()`, with its time,
-        `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`),
-        and `TimestampInsert`, when the library received it. Served by REST
+        One row per pair: its most recent quote, in the columns of its kind that its endpoint fills,
+        with its time, `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of
+        `Timestamp`), and `TimestampInsert`, when the library received it. Served by REST
         (`/v1/last_quote/currencies/{from}/{to}`) through `fetch()` and `poll()`, one request per
         pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
         `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so a quote between
@@ -450,17 +450,17 @@ class _Forex(Namespace):
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous UTC day's open, high, low, close, and volume of each currency pair.
 
-        One row per pair: its 1-day bar of the previous completed UTC day, in the columns of
-        `bars()`: its window, from `TimestampStart`, 00:00 UTC, to the exclusive
-        `TimestampEnd`, 00:00 UTC of the next day, its trading day `Date` (ISO `yyyy-MM-dd`
-        text), and `TimestampInsert`, when the library received it. Served by REST
-        (`/v2/aggs/ticker/{t}/prev`) through `fetch()` and `poll()`, one request per pair;
-        `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar at the
-        day's last millisecond, 23:59:59.999 UTC, which is moved to the day's start; any other
-        stamp raises `MassiveError` naming `bars(symbols, dm.Timespan.DAY).history()` for that
-        day. Currency pairs have no corporate actions, so there is no `adjusted` argument. A
-        pair with no bar (HTTP 404) is left out, with a WARNING.
+        One row per pair: its 1-day bar of the previous completed UTC day, in the columns of its
+        kind that its endpoint fills: its window, from `TimestampStart`, 00:00 UTC, to the exclusive
+        `TimestampEnd`, 00:00 UTC of the next day, its trading day `Date` (ISO `yyyy-MM-dd` text),
+        and `TimestampInsert`, when the library received it. Served by REST
+        (`/v2/aggs/ticker/{t}/prev`) through `fetch()` and `poll()`, one request per pair; `poll()`
+        replaces the table each cycle, keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND`
+        appends each new day's bar. Massive stamps the bar at the day's last millisecond,
+        23:59:59.999 UTC, which is moved to the day's start; any other stamp raises `MassiveError`
+        naming `bars(symbols, dm.Timespan.DAY).history()` for that day. Currency pairs have no
+        corporate actions, so there is no `adjusted` argument. A pair with no bar (HTTP 404) is left
+        out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
         since the endpoint takes one pair per request: use
