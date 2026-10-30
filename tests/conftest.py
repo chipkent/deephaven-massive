@@ -101,10 +101,12 @@ _JVM_ARGS = [
 def _is_xdist_controller(config: pytest.Config) -> bool:
     """Tell whether this process hands tests to pytest-xdist workers instead of running them.
 
-    The condition is xdist's own for starting its distributed session: a distribution mode
-    other than `no` and at least one worker (`-n 0` leaves none), in a run that is more than
-    collection. Under `--collect-only`, `--fixtures`, and `--fixtures-per-test`, xdist starts
-    no session and the main process collects the tests itself. Workers carry `workerinput`.
+    The first part is xdist's own condition for starting its distributed session: a
+    distribution mode other than `no` and at least one worker (`-n 0` leaves none), in a run
+    that is more than `--collect-only`, under which xdist stays out entirely. Under `--fixtures`
+    and `--fixtures-per-test` xdist does start its workers, but pytest lists the fixtures by
+    collecting the tests in the main process itself, which imports the test modules and so
+    needs a JVM; such a run counts as no controller here. Workers carry `workerinput`.
 
     Args:
         config: The pytest configuration.
@@ -163,15 +165,15 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_xdist_node_collection_finished(ids: Sequence[str]) -> None:
     """End a parallel run that selected a live test, before any test starts.
 
-    pytest-xdist calls this in its controller once a worker has collected, with the ids of the
-    tests the worker selected after `-m`, `-k`, and every other deselection; the controller
-    hands out no test until every worker has reported. The decision rests on that selection,
-    not on the `-m` expression, so no expression can slip a live test past it. Without
-    pytest-xdist, or with `-n 0`, the hook is never called.
+    pytest-xdist calls this in its controller each time a worker has collected, with the ids
+    of the tests that worker selected after `-m`, `-k`, and every other deselection. Each
+    worker's report is checked as it arrives, and the controller hands out no test until every
+    worker has reported, so a refusal always comes before any test is scheduled. The decision
+    rests on the selection, not on the `-m` expression, so no expression can slip a live test
+    past it. Without pytest-xdist, or with `-n 0`, the hook is never called.
 
-    Every worker selects the same tests (xdist refuses a run whose workers differ), so the
-    first report decides. A refused run ends through `pytest.exit` with pytest's usage-error
-    status, 4, and a message naming how many live tests were selected and the first of them.
+    A refused run ends through `pytest.exit` with pytest's usage-error status, 4, and a message
+    naming how many live tests the worker selected and the first of them.
 
     Args:
         ids: The ids of the tests the worker selected.
@@ -1137,8 +1139,10 @@ def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
     quotes (Advanced), and the snapshot's `fmv` field (Business, for stocks, options, and
     currencies); then one file of every flat-file prefix. The probe writes the cache, which
     holds digests, never the credentials. The plans are recorded as evidence under "live
-    plans". Only the live tests request this fixture, after the key check, so a unit run never
-    probes.
+    plans". Only the live tests request this fixture, so a unit run never probes. Being
+    session-scoped, it is set up before any function-scoped fixture of the first live test that
+    needs it, the autouse key check included, so it makes the same check first itself: under
+    CI, or without `MASSIVE_API_KEY`, the test skips before anything reaches Massive.
 
     Args:
         pytestconfig: The pytest configuration, for the repository root and the stash.
@@ -1150,12 +1154,13 @@ def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
         pytest.UsageError: When a probe's answer proves nothing (`probe.PlanProbeError`):
             the run cannot tell the plans and asks for `MASSIVE_LIVE_PLANS`.
     """
+    api_key = _live_key()
     declared = os.environ.get(plans.PLANS_VARIABLE, "").strip()
     if declared:
         run_plans = plans.declared_plans(declared)
     else:
         dm = importlib.import_module("deephaven_massive")
-        config: MassiveConfig = dm.MassiveConfig(api_key=_required_env("MASSIVE_API_KEY"))
+        config: MassiveConfig = dm.MassiveConfig(api_key=api_key)
         today = calendar.today()
         owner = {
             "api_key": probe.digest(config.api_key),
@@ -1341,24 +1346,36 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
 def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
     """Skip a live test under CI, without `MASSIVE_API_KEY`, or when the plans fall short.
 
-    It runs before the test's own fixtures, so a skipped live test touches nothing but the
-    plans probe, which the first live test of a run triggers (`live_plans`). `CI` is checked
-    too, so a key added to CI's secrets later still never reaches Massive from CI. A test's
-    `needs` markers name the plans it needs; one the run's plans do not meet skips, naming the
-    plan and its monthly price.
+    It runs before the test's own function-scoped fixtures. The session-scoped `live_plans`
+    fixture, which probes the key's plans for the first live test of a run, is set up before
+    it, and so makes the same check (`_live_key`) first. A test's `needs` markers name the plans
+    it needs; one the run's plans do not meet skips, naming the plan and its monthly price.
 
     Args:
         request: The requesting test, for its markers and the `live_plans` fixture.
     """
     if request.node.get_closest_marker(_INTEGRATION) is None:
         return
-    if os.environ.get("CI", "").strip():
-        pytest.skip("live tests never run in CI")
-    _required_env("MASSIVE_API_KEY")
+    _live_key()
     run_plans: plans.LivePlans = request.getfixturevalue("live_plans")
     unmet = plans.unmet(_requirements(request.node), run_plans)
     if unmet:
         pytest.skip("needs " + "; ".join(plans.plan_text(r) for r in unmet))
+
+
+def _live_key() -> str:
+    """Return the API key a live test may use, or skip the test when it may reach no server.
+
+    Every fixture that sets up a live test calls this before anything reaches Massive: under
+    CI (`CI` set to anything but blank) live tests never run, so a key added to CI's secrets
+    later still never reaches Massive from CI, and without `MASSIVE_API_KEY` they cannot.
+
+    Returns:
+        The key, stripped of surrounding whitespace.
+    """
+    if os.environ.get("CI", "").strip():
+        pytest.skip("live tests never run in CI")
+    return _required_env("MASSIVE_API_KEY")
 
 
 def _required_env(name: str) -> str:

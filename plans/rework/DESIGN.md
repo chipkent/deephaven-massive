@@ -5248,8 +5248,9 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   collected, the controller reads the ids of the tests it selected (after `-m`, `-k`, and every
   other deselection) and ends the run before handing out any test if one is in a
   `*_integration.py` file. The decision rests on the selection, never on the `-m` expression,
-  so `-m ""` and `-m "integration and needs"` are refused like `-m integration`. CI runs the suite in one process: its standard runners have 2 CPUs, where two
-  workers gained nothing once their startup was paid.
+  so `-m ""` and `-m "integration and needs"` are refused like `-m integration`. CI runs the
+  suite in one process: its standard runners have 2 CPUs, where two workers gained nothing
+  once their startup was paid.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
   "@(typing\\.)?overload"]`, each with a reason.
 - **Deephaven imports.** Module-level wherever used at run time; imports used only in

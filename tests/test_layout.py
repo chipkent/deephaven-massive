@@ -2353,9 +2353,11 @@ def test_a_docstring_alone_is_a_valid_layer_package_init(package: str) -> None:
 def test_parallel_workers_refuse_the_live_tests_the_run_selects(marker_option: str) -> None:
     # The refusal reads the tests a worker selected, whatever `-m` expression selected them,
     # and ends the run before the controller hands out any test. `CI` and the missing key
-    # are a second guard: a live test that did start would skip without calling Massive.
-    # The `-m` option goes through PYTEST_ADDOPTS, which pytest reads after the configured
-    # `addopts`, so it replaces the default expression as a command-line `-m` would.
+    # are a second guard: a live test that did start would skip before reaching Massive. The
+    # controller starts no JVM: only the workers' output would say "Server started", and
+    # xdist does not pass it on. The `-m` option goes through PYTEST_ADDOPTS, which pytest
+    # reads after the configured `addopts`, so it replaces the default expression as a
+    # command-line `-m` would.
     env = {k: v for k, v in os.environ.items() if k != "MASSIVE_API_KEY"}
     env |= {"CI": "1", "PYTEST_ADDOPTS": marker_option}
     result = subprocess.run(
@@ -2382,6 +2384,67 @@ def test_parallel_workers_refuse_the_live_tests_the_run_selects(marker_option: s
     assert "live tests run in one process" in output
     assert "tests/datasets/test_timestamps_integration.py::" in output
     assert "no tests ran" in output
+    assert "Server started" not in output
+
+
+_NETWORK_BLOCK = """
+import os
+import socket
+
+
+def _blocked(*args, **kwargs):
+    with open(os.environ["NETWORK_ATTEMPTS"], "a") as attempts:
+        attempts.write(f"{args[1:2]}\\n")
+    raise OSError("network blocked by the test")
+
+
+socket.getaddrinfo = _blocked
+socket.socket.connect = _blocked
+socket.socket.connect_ex = _blocked
+"""
+"""A pytest plugin that records and refuses every name lookup and socket connection."""
+
+
+def test_a_live_test_under_ci_never_probes_the_plans_even_with_a_key(tmp_path: Path) -> None:
+    # The plans probe is a session fixture, set up before the function-scoped key check of
+    # the first live test, so it must check `CI` itself. The run gets a key (a dummy) and no
+    # declared plans, so only that check stands between the test and the probe; the plugin
+    # refuses the network all the same, so the probe could not reach Massive if it ran.
+    (tmp_path / "network_block.py").write_text(_NETWORK_BLOCK)
+    attempts = tmp_path / "attempts.txt"
+    drop = {"MASSIVE_LIVE_PLANS", "MASSIVE_S3_ACCESS_KEY_ID", "MASSIVE_S3_SECRET_ACCESS_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env |= {
+        "CI": "1",
+        "MASSIVE_API_KEY": "not-a-real-key",
+        "NETWORK_ATTEMPTS": str(attempts),
+        "PYTHONPATH": str(tmp_path),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-p",
+            "network_block",
+            "-m",
+            "integration",
+            "tests/datasets/test_timestamps_integration.py",
+        ],
+        cwd=_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == pytest.ExitCode.OK, output
+    assert "live tests never run in CI" in output
+    assert " passed" not in output
+    assert not attempts.exists(), attempts.read_text()
 
 
 def test_the_live_marker_check_runs_before_deselection() -> None:

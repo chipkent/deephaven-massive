@@ -20,6 +20,11 @@ def test_a_test_is_live_when_its_file_is_a_file_of_live_tests() -> None:
 
 def test_a_live_suffix_in_the_test_name_does_not_make_a_test_live() -> None:
     assert not parallel.is_live("tests/test_layout.py::test_names[x_integration.py]")
+    assert not parallel.is_live("tests/test_layout.py::test_names[a::x_integration.py]")
+
+
+def test_a_separator_in_a_live_test_parameter_keeps_the_test_live() -> None:
+    assert parallel.is_live("tests/massive/test_ws_integration.py::test_topic[a::b]")
 
 
 def test_a_selection_of_unit_tests_only_may_run_in_parallel() -> None:
