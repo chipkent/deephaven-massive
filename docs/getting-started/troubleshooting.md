@@ -99,16 +99,12 @@ again after a split. Pass `adjusted=False` to `bars()` for as-traded history.
 
 The library writes to Deephaven's log, which the web UI shows in its **Log** panel.
 
-- A **WARNING** means something needs your attention: live data that has gone stale, a
-  refusal you can act on, or a long command pausing live tables. It is logged once per
-  episode, and a later INFO line says when it recovered.
-- An **ERROR** means something broke a result. The message says whose problem it is. If it
-  points at your code or input, such as a callback that raised or a watchlist that failed, it
-  names what to fix. If it says **"this is a bug in deephaven-massive"**, please report it,
-  with the debug log described next.
-
-Expected conditions, such as a closed market or a refused request that raised an error to
-you, are not logged above INFO.
+- A **WARNING** is something to know about or act on: a refusal you can avoid, a read that
+  left columns empty, a long command pausing live tables, a symbol Massive has no data for.
+- An **ERROR** is a failure: a table that stopped, or a request that failed. The message says
+  what failed and why. If it ends with **"This is a bug in deephaven-massive"**, the problem is
+  in the library, not in your code or your plan: please report it with the debug log described
+  next and the contents of `m.streams()`.
 
 ## The debug log
 

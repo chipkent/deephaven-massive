@@ -32,7 +32,11 @@ last = m.stocks.last_trade(["AAPL", "MSFT"]).fetch()
 
 Many list datasets take `start=` and `end=` on their own time axis (the ex-dividend date for
 dividends) and `limit=`, a cap on the total number of rows. `help()` on a dataset names its
-time axis.
+time axis. A dataset that describes something as it stood on a past day takes `as_of=`:
+
+```python
+apple_2020 = m.reference.ticker_details("AAPL", as_of="2020-01-02").fetch()
+```
 
 ## Live tables from REST: `poll(interval)`
 
@@ -53,7 +57,8 @@ A poll combines its cycles in one of three ways, chosen with `mode=`:
 - `dm.PollMode.APPEND` adds the rows it has not seen before and never changes or removes a
   row. News and filings use it, so the table grows into a feed.
 
-Each dataset has its natural mode, which its `help()` names, so you rarely pass `mode=`. Pass
+The default, `dm.PollMode.AUTO`, uses each dataset's natural mode, which its `help()` names,
+so you rarely pass `mode=`. Pass
 it to change what the table means. On a snapshot, `APPEND` records every new state of each
 symbol instead of only the latest:
 
@@ -143,6 +148,9 @@ yourself. The table's description, shown in the web UI, names the source it came
 market = m.stocks.bars(dm.ALL, dm.Timespan.DAY).history("2026-10-29", "2026-10-29")
 ```
 
+[Reading history](../guides/history.md) covers the two kinds of bounds, which bars a
+range returns, how rows are stamped, and where they come from.
+
 ### Long downloads: `wait=False`
 
 The Deephaven console runs each command while holding the lock that every live table needs to
@@ -160,8 +168,8 @@ year = m.stocks.trades(["AAPL", "MSFT"]).history("2025-10-01", "2026-09-30", wai
 
 `m.streams()` shows the download with `Kind` `read` and a `State` of `LOADING`, then `DONE`, or
 `FAILED` with the error. Until it is `DONE` the table is empty, so `to_pandas(year)` returns no
-rows; take `year.snapshot()` or convert it after it has filled. Releasing the table, or closing
-the session, cancels the download.
+rows; take `year.snapshot()` or convert it after it has filled. Releasing the table cancels the
+download once nothing derived from it remains, and closing the session cancels it at once.
 
 ## Choosing a shape
 

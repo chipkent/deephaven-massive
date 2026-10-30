@@ -77,7 +77,7 @@ about several tickers in the list appears once:
 ```python
 from deephaven.time import dh_today
 
-news = m.reference.news(symbols=watchlist, start=dh_today()).poll(300)
+news = m.reference.news(watchlist, start=dh_today()).poll(300)
 ```
 
 Each cycle sends one request per symbol. On a free plan, which allows five requests a minute,

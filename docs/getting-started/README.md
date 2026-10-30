@@ -25,6 +25,10 @@ one before it, and every example is code you can paste into the console.
    keep their data afterwards.
 8. [Troubleshooting](troubleshooting.md): common problems and their fixes.
 
+After these pages, three guides go deeper: [reading history](../guides/history.md),
+[following a schedule](../guides/schedules.md), and
+[joining across asset classes](../guides/cross-asset.md).
+
 The [column reference](../datasets/) lists every dataset's columns and what each one means.
 The same descriptions appear in the Deephaven web UI when you hover over a column header, and
 in the console through any query's `columns()` method.

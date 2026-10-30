@@ -60,14 +60,15 @@ it. The common cases:
 | What you see | What it means | What to do |
 |---|---|---|
 | `stocks plan has no WebSocket access` (or `options`, `indices`, `futures`) | The plan for that class reads over REST only. | Use a REST dataset with `poll()`, such as `m.stocks.snapshots(symbols).poll(15)`, or `history()` for the past. |
-| `... refused T.AAPL: <Massive's message>; the plan may not include this data on this host` | Massive refused that one stream: the plan includes some streams of the class but not this one. | Stream a dataset the plan includes, such as bars instead of trades, or use the dataset's REST counterpart. |
+| `the WebSocket server ... refused the subscription to T.AAPL; Massive said: ...` | Massive refused that one stream: the plan includes some streams of the class but not this one. | Stream a dataset the plan includes, such as bars instead of trades, or use the dataset's REST counterpart. |
 | `HTTP 403 ...` with Massive's message, from `fetch()`, `poll()`, or `history()` | The plan does not include this REST dataset. | Use another dataset; the message names one where the library has it. |
 | `Your plan doesn't include this data timeframe` | The range starts before the plan's history window. | Ask for a later start. |
-| `the plan does not include these flat files` | Your S3 keys do not reach the flat files for this data. | Pass `source=dm.HistorySource.REST` to `history()`. |
-| `the plan does not include CME futures flat files ...` | Futures flat files are sold per exchange. | Pass `venue=` naming an exchange your plan includes. |
+| `the plan does not include these flat files` | Your S3 keys do not reach the flat files for this data. | Pass `source=dm.HistorySource.REST` to `history()`; the message names it when REST can serve the read. |
+| `the plan does not include CME futures flat files ...` | Futures flat files are sold per exchange. | Pass `venues=` with only the exchanges your plan includes. |
 
-A futures plan sold per exchange works the same way: `venue=dm.FuturesVenue.CME` (or `CBOT`,
-`NYMEX`, `COMEX`) on a futures dataset reads that exchange only.
+Futures datasets read every exchange by default. On a plan sold per exchange, pass the ones
+you hold, such as `m.futures.trades("ESZ6", venues={dm.FuturesVenue.CME})`; the members are
+`CME`, `CBOT`, `NYMEX`, and `COMEX`.
 
 ### Rate limits
 

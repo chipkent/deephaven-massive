@@ -42,7 +42,7 @@ each new article as it appears:
 ```python
 from deephaven.time import dh_today
 
-headlines = m.reference.news(symbols="AAPL", start=dh_today()).poll(300)
+headlines = m.reference.news("AAPL", start=dh_today()).poll(300)
 ```
 
 [Plans and entitlement errors](plans.md) says what each plan can stream.
@@ -70,8 +70,14 @@ exclusive end of the bar's window, and a `Date` column holding the trading day a
 shows no 90% drop on the day of the split; pass `adjusted=False` to `bars()` for the prices as
 traded.
 
-The dates can be text, Python `date` and `datetime` values, or Deephaven's own time values.
-That lets you take a range straight from another table. This finds the minute of 29 October
+The dates can be ISO text, Python `date` and `datetime` values, or Deephaven's own time values
+and text. An hour of trades, written the way Deephaven writes times:
+
+```python
+hour = m.stocks.trades("AAPL").history("2026-10-29T09:30 ET", "2026-10-29T10:30 ET")
+```
+
+Deephaven's values let you take a range straight from another table. This finds the minute of 29 October
 2026 when Apple traded the most shares, then reads every trade inside that minute (reading
 individual trades needs a Stocks plan that includes them):
 
