@@ -6,7 +6,7 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
 - **streams**: one row per stream (a live subscription with its own publisher) and per `poll()`
-  table. Keyed by `StreamId`.
+  table, with the `repr` of the query that opened it in `Query`. Keyed by `StreamId`.
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
@@ -14,6 +14,12 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
   (`rate_limits_changed`), and a row can never be overtaken by an older one. The writer also
   pulls again when the state changes with time alone (a pause ends, a slot frees): it waits on
   its queue no longer than until the moment the pull names.
+
+All of them spell a transport as every other text a user reads does (`TRANSPORT_LABELS`:
+`WebSocket`, `REST`, `flat files`), in `Transport` and in a stream's `SchemaDrift` entries; the
+rows hold the `Transport` member, and `as_row` writes its label. A stream's `Query` is cut to
+`QUERY_SHOWN` characters (`shown_query`), as `Symbols` is cut to its first symbols, so a query
+over a long list stays readable.
 
 The tables live in one session-owned `LivenessScope`, created with the session on the caller
 thread and released by `m.close()`. Users never get the tables themselves: `m.connections()` and
@@ -51,9 +57,16 @@ import pyarrow as pa
 from deephaven import arrow as dh_arrow
 from deephaven import input_table
 
-from deephaven_massive._datasets.schema import Column, ColumnType, Schema, pascal_case
+from deephaven_massive._datasets.schema import (
+    TRANSPORT_LABELS,
+    Column,
+    ColumnType,
+    Schema,
+    pascal_case,
+)
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import MassiveError
+from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_scope
 from deephaven_massive._types import _All
@@ -66,11 +79,12 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-    from deephaven_massive._massive import DriftReport, Transport
+    from deephaven_massive._massive import DriftReport
 
 __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
+    "QUERY_SHOWN",
     "RATE_LIMITS",
     "RATE_LIMIT_KEYS",
     "SCHEMA_DRIFT_SHOWN",
@@ -89,12 +103,16 @@ __all__ = [
     "StreamUpdate",
     "as_row",
     "describe_symbols",
+    "shown_query",
 ]
 
 logger = logging.getLogger(__name__)
 
 _SYMBOLS_SHOWN: Final = 20
 """How many symbols the `Symbols` column lists before it truncates."""
+
+QUERY_SHOWN: Final = 200
+"""The longest `Query` text, in characters; a longer one is cut and ends in `…`."""
 
 SCHEMA_DRIFT_SHOWN: Final = 200
 """The longest `SchemaDrift` text, in characters; a longer one is cut and ends in `…`."""
@@ -197,6 +215,7 @@ STREAMS: Final = Schema(
         for name, column_type in (
             ("StreamId", _L),
             ("Dataset", _S),
+            ("Query", _S),
             ("SymbolCount", _I),
             ("Symbols", _S),
             ("HeldResults", _I),
@@ -249,7 +268,8 @@ class ConnectionRow:
     """One row of `m.connections()`. Timestamps are epoch nanoseconds; None is null.
 
     Attributes:
-        transport: `WS` for a connection, `REST` for a host-decision row.
+        transport: `Transport.WS` for a connection, `Transport.REST` for a host-decision row;
+            the table shows its label, `WebSocket` or `REST`.
         asset_class: The asset class.
         family: The channel family, `TICK` or `FMV`.
         host: The resolved host.
@@ -302,12 +322,16 @@ class StreamRow:
     Attributes:
         stream_id: The stream's identifier (the key).
         dataset: The dataset name, such as `"stocks.trades"`.
+        query: The `repr` of the query whose verb opened the stream or `poll()`, such as
+            `"<StreamHistoryQuery stocks.trades symbols=('AAPL',)>"`, which tells two streams
+            of one dataset apart; cut to `QUERY_SHOWN` characters (`shown_query`).
         symbol_count: How many symbols the stream covers; null for `dm.ALL` and reactive
             tables until the transport fills it in.
         symbols: A truncated, readable list of the symbols.
         held_results: Results of the stream the library still holds.
         deferred: Options contracts deferred by the contract cap.
-        transport: `WS` or `REST`.
+        transport: `Transport.WS` for a stream, `Transport.REST` for a `poll()`; the table
+            shows its label, `WebSocket` or `REST`.
         host: The serving host.
         path: The cluster path.
         rows_published: Rows published so far.
@@ -322,6 +346,7 @@ class StreamRow:
 
     stream_id: int
     dataset: str
+    query: str
     symbol_count: int | None
     symbols: str
     held_results: int
@@ -458,13 +483,40 @@ class RateLimitRow:
 def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     """Return a row keyed by column name: each field's name in PascalCase.
 
+    A `Transport` value becomes its user-facing label (`TRANSPORT_LABELS`), so the tables spell
+    transports as `columns()` does: `Transport.WS` is shown as `WebSocket`.
+
     Args:
         row: A connection, stream, or rate-limit row.
 
     Returns:
         A `{column: value}` mapping for `CONNECTIONS`, `STREAMS`, or `RATE_LIMITS`.
     """
-    return {pascal_case(f.name): getattr(row, f.name) for f in fields(row)}
+    return {pascal_case(f.name): _shown(getattr(row, f.name)) for f in fields(row)}
+
+
+def _shown(value: object) -> object:
+    """Return a row value as its table shows it: a `Transport` as its label, else unchanged.
+
+    Args:
+        value: One field of a row.
+
+    Returns:
+        The value to write.
+    """
+    return TRANSPORT_LABELS[value] if isinstance(value, Transport) else value
+
+
+def shown_query(query: str) -> str:
+    """Return a query's `repr` as the `Query` column shows it: cut to `QUERY_SHOWN` characters.
+
+    Args:
+        query: The query's `repr`, such as `"<Query reference.news start=2025-01-02>"`.
+
+    Returns:
+        The text, or its first `QUERY_SHOWN - 1` characters and `…` when it is longer.
+    """
+    return query if len(query) <= QUERY_SHOWN else query[: QUERY_SHOWN - 1] + "…"
 
 
 def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
@@ -553,8 +605,8 @@ class DriftRegistry:
             where = "GET /v3/trades/{stockTicker}"
             registry.report("stocks.trades", Transport.REST, drift, where=where)  # two WARNINGs
             registry.report("stocks.trades", Transport.REST, drift, where=where)  # no log
-            registry.record(7, Transport.REST.value, drift)  # "REST:halted+, REST:trf_id-"
-            registry.record(7, Transport.REST.value, drift)  # unchanged: None
+            registry.record(7, "REST", drift)  # "REST:halted+, REST:trf_id-"
+            registry.record(7, "REST", drift)  # unchanged: None
     """
 
     __slots__ = ("_lock", "_owners", "_statuses", "_warned")
@@ -645,8 +697,8 @@ class DriftRegistry:
         Args:
             owner: The stream's id, or the connection's key (a tuple), whose row shows the
                 drift.
-            prefix: The transport's value (`"WS"`, `"REST"`) for a stream, or the channel
-                (`"T"`, `"AM"`) for a connection.
+            prefix: The transport's label (`"WebSocket"`, `"REST"`; `TRANSPORT_LABELS`) for
+                a stream, or the channel (`"T"`, `"AM"`) for a connection.
             drift: The payload's drift; its `statuses` are not shown.
 
         Returns:

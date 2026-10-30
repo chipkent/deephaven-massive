@@ -474,8 +474,12 @@ class _Reference(Namespace):
 
         Served over REST (`/v2/reference/news`); `fetch()` returns every article in range and
         `poll()` appends the articles each cycle returns. Each cycle re-reads the whole range
-        for every ticker, so give a `poll()` a recent `start`, a `limit`, or both: a poll
-        without `start` re-reads the news archive every cycle. An article
+        for every ticker, so `poll()` needs `start` or `limit` and raises `ValueError` without
+        either; give it a recent `start`, a `limit`, or both, since a fixed `start` keeps
+        widening the window of a poll that runs for days. Massive documents no default order
+        for this endpoint, so a poll of the latest headlines asks for one:
+        `m.reference.news(symbols=["AAPL", "MSFT"], sort="published_utc",
+        order=dm.Order.DESC, limit=50).poll(60)`. An article
         lists several tickers, so the table has no `Symbol`: it keeps the article's `Tickers`
         (a `String[]`: `table.where("Tickers != null && inObj(`AAPL`, Tickers)")` keeps the
         articles that name one, and `table.ungroup("Tickers")` gives a row per article and
@@ -504,7 +508,8 @@ class _Reference(Namespace):
                 table with a `Symbol` column (a watchlist); None for every article.
             start: The earliest publication (`DateLike`): a date is its 00:00 in New York, an
                 instant (an aware `datetime`, a Java `Instant`) is used as is; None for no
-                lower bound, which reads the whole archive.
+                lower bound, which reads the whole archive and which `poll()` refuses unless
+                `limit` is set.
             end: The end of the range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, a
                 `datetime` is exclusive; None for no upper bound.

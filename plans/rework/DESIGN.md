@@ -155,7 +155,7 @@ deprecation path, and no rule that rests on the chance of breaking someone.
 
 ## 3. Exports
 
-`deephaven_massive/__init__.py` exports exactly these 41 names and nothing else:
+`deephaven_massive/__init__.py` exports exactly these 42 names and nothing else:
 
 ```python
 import deephaven_massive as dm
@@ -219,6 +219,7 @@ dm.Subscription            # Massive's five subscriptions; values are their name
 dm.enable_debug_logging    # enable_debug_logging(output=LogOutput.STDERR): the library's log,
                            # DEBUG and up, to stderr or a file path (section 17.1)
 dm.LogOutput               # Enum, not a wire value: STDERR, the default output
+dm.disable_debug_logging   # disable_debug_logging(): turns off what either switch turned on
 
 # Version
 dm.__version__             # from importlib.metadata
@@ -291,7 +292,8 @@ _errors.py               MassiveError (.status, .request_id), AuthenticationErro
                          from_wire; RowDataError and UnsupportedParameterError, which the ingest
                          layer raises and the tables layer names
 _log_limits.py           rate-limited log records: log_once, BoundedWarnings
-_debug_log.py            enable_debug_logging, LogOutput, the DEEPHAVEN_MASSIVE_LOG variables, and
+_debug_log.py            enable_debug_logging, disable_debug_logging, LogOutput, the
+                         DEEPHAVEN_MASSIVE_LOG variables, and
                          the environment line; no Deephaven import, so it works before a server
                          exists (section 17.1)
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
@@ -600,7 +602,7 @@ defined in exactly one place: the field defaults of this class.
 
 | Field | Default / environment variable | Meaning |
 |---|---|---|
-| `api_key: str` | `MASSIVE_API_KEY`, then `POLYGON_API_KEY` | Required. Absent raises `AuthenticationError` at construction. |
+| `api_key: str` | `MASSIVE_API_KEY` | Required. Absent raises `AuthenticationError` at construction. No other variable is read: `POLYGON_API_KEY`, the vendor's former name, is ignored. |
 | `s3_access_key_id: str \| None` | `MASSIVE_S3_ACCESS_KEY_ID` | Enables flat-file history. |
 | `s3_secret_access_key: str \| None` | `MASSIVE_S3_SECRET_ACCESS_KEY` | The two S3 credentials are both set or both absent; exactly one raises `ValueError`. |
 | `ws_hosts: Mapping[AssetClass, str]` | `{}` | Pins the hostname of the TICK family for a class, for example `{AssetClass.STOCKS: "fullmarket-business.massive.com"}`. Hostname only; validated. The FMV family is never pinned ([section 13](#13-host-resolution-and-connection-protocol)). |
@@ -637,6 +639,10 @@ server corrects. A key holds up to five tiers, one per subscription, and the onl
 tier carries is its request limit (Basic: 5 per minute; every paid tier: none), so the one
 tier input is `rest_basic_subscriptions`, which the library also learns from Massive's first
 refusal; the 5 per minute is a wire constant, not configurable.
+
+Environment variables have one name each and no fallbacks. The credentials keep Massive's
+names (`MASSIVE_API_KEY`, `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY`), so a key
+set up for Massive's own tools works unchanged.
 
 The log is not configured through `MassiveConfig`: it belongs to the process, not to a session.
 Two environment variables turn it on, read once per process when the first session is created
@@ -1177,6 +1183,27 @@ row behind: [section 23](#23-open-verification-items)); `PollMode.REPLACE` other
 filing taxonomies included (a taxonomy is a reference list revised in place, not a feed of new
 rows).
 
+**Feeds need `start` or `limit`.** A *feed* is a dataset whose default `poll()` mode is
+`APPEND`: the news datasets and the filings listed above. Massive keeps a feed's whole archive,
+and a feed query's `start`, `end`, and `limit` are its only bounds on what a cycle reads, so a
+`poll()` with neither `start` nor `limit` would re-read the archive every cycle, spending a
+Basic subscription's five requests a minute on pages the table already holds. `poll()` on such
+a feed query raises `ValueError` before the table exists, in every mode, naming the dataset and
+the fix: `reference.news poll() needs a start or a limit: without either, every cycle re-reads
+the whole archive Massive keeps. Build the query with a start, such as m.reference.news(...,
+start=date.today()), or with a limit and a newest-first order, then call poll(). A fixed start
+keeps widening the window on a poll that runs for days`. A query with a `limit` is the natural
+"latest headlines" poll and is allowed. The `limit` keeps the first rows in the endpoint's
+order, so the query asks for newest first where Massive documents no such default:
+`m.reference.news(symbols="AAPL", sort="published_utc", order=dm.Order.DESC,
+limit=50).poll(60)` (Benzinga news is documented newest first already). The library does not
+check the order: the docstrings say it. The refusal logs one DEBUG line and nothing above it:
+the error is the report. `fetch()` keeps reading the whole range. Every feed declares a time
+axis (the catalog's feed-axis gate), so a `start` can always be given. A moving window that
+reads only what is new
+since the last cycle is a separate design item: it needs rules for late and revised articles
+and a mark per ticker.
+
 - `REPLACE` is a keyed table (`poll_keys`) from which keys absent in the latest cycle are
   deleted, also when the cycle is empty.
 - `UPSERT` is keyed the same way and never deletes. When `poll_keys` are every column
@@ -1369,7 +1396,9 @@ columns first, and `columns()` promises every verb the schema's order. The reord
 that every schema column exists and `withColumnDescriptions` that every named column does, so a
 schema that disagrees with the table fails at once; `Table.with_attributes` skips that check and is not used. The
 table description is `"<dataset>: <summary>"` (`"stocks.trades: Trades of US-listed stocks,
-tick by tick."`), where `<summary>` is the one-sentence `DatasetSpec.summary`. The summary is
+tick by tick."`), where `<summary>` is the one-sentence `DatasetSpec.summary`; a `history()`
+table that read a source appends `Read from <source>: <why>.` (`describe(..., note=...)`,
+[section 16](#16-historysourceauto)). The summary is
 a required field of every spec; `DatasetSpec.__post_init__` raises `ValueError`, naming the
 dataset, unless it is one line of text that ends in a period, with no leading or trailing
 whitespace. The dataset method's docstring starts with the same sentence, which the summary
@@ -2291,16 +2320,20 @@ sides of the boundary.
 Java time values Deephaven hands its users (`java.time.Instant` and `ZonedDateTime`, which are
 instants, and `LocalDate`, a date: what `dh_now()` and `to_j_local_date()` return, and what
 `Instant` and `LocalDate` cells give when read as Java values, through `iter_dict` for one;
-`dh_today()` returns ISO text), or a `numpy.datetime64` of day precision (a date). `_datasets/dates.py`
+`dh_today()` returns ISO text), a `numpy.datetime64` (a date at day precision or coarser, its
+first day; otherwise an instant in UTC, as Deephaven reads it and as `to_numpy` gives an
+`Instant` column), or a `pandas.Timestamp` (an instant, in UTC without a zone). This is the set
+Deephaven's own `deephaven.time` converters take, less a bare integer (epoch nanoseconds there,
+which would silently misread a date written as `20250303`) and Deephaven's text grammar beyond
+ISO-8601. `_datasets/dates.py`
 (`parse_date_like`) turns each into a `date` or an aware `datetime`, outside the wire package;
 it recognizes a Java value by its jpy class name, so it imports neither Deephaven nor jpy. A
-Java instant with nanoseconds below the microsecond is moved outward to a microsecond: unlike
+Java, numpy, or pandas instant with nanoseconds below the microsecond is moved outward to a microsecond: unlike
 typed text, whose extra digits raise, Deephaven's instants carry nanoseconds the user never
 chose (`dh_now()` on Linux, a SIP `Timestamp`). A lower bound (`start`) is rounded down, so it
 still includes the row an instant came from; an upper bound (`end`) is rounded up, so the
 half-open range may include up to 999 ns more but never loses a row. Each rounding logs at
-DEBUG. A `numpy.datetime64` finer than a day (it has no timezone; the message
-names `deephaven.time.to_j_instant`), `NaT`, and a time outside years 1 to 9999 raise
+DEBUG. A `numpy.datetime64` that is `NaT`, and a time outside years 1 to 9999, raise
 `ValueError`. Type checkers see Deephaven's Java values as `Any`, so
 `DateLike` names only `numpy.datetime64` beside the Python types. A
 naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
@@ -3582,7 +3615,39 @@ capabilities (`DatasetSpec.has_rest_history`, `has_grouped_daily`), and the `adj
 the typed `Request.adjusted`.
 
 An `AUTO` call logs its choice and the reason once, for example
-`stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`. Each
+`stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)`.
+
+**The source is never silent.** The two sources of one dataset do not always fill the same
+columns: a REST history endpoint and a flat file can each carry fields the other lacks (REST
+trades have `DecimalSize`; futures files have `Exchange`, and futures trade files
+`Correction`), and a column a source does not carry is null. Under `AUTO` the source changes
+with the symbol count and with the time of day (yesterday's file is published at 11:30 New York
+time), so the same call could return a column filled one hour and null the next. `choose_source`
+therefore classifies the source it passed over (`Alternative`): `AVAILABLE` when it can serve
+the request now; `AFTER_PUBLICATION` when the only reason flat files cannot is a file not yet
+published and, once it is, `AUTO` picks them for this call (`dm.ALL`, or at least
+`flat_file_symbol_threshold` symbols); `UNAVAILABLE` for every reason that does not change with
+time (no S3 credentials, no file or endpoint for the request, adjusted bars, `dm.ALL` over
+REST), or when `AUTO` would not pick the other source anyway. Unless the other source is
+`UNAVAILABLE`, the query compares the columns of the chosen source's history sources (REST: the
+history and grouped-daily paths; flat files: every prefix of the dataset) with the other
+source's, by the generated schemas (`Catalog.history_columns`). When the other source fills
+columns the chosen one leaves null, it logs one WARNING per session, dataset, and set of such
+columns (`SessionCore.warnings`), naming them, the choice and its reason, and what fills them:
+`stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold 50); the
+read leaves DecimalSize null, which the other source, REST, fills: pass
+source=dm.HistorySource.REST to get them (logged once per session)`, or, for
+`AFTER_PUBLICATION`, `... which the other source, flat files, fills: the same call reads them
+once the file lands, the next day`. An `UNAVAILABLE` alternative means the result cannot change
+and the caller cannot pick the other source, so nothing is logged, as with an explicit
+`source=`; a range no row can lie in reads nothing and logs nothing either. Every `history()`
+table records its source in its table description ([section 7.4](#74-column-descriptions)),
+after the summary: `stocks.trades: Trades of US-listed stocks, tick by tick. Read from REST:
+AUTO chose it (2 symbols < flat_file_symbol_threshold 50).`, or `Read from flat files:
+requested with source=...`. The flat-file refusal of adjusted bars reads `adjusted=True needs
+REST, since flat-file bars are unadjusted (as traded); pass adjusted=False for the flat files`,
+so the description says why an adjusted read used REST. A range no row can lie in returns its
+empty table before any source is read, with the summary alone. Each
 transport then logs its own work: the flat-file transport `source=S3 files=<n> skipped=<dates>`
 (`skipped=none` when nothing was missing), the REST transport `source=REST requests=<n>`.
 Missing keys on non-trading dates are skipped. A trading date is a weekday, a forex Sunday, or
@@ -3672,7 +3737,7 @@ table, so the queue stays bounded however fast rows arrive.
 
 | Column | Meaning |
 |---|---|
-| `Transport` | `WS` or `REST` |
+| `Transport` | `WebSocket` or `REST`: the spelling `columns()` and the column reference use for transports |
 | `AssetClass` | enum value |
 | `Family` | `TICK` or `FMV` |
 | `Host`, `Path` | resolved host and cluster path |
@@ -3698,16 +3763,17 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 |---|---|
 | `StreamId` | key |
 | `Dataset` | `"stocks.trades"` |
+| `Query` | the `repr` of the query whose verb opened the stream or `poll()`, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
 | `SymbolCount`, `Symbols` | count and a truncated list |
 | `HeldResults` | results currently held by the library (result records not yet released) |
 | `Deferred` | options contracts deferred by the cap |
-| `Transport`, `Host`, `Path` | |
+| `Transport`, `Host`, `Path` | `Transport` is `WebSocket` for a stream and `REST` for a `poll()` |
 | `RowsPublished` | count |
 | `RequestsPerCycle` | `poll()` fan-out |
 | `State` | `RUNNING`, `FAILED`, `RELEASED`, `CLOSED` |
 | `Error` | text; also a futures stream's schedule miss, a warning that leaves it `RUNNING` ([section 12](#12-timestamp-units-and-day-boundaries)) |
 | `CreatedAt` | `Instant` |
-| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra) and `transport:field-` (missing), sorted, truncated at 200 characters |
+| `SchemaDrift` | text: the stream's drift, `poll()` rows included, as `transport:field+` (extra) and `transport:field-` (missing), with the transport spelled as in `Transport` (`WebSocket:zz+`), sorted, truncated at 200 characters |
 
 **`m.rate_limits()`**: one row per REST rate-limit bucket ([section 13.4](#134-rest)), keyed by
 `Bucket`. The bucket's state lives in a governor that sessions of the same API key share, so
@@ -3768,8 +3834,9 @@ child of `deephaven_massive` and names the file that wrote the record.
 `sys.stderr` through Python's last-resort handler, which Deephaven captures; lower levels are
 dropped.
 
-**Two switches.** Each adds one handler to the `deephaven_massive` logger and sets that
-logger's level; turning the log on again replaces the handler and closes the old one:
+**Two switches on, one off.** Each switch adds one handler to the `deephaven_massive`
+logger and sets that logger's level; turning the log on again replaces the handler and closes
+the old one:
 
 - `DEEPHAVEN_MASSIVE_LOG=<level>` (and `DEEPHAVEN_MASSIVE_LOG_FILE=<path>`), read when the first
   `MassiveSession` is created ([section 5](#5-massiveconfig)). Not at import: a script that
@@ -3782,6 +3849,16 @@ logger's level; turning the log on again replaces the handler and closes the old
   file path to append to, an unopenable file raises its `OSError` and keeps the previous
   handler, and anything else raises `TypeError`. `LogOutput` is an `Enum`, not a `StrEnum`:
   its value is no Massive wire string.
+
+`dm.disable_debug_logging()` turns off whatever either switch turned on, at any level: it logs
+one INFO line saying so, removes and closes the library's handler, and sets the logger's level
+back to `NOTSET`, so the library is as it was at import (WARNING and ERROR through the
+last-resort handler). The variables then count as read, so a later first session does not turn
+the log back on, and a read of them already under way on another thread installs nothing, as
+after `enable_debug_logging`; only `enable_debug_logging` turns it on again. With nothing
+turned on it changes nothing. It leaves a handler the user added to the logger alone, but sets
+the logger's level to `NOTSET` whoever set it last. It takes no argument:
+the switch exists to undo the other two, and a level is what `DEEPHAVEN_MASSIVE_LOG` is for.
 
 Setting the level alone (`logging.getLogger("deephaven_massive").setLevel(logging.DEBUG)`) shows
 nothing below WARNING, because the last-resort handler drops lower levels; that is why the
@@ -5304,6 +5381,8 @@ every transport plan agree. Every outlet of
   `poll_keys` on an `APPEND` dataset, an empty identity (no `poll_keys` and no
   `revision_keys`) on any dataset, since an explicit `APPEND` could not tell rows apart, and
   `revision_keys` that repeat a poll key.)
+- **Feed axis:** a dataset whose default `poll()` mode is `APPEND` declares a time axis, since
+  its `poll()` needs `start`;
 - **Nullable keys:** a dataset with `poll_keys` has at least one that is not in
   `nullable_poll_keys` (`DatasetSpec` refuses a nullable key that is no poll key, or one without
   a reason);
@@ -5354,8 +5433,8 @@ failure.
 
 **`SchemaDrift`** is a text column of both diagnostics tables ([section 17](#17-diagnostics)),
 sorted and truncated at 200 characters: `m.streams()` uses `transport:field+` for extra and
-`transport:field-` for missing, and `m.connections()` uses `channel:field+` and
-`channel:field-`.
+`transport:field-` for missing, with the transport spelled `WebSocket` or `REST`, and
+`m.connections()` uses `channel:field+` and `channel:field-`.
 
 ### 19.6 Refresh and drift
 
@@ -6235,20 +6314,56 @@ document already reflects them.
       the wire package cannot see datasets, and the command is run after every refresh.
     ([section 7.4](#74-column-descriptions), [section 8.11](#811-msnapshots),
     [section 11](#11-enums-and-types), [section 19.4](#194-generated-schemas)).
+65. **The library reports what streams and reads are doing** (2026-10-29; the coordinator
+    decided each point after an adversarial review by a Deephaven quant user and a library
+    maintainer; the owner may object to any of them, and an objection reopens it).
+    - The diagnostics tables spell transports as `columns()` does: `WebSocket`, `REST`, and
+      `flat files`, in `Transport` and in a stream's `SchemaDrift` entries; the internal
+      enum names (`WS`, `FLAT_FILES`) appear in no table. This edits a detail of this
+      document under the owner's rule of one spelling in user-facing text.
+    - `m.streams()` gains a `Query` column, the `repr` of the query that opened the stream or
+      `poll()`, so two streams of one dataset can be told apart.
+    - `dm.disable_debug_logging()` turns off what `enable_debug_logging()` or the environment
+      variables turned on, at any level; it takes no argument.
+    - The `POLYGON_API_KEY` fallback goes; the credentials keep Massive's names. One name per
+      setting, no fallbacks, and nothing warns about the old name, since the library has no
+      users yet.
+    - `history()` under `AUTO` warns once per session, dataset, and set of columns when the
+      chosen source leaves null columns the other fills and the other source could serve the
+      call, now (naming the `source=` that fills them) or once a day's file is published
+      (saying the call changes source the next day); every `history()` table's description
+      records its source and why. A table must never silently change what it fills; a global
+      sort, or a REST-only `AUTO`, costs far more than it buys.
+    - `poll()` on a feed (a dataset whose default mode is `APPEND`: news and filings) refuses
+      to start with neither `start` nor `limit`, naming the fix, since every cycle would
+      otherwise re-read Massive's whole archive; a `limit` alone is the "latest headlines"
+      poll. A moving window that reads only new rows is a separate design item.
+    ([section 5](#5-massiveconfig), [section 7](#7-query-classes-and-verbs),
+    [section 16](#16-historysourceauto), [section 17](#17-diagnostics),
+    [section 17.1](#171-the-log)).
 
-65. **More inputs and a list of datasets** (2026-10-30; the owner approved each item in the
-    API review; the coordinator decided the details below after an adversarial review by a
-    Deephaven quant user and a library maintainer, and the owner may object to any).
+66. **More inputs and a list of datasets** (2026-10-30; the owner approved each item in the
+    API review and decided the three questions it raised, marked *owner*; the coordinator
+    decided the other details after an adversarial review by a Deephaven quant user and a
+    library maintainer, and the owner may object to any).
     - Date and time arguments (`history()`'s bounds and every `start=`, `end=`, `as_of=`, and
-      single day) also accept Deephaven's Java `Instant`, `ZonedDateTime`, and `LocalDate`, and
-      a day-precision `numpy.datetime64`. A Deephaven library takes the values Deephaven hands
-      its users, rather than making them format text in a second grammar. The conversion
-      lives outside the wire package, in `_datasets/dates.py`. A Java instant with
-      nanoseconds below the microsecond is moved outward to a microsecond (`start` down,
-      `end` up, so no row is lost and `end` may include up to 999 ns more), since
-      Deephaven's instants carry nanoseconds the user never chose; a `numpy.datetime64`
-      finer than a day (it has no timezone) and `NaT` are refused.
-      `filters=` values are left to the change that settles their type.
+      single day) take the natural native inputs, the set Deephaven's own `deephaven.time`
+      converters take (*owner*): Java `Instant`, `ZonedDateTime`, and `LocalDate`, a
+      `numpy.datetime64`, and a `pandas.Timestamp`, beside text, `date`, and `datetime`. A
+      Deephaven library takes the values Deephaven hands its users, rather than making them
+      format text in a second grammar. Two of Deephaven's inputs are left out: a bare integer,
+      which Deephaven reads as epoch nanoseconds and which would silently misread a date
+      written as `20250303`, and Deephaven's own text grammar beyond ISO-8601. The conversion
+      lives in `_datasets/dates.py`, outside the wire package; it cannot reuse
+      `deephaven.time`, since the dataset layer imports Deephaven only for type checking.
+    - A `numpy.datetime64` finer than a day is an instant in UTC, as Deephaven reads it
+      (*owner*); one of a day or a coarser calendar unit is a date, its first day.
+    - An instant with nanoseconds below the microsecond (Java, numpy, or pandas) is moved
+      outward to a microsecond, `start` down and `end` up, so no row is lost and `end` may
+      include up to 999 ns more (*owner*): Deephaven's instants carry nanoseconds the user
+      never chose. `filters=` values are left to the change that settles their type.
+    - `tests/test_layout.py` lists the public `queries` module and the API-layer
+      `_dataset_list` module (*owner*).
     - `dm.datasets()`, a static table of every dataset with its summary, verbs, transports,
       and documentation link, at module level, since the catalog needs no key or session
       ([section 7.7](#77-the-dataset-list)).

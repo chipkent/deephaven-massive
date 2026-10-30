@@ -363,8 +363,9 @@ def test_stream_rows_follow_the_holds(
         2,
         "RUNNING",
     )
-    assert (row["SymbolCount"], row["Symbols"], row["Transport"]) == (2, "AAPL, MSFT", "WS")
+    assert (row["SymbolCount"], row["Symbols"], row["Transport"]) == (2, "AAPL, MSFT", "WebSocket")
     assert (row["Host"], row["Path"]) == ("socket.test", "/stocks")
+    assert row["Query"] == repr(q)  # the query that opened it; b reused the stream
     assert row["CreatedAt"] is not None
     massive_session.release(a)
     assert stream_rows()[0]["HeldResults"] == 1
@@ -632,7 +633,7 @@ def test_stream_verbs_work_in_a_console_command(
         ("stocks.quotes", "RUNNING", 1),
         ("stocks.trades", "RUNNING", 3),
     ]
-    rows_when(made["connections"], lambda rows: any(r["Transport"] == "WS" for r in rows))
+    rows_when(made["connections"], lambda rows: any(r["Transport"] == "WebSocket" for r in rows))
     assert made["columns"].size > 0
     for table in made.values():
         if table.is_refreshing:

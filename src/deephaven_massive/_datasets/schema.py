@@ -74,7 +74,7 @@ from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport, WireType
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from datetime import tzinfo
 
     from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
@@ -92,6 +92,7 @@ __all__ = [
     "Schema",
     "SourceColumn",
     "dataset_schema",
+    "filled_columns",
     "key_column",
     "pascal_case",
     "rename",
@@ -633,9 +634,9 @@ TRANSPORT_LABELS: Final[Mapping[Transport, str]] = MappingProxyType(
     {Transport.REST: "REST", Transport.FLAT_FILES: "flat files", Transport.WS: "WebSocket"}
 )
 """How every text a user reads spells each transport: the key-column descriptions, the
-`SuppliedBy` column of `columns()`, and the column reference all use it, so a filter copied
-from one works on another. The `Transport` values stay internal names, which the diagnostics
-tables show. Read-only."""
+`SuppliedBy` column of `columns()`, the column reference, and the `Transport` column of the
+diagnostics tables all use it, so a filter copied from one works on another. The `Transport`
+values stay internal names, which only logs and code show. Read-only."""
 
 _KEY_SENTENCES: Final[Mapping[str, str]] = {
     "Symbol": "The instrument, in the library's canonical symbol form.",
@@ -896,6 +897,34 @@ def _library_names(spec: DatasetSpec) -> tuple[str, ...]:
     if times is RowTimes.NONE:
         return (INSERT,)
     return (DATE, START, END, INSERT)
+
+
+def filled_columns(
+    spec: DatasetSpec,
+    keys: Iterable[tuple[Transport, str]],
+    source: Callable[[Transport, str], Source],
+) -> frozenset[str]:
+    """Return the columns of a dataset that some of its sources fill, by the generated schemas.
+
+    The columns the sources contribute after the rename (`rename`), plus the time columns the
+    library fills for every row whatever the source (`Date`, `TimestampStart`,
+    `TimestampEnd`, `TimestampInsert`, as the dataset has them), so two calls for different
+    sources of one dataset differ only by what their sources carry. The derived columns
+    (`OptionRoot`, `RawSymbol`), which every transport computes alike, are left out.
+
+    Args:
+        spec: The dataset.
+        keys: The sources, as `(transport, source key)`, such as the REST history path and
+            every flat-file prefix of the dataset.
+        source: Returns the generated source of a transport and key.
+
+    Returns:
+        The column names.
+
+    A bad source raises what `rename` or `source` raises.
+    """
+    found = {c.column for transport, key in keys for c in rename(spec, source(transport, key))}
+    return frozenset(found.union(_library_names(spec)))
 
 
 _Contribution = tuple[Transport, SourceColumn]

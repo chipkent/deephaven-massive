@@ -55,7 +55,7 @@ Public API:
       DEBUG and up, to stderr (which Deephaven shows in its log panel) or to a file; the
       environment variable `DEEPHAVEN_MASSIVE_LOG=DEBUG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`)
       does the same when the first session is created. Attach that log to a bug report. It
-      never holds a secret.
+      never holds a secret. `disable_debug_logging()` turns it off again.
 
     The query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`) and the
     argument types (`Symbols`, `DateLike`, `FilterValue`) are in the public module
@@ -128,6 +128,7 @@ __all__ = [
     "canonical_symbol_stock_yahoo",
     "canonicalize_symbols",
     "datasets",
+    "disable_debug_logging",
     "enable_debug_logging",
 ]
 
@@ -174,6 +175,7 @@ _EXPORTS: dict[str, str] = {
     "SymbolConvention": "deephaven_massive._enums",
     "UnknownSymbols": "deephaven_massive._enums",
     "datasets": "deephaven_massive._dataset_list",
+    "disable_debug_logging": "deephaven_massive._debug_log",
     "enable_debug_logging": "deephaven_massive._debug_log",
 }
 
@@ -195,7 +197,11 @@ if TYPE_CHECKING:
         canonical_symbol_stock_nasdaq,
         canonical_symbol_stock_yahoo,
     )
-    from deephaven_massive._debug_log import LogOutput, enable_debug_logging
+    from deephaven_massive._debug_log import (
+        LogOutput,
+        disable_debug_logging,
+        enable_debug_logging,
+    )
     from deephaven_massive._enums import (
         AssetClass,
         ConditionDataType,

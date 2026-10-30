@@ -734,6 +734,27 @@ def test_news_polls_follow_a_live_watchlist(
     rest_session.release(table)
 
 
+def test_a_news_page_without_keywords_keeps_every_column(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    dh_to_pylist: ToRows,
+) -> None:
+    # No article on the page has keywords, so `Keywords` is null on every row, ahead of the
+    # `Tickers` list and the other columns, which keep their values.
+    body = json.loads(load_fixture(OWNER, "news.json"))
+    body.pop("next_url")
+    for article in body["results"]:
+        del article["keywords"]
+    fake_rest.reply("/v2/reference/news", Reply(body))
+    (row,) = dh_to_pylist(rest_session.reference.news(symbols="UBS").fetch())
+    assert row["Keywords"] is None
+    assert row["Tickers"] == ["UBS"]
+    assert row["Author"] == "Sam Boughedda"
+    assert row["PublishedUtc"] == datetime(2024, 6, 24, 18, 33, 53, tzinfo=UTC)
+
+
 def test_lookup_fetches(
     *,
     rest_session: dm.MassiveSession,
@@ -825,6 +846,7 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
         request=Request(),
         interval=timedelta(seconds=60),
         mode=mode,
+        query="<Query test>",
         read=cast("Any", _Statuses("open", "closed")),
         pollers=pollers,
         host="api.massive.com",

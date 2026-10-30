@@ -422,8 +422,8 @@ def test_java_instants_round_outward_to_the_microsecond(
     assert start.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
     assert end.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123457, tzinfo=UTC)
     assert caplog.messages == [
-        f"start={java} rounded down to the microsecond: 789 ns below it",
-        f"end={java} rounded up to the microsecond: 789 ns below it",
+        f"start={java} rounded down to the microsecond",
+        f"end={java} rounded up to the microsecond",
     ]
 
 
@@ -440,22 +440,72 @@ def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
             parse_date_like(java, "start")
 
 
-def test_a_numpy_day_is_a_date() -> None:
+def test_a_numpy_day_or_longer_period_is_a_date() -> None:
+    # A calendar unit names a day, or a period that starts on one: its first day.
     assert parse_date_like(np.datetime64("2025-03-03"), "start") == date(2025, 3, 3)
+    assert parse_date_like(np.datetime64("2025-03"), "start") == date(2025, 3, 1)
+    assert parse_date_like(np.datetime64("2025"), "start") == date(2025, 1, 1)
+
+
+_MORNING = datetime(2025, 3, 3, 9, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("value", "moment", "start", "end"),
+    [
+        pytest.param(np.datetime64("2025-03-03T09:30"), _MORNING, 0, 0, id="minutes"),
+        pytest.param(
+            np.datetime64("2025-03-03T09:30:00.123456", "us"), _MORNING, 123456, 123456, id="us"
+        ),
+        pytest.param(
+            np.datetime64("2025-03-03T09:30:00.123456789", "ns"),
+            _MORNING,
+            123456,
+            123457,
+            id="ns",
+        ),
+        # A picosecond time spans only some 106 days either side of 1970.
+        pytest.param(
+            np.datetime64("1970-01-02T00:00:00.000000000001", "ps"),
+            datetime(1970, 1, 2, tzinfo=UTC),
+            0,
+            1,
+            id="ps",
+        ),
+    ],
+)
+def test_a_numpy_time_is_an_instant_in_utc_rounded_outward(
+    *, value: np.datetime64, moment: datetime, start: int, end: int
+) -> None:
+    # A numpy time has no zone; Deephaven reads it as UTC, and so does the library.
+    assert parse_date_like(value, "start") == moment + timedelta(microseconds=start)
+    assert parse_date_like(value, "end", upper=True) == moment + timedelta(microseconds=end)
+
+
+def test_a_pandas_timestamp_is_an_instant_in_utc_rounded_outward() -> None:
+    pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
+    # A pandas.Timestamp holds nanoseconds a datetime cannot; without a zone it is UTC, as
+    # Deephaven reads it.
+    naive = pd.Timestamp("2025-03-03T09:30:00.123456789")
+    moment = datetime(2025, 3, 3, 9, 30, 0, 123456, tzinfo=UTC)
+    assert parse_date_like(naive, "start") == moment
+    assert parse_date_like(naive, "end", upper=True) == moment + timedelta(microseconds=1)
+    aware = pd.Timestamp("2025-03-03T04:30:00.123456", tz="America/New_York")
+    assert parse_date_like(aware, "start") == moment
 
 
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        (np.datetime64("2025-03-03T09:30"), r"datetime64\[m\], which has no timezone"),
-        (np.datetime64("2025-03"), r"datetime64\[M\], which has no timezone"),
         (np.datetime64("NaT", "D"), "is NaT, not a date"),
         (np.datetime64("NaT", "ns"), "is NaT, not a date"),
         (np.datetime64("10000-01-01"), "is not a time from year 1 to 9999"),
-        (np.datetime64("2025-03-03T09:30:00", "ns"), r"deephaven.time.to_j_instant converts"),
+        (np.datetime64("10000-01-01T00:00"), "is not a time from year 1 to 9999"),
     ],
 )
-def test_a_numpy_time_that_is_not_one_day_is_refused(value: np.datetime64, message: str) -> None:
+def test_a_numpy_value_that_is_no_time_a_datetime_holds_is_refused(
+    value: np.datetime64, message: str
+) -> None:
     with pytest.raises(ValueError, match=message):
         parse_date_like(value, "start")
 

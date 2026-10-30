@@ -412,7 +412,7 @@ def test_a_failed_build_drops_its_hold(
         raise RuntimeError("cannot shape")
 
     with pytest.raises(RuntimeError, match="cannot shape"):
-        core.stream_result(SPEC, q._request, channel="T", build=broken)
+        core.stream_result(SPEC, q._request, channel="T", query="<Query test>", build=broken)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     assert core._stream_ids == {}
 
@@ -427,7 +427,7 @@ def test_an_interrupted_build_drops_its_hold(
         raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        core.stream_result(SPEC, q._request, channel="T", build=interrupted)
+        core.stream_result(SPEC, q._request, channel="T", query="<Query test>", build=interrupted)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     assert core._stream_ids == {}
 

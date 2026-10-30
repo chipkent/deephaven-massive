@@ -112,17 +112,23 @@ One of:
 - a Java `java.time.LocalDate` (a date), or a Java `Instant` or `ZonedDateTime` (an instant,
   moved outward to a microsecond: a start down, an end up), the values Deephaven's own time
   functions return, such as `deephaven.time.dh_now()` and `to_j_local_date("2025-03-03")`, and
-  `Instant` and `LocalDate` cells read as Java values (through `iter_dict`, for one; `to_numpy`
-  gives an `Instant` column as `numpy.datetime64` in nanoseconds instead, which
-  `deephaven.time.to_j_instant` converts). `dh_today()` returns ISO text, the first form;
-- a `numpy.datetime64` of day precision (a date), such as `numpy.datetime64("2025-03-03")`.
+  `Instant` and `LocalDate` cells read as Java values (through `iter_dict`, for one).
+  `dh_today()` returns ISO text, the first form;
+- a `numpy.datetime64`: a date at day precision or coarser (`numpy.datetime64("2025-03-03")`,
+  or a month's first day), otherwise an instant in UTC, as Deephaven reads it (`to_numpy`
+  gives an `Instant` column so), moved outward to a microsecond like a Java instant;
+- a `pandas.Timestamp`, an instant: in UTC when it has no timezone, as Deephaven reads it, and
+  moved outward to a microsecond like a Java instant.
+
+These are the inputs Deephaven's own `deephaven.time` converters take, except two it reads in
+its own way: a bare integer (epoch nanoseconds there, which would silently misread a date
+written as `20250303`) and its text grammar beyond ISO-8601.
 
 Type checkers see Deephaven's Java values as `Any`, so the alias does not name them. A naive
 `datetime` or an ISO string with a time but no UTC offset raises a `ValueError` that names the
-parameter and the fix ("needs a timezone: pass an aware datetime or a date"), and a
-`numpy.datetime64` finer than a day one that says it "has no timezone" and names the values
-to pass instead, since a time without a zone cannot be placed. A date-only value is a whole
-day in the asset class's day zone.
+parameter and the fix ("needs a timezone: pass an aware datetime or a date"), since a time
+without a zone cannot be placed. A date-only value is a whole day in the asset class's day
+zone.
 """
 
 FilterValue: TypeAlias = str | int | float | bool | date | datetime | Sequence[str]
