@@ -4,7 +4,9 @@ import gc
 import logging
 import threading
 import time
+import weakref
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -269,6 +271,39 @@ def test_releasing_a_loading_read_stops_it_and_publishes_nothing(
     assert (row["State"], row["HeldResults"], row["RowsPublished"]) == ("RELEASED", 0, 0)
     assert [r.getMessage() for r in caplog.records if "stopped" in r.getMessage()] != []
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    until(lambda: not massive_session._core._workers)
+
+
+def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
+    massive_session: dm.MassiveSession, stream_rows: Rows, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Called here, as Deephaven calls it on an update-graph thread, which a coverage tracer
+    # before Python 3.14 does not follow.
+    gate = threading.Event()
+    rows = static_rows(massive_session, "AAPL")
+
+    def run(stop: threading.Event) -> Table:
+        assert gate.wait(TIMEOUT)
+        return rows
+
+    result = open_test_read(massive_session, run)
+    read = the_read(massive_session)
+    (call,) = massive_session._core._workers
+    landed = background_read._RowsLanded(weakref.ref(massive_session._core), call)
+    added = SimpleNamespace(size=lambda: 3)
+    update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
+    with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
+        landed.on_update(cast("Any", update), is_replay=False)
+        landed.on_error(RuntimeError("the table broke"))
+    (row,) = stream_rows()
+    assert (row["State"], row["RowsPublished"]) == ("DONE", 3)
+    assert [r.getMessage() for r in caplog.records] == [
+        f"call {call} done: its 3 rows landed in the result",
+        f"call {call}: its result failed: the table broke",
+    ]
+    gate.set()
+    read.thread.join(TIMEOUT)
+    massive_session.release(result)
     until(lambda: not massive_session._core._workers)
 
 
