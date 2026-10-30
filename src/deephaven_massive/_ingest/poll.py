@@ -95,7 +95,12 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import Cancel, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
-from deephaven_massive._tables.diagnostics import StreamRow, StreamUpdate, describe_symbols
+from deephaven_massive._tables.diagnostics import (
+    StreamRow,
+    StreamUpdate,
+    describe_symbols,
+    shown_query,
+)
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
@@ -536,7 +541,7 @@ class Poller:
         """
         began = self._clock.monotonic()
         symbols = self._symbols()
-        record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST.value)
+        record = functools.partial(core.record_stream_drift, self._stream_id, Transport.REST)
         table, requests = self._read(
             symbols=symbols, record=record, executor=pool, cancel=self._stop
         )
@@ -966,6 +971,7 @@ def open_poll(
     request: Request,
     interval: timedelta,
     mode: PollMode,
+    query: str,
     read: CycleReader,
     pollers: Pollers,
     host: str | None,
@@ -989,6 +995,7 @@ def open_poll(
         request: The normalized arguments.
         interval: The time from one cycle's start to the next.
         mode: How cycles combine.
+        query: The `repr` of the query, for the row's `Query`.
         read: Reads one cycle's rows.
         pollers: The session's live pollers.
         host: The REST host, for the row's `Host`.
@@ -1029,6 +1036,7 @@ def open_poll(
             StreamRow(
                 stream_id=stream_id,
                 dataset=spec.name,
+                query=shown_query(query),
                 symbol_count=count,
                 symbols=text,
                 held_results=1,

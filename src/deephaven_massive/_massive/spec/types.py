@@ -91,8 +91,9 @@ class Transport(StrEnum):
     """The transport a source is served on.
 
     Defined once, here, and used on both sides of the wire boundary: the library names its
-    dataset sources and its drift reports by it. Its values are the text the diagnostics
-    tables show in their `Transport` column.
+    dataset sources and its drift reports by it. Its values are internal names; the library
+    spells a transport for its users with labels of its own (`WebSocket`, `REST`,
+    `flat files`).
     """
 
     WS = "WS"

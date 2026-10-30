@@ -129,6 +129,10 @@ STOCK_BARS = DatasetSpec(
         Timespan.DAY: "us_stocks_sip/day_aggs_v1",
     },
     keys={
+        (R, "/v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}"): keys(
+            from_request("stocksTicker"), "WindowStart"
+        ),
+        (R, "/v2/aggs/grouped/locale/us/market/stocks/{date}"): keys("Ticker", "WindowStart"),
         (FF, "us_stocks_sip/minute_aggs_v1"): keys("Ticker", "WindowStart"),
         (FF, "us_stocks_sip/day_aggs_v1"): keys("Ticker", "WindowStart"),
     },
@@ -768,8 +772,19 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
     assert pick(t, "Vwap") == [(None,), (None,)]
     assert caplog.messages == [
         "stocks.bars history: AUTO chose FLAT_FILES (every symbol)",
+        # REST's grouped-daily bars could have served it, with the columns the file lacks.
+        (
+            "stocks.bars history: AUTO read flat files (every symbol); the read leaves Otc, "
+            "Vwap null, which the other source, REST, fills: pass "
+            "source=dm.HistorySource.REST to get them (logged once per session)"
+        ),
         "stocks.bars history: source=S3 files=1 skipped=none",
     ]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        q.history("2025-03-03", "2025-03-03")
+    # Once per session: the second read logs its choice and its files, and no WARNING.
+    assert [r.levelno for r in caplog.records] == [logging.INFO, logging.INFO]
 
 
 def test_each_file_becomes_one_table(

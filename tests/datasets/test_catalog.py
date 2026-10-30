@@ -1160,8 +1160,19 @@ def test_nullable_keys_gate() -> None:
     assert problems(change(EXCHANGES, poll_keys=(), revision_keys=("Name",))) == ()
 
 
+def test_feed_axis_gate() -> None:
+    # A feed's poll() needs start, which only a time axis can carry.
+    assert problems(change(EXCHANGES, poll_mode=PollMode.APPEND)) == (
+        (
+            "feed axis: reference.exchanges: an APPEND dataset declares a time_axis, since its "
+            "poll() needs start"
+        ),
+    )
+    assert change(EXCHANGES, poll_mode=PollMode.APPEND).is_feed
+    assert not EXCHANGES.is_feed
+
+
 def test_append_keys_gate() -> None:
-    assert problems(change(EXCHANGES, poll_mode=PollMode.APPEND)) == ()
     defaulted = DatasetSpec(
         name="reference.exchanges",
         summary="A dataset for the tests.",
@@ -1173,6 +1184,10 @@ def test_append_keys_gate() -> None:
         (
             "append keys: reference.exchanges: an APPEND dataset declares its own poll_keys, "
             "unique per row, not the default ['Symbol']"
+        ),
+        (
+            "feed axis: reference.exchanges: an APPEND dataset declares a time_axis, since its "
+            "poll() needs start"
         ),
         missing,
     )
