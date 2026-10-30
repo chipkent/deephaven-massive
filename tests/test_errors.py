@@ -94,8 +94,7 @@ def test_errors_are_distinct() -> None:
 #
 # A function's `Raises:` section must list exactly what it raises itself and what the helpers it
 # declares with `raises_through` list in theirs. Ruff's DOC502 cannot check a section whose
-# errors come from helpers, so it is off for the modules of the public API, and this check
-# replaces it there.
+# errors come from helpers, so it is off, and this check covers the public API instead.
 
 _SECTION_ENTRY = re.compile(r"^    ([A-Za-z_][\w.]*):")
 
