@@ -71,7 +71,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from deephaven_massive import _massive
-from deephaven_massive._datasets.request import HostDecision
 from deephaven_massive._datasets.symbols import SymbolTable, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import EntitlementError, MassiveError, from_wire
@@ -93,8 +92,10 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     describe_symbols,
 )
-from deephaven_massive._tables.liveness import holds_update_graph_lock, release_scope
+from deephaven_massive._tables.execution_context import holds_update_graph_lock
+from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
+from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import _All
 
@@ -109,9 +110,9 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError
-    from deephaven_massive._tables.core import SessionCore
-    from deephaven_massive._tables.liveness import StreamHandle
+    from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
+    from deephaven_massive._tables.transports import StreamHandle
 
 __all__ = [
     "CONNECTION_SETTINGS",

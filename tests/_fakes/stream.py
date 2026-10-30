@@ -19,8 +19,9 @@ import weakref
 from typing import TYPE_CHECKING, Any
 
 from deephaven_massive._tables.columns import col_defs
-from deephaven_massive._tables.liveness import StreamHandle, new_scope
+from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.transports import StreamHandle
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._errors import MassiveError
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
 
 
 class FakeStreamTransport:

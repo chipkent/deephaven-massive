@@ -4,7 +4,7 @@
 ...), the diagnostics tables, and the lifecycle verbs `release()` and `close()`, and nothing else.
 It checks where it is constructed (an execution context whose query scope is the script
 session's own, never an update-graph thread), builds the session's `SessionCore`
-(`_tables/core.py`), which owns everything stateful and which queries and namespaces share,
+(`_tables/session_core.py`), which owns everything stateful and which queries and namespaces share,
 builds the session's `SessionClients` (`_ingest/clients.py`), which owns every wire client, and
 attaches them to the core once; then it hands the core to one object per namespace.
 
@@ -62,12 +62,12 @@ from deephaven_massive._namespaces.options import _Options
 from deephaven_massive._namespaces.partners import _Partners
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
-from deephaven_massive._tables.core import (
-    SessionCore,
+from deephaven_massive._tables.execution_context import (
     has_execution_context,
     has_script_query_scope,
+    refuse_update_graph_thread,
 )
-from deephaven_massive._tables.liveness import refuse_update_graph_thread
+from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:

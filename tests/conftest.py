@@ -432,13 +432,13 @@ def console_command(
     Returns:
         The function; it takes the command and returns once the command has returned.
     """
-    liveness = importlib.import_module("deephaven_massive._tables.liveness")
+    execution_context = importlib.import_module("deephaven_massive._tables.execution_context")
 
     def run(command: Callable[[], None]) -> None:
         returned = threading.Event()
 
         def body() -> None:
-            with liveness.entered(dh_exec_ctx):
+            with execution_context.entered(dh_exec_ctx):
                 lock = dh_exec_ctx.update_graph.j_update_graph.exclusiveLock()
                 lock.lock()
                 try:
@@ -900,7 +900,7 @@ def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
         The labels of the sessions in the live set, the labels of every session not yet
         freed, the connection groups, and the alive library threads (`_LIBRARY_THREADS`).
     """
-    core = importlib.import_module("deephaven_massive._tables.core")
+    core = importlib.import_module("deephaven_massive._tables.session_core")
     session = importlib.import_module("deephaven_massive._session")
     ws = importlib.import_module("deephaven_massive._ingest.ws")
     with core._live_lock:
@@ -921,9 +921,9 @@ def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Number each test's streams from 1, so tests can name them by id.
 
     Stream ids are process-unique in the library (a module-level counter in
-    `_tables/core.py`); each test gets a fresh counter.
+    `_tables/session_core.py`); each test gets a fresh counter.
     """
-    core = importlib.import_module("deephaven_massive._tables.core")
+    core = importlib.import_module("deephaven_massive._tables.session_core")
     itertools = importlib.import_module("itertools")
     monkeypatch.setattr(core, "_stream_numbers", itertools.count(1))
 

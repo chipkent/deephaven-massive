@@ -19,7 +19,7 @@ to keep.
   converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's
   start, the 16:00 New York session close (stocks), midnight in Chicago (indices), or
   23:59:59.999 UTC (forex and crypto), are stamped at 00:00 of their day in the class day zone
-  (`history_source.stamp_rule`). Every block's rows then get the library's time columns
+  (`row_times.stamp_rule`). Every block's rows then get the library's time columns
   (`row_times.TimeRule`), with `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields
   (`source(Transport.FLAT_FILES, prefix)`), renamed for the dataset (`schema.rename`), and the
@@ -118,15 +118,15 @@ from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.dates import TimeRange, is_trading_day
 from deephaven_massive._datasets.history_source import (
     NOT_PUBLISHED,
-    StampRule,
     published,
-    stamp_rule,
     within_publication_grace,
 )
 from deephaven_massive._datasets.row_times import (
     DATE,
     BarBounds,
+    StampRule,
     TimeRule,
+    stamp_rule,
     time_column,
     time_rule,
     within,
@@ -167,7 +167,7 @@ from deephaven_massive._massive import (
     object_key,
 )
 from deephaven_massive._tables.columns import dataset_table
-from deephaven_massive._tables.liveness import entered
+from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -183,7 +183,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType, SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._massive import DriftReport, Field, FlatFileClient
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = ["BLOCK_SIZE", "ROLL_LIMIT", "FlatFileHistory"]
 
@@ -317,7 +317,7 @@ class _Transform:
         times: How the rows' time columns are filled (`row_times.TimeRule`).
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         stamps: For 1-day bars, how their stamps move to 00:00 of their day in the class day
-            zone (`history_source.stamp_rule`); None otherwise.
+            zone (`row_times.stamp_rule`); None otherwise.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
             None for ticks.
     """
@@ -368,7 +368,7 @@ class _Transform:
                 every time of their files, which hold exactly the requested sessions.
             unknown_symbols: The session's rule for a ticker spelling the library cannot
                 read; `WARN` also adds the `RawSymbol` column to the schema.
-            stamps: How the bars' stamps are treated (`history_source.stamp_rule`), or None
+            stamps: How the bars' stamps are treated (`row_times.stamp_rule`), or None
                 to keep them; the files hold only 1-day bars of the classes that have one.
 
         Returns:
@@ -470,7 +470,7 @@ class _Transform:
         A timestamp that overflows or lies outside 1990 to 2100 raises the `UnitMismatchError` of
         `timestamps.instants`.
         A 1-day bar stamped at a time of day Massive is not known to use raises the
-        `MassiveError` of `timestamps.day_starts`.
+        `MassiveError` of `row_times.day_starts`.
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
@@ -535,7 +535,7 @@ def _flat_file_stamps(spec: DatasetSpec, request: Request) -> StampRule | None:
         request: The normalized arguments.
 
     Returns:
-        The rule (`history_source.stamp_rule`), whose remedy is reading REST, or, for `dm.ALL`
+        The rule (`row_times.stamp_rule`), whose remedy is reading REST, or, for `dm.ALL`
         of a dataset without a grouped-daily path (indices), passing explicit symbols to read
         REST; None when the bars keep their stamps.
     """

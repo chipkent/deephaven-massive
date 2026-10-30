@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from deephaven_massive._datasets import row_times, schema
 from deephaven_massive._massive.refresh.naming import (
     KEY_COLUMNS,
     column_name,
@@ -94,3 +95,10 @@ def test_the_library_owns_every_timestamp_with_a_qualifier(column: str) -> None:
 )
 def test_other_names_are_the_vendor_s(column: str) -> None:
     assert not is_key_column(column)
+
+
+def test_the_key_columns_are_the_ones_the_datasets_produce() -> None:
+    # The refresh imports nothing outside the wire package, so it keeps its own copy of the
+    # names the run-time key rename and the library's time columns give.
+    produced = {*schema.KEY_COLUMNS.values(), row_times.START, row_times.INSERT}
+    assert produced == KEY_COLUMNS

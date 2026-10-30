@@ -33,7 +33,8 @@ from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, o
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import Query
-from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, entered, new_scope
+from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 

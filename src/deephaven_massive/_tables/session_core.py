@@ -1,4 +1,4 @@
-"""`SessionCore`, the internal engine of a session, and the transport ports its verbs call.
+"""`SessionCore`, the internal engine of a session: its registries, live set, and close.
 
 `MassiveSession` (in `_session.py`) is what users create; it delegates everything stateful to
 one `SessionCore`, which queries and namespaces share. The core owns:
@@ -23,13 +23,13 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   the drift registry that every transport reports schema drift to (`diagnostics.py`);
 - the closers that run when the session closes, or when it is freed without `close()`;
 - one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`),
-  each returning one of the ports defined here: `RestTransport` (`fetch`, `poll`, REST
+  each returning one of the ports of `transports.py`: `RestTransport` (`fetch`, `poll`, REST
   `history`, and the WebSocket host decision), `StreamTransport` (opening a WebSocket stream),
   and `FlatFileTransport` (flat-file `history`).
 
 The core holds no wire client and imports no ingest code. The session's ingest side
 (`SessionClients` in `_ingest/clients.py`) owns every wire client and connection and provides
-the ports through the `IngestPorts` protocol defined here; `MassiveSession` builds the core,
+the ports through the `IngestPorts` protocol (`transports.py`); `MassiveSession` builds the core,
 then the clients, and attaches them once (`attach`), and each hook asks the attached ports.
 So the core and everything else on the Deephaven side are tested without a fake server, and a
 dependency never points from the tables up to the code that does the I/O.
@@ -48,12 +48,9 @@ because the core's finalizer only queues work on the reaper. On a free-threaded 
 reference dropped on another thread reaches the thread that created the core only when that
 thread next runs Python code (or a cyclic collection runs), so the core is freed then.
 
-The module also holds the process-wide stream-id allocator and two context checks,
-`has_execution_context` and `has_script_query_scope`, which run only when a `MassiveSession` is
-constructed, the one place an execution context is captured. The thread checks live beside
-`entered` in `_tables/liveness.py`: `refuse_update_graph_thread` runs at every entry point
-(`MassiveSession()`, every verb through `SessionCore.run_verb`, and `close()`), and
-`holds_update_graph_lock` tells the calls that would wait on another thread whether they may.
+The module also holds the process-wide stream-id allocator. The checks of where a call runs,
+which every verb and `close()` make first (through `SessionCore.run_verb`), and the way library
+threads enter the session's context (`entered`) live in `execution_context.py`.
 
 **The console holds the UG lock.** Deephaven's console runs every command holding the update
 graph's exclusive lock, so no update cycle runs until the command returns; a user thread may
@@ -75,6 +72,11 @@ outside every lock, instead of opening a second stream. A second verb on a threa
 the UG lock cannot wait (the open may need that lock, to start a watchlist's listener), so it
 takes the key over: it registers and opens a stream of its own, which later verbs on the key
 reuse, while the first open finishes for its own caller alone.
+
+The module is one subject although it runs past 1,000 lines: the stream registry, the `poll()`
+registry, the count of diagnostics views, the closers, and `close()` all change the same state
+under the one `registry_lock` and keep the one live set in step with it, so each of those
+critical sections reads whole only here.
 """
 
 from __future__ import annotations
@@ -86,7 +88,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Final, TypeVar, cast
 
 from deephaven.dherror import DHError
 from deephaven.update_graph import shared_lock
@@ -102,19 +104,15 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     describe_symbols,
 )
-from deephaven_massive._tables.liveness import (
-    Reaper,
-    ResultRegistry,
+from deephaven_massive._tables.execution_context import (
     entered,
     holds_update_graph_lock,
-    make_result,
     refuse_update_graph_thread,
-    release_scope,
 )
+from deephaven_massive._tables.liveness import Reaper, ResultRegistry, make_result, release_scope
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
-    from datetime import date, timedelta
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.liveness_scope import LivenessScope
@@ -122,41 +120,23 @@ if TYPE_CHECKING:
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-    from deephaven_massive._datasets.history_source import HistoryWindow
-    from deephaven_massive._datasets.request import HostDecision, Request, StreamKey
+    from deephaven_massive._datasets.request import Request, StreamKey
     from deephaven_massive._datasets.schema import Schema
-    from deephaven_massive._enums import AssetClass, ChannelFamily, PollMode
     from deephaven_massive._massive import DriftReport
-    from deephaven_massive._tables.liveness import StreamHandle
+    from deephaven_massive._tables.transports import (
+        FlatFileTransport,
+        IngestPorts,
+        RestTransport,
+        StreamHandle,
+        StreamTransport,
+    )
 
-__all__ = [
-    "PAUSED_TABLES_WARNING_SECONDS",
-    "FlatFileTransport",
-    "IngestPorts",
-    "RestTransport",
-    "SessionCore",
-    "StreamTransport",
-    "has_execution_context",
-    "has_script_query_scope",
-]
+__all__ = ["PAUSED_TABLES_WARNING_SECONDS", "SessionCore"]
 
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-
-# A thread with no execution context gets Deephaven's empty default context, whose update graph
-# is a PoisonedUpdateGraph: creating any refreshing table under it fails. That class is the
-# only signal Deephaven offers for "no context is active".
-_POISONED_UPDATE_GRAPH: Final = "PoisonedUpdateGraph"
-
-# The query scope of a script session's context: formulas resolve names through the session's
-# live globals, which is how a formula such as `update_view("Symbol = canonical_symbol(...)")`
-# reaches a Python function the library defines. `make_user_exec_ctx(freeze_vars=[...])`
-# builds a StandaloneQueryScope holding only the frozen variables instead.
-_SCRIPT_QUERY_SCOPE: Final = (
-    "io.deephaven.engine.util.AbstractScriptSession$ScriptSessionQueryScope"
-)
 
 # Stream ids are minted here, not by the transport, so a stream is registered before it opens.
 # Its own leaf lock: the session module's registration lock is taken before a session's
@@ -172,33 +152,6 @@ _live_lock = threading.Lock()
 _live: dict[int, SessionCore] = {}
 
 
-def has_execution_context(exec_ctx: ExecutionContext) -> bool:
-    """Tell whether an execution context is a real one, not the thread's empty default.
-
-    Args:
-        exec_ctx: The context `get_exec_ctx()` returned.
-
-    Returns:
-        True if live tables can be created under it.
-    """
-    j_update_graph = exec_ctx.update_graph.j_update_graph
-    return str(j_update_graph.getClass().getSimpleName()) != _POISONED_UPDATE_GRAPH
-
-
-def has_script_query_scope(exec_ctx: ExecutionContext) -> bool:
-    """Tell whether formulas under an execution context can call the library's Python functions.
-
-    Args:
-        exec_ctx: The context `get_exec_ctx()` returned.
-
-    Returns:
-        True when the context's query scope is the Python script session's own scope, False
-        for a frozen copy (`make_user_exec_ctx(freeze_vars=[...])`).
-    """
-    j_query_scope = exec_ctx.j_exec_ctx.getQueryScope()
-    return str(j_query_scope.getClass().getName()) == _SCRIPT_QUERY_SCOPE
-
-
 PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
 """Seconds a verb may run on a thread that holds the update graph's lock before the session
 logs, once, that the worker's live tables are paused (`SessionCore.run_verb`)."""
@@ -212,208 +165,6 @@ def _next_stream_id() -> int:
     """
     with _stream_id_lock:
         return next(_stream_numbers)
-
-
-class RestTransport(Protocol):
-    """The REST transport, from `SessionCore.rest_transport()` (`IngestPorts.rest`).
-
-    Every method runs synchronously on the calling thread and raises `EntitlementError` on
-    HTTP 403 and `MassiveError` on other failures; `poll()` instead fails its live table.
-
-    The raw-row read the futures calendar uses (`RestEndpoints.fetch_rows`) is not part of this
-    port: it takes the rate governor's bucket and the wire layer's `Cancel` token, which no
-    module of `_tables` may name. The ingest layer, which wires the calendar to the REST
-    transport, reaches it on the concrete `RestEndpoints` (`SessionClients.rest`).
-    """
-
-    def resolve_host(self, asset_class: AssetClass, family: ChannelFamily) -> HostDecision:
-        """Decide the WebSocket host of a (class, family), once per session.
-
-        Called by the WebSocket transport on the caller thread at the first stream verb for the
-        pair. The first call may make one REST request; the decision is then cached for the
-        life of the session, so later calls return it without a request. Each new decision
-        writes the pair's `Transport=REST` row of `m.connections()` (host, recency, evidence).
-
-        Args:
-            asset_class: The asset class of the stream.
-            family: The channel family, `TICK` or `FMV`.
-        """
-        ...
-
-    def crypto_pair(self, symbol: str) -> tuple[str, str]:
-        """Return a crypto ticker's base and quote, looking them up in Massive if needed.
-
-        Called by the WebSocket transport for each crypto ticker of a stream, before it starts
-        or on its lookup worker. The first such call of the session blocks while it reads
-        Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page, listed
-        and delisted pairs), which the session then keeps; a failed read is read again by the
-        next call.
-
-        Args:
-            symbol: A canonical crypto ticker.
-
-        Returns:
-            `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`.
-
-        A failed read, or a ticker the list does not hold, raises a `MassiveError` naming the
-        ticker.
-        """
-        ...
-
-    def record_verdict(
-        self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
-    ) -> None:
-        """Replace the cached host decision of a (class, family) with a server's verdict.
-
-        Called by the WebSocket transport when the explicit-verdict rule re-routes a
-        connection (for example to the delayed host, with `Recency.DELAYED` and evidence
-        `"server verdict: <message>"`). Every later `resolve_host` for the pair returns this
-        decision, and the pair's `Transport=REST` row of `m.connections()` is rewritten with
-        it. No request is made and nothing blocks.
-
-        Args:
-            asset_class: The asset class of the connection.
-            family: The channel family.
-            decision: The new decision.
-        """
-        ...
-
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
-        """Return every row the dataset's `fetch` endpoint returns for the request, static.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments.
-            call: The verb call's id (`next_stream_id`), which its log lines and thread names
-                carry.
-        """
-        ...
-
-    def poll(
-        self, spec: DatasetSpec, request: Request, *, interval: timedelta, mode: PollMode
-    ) -> Table:
-        """Return a live table that re-runs `fetch` every `interval`, tracked by the session.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments.
-            interval: The time between cycles.
-            mode: How cycles combine.
-        """
-        ...
-
-    def history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
-    ) -> Table:
-        """Return the dataset's REST history over `window`, paged internally, static.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments, with the parsed `start` and `end` bounds.
-            window: What the call reads and keeps (`history_window` in
-                `_datasets/history_source.py`).
-            call: The verb call's id, as `fetch` takes it.
-        """
-        ...
-
-
-class StreamTransport(Protocol):
-    """The WebSocket transport, from `SessionCore.stream_transport()` (`IngestPorts.streams`)."""
-
-    def open_stream(
-        self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-    ) -> StreamHandle:
-        """Create a new stream: its publisher and blink table in a new stream scope.
-
-        Runs on the caller thread; may resolve the host with one REST call. Must not hold the
-        session's registry lock while calling Deephaven. The session has already registered the
-        stream under `stream_id`, so `SessionCore.fail_stream(stream_id, ...)` and
-        `SessionCore.stream_shut_down(stream_id)` may be called from the moment the publisher
-        exists, even before this method returns. The publisher is named
-        `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must first
-        call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's topics.
-        The returned handle carries `stream_id`. If the open raises anything, even
-        `KeyboardInterrupt`, the transport has released the stream scope and the stream's
-        references (its connection lease and topics) before the exception propagates.
-
-        Args:
-            spec: The dataset.
-            request: The normalized arguments.
-            channel: The WebSocket channel.
-            stream_id: The id the session minted for the stream.
-        """
-        ...
-
-
-class FlatFileTransport(Protocol):
-    """The flat-file transport, from `SessionCore.flat_file_transport()` (`IngestPorts.flat_files`).
-
-    It only reads files: `HistoryQuery.history()` has already chosen flat files as the source
-    (`choose_source` in `_datasets/history_source.py`).
-    """
-
-    def history(
-        self,
-        spec: DatasetSpec,
-        request: Request,
-        window: HistoryWindow,
-        *,
-        dates: Sequence[date],
-        call: int,
-    ) -> Table:
-        """Return the rows of `window` from the dataset's flat files, static.
-
-        Args:
-            spec: The dataset, with a flat-file prefix for the request.
-            request: The normalized arguments, with the raw `start` and `end` bounds and static
-                symbols (never a reactive table).
-            window: What the call reads and keeps (`history_window` in
-                `_datasets/history_source.py`).
-            dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
-            call: The verb call's id (`next_stream_id`), which its log lines and thread names
-                carry.
-        """
-        ...
-
-
-class IngestPorts(Protocol):
-    """The session's ingest side as the core sees it: one factory per transport.
-
-    Implemented by `SessionClients` in `_ingest/clients.py`, which owns the session's wire
-    clients and connections, and attached to the core once by `MassiveSession` (`attach`). The
-    core's hooks (`rest_transport`, `stream_transport`, `flat_file_transport`) call these
-    methods; verbs call the hooks. Each method runs on the calling thread, makes no network
-    request, and may be called from any thread.
-    """
-
-    def rest(self) -> RestTransport:
-        """Return the session's REST transport, over one REST client for the session's life.
-
-        The first call creates the session's REST client and registers its close with the core
-        (`SessionCore.on_close`); later calls share it.
-        """
-        ...
-
-    def streams(self) -> StreamTransport:
-        """Return a WebSocket transport over the session's connections.
-
-        Each call may return a new, lightweight transport; every one opens its streams on the
-        connections of the session's connection group, which sessions of the same API key and
-        connection settings share. The first call joins the group and registers the session's
-        leaving it with the session's closers. No connection is opened.
-        """
-        ...
-
-    def flat_files(self) -> FlatFileTransport:
-        """Return a new flat-file transport for one `history()` call.
-
-        The first call creates the session's S3 client and registers its close with the core
-        (`SessionCore.on_close`); later calls share it.
-
-        Raises:
-            ValueError: If the configuration has no S3 credentials.
-        """
-        ...
 
 
 def _call(core_ref: weakref.ref[SessionCore], release: Callable[..., None], *args: object) -> None:
@@ -505,7 +256,7 @@ def _close_collected(label: str, closers: tuple[Callable[[], None], ...]) -> Non
 
 
 @dataclass(frozen=True, slots=True)
-class _StreamState:
+class _StreamEntry:
     """One stream of the registry; replaced, never mutated, under `registry_lock`.
 
     A record is registered before the transport opens the stream (`OPENING`, `handle` None),
@@ -632,7 +383,7 @@ class SessionCore:
         )
         self.drift: Final = DriftRegistry()
         self._stream_ids: dict[StreamKey, int] = {}
-        self._streams: dict[int, _StreamState] = {}
+        self._streams: dict[int, _StreamEntry] = {}
         # The live `poll()` tables, by stream id; they have no key and no handle.
         self._polls: dict[int, _PollState] = {}
         # How many diagnostics views (`diagnostics_view`) users hold.
@@ -1114,7 +865,7 @@ class SessionCore:
                 created_at=time.time_ns(),
             )
             ready = threading.Event()
-            state = _StreamState(key, None, row, ready)
+            state = _StreamEntry(key, None, row, ready)
             # The key first: hashing it can run Python (a SymbolTable box), so it may be
             # interrupted; the int-keyed store and the append after it run no Python code.
             # No row is written until the open finishes: m.streams() has no OPENING state.
