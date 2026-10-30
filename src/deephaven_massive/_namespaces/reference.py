@@ -17,7 +17,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._enums import (
     AssetClass,
     ConditionDataType,
@@ -30,7 +29,7 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import Namespace, build_query, day_argument, list_params
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -325,7 +324,7 @@ class _Reference(Namespace):
             "exchange": _text("exchange", exchange),
             "cusip": _text("cusip", cusip),
             "cik": _text("cik", cik),
-            "date": None if date is None else calendar_day(TICKERS, date, "date"),
+            "date": None if date is None else day_argument(TICKERS, date, "date"),
             "active": active,
             "search": _text("search", search),
             **list_params(sort=sort, order=order),
@@ -370,7 +369,7 @@ class _Reference(Namespace):
             TICKER_DETAILS,
             symbols=symbols,
             all_alternative="m.reference.tickers() for every ticker",
-            params={"date": None if date is None else calendar_day(TICKER_DETAILS, date, "date")},
+            params={"date": None if date is None else day_argument(TICKER_DETAILS, date, "date")},
         )
         return cast("Query", query)
 

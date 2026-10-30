@@ -460,7 +460,7 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     naive = datetime(2025, 6, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match="needs a timezone"):
         m.indices.daily_open_close("I:SPX", naive)
-    with pytest.raises(ValueError, match="is not an ISO-8601 date"):
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         m.indices.daily_open_close("I:SPX", "June 2")
     with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
         m.indices.daily_open_close("I:SPX", cast("str", 20250602))

@@ -549,6 +549,11 @@ def test_daily_open_close_rejects_all_and_bad_days(massive_session: dm.MassiveSe
         open_close("AAPL", datetime(2025, 6, 6, 9, 30))  # noqa: DTZ001 - a naive time on purpose
     with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
         open_close("AAPL", datetime(2025, 6, 7, 1, tzinfo=UTC))
+    # Deephaven's own text reaches the day too, and a time there is no day either.
+    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+        open_close("AAPL", "2025-06-06T09:30 America/New_York")
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time"):
+        open_close("AAPL", "June 6")
     with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
         open_close("AAPL", cast("Any", 20250606))
     with pytest.raises(TypeError, match="adjusted must be a bool"):

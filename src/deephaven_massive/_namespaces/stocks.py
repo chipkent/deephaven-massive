@@ -27,7 +27,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import (
     AssetClass,
@@ -45,6 +44,7 @@ from deephaven_massive._namespaces.base import (
     Namespace,
     adjustment_notes,
     build_query,
+    day_argument,
     list_params,
     one_or_any_of,
     optional_text,
@@ -2613,7 +2613,7 @@ class _Stocks(Namespace):
             symbols=symbols,
             all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)",
             adjusted=require_bool("adjusted", adjusted),
-            params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+            params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
         )
         return cast("Query", query)
 

@@ -380,7 +380,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         ref.tickers(active=None)
     with pytest.raises(ValueError, match="needs a timezone"):
         ref.tickers(date="2025-01-02T09:30")
-    with pytest.raises(ValueError, match="is not an ISO-8601 date"):
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         ref.ticker_details("AAPL", date="soon")
     with pytest.raises(ValueError, match="types is empty"):
         ref.ticker_events("AAPL", types=[])

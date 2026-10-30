@@ -77,6 +77,7 @@ from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
+from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._tables.watchlist import read_symbols
 from deephaven_massive._types import override
 
@@ -898,14 +899,15 @@ class HistoryQuery(QueryBase):
           and crypto. For futures a date names the trading session whose `Date`
           (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
           (earlier after a holiday).
-        - **Instants** (an aware `datetime`, ISO text with an offset, a Java `Instant` or
-          `ZonedDateTime` such as `dh_now()` or an `Instant` cell read with `iter_dict`, or a
-          `numpy.datetime64` finer than a day or a `pandas.Timestamp`, in UTC without a zone) are
-          exact instants, half-open: rows with `start <= Timestamp < end` (for bars,
-          `TimestampStart`). Equal instants give an empty table. A Java, numpy, or pandas instant
-          with nanoseconds below the microsecond, which a `datetime` cannot hold, is moved outward
-          to a microsecond: `start` down, so a row it came from is still included, and `end`
-          up, so `end` may include up to 999 ns more but never loses a row.
+        - **Instants** (an aware `datetime` or `pandas.Timestamp`, ISO text with an offset,
+          Deephaven's own text such as `"2025-03-03T09:30 America/New_York"`, a Java `Instant`
+          or `ZonedDateTime` such as `dh_now()` or an `Instant` cell read with `iter_dict`, or a
+          `numpy.datetime64` finer than a day, read as UTC) are exact instants, half-open: rows
+          with `start <= Timestamp < end` (for bars, `TimestampStart`). Equal instants give an
+          empty table. A Java, numpy, or pandas instant with nanoseconds below the microsecond,
+          which a `datetime` cannot hold, is moved outward to a microsecond: `start` down, so a
+          row it came from is still included, and `end` up, so `end` may include up to 999 ns
+          more but never loses a row.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole window
         lies inside the range and has ended: its `TimestampStart` lies in the range, and its
@@ -1042,8 +1044,12 @@ class HistoryQuery(QueryBase):
             The static table.
         """
         chosen = _require_enum(source, HistorySource, "source")
-        first = parse_date_like(start, "start")
-        last = None if end is None else parse_date_like(end, "end", upper=True)
+        first = parse_date_like(deephaven_time_text(start, "start"), "start")
+        last = (
+            None
+            if end is None
+            else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
+        )
         symbols = self._request.symbols
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols)

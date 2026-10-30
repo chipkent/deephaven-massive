@@ -403,6 +403,9 @@ def test_deephaven_java_dates_and_instants_are_bounds() -> None:
     assert cast("datetime", moment).utcoffset() == timedelta(hours=-5)
 
 
+_DATES_LOG = "deephaven_massive._datasets.dates"
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -415,22 +418,51 @@ def test_java_instants_round_outward_to_the_microsecond(
 ) -> None:
     # Deephaven's instants carry nanoseconds the user never chose. A start rounds down, so it
     # still includes the row it came from; an end rounds up, so the range loses no row.
-    caplog.set_level(logging.DEBUG, logger="deephaven_massive._datasets.dates")
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
     java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
     start = cast("datetime", parse_date_like(java, "start"))
     end = cast("datetime", parse_date_like(java, "end", upper=True))
     assert start.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
     assert end.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123457, tzinfo=UTC)
     assert caplog.messages == [
-        f"start={java} rounded down to the microsecond",
-        f"end={java} rounded up to the microsecond",
+        f"start={java} rounded down to 2025-03-03T14:30:00.123456+00:00, by 789.0 ns",
+        f"end={java} rounded up to 2025-03-03T14:30:00.123457+00:00, by 211.0 ns",
     ]
 
 
-def test_a_java_instant_on_a_microsecond_is_not_moved() -> None:
-    java = _present(to_j_instant("2025-03-03T14:30:00.123456Z"))
+def test_an_instant_on_a_microsecond_is_not_moved_or_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
     exact = datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
-    assert parse_date_like(java, "end", upper=True) == exact
+    for value in (
+        _present(to_j_instant("2025-03-03T14:30:00.123456Z")),
+        pd.Timestamp("2025-03-03T14:30:00.123456", tz="UTC"),
+    ):
+        assert parse_date_like(value, "end", upper=True) == exact
+    assert caplog.messages == []
+
+
+def test_an_instant_before_1970_rounds_outward_too() -> None:
+    # Before the epoch the count is negative; down is still earlier and up still later.
+    java = _present(to_j_instant("1969-12-31T23:59:59.999999500Z"))
+    last = datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+    assert parse_date_like(java, "start") == last
+    assert parse_date_like(java, "end", upper=True) == datetime(1970, 1, 1, tzinfo=UTC)
+    numpy_time = np.datetime64("1969-12-31T23:59:59.999999500", "ns")
+    assert parse_date_like(numpy_time, "start") == last
+    assert parse_date_like(numpy_time, "end", upper=True) == datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def test_an_end_past_the_last_microsecond_of_9999_is_the_largest_datetime() -> None:
+    # Rounding up cannot pass the largest datetime, which no row reaches; a start still rounds
+    # down to it.
+    jpy = importlib.import_module("jpy")  # untyped: a Java instant past numpy's range
+    java = jpy.get_type("java.time.Instant").parse("9999-12-31T23:59:59.999999500Z")
+    largest = datetime.max.replace(tzinfo=UTC)
+    assert parse_date_like(java, "end", upper=True) == largest
+    assert parse_date_like(java, "start") == largest
 
 
 def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
@@ -440,11 +472,16 @@ def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
             parse_date_like(java, "start")
 
 
-def test_a_numpy_day_or_longer_period_is_a_date() -> None:
-    # A calendar unit names a day, or a period that starts on one: its first day.
+def test_a_numpy_day_is_a_date() -> None:
     assert parse_date_like(np.datetime64("2025-03-03"), "start") == date(2025, 3, 3)
-    assert parse_date_like(np.datetime64("2025-03"), "start") == date(2025, 3, 1)
-    assert parse_date_like(np.datetime64("2025"), "start") == date(2025, 1, 1)
+
+
+@pytest.mark.parametrize("value", [np.datetime64("2025-03-06", "W"), np.datetime64("2025-03")])
+def test_a_numpy_week_month_or_year_is_refused(value: np.datetime64) -> None:
+    # As an end it would shrink the range to the period's first day, and a numpy week starts
+    # on a Thursday.
+    with pytest.raises(ValueError, match=r"a numpy.datetime64 of a week, month, or year; pass a"):
+        parse_date_like(value, "end", upper=True)
 
 
 _MORNING = datetime(2025, 3, 3, 9, 30, tzinfo=UTC)
@@ -482,23 +519,53 @@ def test_a_numpy_time_is_an_instant_in_utc_rounded_outward(
     assert parse_date_like(value, "end", upper=True) == moment + timedelta(microseconds=end)
 
 
-def test_a_pandas_timestamp_is_an_instant_in_utc_rounded_outward() -> None:
+def test_a_numpy_time_logs_that_it_is_read_as_utc_and_how_it_is_rounded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    value = np.datetime64("2025-03-03T09:30:00.123456789", "ns")
+    parse_date_like(value, "end", upper=True)
+    assert caplog.messages == [
+        f"end={value!r} has no timezone; read as UTC",
+        f"end={value} rounded up to 2025-03-03T09:30:00.123457+00:00, by 211.0 ns",
+    ]
+
+
+def test_an_aware_pandas_timestamp_keeps_its_nanoseconds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A pandas.Timestamp holds nanoseconds a datetime would drop; they round outward.
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
     pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
-    # A pandas.Timestamp holds nanoseconds a datetime cannot; without a zone it is UTC, as
-    # Deephaven reads it.
-    naive = pd.Timestamp("2025-03-03T09:30:00.123456789")
+    stamp = pd.Timestamp("2025-03-03T04:30:00.123456789", tz="America/New_York")
     moment = datetime(2025, 3, 3, 9, 30, 0, 123456, tzinfo=UTC)
-    assert parse_date_like(naive, "start") == moment
-    assert parse_date_like(naive, "end", upper=True) == moment + timedelta(microseconds=1)
-    aware = pd.Timestamp("2025-03-03T04:30:00.123456", tz="America/New_York")
-    assert parse_date_like(aware, "start") == moment
+    assert parse_date_like(stamp, "start") == moment
+    assert parse_date_like(stamp, "end", upper=True) == moment + timedelta(microseconds=1)
+    assert caplog.messages == [
+        f"start={stamp} rounded down to 2025-03-03T09:30:00.123456+00:00, by 789.0 ns",
+        f"end={stamp} rounded up to 2025-03-03T09:30:00.123457+00:00, by 211.0 ns",
+    ]
+
+
+def test_a_pandas_timestamp_without_a_zone_or_value_is_refused() -> None:
+    # Like a naive datetime, a naive pandas.Timestamp cannot be placed: read as UTC, a New York
+    # user's 09:30 would become 04:30.
+    pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
+    with pytest.raises(ValueError, match=r"needs a timezone: pass an aware datetime or a date"):
+        parse_date_like(pd.Timestamp("2025-03-03T09:30"), "start")
+    with pytest.raises(ValueError, match=r"^start=NaT is NaT, not a time$"):
+        parse_date_like(pd.NaT, "start")
+    # The message shows the value as passed, not its numpy form.
+    late = pd.Timestamp(np.datetime64("10000-01-01T00:00", "s")).tz_localize("UTC")
+    with pytest.raises(ValueError, match=r"^start=10000-01-01 00:00:00\+00:00 is not a time"):
+        parse_date_like(late, "start")
 
 
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        (np.datetime64("NaT", "D"), "is NaT, not a date"),
-        (np.datetime64("NaT", "ns"), "is NaT, not a date"),
+        (np.datetime64("NaT", "D"), "is NaT, not a time"),
+        (np.datetime64("NaT", "ns"), "is NaT, not a time"),
         (np.datetime64("10000-01-01"), "is not a time from year 1 to 9999"),
         (np.datetime64("10000-01-01T00:00"), "is not a time from year 1 to 9999"),
     ],

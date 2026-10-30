@@ -22,7 +22,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import (
     AssetClass,
@@ -33,7 +32,7 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query
+from deephaven_massive._namespaces.base import Namespace, build_query, day_argument
 
 if TYPE_CHECKING:
     from deephaven_massive._query import (
@@ -739,6 +738,6 @@ class _Crypto(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
-                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

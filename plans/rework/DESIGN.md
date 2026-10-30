@@ -369,6 +369,8 @@ _tables/                 the Deephaven side: tables, liveness, library threads
   stream.py              streams, flush thread, fan-out, bound-failure routing (section 14)
   poll.py                poll(): Poller, Pollers, open_poll; REPLACE/UPSERT/APPEND, fan-out, data
                          failures -> publish_failure; SymbolRowError
+  time_text.py           deephaven_time_text(): Deephaven's own date and time text, read by
+                         Deephaven's parser for the date arguments (section 11)
   watchlist.py           read_symbols(), SymbolWatch: the check and watch of symbol tables
                          (section 10)
   symbols.py             canonicalize_symbols(), the table form of the symbol converters
@@ -2316,27 +2318,38 @@ declares its one WebSocket channel and flat-file prefix (a bars dataset keys the
 `Transport {REST, WS, FLAT_FILES}` is defined once, in `_massive.spec.types`, and used on both
 sides of the boundary.
 
-**Dates.** Parameters accept an ISO-8601 `str`, a `date`, a timezone-aware `datetime`, the
-Java time values Deephaven hands its users (`java.time.Instant` and `ZonedDateTime`, which are
+**Dates.** Parameters accept an ISO-8601 `str`, any date or time text Deephaven's own parser
+reads (such as `"2025-03-03T09:30 America/New_York"` or `"2025-03-03T09:30:00 ET"`), a `date`,
+a timezone-aware `datetime` (a `pandas.Timestamp` among them, its nanoseconds kept), the Java
+time values Deephaven hands its users (`java.time.Instant` and `ZonedDateTime`, which are
 instants, and `LocalDate`, a date: what `dh_now()` and `to_j_local_date()` return, and what
 `Instant` and `LocalDate` cells give when read as Java values, through `iter_dict` for one;
-`dh_today()` returns ISO text), a `numpy.datetime64` (a date at day precision or coarser, its
-first day; otherwise an instant in UTC, as Deephaven reads it and as `to_numpy` gives an
-`Instant` column), or a `pandas.Timestamp` (an instant, in UTC without a zone). This is the set
-Deephaven's own `deephaven.time` converters take, less a bare integer (epoch nanoseconds there,
-which would silently misread a date written as `20250303`) and Deephaven's text grammar beyond
-ISO-8601. `_datasets/dates.py`
-(`parse_date_like`) turns each into a `date` or an aware `datetime`, outside the wire package;
-it recognizes a Java value by its jpy class name, so it imports neither Deephaven nor jpy. A
-Java, numpy, or pandas instant with nanoseconds below the microsecond is moved outward to a microsecond: unlike
-typed text, whose extra digits raise, Deephaven's instants carry nanoseconds the user never
-chose (`dh_now()` on Linux, a SIP `Timestamp`). A lower bound (`start`) is rounded down, so it
-still includes the row an instant came from; an upper bound (`end`) is rounded up, so the
-half-open range may include up to 999 ns more but never loses a row. Each rounding logs at
-DEBUG. A `numpy.datetime64` that is `NaT`, and a time outside years 1 to 9999, raise
-`ValueError`. Type checkers see Deephaven's Java values as `Any`, so
-`DateLike` names only `numpy.datetime64` beside the Python types. A
-naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
+`dh_today()` returns ISO text), or a `numpy.datetime64` (a date at day precision; otherwise an
+instant in UTC, as Deephaven reads it and as `to_numpy` gives an `Instant` column, which logs
+at DEBUG). This is the set Deephaven's own `deephaven.time` converters take, less a bare
+integer, which Deephaven reads as epoch nanoseconds and which would silently misread a date
+written as `20250303`, and text Deephaven reads only as such a count. Internal code may still
+pass an integer it has already decoded, such as epoch nanoseconds, where an internal API takes
+one; the public arguments refuse it. ISO-8601 text is read by `_datasets/dates.py`
+(`parse_date_like`), exactly as before. Other text is read by Deephaven's parser at the API
+layer (`_tables/time_text.py`, `deephaven_time_text`): first as a date, so date-only text stays
+a calendar date, then as a date and time with a zone or offset, never as an epoch count; the
+Java value it gives then goes down like any other. Text neither reads raises one `ValueError`
+naming both forms. `parse_date_like` turns each value into a `date` or an aware `datetime`,
+outside the wire package; it recognizes a Java value by its jpy class name, so it imports
+neither Deephaven nor jpy. A Java, numpy, or pandas instant with nanoseconds below the
+microsecond is moved outward to a microsecond: unlike typed ISO text, whose extra digits raise,
+Deephaven's instants carry nanoseconds the user never chose (`dh_now()` on Linux, a SIP
+`Timestamp`). A lower bound (`start`) is rounded down, so it still includes the row an instant
+came from; an upper bound (`end`) is rounded up, so the half-open range may include up to
+999 ns more but never loses a row, and an `end` past the last microsecond of year 9999 becomes
+`datetime.max`. Each rounding logs at DEBUG with its result and the amount moved. A
+`numpy.datetime64` of a week, month, or year raises `ValueError` naming a day instead: as an
+`end` it would shrink the range to its first day, and a numpy week starts on a Thursday. A
+`NaT` (numpy or pandas) and a time outside years 1 to 9999 raise `ValueError`, with the value
+as the caller passed it. Type checkers see Deephaven's Java values as `Any`, so `DateLike` names
+only `numpy.datetime64` beside the Python types. A naive `datetime` or `pandas.Timestamp`, or an
+ISO string with a time but no offset, raises a `ValueError` that names
 the parameter, the value, and the fix, for example `start=datetime.datetime(2025, 1, 2, 9, 30)
 needs a timezone: pass an aware datetime or a date`. The same rule and message apply to a naive
 `datetime` passed as a `filters` value or a typed parameter. ISO text with more than six
@@ -6351,17 +6364,32 @@ document already reflects them.
       converters take (*owner*): Java `Instant`, `ZonedDateTime`, and `LocalDate`, a
       `numpy.datetime64`, and a `pandas.Timestamp`, beside text, `date`, and `datetime`. A
       Deephaven library takes the values Deephaven hands its users, rather than making them
-      format text in a second grammar. Two of Deephaven's inputs are left out: a bare integer,
-      which Deephaven reads as epoch nanoseconds and which would silently misread a date
-      written as `20250303`, and Deephaven's own text grammar beyond ISO-8601. The conversion
-      lives in `_datasets/dates.py`, outside the wire package; it cannot reuse
-      `deephaven.time`, since the dataset layer imports Deephaven only for type checking.
+      format text in a second grammar. The conversion lives in `_datasets/dates.py`, outside
+      the wire package.
+    - Integers are refused in every public date argument (*owner*): Deephaven reads one as
+      epoch nanoseconds, which would silently misread a date written as `20250303`. Internal
+      APIs may pass integers, such as epoch nanoseconds, directly as an optimization; nothing
+      is added for that, and nothing blocks it.
+    - Deephaven's own date and time text is accepted (*owner*), read by Deephaven's parser
+      rather than a second hand-written grammar: any text `to_j_local_date` or `to_j_zdt`
+      reads, such as `"2025-03-03T09:30 America/New_York"`. ISO-8601 is read exactly as
+      before, and date-only text stays a calendar date. The API layer converts the text
+      (`_tables/time_text.py`), since the dataset layer imports Deephaven only for type
+      checking; it is called where the arguments arrive, which is simpler than passing a
+      parser object down through the dataset layer. Deephaven's instant parser is not used, so
+      bare digits are never read as an epoch count. Text neither form reads raises one error
+      naming both.
     - A `numpy.datetime64` finer than a day is an instant in UTC, as Deephaven reads it
-      (*owner*); one of a day or a coarser calendar unit is a date, its first day.
+      (*owner*); a day is a date. A week, month, or year is refused, naming a day: as an `end`
+      it would shrink the range to its first day, and a numpy week starts on a Thursday.
+    - A `pandas.Timestamp` without a timezone is refused like a naive `datetime`: read as UTC,
+      a New York user's 09:30 would silently become 04:30. A `numpy.datetime64` has no zone
+      slot at all, so it stays UTC.
     - An instant with nanoseconds below the microsecond (Java, numpy, or pandas) is moved
       outward to a microsecond, `start` down and `end` up, so no row is lost and `end` may
       include up to 999 ns more (*owner*): Deephaven's instants carry nanoseconds the user
-      never chose. `filters=` values are left to the change that settles their type.
+      never chose. An `end` past the last microsecond of year 9999 becomes `datetime.max`.
+      `filters=` values are left to the change that settles their type.
     - `tests/test_layout.py` lists the public `queries` module and the API-layer
       `_dataset_list` module (*owner*).
     - `dm.datasets()`, a static table of every dataset with its summary, verbs, transports,

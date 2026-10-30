@@ -107,29 +107,30 @@ DateLike: TypeAlias = str | date | datetime | np.datetime64
 
 One of:
 
-- an ISO-8601 string, `"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`;
-- a `date`, or a timezone-aware `datetime`;
+- an ISO-8601 string, `"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`, or any date or time
+  text Deephaven's own parser reads, such as `"2025-03-03T09:30 America/New_York"` or
+  `"2025-03-03T09:30:00 ET"`;
+- a `date`, or a timezone-aware `datetime`, a `pandas.Timestamp` among them (its nanoseconds
+  are kept and moved outward to a microsecond like a Java instant's);
 - a Java `java.time.LocalDate` (a date), or a Java `Instant` or `ZonedDateTime` (an instant,
   moved outward to a microsecond: a start down, an end up), the values Deephaven's own time
   functions return, such as `deephaven.time.dh_now()` and `to_j_local_date("2025-03-03")`, and
   `Instant` and `LocalDate` cells read as Java values (through `iter_dict`, for one).
   `dh_today()` returns ISO text, the first form;
-- a `numpy.datetime64`: a date at day precision or coarser (`numpy.datetime64("2025-03-03")`,
-  or a month's first day), otherwise an instant in UTC, as Deephaven reads it (`to_numpy`
-  gives an `Instant` column so), moved outward to a microsecond like a Java instant;
-- a `pandas.Timestamp`, an instant: in UTC when it has no timezone, as Deephaven reads it, and
-  moved outward to a microsecond like a Java instant.
+- a `numpy.datetime64`: a date at day precision (`numpy.datetime64("2025-03-03")`), otherwise
+  an instant in UTC, as Deephaven reads it (`to_numpy` gives an `Instant` column so), moved
+  outward to a microsecond like a Java instant. A week, month, or year is refused: as an `end`
+  it would shrink the range to its first day, and a numpy week starts on a Thursday.
 
-These are the inputs Deephaven's own `deephaven.time` converters take, except two it reads in
-its own way: a bare integer (epoch nanoseconds there, which would silently misread a date
-written as `20250303`) and its text grammar beyond ISO-8601.
+These are the inputs Deephaven's own `deephaven.time` converters take, except a bare integer
+(epoch nanoseconds there, which would silently misread a date written as `20250303`), and text
+Deephaven reads only as such a count.
 
 Type checkers see Deephaven's Java values as `Any`, so the alias does not name them. A naive
-`datetime` or an ISO string with a time but no UTC offset raises a `ValueError` that names the
-parameter and the fix ("needs a timezone: pass an aware datetime or a date"), since a time
-without a zone cannot be placed. A date-only value is a whole day in the asset class's day
-zone.
-"""
+`datetime` or `pandas.Timestamp`, or an ISO string with a time but no UTC offset, raises a
+`ValueError` that names the parameter and the fix ("needs a timezone: pass an aware datetime or
+a date"), since a time without a zone cannot be placed. A date-only value is a whole day in the
+asset class's day zone. """
 
 FilterValue: TypeAlias = str | int | float | bool | date | datetime | Sequence[str]
 """A value in the `filters` mapping, keyed by a wire parameter name with its dots written as

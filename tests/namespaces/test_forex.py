@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import numpy as np
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
@@ -587,6 +588,26 @@ def test_quotes_history_takes_deephaven_instants_rounded_outward(
     assert start is not None  # Deephaven's converters are typed Optional
     assert end is not None
     rest_session.forex.quotes("C:EURUSD").history(start, end, source=dm.HistorySource.REST)
+    hour = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
+    ((_, params),) = sent(fake_rest)
+    assert params["timestamp.gte"] == [str(hour)]
+    assert params["timestamp.lt"] == [str(hour + 3_600 * NS + 1_000)]
+
+
+def test_quotes_history_takes_numpy_times_and_deephaven_text(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # Deephaven's own text for the start, and a numpy time in UTC, with nanoseconds, for the
+    # end, which rounds up so the half-open range loses no row.
+    body = fixture_body(load_fixture, "quotes.json")
+    del body["next_url"]  # the sample's next page is on Massive's host
+    fake_rest.reply("/v3/quotes/C%3AEURUSD", Reply(body))
+    end = np.datetime64("2021-07-01T01:00:00.000000500", "ns")
+    query = rest_session.forex.quotes("C:EURUSD")
+    query.history("2021-06-30T20:00 America/New_York", end, source=dm.HistorySource.REST)
     hour = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
     ((_, params),) = sent(fake_rest)
     assert params["timestamp.gte"] == [str(hour)]

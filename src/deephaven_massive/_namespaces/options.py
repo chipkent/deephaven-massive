@@ -31,7 +31,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import check_symbol, symbol_class
 from deephaven_massive._enums import (
@@ -49,6 +48,7 @@ from deephaven_massive._namespaces.base import (
     Namespace,
     adjustment_notes,
     build_query,
+    day_argument,
     list_params,
 )
 
@@ -941,7 +941,7 @@ class _Options(Namespace):
         params: dict[str, object] = {
             "underlying_ticker": None if underlying is None else _underlying(underlying),
             "contract_type": _contract_type(contract_type),
-            "as_of": None if as_of is None else calendar_day(CONTRACTS, as_of, "as_of"),
+            "as_of": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
             "expired": _expired(expired),
         }
         params.update(list_params(sort=sort, order=order))
@@ -1006,6 +1006,6 @@ class _Options(Namespace):
                 symbols=symbols,
                 all_alternative="m.options.snapshots(dm.ALL)",
                 adjusted=adjusted,
-                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

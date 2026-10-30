@@ -45,7 +45,12 @@ from deephaven_massive._datasets.catalog import (
     symbol_family,
     takes_instants,
 )
-from deephaven_massive._datasets.dates import check_order, parse_date_like, require_aware
+from deephaven_massive._datasets.dates import (
+    calendar_day,
+    check_order,
+    parse_date_like,
+    require_aware,
+)
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
@@ -57,6 +62,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
+from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._types import _All, override
 
 if TYPE_CHECKING:
@@ -74,6 +80,7 @@ __all__ = [
     "adjustment_notes",
     "bar_query_class",
     "build_query",
+    "day_argument",
     "list_params",
     "one_or_any_of",
     "optional_text",
@@ -219,6 +226,26 @@ def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> 
     if count == 1 and span in spec.channels:
         return StreamHistoryQuery
     return HistoryQuery
+
+
+def day_argument(spec: DatasetSpec, value: DateLike, name: str) -> date:
+    """Read a dataset's one-day argument, such as a daily summary's `date` or `as_of`.
+
+    The argument takes every `DateLike` form and Deephaven's own date text
+    (`deephaven_time_text`), and must name a calendar day (`dates.calendar_day`).
+
+    Args:
+        spec: The dataset, for messages.
+        value: The argument as the caller passed it.
+        name: The parameter's name, such as `"date"`.
+
+    Returns:
+        The calendar date to send.
+
+    The `ValueError` or `TypeError` of `deephaven_time_text` and `calendar_day` propagates: a
+    time instead of a day, text neither form reads, or a value of another type.
+    """
+    return calendar_day(spec, deephaven_time_text(value, name), name)
 
 
 def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
@@ -628,8 +655,10 @@ def build_query(
         _require_enum(timespan, Timespan, "timespan")
     if timespan is not None and spec.is_bars:
         cls = bar_query_class(spec, timespan, multiplier)
-    first = None if start is None else parse_date_like(start, "start")
-    last = None if end is None else parse_date_like(end, "end", upper=True)
+    first = None if start is None else parse_date_like(deephaven_time_text(start, "start"), "start")
+    last = (
+        None if end is None else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
+    )
     _check_axis(core, spec, start=first, end=last)
     given = (
         ()
