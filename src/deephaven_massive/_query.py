@@ -904,10 +904,10 @@ class HistoryQuery(QueryBase):
           or `ZonedDateTime` such as `dh_now()` or an `Instant` cell read with `iter_dict`, or a
           `numpy.datetime64` finer than a day, read as UTC) are exact instants, half-open: rows
           with `start <= Timestamp < end` (for bars, `TimestampStart`). Equal instants give an
-          empty table. A Java, numpy, or pandas instant with nanoseconds below the microsecond,
-          which a `datetime` cannot hold, is moved outward to a microsecond: `start` down, so a
-          row it came from is still included, and `end` up, so `end` may include up to 999 ns
-          more but never loses a row.
+          empty table. An instant with nanoseconds below the microsecond (text, Java, numpy, or
+          pandas), which a `datetime` cannot hold, is moved outward to a microsecond: `start`
+          down, so a row it came from is still included, and `end` up, so `end` may include up
+          to 999 ns more but never loses a row.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole window
         lies inside the range and has ended: its `TimestampStart` lies in the range, and its

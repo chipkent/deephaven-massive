@@ -107,9 +107,16 @@ DateLike: TypeAlias = str | date | datetime | np.datetime64
 
 One of:
 
-- an ISO-8601 string, `"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`, or any date or time
-  text Deephaven's own parser reads, such as `"2025-03-03T09:30 America/New_York"` or
-  `"2025-03-03T09:30:00 ET"`;
+- text, read by one of two parsers:
+  - ISO-8601, read as before: a date in any ISO form (`"2025-03-03"`, `"20250303"`,
+    `"2025-W10-1"`), or a date and time with an offset (`"2025-03-03T09:30:00-05:00"`), whose
+    digits below the microsecond are rounded outward like a Java instant's;
+  - otherwise Deephaven's own date text, as `deephaven.time.to_j_local_date` reads it
+    (`"2025-3-3"`), or its date and time text with a zone, as `to_j_zdt` reads it
+    (`"2025-03-03T09:30 America/New_York"`, `"2025-03-03T09:30:00 ET"`). Deephaven text that
+    names a day and a zone but no time (`"2025-03-03 ET"`) is refused, since Deephaven reads it
+    as that midnight. Deephaven's instant parser is never used: it reads bare digits as an epoch
+    count;
 - a `date`, or a timezone-aware `datetime`, a `pandas.Timestamp` among them (its nanoseconds
   are kept and moved outward to a microsecond like a Java instant's);
 - a Java `java.time.LocalDate` (a date), or a Java `Instant` or `ZonedDateTime` (an instant,
@@ -123,14 +130,15 @@ One of:
   it would shrink the range to its first day, and a numpy week starts on a Thursday.
 
 These are the inputs Deephaven's own `deephaven.time` converters take, except a bare integer
-(epoch nanoseconds there, which would silently misread a date written as `20250303`), and text
+(epoch nanoseconds there, which would silently misread a date written as `20250303`) and text
 Deephaven reads only as such a count.
 
 Type checkers see Deephaven's Java values as `Any`, so the alias does not name them. A naive
 `datetime` or `pandas.Timestamp`, or an ISO string with a time but no UTC offset, raises a
 `ValueError` that names the parameter and the fix ("needs a timezone: pass an aware datetime or
 a date"), since a time without a zone cannot be placed. A date-only value is a whole day in the
-asset class's day zone. """
+asset class's day zone.
+"""
 
 FilterValue: TypeAlias = str | int | float | bool | date | datetime | Sequence[str]
 """A value in the `filters` mapping, keyed by a wire parameter name with its dots written as

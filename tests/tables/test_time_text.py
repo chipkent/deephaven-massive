@@ -61,18 +61,33 @@ def test_text_neither_reads_names_both_forms(text: str) -> None:
         deephaven_time_text(text, "start")
 
 
-def test_a_date_without_dashes_is_never_read_as_an_epoch_count() -> None:
-    # ISO-8601's basic form reads it as a time without a zone, which is refused; Deephaven's
-    # instant parser, which would read it as seconds since 1970, is never asked.
-    with pytest.raises(ValueError, match=r"needs a timezone"):
-        deephaven_time_text("20250303", "start")
+def test_a_refusal_keeps_deephaven_s_reason_and_names_the_zones_it_reads() -> None:
+    reason = r"Deephaven: No matching time zone: EST\)"
+    zones = r"Deephaven reads zones such as ET, CT, UTC, and America/New_York$"
+    with pytest.raises(ValueError, match=rf"{reason}\. {zones}"):
+        deephaven_time_text("2025-03-03T09:30 EST", "start")
+
+
+def test_a_date_without_dashes_is_an_iso_date_never_an_epoch_count() -> None:
+    # ISO-8601's basic form; Deephaven's instant parser, which would read it as seconds since
+    # 1970, is never asked.
+    assert _bound("20250303") == date(2025, 3, 3)
+
+
+def test_deephaven_date_text_is_a_date() -> None:
+    assert _bound("2025-3-3") == date(2025, 3, 3)
+
+
+@pytest.mark.parametrize("text", ["2025-03-03 ET", "2025-03-03 America/New_York", "2025-03-03 UTC"])
+def test_a_day_and_a_zone_without_a_time_is_refused(text: str) -> None:
+    # Deephaven reads it as that midnight, so as an end it would drop the day.
+    with pytest.raises(ValueError, match=r"names a day and a zone but no time; pass '2025-03-03'"):
+        deephaven_time_text(text, "end")
 
 
 def test_iso_text_refused_for_another_reason_keeps_its_error() -> None:
     with pytest.raises(ValueError, match=r"needs a timezone: pass an aware datetime or a date"):
         deephaven_time_text("2025-03-03T09:30", "start")
-    with pytest.raises(ValueError, match=r"more than six fractional digits"):
-        deephaven_time_text("2025-03-03T09:30:00.123456789Z", "start")
 
 
 @pytest.mark.parametrize("value", [date(2025, 3, 3), 20250303])

@@ -47,6 +47,7 @@ reads a numpy time as UTC.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from dataclasses import dataclass
@@ -120,15 +121,15 @@ MIXED_BOUNDS: Final = (
 )
 """The message of a range that mixes a date and a datetime."""
 
-_DATE_ONLY: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A fraction of a second finer than the microsecond, which `datetime.fromisoformat` truncates,
 # in the extended (`09:30:00.1234567`) and the basic (`093000.1234567`) time form alike. Only a
 # fraction of a second can hold a `.` or `,` in ISO-8601 text, so the separator marks it.
-_BELOW_MICROSECOND: Final = re.compile(r"[.,]\d{7,}")
-_BELOW_MICROSECOND_MESSAGE: Final = (
-    "has more than six fractional digits of a second, which a datetime cannot hold; cutting "
-    "them would move the time, so give at most microseconds"
-)
+_ISO_DATE: Final = re.compile(r"^(\d{4}-.+|\d{4}W\d{3}|\d{8})$")
+"""The shapes of an ISO-8601 calendar date: extended (with dashes), or basic in exactly eight
+characters. `date.fromisoformat` alone also reads longer runs of digits, such as the epoch
+count `"1741012200"` as 1741-01-22, which this keeps out."""
+_FRACTION: Final = re.compile(r"[.,](\d+)")
+"""The fraction of a second in ISO-8601 text; only a fraction can hold a `.` or `,`."""
 _OUTSIDE_DATETIME: Final = "is not a time from year 1 to 9999, which a datetime holds"
 _JAVA_INSTANTS: Final = frozenset({"java.time.Instant", "java.time.ZonedDateTime"})
 """The Java classes whose values are instants, by their jpy class name."""
@@ -167,7 +168,7 @@ class TimeTextError(ValueError):
 
     A `ValueError`, so callers that catch one keep working; its own class lets the API layer,
     which also reads Deephaven's date and time text, tell this failure from the others (a
-    time without a timezone, digits below the microsecond) and name both forms in one message.
+    time without a timezone) and name both forms in one message.
     """
 
 
@@ -175,14 +176,15 @@ def parse_date_like(value: DateLike, name: str, *, upper: bool = False) -> date 
     """Parse one time bound into a `date` or an aware `datetime`.
 
     Args:
-        value: An ISO-8601 string (`"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`), a `date`,
-            a timezone-aware `datetime` (a `pandas.Timestamp` among them), a Java `LocalDate`
-            (a date), a Java `Instant` or `ZonedDateTime` (an aware `datetime` at the same
-            instant), or a `numpy.datetime64` (a date at day precision; otherwise an instant
-            in UTC, since numpy times have no timezone). An instant finer than a microsecond
-            from Java, numpy, or pandas is rounded to a microsecond (`_rounded`). A bare
-            integer is no bound: Deephaven reads one as epoch nanoseconds, which would
-            silently misread a date written as `20250303`.
+        value: An ISO-8601 string (a date in any ISO form, `"2025-03-03"`, `"20250303"`, or
+            `"2025-W10-1"`, or a date and time with an offset, `"2025-03-03T09:30:00-05:00"`), a
+            `date`, a timezone-aware `datetime` (a `pandas.Timestamp` among them), a Java
+            `LocalDate` (a date), a Java `Instant` or `ZonedDateTime` (an aware `datetime` at
+            the same instant), or a `numpy.datetime64` (a date at day precision; otherwise an
+            instant in UTC, since numpy times have no timezone). An instant finer than a
+            microsecond, from ISO text, Java, numpy, or pandas, is rounded to a microsecond
+            (`_outward`). A bare integer is no bound: Deephaven reads one as epoch nanoseconds,
+            which would silently misread a date written as `20250303`.
         name: The parameter's name, used in error messages (`"start"`, `"end"`, `"date"`).
         upper: True for the upper bound of a range (`end`), which an instant between two
             microseconds is rounded up for, so the half-open range never loses a row; False,
@@ -194,12 +196,12 @@ def parse_date_like(value: DateLike, name: str, *, upper: bool = False) -> date 
     Raises:
         TypeError: If `value` is none of the accepted types.
         TimeTextError: If a string is not ISO-8601.
-        ValueError: For a naive `datetime` or `pandas.Timestamp`, or a string with a time but
-            no offset (the message names the parameter, the value, and the fix;
-            `require_aware`); a string with more than six fractional digits of a second,
-            which a `datetime` would silently cut to microseconds; a `pandas.NaT` or a
-            `numpy.datetime64` that is `NaT`; a `numpy.datetime64` of a week, month, or year;
-            or a Java, numpy, or pandas time outside years 1 to 9999.
+
+    Other values raise a `ValueError`: a naive `datetime` or `pandas.Timestamp`, or a string with
+    a time but no offset (the message names the parameter, the value, and the fix;
+    `require_aware`); a `pandas.NaT` or a `numpy.datetime64` that is `NaT`; a
+    `numpy.datetime64` of a week, month, or year; or a Java, numpy, or pandas time outside
+    years 1 to 9999.
     """
     if isinstance(value, datetime):
         if hasattr(value, "to_datetime64"):  # a pandas.Timestamp, which can hold nanoseconds
@@ -209,14 +211,15 @@ def parse_date_like(value: DateLike, name: str, *, upper: bool = False) -> date 
         return value
     elif isinstance(value, str):
         text = value.strip()
-        try:
-            if _DATE_ONLY.match(text):
+        if _ISO_DATE.match(text):  # a calendar date: `2025-03-03`, `20250303`, `2025-W10-1`
+            with contextlib.suppress(ValueError):
                 return date.fromisoformat(text)
+        try:
             parsed = datetime.fromisoformat(text)
         except ValueError:
             raise TimeTextError(f"{name}={value!r} is not an ISO-8601 date or datetime") from None
-        if _BELOW_MICROSECOND.search(text):  # ISO-8601 that `fromisoformat` cut short
-            raise ValueError(f"{name}={value!r} {_BELOW_MICROSECOND_MESSAGE}")
+        require_aware(name, value, parsed)
+        return _outward(parsed, _cut_digits(text), name=name, value=value, upper=upper)
     else:
         found = _foreign_bound(value, name, upper=upper)
         if found is None:
@@ -363,25 +366,59 @@ def _rounded(attoseconds: int, name: str, value: object, *, upper: bool) -> date
         moment = _EPOCH + timedelta(microseconds=micros)
     except OverflowError:
         raise ValueError(f"{name}={value} {_OUTSIDE_DATETIME}") from None
+    return _outward(moment, rest, name=name, value=value, upper=upper)
+
+
+def _outward(moment: datetime, rest: int, *, name: str, value: object, upper: bool) -> datetime:
+    """Move a microsecond instant up for an upper bound when time below the microsecond was cut.
+
+    Args:
+        moment: The instant with everything below the microsecond cut (rounded down).
+        rest: The attoseconds that were cut; 0 when nothing was.
+        name: The parameter's name, for the log line.
+        value: The bound as the caller passed it, for the log line.
+        upper: True for an upper bound, which moves up a microsecond; False to stay down.
+
+    Returns:
+        `moment`, a microsecond later for an upper bound with a `rest`; `datetime.max` for an
+        upper bound past the last microsecond of year 9999, which no row reaches.
+    """
     if not rest:
         return moment
+    direction, moved = "down", rest
     if upper:
-        moved = _ATTOSECONDS["us"] - rest
         try:
             moment += _ONE_MICROSECOND
-        except OverflowError:  # the end of year 9999
-            moment = datetime.max.replace(tzinfo=UTC)
-    else:
-        moved = rest
+            direction, moved = "up", _ATTOSECONDS["us"] - rest
+        except OverflowError:  # the end of year 9999: stays at the largest datetime
+            direction = "down (clamped)"
     logger.debug(
         "%s=%s rounded %s to %s, by %s ns",
         name,
         value,
-        "up" if upper else "down",
+        direction,
         moment.isoformat(),
         moved / _NANOS,
     )
     return moment
+
+
+def _cut_digits(text: str) -> int:
+    """Return the attoseconds `datetime.fromisoformat` cut from ISO-8601 text.
+
+    It keeps six fractional digits of a second and drops the rest, which this reads back.
+
+    Args:
+        text: ISO-8601 text that parsed.
+
+    Returns:
+        The cut part of the second in attoseconds, at least 1 when any cut digit is nonzero
+        (digits past the eighteenth count only as nonzero); 0 when nothing was cut.
+    """
+    found = _FRACTION.search(text)
+    digits = found.group(1)[6:] if found else ""
+    attoseconds = int(digits[:12].ljust(12, "0") or "0")
+    return attoseconds or int(any(digit != "0" for digit in digits))
 
 
 def require_aware(name: str, raw: object, moment: datetime) -> None:
@@ -710,7 +747,7 @@ def day_class(
     return shared.pop()
 
 
-def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
+def calendar_day(spec: DatasetSpec, value: DateLike, name: str, *, given: object = None) -> date:
     """Turn the single day a dataset's path or parameter takes into a calendar date.
 
     Endpoints such as the daily open-close summary take one calendar day (the day of the
@@ -721,16 +758,19 @@ def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
 
     Args:
         spec: The dataset, for the message.
-        value: The day, as an ISO-8601 date string, a `date`, a Java `LocalDate`, or a
+        value: The day, as ISO-8601 date text, a `date`, a Java `LocalDate`, or a
             day-precision `numpy.datetime64`.
         name: The parameter's name, used in error messages (`"date"`).
+        given: The argument as the caller passed it, for the message, when `value` is its
+            conversion (Deephaven text read as a Java value); None when `value` is it.
 
     Returns:
         The calendar date to put in the request.
 
     Raises:
-        ValueError: If `value` is a `datetime`, or ISO-8601 text with a time
-            (`"<dataset>: <name> is a calendar date; pass a date"`).
+        ValueError: If `value` is a time rather than a day: a `datetime`, ISO-8601 text with a
+            time, or an instant (`"<dataset>: <name>=<value> is a calendar date; pass a
+            date"`, showing the value as the caller passed it).
 
     Text that is not ISO-8601, or a value of another type, raises the `ValueError` or
     `TypeError` of `parse_date_like`.
@@ -738,7 +778,8 @@ def calendar_day(spec: DatasetSpec, value: DateLike, name: str) -> date:
     parsed = parse_date_like(value, name)
     if not isinstance(parsed, datetime):
         return parsed
-    raise ValueError(f"{spec.name}: {name} is a calendar date; pass a date")
+    shown = value if given is None else given
+    raise ValueError(f"{spec.name}: {name}={shown!r} is a calendar date; pass a date")
 
 
 _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {

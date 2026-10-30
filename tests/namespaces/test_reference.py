@@ -224,9 +224,9 @@ def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
     # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+    with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
         ref.ticker_details("AAPL", date=early)
-    with pytest.raises(ValueError, match="date is a calendar date; pass a date"):
+    with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
         ref.tickers(date=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)

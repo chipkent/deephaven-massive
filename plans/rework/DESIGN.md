@@ -2331,16 +2331,20 @@ integer, which Deephaven reads as epoch nanoseconds and which would silently mis
 written as `20250303`, and text Deephaven reads only as such a count. Internal code may still
 pass an integer it has already decoded, such as epoch nanoseconds, where an internal API takes
 one; the public arguments refuse it. ISO-8601 text is read by `_datasets/dates.py`
-(`parse_date_like`), exactly as before. Other text is read by Deephaven's parser at the API
-layer (`_tables/time_text.py`, `deephaven_time_text`): first as a date, so date-only text stays
-a calendar date, then as a date and time with a zone or offset, never as an epoch count; the
-Java value it gives then goes down like any other. Text neither reads raises one `ValueError`
-naming both forms. `parse_date_like` turns each value into a `date` or an aware `datetime`,
+(`parse_date_like`): first as a date in any ISO form (`"2025-03-03"`, `"20250303"`,
+`"2025-W10-1"`), then as a date and time. Other text is read by Deephaven's parser at the API
+layer (`_tables/time_text.py`, `deephaven_time_text`): first as a date (`"2025-3-3"`), so
+date-only text stays a calendar date, then as a date and time with a zone or offset, never as an
+epoch count; the Java value it gives then goes down like any other. Deephaven text that names a
+day and a zone but no time (`"2025-03-03 ET"`), which Deephaven reads as that midnight, is
+refused, since as an `end` it would drop the day. Text neither reads raises one `ValueError`
+naming both forms, with Deephaven's own reason (such as `No matching time zone: EST`) and the
+zones it reads. `parse_date_like` turns each value into a `date` or an aware `datetime`,
 outside the wire package; it recognizes a Java value by its jpy class name, so it imports
-neither Deephaven nor jpy. A Java, numpy, or pandas instant with nanoseconds below the
-microsecond is moved outward to a microsecond: unlike typed ISO text, whose extra digits raise,
-Deephaven's instants carry nanoseconds the user never chose (`dh_now()` on Linux, a SIP
-`Timestamp`). A lower bound (`start`) is rounded down, so it still includes the row an instant
+neither Deephaven nor jpy. An instant with nanoseconds below the microsecond, from ISO or
+Deephaven text, Java, numpy, or pandas, is moved outward to a microsecond: Deephaven's instants
+carry nanoseconds the user never chose (`dh_now()` on Linux, a SIP `Timestamp`), and text
+follows the same rule. A lower bound (`start`) is rounded down, so it still includes the row an instant
 came from; an upper bound (`end`) is rounded up, so the half-open range may include up to
 999 ns more but never loses a row, and an `end` past the last microsecond of year 9999 becomes
 `datetime.max`. Each rounding logs at DEBUG with its result and the amount moved. A
@@ -2352,9 +2356,9 @@ only `numpy.datetime64` beside the Python types. A naive `datetime` or `pandas.T
 ISO string with a time but no offset, raises a `ValueError` that names
 the parameter, the value, and the fix, for example `start=datetime.datetime(2025, 1, 2, 9, 30)
 needs a timezone: pass an aware datetime or a date`. The same rule and message apply to a naive
-`datetime` passed as a `filters` value or a typed parameter. ISO text with more than six
-fractional digits of a second raises `ValueError` too: a `datetime` holds microseconds, and
-cutting the rest would move the time. A range (`history()` and the `start`/`end` of a `…T`
+`datetime` passed as a `filters` value or a typed parameter. A `filters` value given as ISO text
+finer than a microsecond is rounded the same way, up for an upper bound (`.lt`, `.lte`) and
+down otherwise. A range (`history()` and the `start`/`end` of a `…T`
 dataset) takes two bounds of one kind: two dates are whole days, two datetimes exact instants,
 and a date mixed with a datetime raises `ValueError`
 ([section 12](#12-timestamp-units-and-day-boundaries)).
@@ -6389,6 +6393,14 @@ document already reflects them.
       outward to a microsecond, `start` down and `end` up, so no row is lost and `end` may
       include up to 999 ns more (*owner*): Deephaven's instants carry nanoseconds the user
       never chose. An `end` past the last microsecond of year 9999 becomes `datetime.max`.
+      ISO-8601 text finer than a microsecond, refused before, is rounded the same way, so text
+      and values follow one rule (coordinator, following the owner's wish for
+      Deephaven-like inputs).
+    - Every ISO-8601 date form is a date (`"20250303"`, `"2025-W10-1"`), as Python reads it,
+      and Deephaven's own date text (`"2025-3-3"`) too. Deephaven text that names a day and a
+      zone but no time (`"2025-03-03 ET"`) is refused: Deephaven reads it as that midnight,
+      so as an `end` it would drop the day. A refusal keeps Deephaven's own reason and names
+      the zones it reads (coordinator).
       `filters=` values are left to the change that settles their type.
     - `tests/test_layout.py` lists the public `queries` module and the API-layer
       `_dataset_list` module (*owner*).

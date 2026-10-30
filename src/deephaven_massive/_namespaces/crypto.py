@@ -718,9 +718,9 @@ class _Crypto(Namespace):
             symbols: The pairs, as Massive's tickers such as `X:BTCUSD`; one string, a
                 sequence, or a Deephaven table with a `Symbol` column (read once per
                 `poll()` cycle).
-            date: The UTC day, as `"YYYY-MM-DD"`, a `date`, a Java `LocalDate`, or a
-                day-precision `numpy.datetime64`. It is a calendar date, so a `datetime` or an
-                instant raises `ValueError`.
+            date: The UTC day, as `"YYYY-MM-DD"`, a `date`, Deephaven date text such as
+                `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`. It is a
+                calendar date, so a `datetime` or an instant raises `ValueError`.
 
         Returns:
             The query. No request is made until a verb is called.

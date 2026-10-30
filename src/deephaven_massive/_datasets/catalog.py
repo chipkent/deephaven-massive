@@ -950,7 +950,9 @@ def _sent_value(
         dates = any(p.name == base and p.kind is ParamKind.DATE for p in rest_path.params)
         return _list_items(spec, key, value, dates=dates)
     if isinstance(value, str) and kind in _TIME_KINDS:
-        value = parse_date_like(value, key)
+        # An upper bound (`.lt`, `.lte`) rounds text finer than a microsecond up, so no row
+        # is lost; every other form rounds down.
+        value = parse_date_like(value, key, upper=name.rpartition(".")[2] in ("lt", "lte"))
     if (
         isinstance(value, date)
         and not isinstance(value, datetime)

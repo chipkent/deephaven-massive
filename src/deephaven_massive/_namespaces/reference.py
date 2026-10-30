@@ -293,9 +293,10 @@ class _Reference(Namespace):
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            date: The day the listing is as of: a `date`, ISO-8601 date text, a Java
-                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
-                raises `ValueError`: it is a calendar date); None for today.
+            date: The day the listing is as of: a `date`, ISO-8601 date text, Deephaven date
+                text such as `"2025-3-3"`, a Java `LocalDate`, or a day-precision
+                `numpy.datetime64` (a `datetime` or an instant raises `ValueError`: it is a
+                calendar date); None for today.
             active: True lists tickers traded on `date`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
             sort: The field to sort by, such as `"ticker"`; None for the endpoint's default.
@@ -354,9 +355,10 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
                 column.
-            date: The day the details are as of: a `date`, ISO-8601 date text, a Java
-                `LocalDate`, or a day-precision `numpy.datetime64` (a `datetime` or an instant
-                raises `ValueError`: it is a calendar date); None for the latest.
+            date: The day the details are as of: a `date`, ISO-8601 date text, Deephaven date
+                text such as `"2025-3-3"`, a Java `LocalDate`, or a day-precision
+                `numpy.datetime64` (a `datetime` or an instant raises `ValueError`: it is a
+                calendar date); None for the latest.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.

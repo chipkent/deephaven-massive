@@ -245,7 +245,7 @@ def day_argument(spec: DatasetSpec, value: DateLike, name: str) -> date:
     The `ValueError` or `TypeError` of `deephaven_time_text` and `calendar_day` propagates: a
     time instead of a day, text neither form reads, or a value of another type.
     """
-    return calendar_day(spec, deephaven_time_text(value, name), name)
+    return calendar_day(spec, deephaven_time_text(value, name), name, given=value)
 
 
 def list_params(*, sort: str | None, order: Order | None) -> dict[str, ParamValue]:
