@@ -109,12 +109,13 @@ def plans_variable(tiers: dict[str, str], flat_files: list[str]) -> str:
         flat_files: The prefixes the S3 pair reached.
 
     Returns:
-        Every class with its tier, such as `"stocks=starter,options=basic,...,s3"`, with `s3`
-        when any prefix was reached. Basic classes are named too, so the value is never
-        empty: an empty one would make the live tests probe the key again themselves.
+        Every class with its tier, then each reached flat-file prefix as `s3=<prefix>`, such as
+        `"stocks=starter,options=basic,...,s3=us_stocks_sip/day_aggs_v1"`, so the live tests
+        skip a prefix the credentials do not reach. Basic classes are named too, so the value
+        is never empty: an empty one would make the live tests probe the key again themselves.
     """
     entries = [f"{name}={tier}" for name, tier in tiers.items()]
-    return ",".join([*entries, "s3"] if flat_files else entries)
+    return ",".join([*entries, *(f"s3={prefix}" for prefix in sorted(flat_files))])
 
 
 def probe_key(credentials: Credentials, *, now: datetime) -> ProbeResult:

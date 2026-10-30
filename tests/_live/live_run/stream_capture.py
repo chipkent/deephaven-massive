@@ -634,6 +634,7 @@ def run_stream_day(
             if stream.held:
                 tables.extend([query.append_only(), query.last_by()])
         _sample_until(m, folder, until=until, clock=clock, recorder=recorder)
+        failures = failed_streams(diagnostics_rows(m, m.streams()))
     finally:
         for handle in listeners:
             handle.stop()
@@ -642,7 +643,10 @@ def run_stream_day(
     gaps = total_gaps(folder)
     minutes = round(gaps.total_seconds() / 60)
     for unit in units:
-        if gaps > MAX_GAP:
+        failure = failures.get(unit.split()[0], "")
+        if failure:
+            report(unit, "failed", f"a stream failed: {failure}")
+        elif gaps > MAX_GAP:
             report(unit, "failed", f"gaps {minutes}")
         elif recorder.errors:
             report(unit, "failed", recorder.errors[0])
@@ -650,10 +654,38 @@ def run_stream_day(
             report(unit, "passed", f"gaps {minutes}" if minutes else "")
 
 
+DATASET_CLASSES: Final = {"forex": "currencies", "crypto": "currencies"}
+"""The class of the namespaces whose name is not their class's: forex and crypto streams are
+the currencies unit's."""
+
+
+def failed_streams(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Return each class whose streams ended the day failed, with the first failure's error.
+
+    A stream Massive refuses, or that fails on its own, fails asynchronously: its table stops
+    growing while the sampler goes on, so the day's verdict must read the streams' states.
+
+    Args:
+        rows: The rows of `m.streams()` at the day's end.
+
+    Returns:
+        The error of the first `FAILED` stream of each class, by class.
+    """
+    found: dict[str, str] = {}
+    for row in rows:
+        if row["State"] == "FAILED":
+            namespace = str(row["Dataset"]).split(".")[0]
+            found.setdefault(DATASET_CLASSES.get(namespace, namespace), str(row["Error"]))
+    return found
+
+
 def _sample_until(
     m: MassiveSession, folder: Path, *, until: datetime, clock: Clock, recorder: Recorder
 ) -> None:
     """Sample every `SAMPLE_SECONDS` until a time, writing the minute counts each minute.
+
+    Two samples further apart than `GAP_THRESHOLD` (the machine slept, or the child stalled)
+    record the interval between them in `gaps.csv`, as a restart does.
 
     Args:
         m: The session.
@@ -663,7 +695,12 @@ def _sample_until(
         recorder: Its minute counts are flushed once a minute.
     """
     last_minute = ""
+    previous: datetime | None = None
     while (now := clock.now()) < until:
+        if previous is not None and now - previous > GAP_THRESHOLD:
+            gap = {"start": previous.isoformat(), "end": now.isoformat()}
+            append_csv(folder / "gaps.csv", [gap | {"cause": "the machine slept or stalled"}])
+        previous = now
         _sample(m, folder, now)
         if now.strftime("%H%M") != last_minute:
             recorder.flush_minutes()

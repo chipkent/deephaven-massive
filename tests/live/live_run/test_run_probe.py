@@ -120,8 +120,16 @@ def test_plans_take_the_live_tests_grammar() -> None:
     tiers = dict.fromkeys(TIERS, "basic") | {"stocks": "starter", "currencies": "business"}
     text = "stocks=starter,options=basic,indices=basic,currencies=business,futures=basic"
     assert run_probe.plans_variable(tiers, []) == text
-    assert run_probe.plans_variable(tiers, ["x"]) == text + ",s3"
-    assert plans.declared_plans(text).tiers == tiers  # the live tests read it back exactly
+    with_files = run_probe.plans_variable(tiers, ["us_stocks_sip/day_aggs_v1", "a/b"])
+    assert with_files == text + ",s3=a/b,s3=us_stocks_sip/day_aggs_v1"
+    read = plans.declared_plans(with_files)  # the live tests read it back exactly
+    assert (read.tiers, read.s3, read.flat_files) == (
+        tiers,
+        True,
+        ("a/b", "us_stocks_sip/day_aggs_v1"),
+    )
+    assert plans.reaches(read, "a/b")
+    assert not plans.reaches(read, "global_crypto/day_aggs_v1")
 
 
 def test_a_tier_that_keeps_all_history_reads_all() -> None:

@@ -217,3 +217,13 @@ def test_the_default_waits_are_real() -> None:
     waits = Waits()
     before = datetime.now(UTC)
     assert before <= waits.now()
+
+
+def test_the_options_call_reads_an_endpoint_basic_includes(
+    fake_rest: FakeRestServer, open_session: Callable[[], MassiveSession]
+) -> None:
+    # A contract's previous-day bar: Options Basic has aggregates, but not the chain snapshot.
+    with open_session() as m:
+        upgrade_check.CALLS["options"](m)
+    [request] = fake_rest.requests
+    assert request.target.startswith("/v2/aggs/ticker/O%3ASPY261218C00600000/prev")

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveSession
     from tests._fakes.rest import FakeRestServer
+    from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
 
 START = datetime(2026, 11, 4, 14, 0, tzinfo=UTC)
@@ -587,3 +588,75 @@ def test_the_listener_queues_only_updates_that_added_rows(tmp_path: Path) -> Non
     )
     copier.on_update(cast("TableUpdate", _Update({})), is_replay=False)
     assert queued == [("stocks-minute-bars", 2)]
+
+
+def test_a_class_whose_stream_failed_is_named_with_its_error() -> None:
+    rows = [
+        {"Dataset": "stocks.bars", "State": "STREAMING", "Error": ""},
+        {"Dataset": "forex.quotes", "State": "FAILED", "Error": "HTTP 403 not entitled"},
+        {"Dataset": "crypto.bars", "State": "FAILED", "Error": "a later failure"},
+    ]
+    assert stream_capture.failed_streams(rows) == {"currencies": "HTTP 403 not entitled"}
+
+
+def test_a_stall_between_samples_is_recorded_as_a_gap(
+    massive_session: MassiveSession, tmp_path: Path
+) -> None:
+    day = _Day()
+    jumps = iter([timedelta(seconds=10), timedelta(hours=2)])
+
+    def wait(seconds: float) -> bool:
+        day.waits.append(seconds)
+        day.now_at += next(jumps, timedelta(hours=9))  # the machine slept through the second
+        return False
+
+    recorder = Recorder(tmp_path)
+    try:
+        stream_capture._sample_until(
+            massive_session,
+            tmp_path,
+            until=START + timedelta(hours=3),
+            clock=Clock(now=day.now, wait=wait),
+            recorder=recorder,
+        )
+    finally:
+        recorder.close()
+    [gap] = _csv(tmp_path / "gaps.csv")
+    assert (gap["start"], gap["end"]) == (
+        (START + timedelta(seconds=10)).isoformat(),
+        (START + timedelta(seconds=10, hours=2)).isoformat(),
+    )
+    assert stream_capture.total_gaps(tmp_path) == timedelta(hours=2)
+
+
+@pytest.mark.jvm_held
+def test_a_stream_that_failed_fails_its_unit(
+    make_ws_session: Callable[..., WsSession], fake_ws_server: FakeMassiveServer, tmp_path: Path
+) -> None:
+    fake_ws_server.refuse["AM.I:SPX"] = "not authorized"
+    harness = make_ws_session()
+
+    def refused() -> None:
+        def failed() -> bool:
+            harness.flush()
+            assert harness.session._core.diagnostics.barrier().wait(15.0)
+            states = stream_capture.diagnostics_rows(harness.session, harness.session.streams())
+            return any(r["State"] == "FAILED" for r in states)
+
+        fake_ws_server.wait_for(lambda _: failed())
+
+    day = _Day(stop_after=1, action=refused)
+    seen, report = _reports()
+    stream_capture.run_stream_day(
+        harness.session,
+        units=["indices delayed"],
+        tiers={"indices": "starter"},
+        folder=tmp_path,
+        until=START + timedelta(hours=1),
+        report=report,
+        clock=day.clock(),
+    )
+    [(unit, status, reason)] = seen
+    assert (unit, status) == ("indices delayed", "failed")
+    assert reason.startswith("a stream failed: ")
+    assert "not authorized" in reason

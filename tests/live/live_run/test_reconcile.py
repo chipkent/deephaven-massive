@@ -161,3 +161,42 @@ def test_each_stream_reads_its_own_class_history() -> None:
         reconcile._history(session, stream, symbols=["X"], day=DAY)
         assert check(calls), (stream, calls)
         assert calls[-2] == "history"
+
+
+def test_index_bars_are_compared_without_a_volume(
+    fake_rest: FakeRestServer, tmp_path: Path
+) -> None:
+    start = _ns(OPEN)
+    streamed = tmp_path / "stream-day"
+    (streamed / "rows").mkdir(parents=True)
+    bars = pa.table(
+        {
+            "Symbol": ["I:NDX"],
+            "TimestampStart": pa.array([start], pa.timestamp("ns", tz="UTC")),
+            "Open": [1.0],
+            "High": [2.0],
+            "Low": [0.5],
+            "Close": [1.5],
+        }
+    )
+    pq.write_table(bars, streamed / "rows" / "indices-minute-bars-2026-10-28T14.parquet")
+    history = [{"t": start // 10**6, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5}]
+    fake_rest.reply(
+        "/v2/aggs/ticker/I%3ANDX/range/1/minute/1793160000000/1793246399999",
+        Reply(envelope(history, ticker="I:NDX", resultsCount=1)),
+    )
+    seen: list[tuple[str, str, str]] = []
+    folder = tmp_path / "reconcile"
+    folder.mkdir()
+    with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
+        reconcile.run_reconcile(
+            m,
+            units=["indices delayed"],
+            stream_folder=streamed,
+            day=DAY,
+            folder=folder,
+            report=lambda *result: seen.append(result),
+        )
+    assert seen == [("indices delayed", "passed", "")]
+    summary = json.loads((folder / "summary.json").read_text())
+    assert summary["streams"]["indices-minute-bars"]["match_share"] == 1.0

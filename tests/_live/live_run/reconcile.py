@@ -31,7 +31,23 @@ if TYPE_CHECKING:
     from deephaven_massive import MassiveSession
 
 FIELDS: Final = ("Open", "High", "Low", "Close", "Volume")
-"""The bar fields compared."""
+"""The bar fields compared, of every stream but the indices', which have no volume."""
+
+INDEX_FIELDS: Final = ("Open", "High", "Low", "Close")
+"""The bar fields compared of index bars."""
+
+
+def fields_of(stream: str) -> tuple[str, ...]:
+    """Return the fields compared of a stream's bars.
+
+    Args:
+        stream: The stream, such as `"indices-minute-bars"`.
+
+    Returns:
+        `INDEX_FIELDS` for index bars, else `FIELDS`.
+    """
+    return INDEX_FIELDS if stream.startswith("indices") else FIELDS
+
 
 UNIT_STREAMS: Final = {
     "stocks": ("stocks-minute-bars",),
@@ -94,7 +110,8 @@ def streamed_bars(
             continue
         starts = table.column("TimestampStart").cast("int64").to_pylist()
         symbols = table.column("Symbol").to_pylist()
-        values = list(zip(*(table.column(f).to_pylist() for f in FIELDS), strict=True))
+        columns = (table.column(f).to_pylist() for f in fields_of(stream))
+        values = list(zip(*columns, strict=True))
         for symbol, start, value in zip(symbols, starts, values, strict=True):
             bars[symbol, start] = value
     return bars
@@ -165,7 +182,7 @@ def run_reconcile(
             if symbols:
                 for row in rows_of(_history(m, stream, symbols=symbols, day=day)):
                     start = int(row["TimestampStart"].timestamp() * 1e9)
-                    fetched[row["Symbol"], start] = tuple(row[f] for f in FIELDS)
+                    fetched[row["Symbol"], start] = tuple(row[f] for f in fields_of(stream))
             rows = compare(streamed, fetched)
             compared += len(symbols)
             append_csv(folder / "reconciliation.csv", [{"stream": stream} | r for r in rows])
