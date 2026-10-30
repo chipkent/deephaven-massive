@@ -18,7 +18,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   symbols a request), `adjusted` (`Request.adjusted`), the futures `resolution`, the page
   size (`DatasetSpec.page_size`, or `Request.limit` when that is smaller, so a small cap
   fetches no more than it keeps), and for `history()` the ascending direction (`_ascending`).
-  `Request.limit` caps the total rows, and the client stops paging there.
+  `Request.limit` caps the total rows, and the client stops paging there; for a dataset whose
+  symbols overlap (`DatasetSpec.symbols_overlap`, the news of a watchlist) it caps each
+  request's rows instead, and a row several requests return is kept once (`_first_copies`).
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`_keep`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -124,7 +126,7 @@ from deephaven_massive._datasets.symbols import (
     forex_codes,
     option_roots,
     symbol_class,
-    unknown_symbol_message,
+    unreadable_symbol_message,
 )
 from deephaven_massive._datasets.timestamps import (
     UnitMismatchError,
@@ -133,8 +135,8 @@ from deephaven_massive._datasets.timestamps import (
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
+    OnError,
     Timespan,
-    UnknownSymbols,
     subscription_of,
 )
 from deephaven_massive._errors import MassiveError, PermanentError, from_wire
@@ -206,6 +208,8 @@ endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built.
 
 _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
+_ROW_NUMBER: Final = "__row_number"
+"""The scratch column `_first_copies` numbers rows in; no dataset column starts with `_`."""
 
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
@@ -273,6 +277,22 @@ def _outcome(future: Future[T]) -> T:
         return future.result()
     except MassiveError as error:
         raise type(error)(str(error), status=error.status, request_id=error.request_id) from None
+
+
+def _decided(future: Future[T] | None) -> T | None:
+    """Return a shared lookup's result once it has succeeded, and None in every other state.
+
+    Args:
+        future: The lookup's future, or None when no lookup is claimed.
+
+    Returns:
+        The result; None when the lookup is not claimed, still running, or failed (its
+        future holds a `MassiveError` or `_AbandonedError`, which only the claim-or-wait path
+        may act on).
+    """
+    if future is None or not future.done() or future.exception() is not None:
+        return None
+    return future.result()
 
 
 def _crypto_entry(ticker: str, row: Mapping[str, object]) -> tuple[str, str] | str:
@@ -638,7 +658,9 @@ def _base(
 
     Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
     in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
-    segment, the indicators' query parameter); `Request.adjusted` when it is set; and the
+    segment, the indicators' query parameter); `Request.adjusted` when it is set and the path
+    takes it (a path without it, the crypto indicators', serves prices no split changes, so
+    `True` is left out there); and the
     futures `resolution` and the page size when the path takes them. The page size is
     `DatasetSpec.page_size`, or `Request.limit` when that is smaller.
 
@@ -653,8 +675,8 @@ def _base(
         `(path parameters, query parameters)`.
 
     Raises:
-        ValueError: If `Request.adjusted` is set and the path has no `adjusted` parameter
-            (the crypto indicators); an explicit value is never dropped.
+        ValueError: If `Request.adjusted` is False and the path has no `adjusted` parameter
+            (the crypto indicators): unadjusted prices are never dropped silently.
 
     Any other parameter the caller set that the path does not take raises the `ValueError` of
     `_caller_params`.
@@ -665,10 +687,10 @@ def _base(
         path["multiplier"] = request.multiplier
     if request.timespan is not None and "timespan" in params:
         (path if params["timespan"].in_path else query)["timespan"] = request.timespan
-    if request.adjusted is not None:
-        if "adjusted" not in params:
-            raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
+    if "adjusted" in params and request.adjusted is not None:
         query["adjusted"] = request.adjusted
+    elif request.adjusted is False:
+        raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if spec.page_size is not None and "limit" in params:
@@ -819,7 +841,7 @@ class _Converter:
         spec: DatasetSpec,
         rest_path: RestPath,
         *,
-        unknown_symbols: UnknownSymbols,
+        unreadable_symbols: OnError,
     ) -> _Converter:
         """Prepare the conversion from the path's generated fields and the dataset's schema.
 
@@ -827,13 +849,13 @@ class _Converter:
             catalog: The catalog, for the dataset's merged schema.
             spec: The dataset.
             rest_path: The path.
-            unknown_symbols: The session's rule for a symbol spelling the library cannot
-                read; `WARN` also adds the `RawSymbol` column to the schema.
+            unreadable_symbols: The session's setting for a symbol spelling the library
+                cannot read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
 
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=unknown_symbols is UnknownSymbols.WARN)
+        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.
@@ -846,7 +868,7 @@ class _Converter:
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
             required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
             symbols=WireSymbols(
-                spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
+                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
             ),
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
             time_name=time_column(spec.times),
@@ -906,8 +928,8 @@ class _Converter:
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
-                session's `unknown_symbols` is `FAIL`; under `WARN` such a row keeps a null
-                `Symbol` and the text in `RawSymbol`.
+                session's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a
+                row keeps a null `Symbol` and the text in `RawSymbol`.
 
         A timestamp out of range raises the `UnitMismatchError` of `timestamps.instants`.
         """
@@ -928,8 +950,8 @@ class _Converter:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
                     read = self.symbols.read(values, {})
-                    if read.unknown and self.symbols.unknown is UnknownSymbols.FAIL:
-                        raise RowDataError(unknown_symbol_message(self.dataset, read.unknown))
+                    if read.unreadable and not self.symbols.keeps:
+                        raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
                     values, raw = read.symbols, read.raw
                 if source.unit is not None:
                     label = f"{self.dataset}.{name}"
@@ -938,6 +960,28 @@ class _Converter:
                     )
             arrays[name] = widen(values, target)
         return pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
+
+
+def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
+    """Drop the repeats of a row that several symbols' requests returned, keeping its first.
+
+    A row is identified by `keys` alone. A row with a null key is never merged with another:
+    a null cannot tell two rows apart, so every such row is kept, in place.
+
+    Args:
+        rows: The rows of every request, in request order.
+        keys: The columns that identify a row (`DatasetSpec.poll_keys`).
+
+    Returns:
+        The rows, each identity once, in the order of their first copies.
+    """
+    numbered = rows.append_column(_ROW_NUMBER, pa.array(range(rows.num_rows), pa.int64()))
+    keyed = functools.reduce(pc.and_, (pc.is_valid(rows[key]) for key in keys))
+    identified = numbered.filter(keyed)
+    firsts = identified.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
+    unkeyed = numbered.filter(pc.invert(keyed))[_ROW_NUMBER]
+    kept = pa.chunked_array([*firsts[f"{_ROW_NUMBER}_min"].chunks, *unkeyed.chunks], pa.int64())
+    return rows.take(kept.sort())
 
 
 def _whole(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
@@ -1075,18 +1119,22 @@ class RestState:
     def known_host(self, key: tuple[AssetClass, ChannelFamily]) -> HostDecision | None:
         """Return the decision of a (class, family) if one is made, without claiming it.
 
-        A failed decision is removed before its future completes, so a completed future under
-        the key always holds a decision.
+        A failed decision is removed before its future fails, but this check reads the future
+        under the lock and looks at it after: its maker may forget and fail it in between. So
+        only a decision counts; a failed future gives None, and the caller then claims or
+        waits as usual (`RestEndpoints.resolve_host`), where a failure reaches it as a copy
+        and an abandoned decision as a retry.
 
         Args:
             key: The asset class and channel family.
 
         Returns:
-            The decision, or None while none is made or one is being made.
+            The decision, or None while none is made, one is being made, or the one being made
+            has just failed.
         """
         with self._lock:
             future = self._hosts.get(key)
-        return future.result() if future is not None and future.done() else None
+        return _decided(future)
 
     def replace_host(self, key: tuple[AssetClass, ChannelFamily], decision: HostDecision) -> None:
         """Cache a decision for a (class, family) in place of any earlier one.
@@ -1132,15 +1180,18 @@ class RestState:
     def known_crypto(self) -> CryptoTickers | None:
         """Return the session's crypto ticker list if it is read, without claiming it.
 
-        A failed read is removed before its future completes, so a completed future always
-        holds the list.
+        A failed read is removed before its future fails, but this check reads the future
+        under the lock and looks at it after: its reader may forget and fail it in between. So
+        only a list counts; a failed future gives None, and the caller then claims or waits
+        as usual (`RestReader._crypto_tickers`), where a failure reaches it as a copy and an
+        abandoned read as a retry.
 
         Returns:
-            The list, or None while it is not read or being read.
+            The list, or None while it is not read, is being read, or has just failed.
         """
         with self._lock:
             future = self._crypto
-        return future.result() if future is not None and future.done() else None
+        return _decided(future)
 
     def forget_crypto(self) -> None:
         """Remove a failed read of the crypto ticker list, so that the next caller tries again.
@@ -1180,8 +1231,8 @@ class RestReader:
         catalog: The dataset catalog.
         drift: The session's drift registry.
         max_concurrency: The most requests of one fan-out at a time.
-        unknown_symbols: The session's rule for a symbol spelling the library cannot read
-            (`MassiveConfig.unknown_symbols`).
+        unreadable_symbols: The session's setting for a symbol spelling the library cannot
+            read (`MassiveConfig.unreadable_symbols`).
         threads: The name prefix of the threads of a fan-out pool this reader makes, such as
             `"massive #1 call-7 rest"`: the session, the call, and the transport.
         exec_ctx: The session's execution context, which tells whether a read's thread holds
@@ -1192,7 +1243,7 @@ class RestReader:
     catalog: Catalog
     drift: DriftRegistry
     max_concurrency: int
-    unknown_symbols: UnknownSymbols
+    unreadable_symbols: OnError
     threads: str
     exec_ctx: ExecutionContext
 
@@ -1361,7 +1412,10 @@ class RestReader:
         caller it joined; the lookup goes on for that caller and every other one still waiting.
 
         Blocks the calling thread until the lookup ends or this caller gives up; holds no lock
-        meanwhile, and leaves no listener behind. Logs the wait at DEBUG, a lookup abandoned by
+        meanwhile. It leaves the governor's bucket listener behind on no path; the callback it
+        adds to the future cannot be removed, so it stays there, setting an event nobody waits
+        on once this call returns (a future cached for the session keeps one per caller that
+        waited on it). Logs the wait at DEBUG, a lookup abandoned by
         its maker at INFO, and giving up at ERROR.
 
         Args:
@@ -1474,7 +1528,7 @@ class RestReader:
         session raises `MassiveError("... is closed")`.
         """
         converter = _Converter.build(
-            self.catalog, spec, rest_path, unknown_symbols=self.unknown_symbols
+            self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
         )
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
@@ -1844,7 +1898,7 @@ class RestReader:
         """Run one `poll()` cycle: the planned requests of `read_fetch` for the cycle's symbols.
 
         A reactive symbol table can route a new symbol to a path that lacks a parameter the
-        caller set (an explicit `adjusted` on the crypto indicators). Retrying cannot fix that,
+        caller set (`adjusted=False` on the crypto indicators). Retrying cannot fix that,
         so its `ValueError` becomes `UnsupportedParameterError`, which fails the table. Before
         reading, the cycle's requests per bucket go to `pace`, which warns once when the paced
         ones outlast the interval.
@@ -1915,17 +1969,24 @@ class RestReader:
             errors.clear()
 
     def plan_fetch(
-        self, spec: DatasetSpec, request: Request, symbols: NormalizedSymbols | None
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        symbols: NormalizedSymbols | None,
+        *,
+        split: CryptoSplit | None = None,
     ) -> list[tuple[RestPath, list[Call]]]:
         """Plan the requests of a `fetch()` or `poll()` cycle, path by path.
 
         Makes no request, except that the first crypto pair a path takes as two currencies
-        reads the session's crypto ticker list (`crypto_pair`).
+        reads the session's crypto ticker list (`crypto_pair`), unless `split` is given.
 
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments.
             symbols: The static symbols.
+            split: Splits a crypto pair into its currencies; None for `crypto_pair`. A check
+                that must make no request passes `_unsplit`.
 
         Returns:
             Each path the cycle reads (`fetch_paths`) with its calls; none for an empty symbol
@@ -1945,7 +2006,7 @@ class RestReader:
                 request,
                 symbols=own,
                 dates=(request.start, request.end),
-                split=self.crypto_pair,
+                split=self.crypto_pair if split is None else split,
             )
             planned.append((rest_path, calls))
         return planned
@@ -1958,6 +2019,7 @@ class RestReader:
         symbols: NormalizedSymbols | None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
+        cancel: Cancel | None = None,
         pauses_live_tables: bool = False,
     ) -> tuple[pa.Table, int]:
         """Read a dataset's fetch paths for the symbols: `fetch()`.
@@ -1972,12 +2034,15 @@ class RestReader:
             symbols: The static symbols.
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
+            cancel: A background read's stop token, which ends the read's waits when set; None
+                when only the session's close should.
             pauses_live_tables: True when the calling thread holds the update graph's lock (a
                 console command), so the read pauses every live table of the worker while it
                 runs.
 
         Returns:
-            The rows of every path, in path order, capped at `Request.limit`, and the request
+            The rows of every path, in path order, capped at `Request.limit` (each request's
+            rows, for a dataset whose symbols overlap; `_read_planned`), and the request
             count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
@@ -1991,7 +2056,7 @@ class RestReader:
             pauses_live_tables=pauses_live_tables,
         )
         return self._read_planned(
-            spec, request, planned, record=record, executor=executor, cancel=None
+            spec, request, planned, record=record, executor=executor, cancel=cancel
         )
 
     def _read_planned(
@@ -2005,6 +2070,10 @@ class RestReader:
         cancel: Cancel | None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the total rows at `Request.limit`.
+
+        For a dataset whose symbols overlap (`DatasetSpec.symbols_overlap`), such as the news
+        of a watchlist, each request is capped instead, and a row several requests returned
+        is kept once, at its first copy (`_first_copies`).
 
         Args:
             spec: The dataset.
@@ -2039,10 +2108,24 @@ class RestReader:
             requests += made
         if not tables:
             schema = self.catalog.dataset_schema(
-                spec, raw_symbol=self.unknown_symbols is UnknownSymbols.WARN
+                spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
+        if spec.symbols_overlap:
+            # Each request was capped on its own, so one symbol's rows never crowd out another's.
+            kept = _first_copies(rows, spec.poll_keys)
+            logger.debug(
+                "%s: kept %d of %d rows from %d requests, each row once by %s; limit=%s per "
+                "request",
+                spec.name,
+                kept.num_rows,
+                rows.num_rows,
+                requests,
+                ", ".join(spec.poll_keys),
+                request.limit,
+            )
+            return kept, requests
         if request.limit is not None:
             rows = rows.slice(0, request.limit)
         return rows, requests
@@ -2085,7 +2168,7 @@ class RestEndpoints:
             core.catalog,
             core.drift,
             core.config.max_concurrency,
-            core.config.unknown_symbols,
+            core.config.unreadable_symbols,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
         )
@@ -2273,12 +2356,15 @@ class RestEndpoints:
             )
         )
 
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+    def fetch(
+        self, spec: DatasetSpec, request: Request, *, call: int, stop: threading.Event | None = None
+    ) -> Table:
         """Return every row the dataset's fetch path returns for the request, as a static table.
 
         Requests run on this thread, or for a per-symbol path on a pool of up to
-        `max_concurrency` threads; `Request.limit` caps the total rows. Drift is logged, once
-        per field.
+        `max_concurrency` threads; `Request.limit` caps the total rows, or each request's rows
+        for a dataset whose symbols overlap, which keeps a row several requests return once
+        (`RestReader._read_planned`). Drift is logged, once per field.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2286,6 +2372,9 @@ class RestEndpoints:
                 table before this call).
             call: The call's id (`SessionCore.next_stream_id`), which names its fan-out
                 threads (`"massive #1 call-7 rest_0"`).
+            stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`),
+                which ends the read's waits when set; None when only the session's close
+                should.
 
         Returns:
             A static table in the dataset's schema.
@@ -2303,12 +2392,34 @@ class RestEndpoints:
             spec,
             request,
             symbols=request.symbols,
+            cancel=_token(stop),
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
         return self._static(spec, table)
 
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+        """Plan `fetch`'s requests with none made, so a parameter error raises now.
+
+        A background `fetch(wait=False)` calls it on the caller thread before its table
+        exists. Crypto pairs are not split (`_unsplit`): the read splits them, and a pair
+        Massive does not list fails the read's table instead.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with static symbols.
+
+        A parameter a path does not take raises the `ValueError` of `_base`.
+        """
+        self._reader("check").plan_fetch(spec, request, request.symbols, split=_unsplit)
+
     def history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, call: int
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         """Return the dataset's REST history over `window`, paged internally, as a static table.
 
@@ -2333,6 +2444,7 @@ class RestEndpoints:
             request: The normalized arguments, with static symbols.
             window: The call's window (`history_window` in `_datasets/history_source.py`).
             call: The call's id, which names its fan-out threads, as in `fetch`.
+            stop: A background read's stop token, as `fetch` takes it.
 
         Returns:
             A static table in the dataset's schema.
@@ -2343,23 +2455,9 @@ class RestEndpoints:
         HTTP 404, its data cut short.
         """
         reader = self._reader(f"call-{call}")
-        if isinstance(request.symbols, _All):
-            rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
-            path, query = _base(spec, rest_path, request, fixed={})
-            # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
-            days = [
-                day
-                for day in partition_dates(spec, window)
-                if is_trading_day(spec.asset_class, day)
-            ]
-            calls = [Call({**path, "date": day}, query) for day in days]
-            shape = ReadShape.PER_DAY
-        else:
-            rest_path = reader.rest_path(cast("str", spec.history_path))
-            calls = _history_calls(
-                spec, rest_path, request, window=window, split=reader.crypto_pair
-            )
-            shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
+        rest_path, calls, shape = _history_plan(
+            reader, spec, request, window=window, split=reader.crypto_pair
+        )
         announce(
             self._state.client.governor,
             f"{spec.name} history",
@@ -2375,10 +2473,25 @@ class RestEndpoints:
             limit=None,
             window=window,
             remedy=_history_remedy(request),
+            cancel=_token(stop),
             patience=reader.patience(),
         )
         logger.info("%s history: source=REST requests=%d", spec.name, requests)
         return self._static(spec, table)
+
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+        """Plan `history`'s requests with none made, so a parameter error raises now.
+
+        The `check_fetch` of a background `history(..., wait=False)` served by REST.
+
+        Args:
+            spec: The dataset; `history()` has checked that REST can serve the request.
+            request: The normalized arguments, with static symbols and the parsed bounds.
+            window: The call's window.
+
+        A parameter the path does not take raises the `ValueError` of `_base`.
+        """
+        _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
 
     def poll(
         self,
@@ -2597,6 +2710,77 @@ def _range_segments(requested: TimeRange) -> dict[str, object]:
     first = requested.start.replace(microsecond=requested.start.microsecond // 1000 * 1000)
     last = requested.end - _ONE_MICROSECOND
     return {"from": first, "to": last.replace(microsecond=last.microsecond // 1000 * 1000)}
+
+
+def _history_plan(
+    reader: RestReader,
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    window: HistoryWindow,
+    split: CryptoSplit,
+) -> tuple[RestPath, list[Call], ReadShape]:
+    """Plan a REST `history()`'s requests: the path, its calls, and how they are counted.
+
+    `dm.ALL` reads the grouped-daily path, one request per trading day of the window; any other
+    request reads the history path (`_history_calls`). Makes no request unless `split` does.
+
+    Args:
+        reader: The reader whose paths the plan names.
+        spec: The dataset.
+        request: The normalized arguments, with static symbols.
+        window: The call's window.
+        split: Splits a crypto pair into its currencies (`RestReader.crypto_pair`, or
+            `_unsplit` for a check).
+
+    Returns:
+        The path, the planned calls in result order, and the read's `ReadShape`.
+
+    A parameter the path does not take raises the `ValueError` of `_base`.
+    """
+    if isinstance(request.symbols, _All):
+        rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
+        path, query = _base(spec, rest_path, request, fixed={})
+        # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
+        days = [
+            day for day in partition_dates(spec, window) if is_trading_day(spec.asset_class, day)
+        ]
+        return rest_path, [Call({**path, "date": day}, query) for day in days], ReadShape.PER_DAY
+    rest_path = reader.rest_path(cast("str", spec.history_path))
+    calls = _history_calls(spec, rest_path, request, window=window, split=split)
+    shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
+    return rest_path, calls, shape
+
+
+def _unsplit(symbol: str) -> tuple[str, str]:
+    """Stand in for a crypto pair's split in a plan that must make no request.
+
+    `check_fetch` and `check_history` plan requests only to raise their parameter errors at
+    the call; the read itself splits each pair by Massive's ticker list.
+
+    Args:
+        symbol: A canonical crypto ticker, unused.
+
+    Returns:
+        Two empty currencies.
+    """
+    del symbol
+    return "", ""
+
+
+def _token(stop: threading.Event | None) -> Cancel | None:
+    """Return a background read's stop token as the wire layer's `Cancel` it is.
+
+    The ports type the token as the `threading.Event` the tables layer may name;
+    `SessionClients.read_stop` makes every one a `Cancel`.
+
+    Args:
+        stop: The token, or None.
+
+    Returns:
+        The same object, typed as a `Cancel`.
+    """
+    return cast("Cancel | None", stop)
 
 
 def _history_calls(

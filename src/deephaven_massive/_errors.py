@@ -21,28 +21,41 @@ Parameter mistakes are not `MassiveError`s: a wrong *value* raises `ValueError` 
 *type* (for example a plain string where an enum member is required) raises `TypeError`, both
 synchronously on the calling thread.
 
-Static verbs (`fetch()`, `history()`) raise these exceptions directly. Live tables report them
-through `TablePublisher.publish_failure`, so the table fails where Deephaven users look, and the
-failure is also logged at ERROR and shown in `m.streams()`.
+Static verbs (`fetch()`, `history()`) raise these exceptions directly. A live table fails with
+one (its publisher's `publish_failure`), so the failure shows where Deephaven users look; it is
+also logged at ERROR and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported. The rate-limited log helpers, `log_once` and `BoundedWarnings`,
-are in `_log_limits`.
+fix, which is not exported, and `LIBRARY_BUG`, the sentence that ends every message about a
+defect of the library itself. The rate-limited log helpers, `log_once` and `BoundedLog`, are in
+`_log_limits`.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
 
 from __future__ import annotations
 
+from typing import Final
+
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 
 __all__ = [
+    "LIBRARY_BUG",
     "AuthenticationError",
     "EntitlementError",
     "MassiveError",
     "PermanentError",
     "from_wire",
 ]
+
+
+LIBRARY_BUG: Final = (
+    "This is a bug in deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and "
+    "report it with the log and m.streams() at "
+    "https://github.com/chipkent/deephaven-massive/issues."
+)
+"""The last sentence of every message about a defect of the library itself, never the user's:
+how to report it, with what."""
 
 
 class MassiveError(Exception):

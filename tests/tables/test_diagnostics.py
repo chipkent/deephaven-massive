@@ -36,6 +36,7 @@ from deephaven_massive._tables.diagnostics import (
     LimitSource,
     RateLimitRow,
     RateLimitState,
+    StreamKind,
     StreamRow,
     StreamState,
     StreamUpdate,
@@ -51,6 +52,7 @@ TIMEOUT = 30.0
 
 STREAM = StreamRow(
     stream_id=7,
+    kind=StreamKind.STREAM,
     dataset="stocks.trades",
     query="<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>",
     symbol_count=2,
@@ -89,6 +91,7 @@ def test_column_sets() -> None:
     )
     assert STREAMS.column_names == (
         "StreamId",
+        "Kind",
         "Dataset",
         "Query",
         "SymbolCount",
@@ -105,7 +108,15 @@ def test_column_sets() -> None:
         "CreatedAt",
         "SchemaDrift",
     )
-    assert [s.value for s in StreamState] == ["RUNNING", "FAILED", "RELEASED", "CLOSED"]
+    assert [s.value for s in StreamState] == [
+        "RUNNING",
+        "LOADING",
+        "DONE",
+        "FAILED",
+        "RELEASED",
+        "CLOSED",
+    ]
+    assert [k.value for k in StreamKind] == ["stream", "poll", "read"]
     assert [s.value for s in ConnectionState] == [
         "RESOLVING",
         "CONNECTING",
@@ -148,6 +159,21 @@ def test_stream_updates_can_clear_a_warning() -> None:
     cleared = StreamUpdate(deferred=0, clear_error=True).apply(row)
     assert (cleared.deferred, cleared.error, cleared.state) == (0, None, StreamState.RUNNING)
     assert StreamUpdate(error="new", clear_error=True).apply(row).error is None
+
+
+def test_skipped_symbols_and_the_transport_warning_neither_hide_nor_clear_each_other() -> None:
+    row = _stream(deferred=2, error="over capacity: 1002/1000; 2 deferred")
+    both = StreamUpdate(skipped="skipping 1 value").apply(row)
+    assert as_row(both)["Error"] == "over capacity: 1002/1000; 2 deferred; skipping 1 value"
+    alone = StreamUpdate(deferred=0, clear_error=True).apply(both)  # the cap frees up
+    assert as_row(alone)["Error"] == "skipping 1 value"
+    assert StreamUpdate(rows_published=1).apply(alone).skipped == "skipping 1 value"
+    back = StreamUpdate(error="waiting for a slot").apply(alone)
+    fixed = StreamUpdate(clear_skipped=True, skipped="ignored").apply(back)  # the row is fixed
+    assert as_row(fixed)["Error"] == "waiting for a slot"
+    assert as_row(StreamUpdate(clear_error=True).apply(fixed))["Error"] is None
+    stopped = dataclasses.replace(both, state=StreamState.FAILED, error="the cause")
+    assert as_row(stopped)["Error"] == "the cause"  # a stop shows only its cause
 
 
 @pytest.mark.parametrize("state", [StreamState.FAILED, StreamState.CLOSED])

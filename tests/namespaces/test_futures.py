@@ -98,10 +98,14 @@ def test_trades_and_quotes_stream_and_have_history(massive_session: dm.MassiveSe
         q = factory(["NQZ5", "ESZ5", "ESZ5"])
         assert type(q) is StreamHistoryQuery
         assert request(q).symbols == ("ESZ5", "NQZ5")
-        assert request(q).venue is None
-        cme = factory("ESZ5", venue=dm.FuturesVenue.CME)
-        assert request(cme).venue is dm.FuturesVenue.CME
+        # Every venue by default, in FuturesVenue order.
+        assert request(q).venues == tuple(dm.FuturesVenue)
+        cme = factory("ESZ5", venues={dm.FuturesVenue.CME})
+        assert request(cme).venues == (dm.FuturesVenue.CME,)
+        two = factory("ESZ5", venues={dm.FuturesVenue.COMEX, dm.FuturesVenue.CBOT})
+        assert request(two).venues == (dm.FuturesVenue.CBOT, dm.FuturesVenue.COMEX)
         assert request(factory(dm.ALL)).symbols is dm.ALL
+        assert "venues=(FuturesVenue.CME)" in repr(cme)
 
 
 _PLAIN = cast("Any", "text")
@@ -110,9 +114,12 @@ _PLAIN = cast("Any", "text")
 @pytest.mark.parametrize(
     ("call", "message"),
     [
-        (lambda f: f.trades("ESZ5", venue=_PLAIN), "venue must be dm.FuturesVenue"),
-        (lambda f: f.quotes("ESZ5", venue=_PLAIN), "venue must be dm.FuturesVenue"),
-        (lambda f: f.bars("ESZ5", venue=_PLAIN), "venue must be dm.FuturesVenue"),
+        (lambda f: f.trades("ESZ5", venues=_PLAIN), "venues must be a set of dm.FuturesVenue"),
+        (lambda f: f.quotes("ESZ5", venues={_PLAIN}), "venues must hold only dm.FuturesVenue"),
+        (
+            lambda f: f.bars("ESZ5", venues=dm.FuturesVenue.CME),
+            "venues must be a set of dm.FuturesVenue, such as",
+        ),
         (lambda f: f.bars("ESZ5", _PLAIN), "timespan must be dm.Timespan"),
         (lambda f: f.snapshots("ESZ5", order=_PLAIN), "order must be dm.Order"),
         (lambda f: f.contracts(order=_PLAIN), "order must be dm.Order"),
@@ -120,9 +127,9 @@ _PLAIN = cast("Any", "text")
         (lambda f: f.schedules(order=_PLAIN), "order must be dm.Order"),
     ],
     ids=[
-        "trades.venue",
-        "quotes.venue",
-        "bars.venue",
+        "trades.venues",
+        "quotes.venues",
+        "bars.venues",
         "bars.timespan",
         "snapshots.order",
         "contracts.order",
@@ -166,10 +173,12 @@ def test_bars_pick_their_class_from_the_timespan(
 
 
 def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.futures.bars(dm.ALL, venue=dm.FuturesVenue.NYMEX)
+    q = massive_session.futures.bars(dm.ALL, venues={dm.FuturesVenue.NYMEX})
     assert type(q) is StreamHistoryQuery
     assert request(q).timespan is dm.Timespan.MINUTE
-    assert request(q).venue is dm.FuturesVenue.NYMEX
+    assert request(q).venues == (dm.FuturesVenue.NYMEX,)
+    with pytest.raises(ValueError, match="venues is empty; leave it out to read every venue"):
+        massive_session.futures.bars(dm.ALL, venues=frozenset())
 
 
 def test_bars_reject_the_day_timespan(massive_session: dm.MassiveSession) -> None:
@@ -784,7 +793,8 @@ def test_products_over_rest(
         ("/futures/v1/products", {"product_code": ["EBE"], "limit": ["50000"]})
     ]
     assert [(r["ProductCode"], r["TradingVenue"], r["Date"], r["LastUpdated"]) for r in out] == [
-        ("EBE", "XNYM", "2025-07-07", "2025-02-22")
+        # Massive sends a time of day with an offset: 2017-01-01T17:11:39-06:00 is 23:11:39 UTC.
+        ("EBE", "XNYM", "2025-07-07", 1483312299000000000)
     ]
     assert out[0]["UnitOfMeasureQty"] == 1000.0
 
@@ -995,11 +1005,11 @@ CME = dm.FuturesVenue.CME
 @pytest.mark.parametrize(
     ("build", "prefix", "day"),
     [
-        (lambda f: f.trades("ESZ4", venue=CME), "trades_v1", date(2024, 12, 17)),
-        (lambda f: f.quotes("GCJ5", venue=CME), "quotes_v1", date(2024, 12, 17)),
-        (lambda f: f.bars("GCJ5", venue=CME), "minute_aggs_v1", date(2025, 2, 4)),
+        (lambda f: f.trades("ESZ4", venues={CME}), "trades_v1", date(2024, 12, 17)),
+        (lambda f: f.quotes("GCJ5", venues={CME}), "quotes_v1", date(2024, 12, 17)),
+        (lambda f: f.bars("GCJ5", venues={CME}), "minute_aggs_v1", date(2025, 2, 4)),
         (
-            lambda f: f.bars("GCJ5", dm.Timespan.SESSION, venue=CME),
+            lambda f: f.bars("GCJ5", dm.Timespan.SESSION, venues={CME}),
             "session_aggs_v1",
             date(2025, 2, 4),
         ),
@@ -1059,11 +1069,13 @@ def test_a_file_of_spreads_reads_every_ticker_as_written(
     day = date(2025, 2, 4)
     key = object_key("us_futures_{venue}/session_aggs_v1", day, "cbot")
     fake_s3.put(key, make_csv_gz("\n".join([header, *SPREAD_ROWS]) + "\n"))
-    every = s3_session.futures.bars(dm.ALL, dm.Timespan.SESSION, venue=dm.FuturesVenue.CBOT)
+    every = s3_session.futures.bars(dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CBOT})
     out = rows(every.history(day, day, source=dm.HistorySource.FLAT_FILES))
     assert [r["Symbol"] for r in out] == [row.split(",")[0] for row in SPREAD_ROWS]
     # A spread is a symbol a dataset takes, and filters the same file.
-    one = s3_session.futures.bars("BOB 02-01 U6", dm.Timespan.SESSION, venue=dm.FuturesVenue.CBOT)
+    one = s3_session.futures.bars(
+        "BOB 02-01 U6", dm.Timespan.SESSION, venues={dm.FuturesVenue.CBOT}
+    )
     picked = rows(one.history(day, day, source=dm.HistorySource.FLAT_FILES))
     assert [(r["Symbol"], r["Close"]) for r in picked] == [("BOB 02-01 U6", 3.0)]
 

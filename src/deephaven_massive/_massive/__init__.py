@@ -40,6 +40,10 @@ Interface:
     - `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`: a Basic subscription's limit (5 requests
       per minute) and the seconds a finished request holds its slot (61).
     - `Cancel`: the cancellation token that ends a request's waits.
+    - `set_reply_capture`, `CapturedReply`: an optional process-wide sink that receives every
+      raw reply the REST and WebSocket clients read (each REST body, refusals included, and
+      each frame after authentication), already cleaned of the clients' secrets, for
+      recording Massive's real replies. Off by default.
     - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, which keys the
       governor the library shares. It is part of `net` and loads no client.
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
@@ -74,6 +78,7 @@ __all__ = [
     "RATE_WINDOW",
     "BucketState",
     "Cancel",
+    "CapturedReply",
     "DriftReport",
     "DriftSample",
     "Field",
@@ -104,6 +109,7 @@ __all__ = [
     "object_key",
     "origin_of",
     "provenance",
+    "set_reply_capture",
     "source",
     "sources",
     "to_batch",
@@ -115,6 +121,8 @@ _EXPORTS: dict[str, str] = {
     "RATE_WINDOW": "deephaven_massive._massive.rest.governor",
     "BucketState": "deephaven_massive._massive.rest.governor",
     "Cancel": "deephaven_massive._massive.net.cancel",
+    "CapturedReply": "deephaven_massive._massive.net.capture",
+    "set_reply_capture": "deephaven_massive._massive.net.capture",
     "RequestGovernor": "deephaven_massive._massive.rest.governor",
     "FlatFile": "deephaven_massive._massive.flatfiles.reader",
     "FlatFileClient": "deephaven_massive._massive.flatfiles.client",
@@ -157,6 +165,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.flatfiles.object_keys import object_key
     from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
     from deephaven_massive._massive.net.cancel import Cancel
+    from deephaven_massive._massive.net.capture import CapturedReply, set_reply_capture
     from deephaven_massive._massive.net.errors import (
         WireAuthError,
         WireEntitlementError,

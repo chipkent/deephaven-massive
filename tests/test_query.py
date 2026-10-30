@@ -44,6 +44,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
+from deephaven_massive._tables.background_read import BACKGROUND_NOTE
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher
@@ -168,15 +169,25 @@ class Recorder:
         self.calls: list[tuple[str, DatasetSpec, Request, dict[str, Any]]] = []
         # The call id each static verb passed, in call order.
         self.call_ids: list[int] = []
+        # The request checks a background read made on the calling thread.
+        self.checks: list[tuple[str, DatasetSpec, Request]] = []
         self._catalog = catalog
 
     def _record(self, verb: str, spec: DatasetSpec, request: Request, **extra: object) -> Table:
         self.calls.append((verb, spec, request, dict(extra)))
         return dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
 
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+    def fetch(
+        self, spec: DatasetSpec, request: Request, *, call: int, stop: threading.Event | None = None
+    ) -> Table:
         self.call_ids.append(call)
-        return self._record("fetch", spec, request)
+        return self._record("fetch", spec, request, **({} if stop is None else {"stop": stop}))
+
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+        self.checks.append(("fetch", spec, request))
+
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+        self.checks.append(("history", spec, request))
 
     def poll(
         self,
@@ -197,9 +208,11 @@ class Recorder:
         *,
         dates: Sequence[date] | None = None,
         call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         self.call_ids.append(call)
-        return self._record("history", spec, request, window=window, dates=dates)
+        extra = {} if stop is None else {"stop": stop}
+        return self._record("history", spec, request, window=window, dates=dates, **extra)
 
 
 @pytest.fixture
@@ -285,11 +298,11 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
         multiplier=5,
         adjusted=False,
         start="2025-01-02",
-        params={"sort": "timestamp"},
+        params={"sort": "asc"},
     )
     assert repr(bars) == (
         "<HistoryQuery forex.bars symbols=('C:EURUSD',) timespan=Timespan.MINUTE multiplier=5 "
-        "adjusted=False start=2025-01-02 params={'sort': 'timestamp'}>"
+        "adjusted=False start=2025-01-02 params={'sort': 'asc'}>"
     )
     # Without a time axis, the date filters are free for `filters=`.
     unbounded = dataclasses.replace(NEWS_SPEC, time_axis=None)
@@ -394,21 +407,24 @@ def test_fetch_and_poll_delegate(massive_session: dm.MassiveSession, rest: Recor
     q = feed(massive_session)
     q.fetch()
     q.poll(30)
+    q.poll(30, mode=PollMode.AUTO)
     q.poll(timedelta(minutes=1), mode=PollMode.REPLACE)
     shown = repr(q)
+    # AUTO, the default, is the dataset's own mode: APPEND for this feed.
     assert [(c[0], c[3]) for c in rest.calls] == [
         ("fetch", {}),
+        ("poll", {"interval": timedelta(seconds=30), "mode": PollMode.APPEND, "query": shown}),
         ("poll", {"interval": timedelta(seconds=30), "mode": PollMode.APPEND, "query": shown}),
         ("poll", {"interval": timedelta(minutes=1), "mode": PollMode.REPLACE, "query": shown}),
     ]
 
 
-@pytest.mark.parametrize("mode", [None, PollMode.REPLACE])
+@pytest.mark.parametrize("mode", [PollMode.AUTO, PollMode.REPLACE])
 def test_a_feed_without_start_refuses_to_poll(
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
-    mode: PollMode | None,
+    mode: PollMode,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Every cycle would re-read Massive's whole archive; the message names the fix.
@@ -753,17 +769,43 @@ def test_history_reads_a_reactive_symbol_table_once_for_every_source(
     assert rest.calls[1][2].symbols == ("AAPL", "MSFT")  # AUTO: the dataset has no flat files
 
 
-def test_history_refuses_a_symbol_table_row_that_is_not_canonical(
-    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+def strict(session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The session's rule for symbol-table rows becomes RAISE.
+    config = dataclasses.replace(session._core.config, noncanonical_symbols=dm.OnError.RAISE)
+    monkeypatch.setattr(session._core, "config", config)
+
+
+def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    strict(massive_session, monkeypatch)
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
     for source in HistorySource:
         with pytest.raises(
-            ValueError, match=r"^a symbol table holds 'msft' .*dm\.canonicalize_symbols"
+            ValueError,
+            match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
         ):
             q.history("2025-03-03", "2025-03-03", source=source)
     assert rest.calls == []
     assert flat.calls == []
+
+
+def test_history_skips_a_symbol_table_row_that_is_not_canonical(
+    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+) -> None:
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
+    q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+    assert rest.calls[0][2].symbols == ("AAPL",)
+    assert flat.calls == []
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
+    with pytest.raises(
+        ValueError, match=r"^stocks\.trades: no row of the symbol table is Massive's ticker"
+    ):
+        only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
 
 
 def test_history_rejects_a_symbol_table_without_symbols(
@@ -825,6 +867,8 @@ def test_duplicate_last_by_keys_open_no_stream(
         (["Symbol", "Nope"], (ValueError, "Nope")),
         ([1], (TypeError, "only column names")),
         ({"Symbol"}, (TypeError, "by must be a str or a sequence of str")),
+        # None is no mode: the default is "Symbol", written out.
+        (None, (TypeError, "by must be a str or a sequence of str, not NoneType")),
         (["Symbol", "Exchange", "Symbol"], (ValueError, r"by names \['Symbol'\] more than once")),
     ],
 )
@@ -904,17 +948,38 @@ def test_a_static_symbol_table_without_symbols_opens_no_stream(
 
 
 @pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
-def test_a_static_symbol_table_row_that_is_not_canonical_opens_no_stream(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
+def test_a_static_symbol_table_row_that_is_not_canonical_opens_no_stream_under_raise(
+    massive_session: dm.MassiveSession,
+    *,
+    fake_streams: FakeStreams,
+    verb: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Refused, as the same text in a list is: never canonicalized and never dropped.
+    # Refused, as the same text in a list always is: never canonicalized and never dropped.
+    strict(massive_session, monkeypatch)
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
     call = getattr(q, verb)
     with pytest.raises(
-        ValueError, match=r"^a symbol table holds 'msft' .*dm\.canonicalize_symbols"
+        ValueError,
+        match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
     ):
         call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
+
+
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_a_static_symbol_table_row_that_is_not_canonical_is_skipped(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
+) -> None:
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    call = getattr(q, verb)
+    massive_session.release(call(3) if verb == "ring" else call())
+    assert len(fake_streams.opened) == 1
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
+    call = getattr(only_bad, verb)
+    with pytest.raises(ValueError, match=r"^stocks\.trades: no row of the symbol table is"):
+        call(3) if verb == "ring" else call()
+    assert len(fake_streams.opened) == 1
 
 
 def test_bar_channels_follow_the_timespan(
@@ -982,7 +1047,11 @@ def test_a_refused_static_verb_logs_nothing(
     one_row = last_trade(massive_session)
     massive_session.close()
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
-        for verb in (one_row.fetch, lambda: q.history("2025-03-03", source=HistorySource.REST)):
+        verbs: list[Callable[[], Table]] = [
+            one_row.fetch,
+            lambda: q.history("2025-03-03", source=HistorySource.REST),
+        ]
+        for verb in verbs:
             with pytest.raises(dm.MassiveError, match="is closed"):
                 verb()
     assert [r.getMessage() for r in caplog.records if r.levelno < logging.WARNING] == []
@@ -1182,14 +1251,17 @@ def test_last_by_matches_the_rows_of_a_reactive_table(
     massive_session.release(current)
 
 
-def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    strict(massive_session, monkeypatch)
     watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, StreamQuery)
     for verb in (q.blink, q.append_only, q.last_by):
-        with pytest.raises(ValueError, match=r"^a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"):
+        with pytest.raises(
+            ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"
+        ):
             verb()
     assert fake_streams.publishers == {}
 
@@ -1223,15 +1295,16 @@ def test_ring_accepts_its_lower_bound(
     massive_session.release(result)
 
 
-def test_an_empty_window_in_a_warn_session_has_the_raw_symbol_column() -> None:
-    # The empty result of a window no row fits in has the session's columns, RawSymbol
-    # included, as every other result of a WARN session does.
-    config = dm.MassiveConfig(api_key="test-key", unknown_symbols=dm.UnknownSymbols.WARN)
+@pytest.mark.parametrize("unreadable", list(dm.OnError))
+def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None:
+    # The empty result of a window no row fits in has the session's columns, with RawSymbol
+    # exactly when the session keeps unreadable rows, as every other result of it does.
+    config = dm.MassiveConfig(api_key="test-key", unreadable_symbols=unreadable)
     with dm.MassiveSession(config) as session:
         q = trades(session)
-        empty = q._empty()
+        empty = q._empty_rows()
         names = [c.name for c in empty.columns]
-        assert "RawSymbol" in names
+        assert ("RawSymbol" in names) is (unreadable is not dm.OnError.RAISE)
         assert names == [name for (name,) in q.columns().iter_tuple(cols="Name")]
 
 
@@ -1443,3 +1516,121 @@ def test_auto_warns_that_an_unpublished_file_changes_the_source_the_next_day(
 def _futures(count: int) -> list[str]:
     months = "FGHJKMNQUVXZ"
     return [f"E{chr(65 + n // 12)}{months[n % 12]}5" for n in range(count)]
+
+
+# --- wait=False ------------------------------------------------------------------------------
+
+
+def _join_reads(session: dm.MassiveSession) -> None:
+    # Waits for every background read of the session to end, then for its row to be written.
+    for state in list(session._core._workers.values()):
+        cast("Any", state.fail).__self__.thread.join(TIMEOUT)
+
+
+def _released(session: dm.MassiveSession, *tables: Table) -> None:
+    for table in tables:
+        session.release(table)
+
+
+def test_wait_false_reads_in_the_background(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    q = news(massive_session)
+    with caplog.at_level(logging.DEBUG):
+        fetched = q.fetch(wait=False)
+        history = trades(massive_session).history(
+            "2025-03-03", "2025-03-04", source=HistorySource.REST, wait=False
+        )
+        _join_reads(massive_session)
+    assert fetched.is_refreshing
+    assert history.is_refreshing
+    # The parameters were checked on the calling thread, then the transport ran with a token.
+    assert [check[0] for check in rest.checks] == ["fetch", "history"]
+    assert [call[0] for call in rest.calls] == ["fetch", "history"]
+    assert all(isinstance(call[3]["stop"], threading.Event) for call in rest.calls)
+    rows = stream_rows()
+    assert [(r["StreamId"], r["Kind"], r["State"], r["Transport"]) for r in rows] == [
+        (1, "read", "DONE", "REST"),
+        (2, "read", "DONE", "REST"),
+    ]
+    # Each read logs its own outcome, from its thread; the call logs no `done` line.
+    assert sorted(_calls(caplog)) == [
+        "call 1 done: 0 rows in <s> s",
+        f"call 1 start: {q!r}.fetch(wait=False)",
+        "call 2 done: 0 rows in <s> s",
+        (
+            f"call 2 start: {trades(massive_session)!r}.history('2025-03-03', '2025-03-04', "
+            "source=<HistorySource.REST: 'rest'>, wait=False)"
+        ),
+    ]
+    _released(massive_session, fetched, history)
+
+
+def test_wait_must_be_a_bool(massive_session: dm.MassiveSession, rest: Recorder) -> None:
+    with pytest.raises(TypeError, match="wait must be a bool, not int"):
+        news(massive_session).fetch(wait=cast("bool", 0))
+    with pytest.raises(TypeError, match="wait must be a bool, not str"):
+        trades(massive_session).history("2025-03-03", wait=cast("bool", "no"))
+    assert rest.calls == []
+    assert massive_session._core._workers == {}
+
+
+def test_wait_false_raises_argument_errors_at_the_call(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    every = trades(massive_session, dm.ALL)
+    with pytest.raises(ValueError, match="needs explicit symbols"):
+        every.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=False)
+    with pytest.raises(ValueError, match=r"history has no possible source"):
+        every.history("2025-03-03", "2025-03-03", wait=False)
+
+    def refuse(*_: object) -> None:
+        raise ValueError("/fed/v1/inflation does not take adjusted")
+
+    monkeypatch.setattr(rest, "check_fetch", refuse)  # a path that refuses a parameter
+    with pytest.raises(ValueError, match="does not take adjusted"):
+        news(massive_session).fetch(wait=False)
+    assert rest.calls == []
+    assert flat.calls == []
+    assert massive_session._core._workers == {}
+
+
+def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    instant = datetime(2025, 3, 3, 15, tzinfo=UTC)  # equal instants: no row lies between
+    files = values.history(instant, instant, wait=False)
+    forced = trades(s3_session).history(instant, instant, source=HistorySource.REST, wait=False)
+    landed = values.history("2025-03-03", "2025-03-03", wait=False)
+    _join_reads(s3_session)
+    assert (rest.calls, rest.checks) == ([], [])
+    assert [call[0] for call in flat.calls] == ["history"]  # only the range with rows
+    assert isinstance(flat.calls[0][3]["stop"], threading.Event)
+    assert s3_session._core.diagnostics.barrier().wait(TIMEOUT)
+    rows = sorted(dh_to_pylist(s3_session.streams()), key=lambda r: r["StreamId"])
+    assert [(r["State"], r["Transport"]) for r in rows] == [
+        ("DONE", "flat files"),
+        ("DONE", "REST"),
+        ("DONE", "flat files"),
+    ]
+    assert files.attributes()["TableDescription"].endswith(
+        "AUTO chose it (REST cannot serve it: indices.values has no REST history). "
+        + BACKGROUND_NOTE
+    )
+    _released(s3_session, files, forced, landed)

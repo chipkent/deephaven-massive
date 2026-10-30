@@ -136,7 +136,9 @@ def declared_plans(text: str) -> LivePlans:
 
     Args:
         text: The variable's value, such as `"stocks=starter,currencies=starter,s3"`; spaces
-            and case are ignored.
+            and case are ignored. `s3=<prefix>` entries, such as
+            `s3=us_stocks_sip/day_aggs_v1`, name the flat-file prefixes the credentials reach,
+            as a probe found them; plain `s3` lets every prefix be tried.
 
     Returns:
         The plans: every class Basic unless named.
@@ -146,7 +148,12 @@ def declared_plans(text: str) -> LivePlans:
     """
     tiers = dict.fromkeys(TIERS, "basic")
     s3 = False
-    for entry in text.lower().replace(" ", "").split(","):
+    prefixes: list[str] = []
+    for written in text.replace(" ", "").split(","):
+        entry = written.lower()
+        if entry.startswith(S3 + "="):
+            prefixes.append(written.partition("=")[2])  # a prefix keeps its case
+            continue
         if not entry:
             continue
         if entry == S3:
@@ -159,7 +166,9 @@ def declared_plans(text: str) -> LivePlans:
                 + "; ".join(f"{c}: {', '.join(t)}" for c, t in TIERS.items())
             )
         tiers[name] = tier
-    return LivePlans(tiers=tiers, s3=s3, flat_files=None, source=f"declared in {PLANS_VARIABLE}")
+    flat_files = tuple(sorted(prefixes)) if prefixes else None
+    source = f"declared in {PLANS_VARIABLE}"
+    return LivePlans(tiers=tiers, s3=s3 or bool(prefixes), flat_files=flat_files, source=source)
 
 
 def plans_text(plans: LivePlans) -> str:

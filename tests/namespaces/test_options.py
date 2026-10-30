@@ -415,6 +415,10 @@ def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSess
         bars(CONTRACT, cast("dm.Timespan", "minute"))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         bars(CONTRACT, adjusted=cast("bool", 1))
+    # None would read as a path without `adjusted`: REST would send Massive's default,
+    # adjusted, while the flat files, as traded, could serve the same call.
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        bars(CONTRACT, adjusted=cast("bool", None))
 
 
 def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.MassiveSession) -> None:
@@ -473,12 +477,15 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
     assert type(q) is Query
     assert request_of(q) == {
         "symbols": (CONTRACT,),
-        "params": {"type": "options"},
+        "params": {},
         "filters": {"ticker_gte": "O:A"},
     }
     assert snapshots(dm.ALL)._request.symbols is dm.ALL
+    assert dict(snapshots(dm.ALL)._request.params) == {"type": "options"}
     with pytest.raises(ValueError, match=r"^type is set through its own argument"):
         snapshots(dm.ALL, filters={"type": "stocks"})
+    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
+        snapshots([CONTRACT], filters={"type": "options"})
     with pytest.raises(ValueError, match=r"^ticker_any_of is set through symbols=, not"):
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})
 
@@ -489,7 +496,7 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
         underlying="NVDA",
         contract_type=dm.ContractType.CALL,
         as_of="2025-01-02",
-        expired=False,
+        expired=True,
         filters={"strike_price_gte": 100, "expiration_date_lte": date(2026, 1, 16)},
     )
     assert type(listed) is Query
@@ -498,14 +505,18 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
         "params": {
             "as_of": date(2025, 1, 2),
             "contract_type": dm.ContractType.CALL,
-            "expired": False,
+            "expired": True,
             "underlying_ticker": "NVDA",
         },
         "filters": {"expiration_date_lte": date(2026, 1, 16), "strike_price_gte": 100},
     }
-    described = contracts(symbols=[CONTRACT])
+    described = contracts([CONTRACT])
     assert request_of(described) == {"symbols": (CONTRACT,), "params": {}, "filters": {}}
+    assert request_of(contracts(symbols=[CONTRACT])) == request_of(described)
     assert request_of(contracts()) == {"symbols": None, "params": {}, "filters": {}}
+    # False, the default, is Massive's own, so it is not sent, also beside named contracts.
+    assert request_of(contracts(expired=False)) == request_of(contracts())
+    assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
 
 
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
@@ -531,9 +542,9 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
 def test_as_of_and_date_refuse_a_time(massive_session: dm.MassiveSession) -> None:
     # Both are calendar dates: an instant would name a day only through a zone.
     late = datetime(2025, 1, 3, 2, 0, tzinfo=UTC)
-    with pytest.raises(ValueError, match=r"^options\.contracts: as_of is a calendar date"):
+    with pytest.raises(ValueError, match=r"^options\.contracts: as_of=.* is a calendar date"):
         massive_session.options.contracts(as_of=late)
-    with pytest.raises(ValueError, match=r"^options\.daily_open_close: date is a calendar date"):
+    with pytest.raises(ValueError, match=r"^options\.daily_open_close: date=.* is a calendar date"):
         massive_session.options.daily_open_close(CONTRACT, late)
     q = massive_session.options.contracts(as_of="2025-01-02")
     assert dict(q._request.params) == {"as_of": date(2025, 1, 2)}
@@ -552,6 +563,8 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
     assert daily(CONTRACT, "2025-01-02", adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         daily(CONTRACT, "2025-01-02", adjusted=cast("bool", 0))
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        daily(CONTRACT, "2025-01-02", adjusted=cast("bool", None))
     with pytest.raises(ValueError, match=r"use m\.options\.snapshots\(dm\.ALL\)"):
         daily(dm.ALL, "2025-01-02")
     with pytest.raises(TypeError):
@@ -689,6 +702,8 @@ def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
     assert prev(CONTRACT, adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         prev(CONTRACT, adjusted=cast("bool", 1))
+    with pytest.raises(TypeError, match="adjusted must be a bool"):
+        prev(CONTRACT, adjusted=cast("bool", None))
     with pytest.raises(
         ValueError,
         match=r"use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"
@@ -887,7 +902,22 @@ def test_snapshots_ask_for_options_250_contracts_a_request(
     # The two requests run concurrently, so they arrive in either order.
     chunks = sorted((q["ticker.any_of"][0].split(",") for _, q in requests), key=len)
     assert chunks == [contracts[-1:], contracts[:250]]
-    assert all(q["type"] == ["options"] and q["limit"] == ["250"] for _, q in requests)
+    assert all("type" not in q and q["limit"] == ["250"] for _, q in requests)
+
+
+def test_snapshots_send_no_type_beside_tickers(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # Massive answers `type` beside `ticker.any_of` with HTTP 400 "Cannot specify tickers and
+    # type.", so only `dm.ALL` sends it; this is the exact query sent for one contract.
+    fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
+    rest_session.options.snapshots(["O:NCLH221014C00005000"]).fetch()
+    assert [r.target for r in fake_rest.requests if r.method == "GET"] == [
+        "/v3/snapshot?limit=250&ticker.any_of=O%3ANCLH221014C00005000"
+    ]
 
 
 def test_snapshots_keep_the_error_row_of_a_contract(
@@ -923,7 +953,7 @@ def test_contracts_list_or_read_each_contract(
             underlying="AAPL",
             contract_type=dm.ContractType.CALL,
             as_of=date(2021, 11, 1),
-            expired=False,
+            expired=True,
             sort="strike_price",
             order=dm.Order.DESC,
             filters={"strike_price_lte": 90},
@@ -936,7 +966,7 @@ def test_contracts_list_or_read_each_contract(
                 "underlying_ticker": ["AAPL"],
                 "contract_type": ["call"],
                 "as_of": ["2021-11-01"],
-                "expired": ["false"],
+                "expired": ["true"],
                 "sort": ["strike_price"],
                 "order": ["desc"],
                 "strike_price.lte": ["90"],
@@ -955,7 +985,7 @@ def test_contracts_list_or_read_each_contract(
     fake_rest.reply(
         wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
     )
-    described = rows(rest_session.options.contracts(symbols=one, as_of="2021-11-01").fetch())
+    described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch())
     assert sent(fake_rest)[-1] == (
         f"/v3/reference/options/contracts/{one}",
         {"as_of": ["2021-11-01"]},

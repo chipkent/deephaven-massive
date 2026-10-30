@@ -6,7 +6,7 @@ Each section lists one dataset's columns in the order every verb returns them. *
 
 A dataset has only the columns it can fill, so two asset classes' tables of one kind (stock and forex quotes, say) can differ in their columns, while the columns they share have one name and type. To merge them, keep the shared columns: `common = [c for c in a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. To keep every column instead, add each missing one to the other table as a typed null first, such as `b.update("Tape = NULL_LONG")`.
 
-In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.stocks.trades`, `m.stocks.last_trade`, `m.stocks.quotes`, `m.stocks.last_quote`, `m.stocks.bars`, `m.stocks.previous_day_bar`, `m.stocks.luld`, `m.stocks.imbalances`, `m.stocks.fmv`, `m.stocks.snapshots`, `m.stocks.movers`, `m.stocks.daily_open_close`, `m.stocks.dividends`, `m.stocks.splits`, `m.stocks.ipos`, `m.stocks.short_interest`, `m.stocks.short_volume`, `m.stocks.share_float`, `m.stocks.financials.ratios`, `m.stocks.filings.index`, `m.stocks.filings.sections_10k`, `m.stocks.filings.text_8k`, and `m.stocks.filings.risk_factors` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+`m.stocks.trades`, `m.stocks.last_trade`, `m.stocks.quotes`, `m.stocks.last_quote`, `m.stocks.bars`, `m.stocks.previous_day_bar`, `m.stocks.luld`, `m.stocks.imbalances`, `m.stocks.fmv`, `m.stocks.snapshots`, `m.stocks.movers`, `m.stocks.daily_open_close`, `m.stocks.dividends`, `m.stocks.splits`, `m.stocks.ipos`, `m.stocks.short_interest`, `m.stocks.short_volume`, `m.stocks.share_float`, `m.stocks.financials.ratios`, `m.stocks.filings.index`, `m.stocks.filings.sections_10k`, `m.stocks.filings.text_8k`, and `m.stocks.filings.risk_factors` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="trades"></a>
 
@@ -19,6 +19,7 @@ Trades of US-listed stocks, tick by tick.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `Conditions` | long[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `conditions` | `conditions` | `c` |
 | `Correction` | long | The trade correction indicator. | REST, flat files | `correction` | `correction` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `exchange` | `exchange` | `x` |
@@ -50,6 +51,7 @@ The latest trade of each US-listed stock.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under." | REST | `T` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." | REST | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `T` |
 | `Conditions` | long[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST | `c` |
 | `Correction` | long | The trade correction indicator. | REST | `e` |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `x` |
@@ -79,6 +81,7 @@ National best bid and offer quotes of US-listed stocks, tick by tick.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `AskExchange` | long | The ask exchange ID | REST, flat files, WebSocket | `ask_exchange` | `ask_exchange` | `ax` |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
 | `AskSize` | double | The ask size. This represents the number of shares sellers are offering at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
@@ -110,6 +113,7 @@ The latest national best bid and offer of each US-listed stock.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under." | REST | `T` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." | REST | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `T` |
 | `AskExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `X` |
 | `AskPrice` | double | The ask price. | REST | `P` |
 | `AskSize` | double | The ask size. This represents the number of shares sellers are offering at the given ask price. | REST | `S` |
@@ -140,6 +144,7 @@ Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 | `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request, `T` | `ticker` | `sym` |
 | `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `o` | `open` | `o` |
 | `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, flat files, WebSocket | `c` | `close` | `c` |
@@ -177,6 +182,7 @@ The previous trading day's bar (open, high, low, close, volume) of US stocks.
 | `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST |  |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." | REST | `t` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. | REST |  |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `T` |
 | `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST | `v` |
 | `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `o` |
 | `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `c` |
@@ -201,6 +207,7 @@ Limit up-limit down price bands of US-listed stocks, as they change.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock." | WebSocket | `T` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix MS." | WebSocket | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | WebSocket | `T` |
 | `HighPrice` | double | The high price. | WebSocket | `h` |
 | `LowPrice` | double | The low price. | WebSocket | `l` |
 | `Indicators` | long[] | The Indicators. See Conditions and Indicators (https://massive.com/glossary/us/stocks/conditions-indicators) for a glossary (LULD indicators are located near the bottom). | WebSocket | `i` |
@@ -223,6 +230,7 @@ Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `T`: "The ticker symbol for the given stock." | WebSocket | `T` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The Timestamp in Unix Ns." | WebSocket | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | WebSocket | `T` |
 | `AuctionTime` | long | The time that the auction is planned to take place in the format (hour x 100) + minutes in Eastern Standard Time, for example 930 would be 9:30 am EST, and 1600 would be 4:00 pm EST. | WebSocket | `at` |
 | `AuctionType` | String | The auction type. `O` - Early Opening Auction (non-NYSE only) `M` - Core Opening Auction `H` - Reopening Auction (Halt Resume) `C` - Closing Auction `P` - Extreme Closing Imbalance (NYSE only) `R` - Regulatory Closing Imbalance (NYSE only) | WebSocket | `a` |
 | `SymbolSequence` | long | The symbol sequence. | WebSocket | `i` |
@@ -247,6 +255,7 @@ Massive's fair market value estimate of US-listed stocks, as it updates.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From WebSocket `sym`: "The ticker symbol for the given security." | WebSocket | `sym` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | WebSocket |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From WebSocket `t`: "The nanosecond timestamp." | WebSocket | `t` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | WebSocket | `sym` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | WebSocket | `fmv` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | WebSocket |  |
 
@@ -263,6 +272,7 @@ Current market snapshots of US-listed stocks, one row per ticker.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
 | `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `day` object: The most recent daily bar for this ticker. | REST | `day.dv` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
@@ -321,6 +331,7 @@ The twenty US stocks with the largest percentage move today, up or down.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.c` |
 | `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `day` object: The most recent daily bar for this ticker. | REST | `day.dv` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. | REST | `day.h` |
@@ -382,6 +393,7 @@ The open, close, and pre- and after-market prices of US stocks on one day.
 | `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a New York calendar day. From REST `from`: "The requested date." | REST | `from` |
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. | REST |  |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. | REST |  |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `symbol` |
 | `AfterHours` | double | The close price of the ticker symbol in after hours trading. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `afterHours` |
 | `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `close` |
 | `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `high` |
@@ -405,6 +417,7 @@ Cash dividends of US-listed stocks, one row per distribution.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock symbol for the company issuing the dividend". | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `CashAmount` | double | Original dividend amount per share in the specified currency | REST | `cash_amount` |
 | `Currency` | String | Currency code for the dividend payment (e.g., USD, CAD) | REST | `currency` |
 | `DeclarationDate` | String | Date when the company officially announced the dividend | REST | `declaration_date` |
@@ -431,6 +444,7 @@ Stock splits, reverse splits, and stock dividends of US-listed stocks.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock symbol for the company that executed the split". | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AdjustmentType` | String | Classification of the share-change event. Possible values include: forward_split (share count increases), reverse_split (share count decreases), stock_dividend (shares issued as a dividend) | REST | `adjustment_type` |
 | `ExecutionDate` | String | Date when the stock split takes effect. The adjustment is applied overnight. On the prior trading day, the post-market session is the last session that shows pre-split prices. On the execution date, all trading is already adjusted for the split. This includes the pre-market session. | REST | `execution_date` |
 | `HistoricalAdjustmentFactor` | double | Cumulative adjustment factor used to offset split effects on historical prices. To adjust a historical price for splits: for a price on date D, find the first split whose `execution_date` is after date D and multiply the unadjusted price by the `historical_adjustment_factor`. | REST | `historical_adjustment_factor` |
@@ -452,6 +466,7 @@ Initial public offerings on US exchanges, upcoming and past, one row per offerin
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The ticker symbol of the IPO event." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AnnouncedDate` | String | The date when the IPO event was announced. | REST | `announced_date` |
 | `CurrencyCode` | String | Underlying currency of the security. | REST | `currency_code` |
 | `FinalIssuePrice` | double | The price set by the company and its underwriters before the IPO goes live. | REST | `final_issue_price` |
@@ -486,6 +501,7 @@ Short interest of US-listed stocks, one row per ticker and FINRA settlement date
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AvgDailyVolume` | long | The average daily trading volume for the stock over a specified period, typically used to contextualize short interest. | REST | `avg_daily_volume` |
 | `DaysToCover` | double | Calculated as short_interest divided by avg_daily_volume, representing the estimated number of days it would take to cover all short positions based on average trading volume. | REST | `days_to_cover` |
 | `SettlementDate` | String | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. | REST | `settlement_date` |
@@ -505,6 +521,7 @@ Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AdfShortVolume` | long | Short volume reported via the Alternative Display Facility (ADF), excluding exempt volume. | REST | `adf_short_volume` |
 | `AdfShortVolumeExempt` | long | Short volume reported via ADF that was marked as exempt. | REST | `adf_short_volume_exempt` |
 | `Date` | String | The date of trade activity reported in the format YYYY-MM-DD | REST | `date` |
@@ -534,6 +551,7 @@ The free float of US-listed stocks: the latest count of shares the public can tr
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The primary ticker symbol for the stock." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `EffectiveDate` | String | The effective date of the free float measurement. | REST | `effective_date` |
 | `FreeFloat` | long | Number of shares freely tradable in the market. Free float shares represent the portion of a company's outstanding shares that is freely tradable in the market, excluding any holdings considered strategic, controlling, or long term. This excludes insiders, directors, founders, 5 percent plus shareholders, cross holdings, government stakes except pensions, restricted or locked up shares, employee plans, and any entities with board influence, leaving only shares that are genuinely available for public trading. | REST | `free_float` |
 | `FreeFloatPercent` | double | Percentage of total shares outstanding that are available for public trading, rounded to two decimal places. | REST | `free_float_percent` |
@@ -698,6 +716,7 @@ Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AverageVolume` | double | Average trading volume over the last 30 trading days, providing context for liquidity. | REST | `average_volume` |
 | `Cash` | double | Cash ratio, calculated as cash and cash equivalents divided by current liabilities, measuring the most liquid form of liquidity coverage. | REST | `cash` |
 | `Cik` | String | Central Index Key (CIK) number assigned by the SEC to identify the company. | REST | `cik` |
@@ -735,6 +754,7 @@ The index of SEC EDGAR filings by US-listed companies, one row per filing and fi
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the filing entity, if available." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AccessionNumber` | String | SEC accession number uniquely identifying the filing (e.g., '0000320193-24-000123'). | REST | `accession_number` |
 | `Cik` | String | SEC Central Index Key (CIK) identifying the filing entity. | REST | `cik` |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
@@ -756,6 +776,7 @@ The text of sections of 10-K annual reports, one row per filing and section.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `FilingUrl` | String | SEC URL source for the full filing. | REST | `filing_url` |
@@ -777,6 +798,7 @@ The item text of 8-K current reports, one row per filing and filer.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AccessionNumber` | String | SEC accession number uniquely identifying the filing (e.g., '0000004962-25-000002'). | REST | `accession_number` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
@@ -821,6 +843,7 @@ Risk factors disclosed in company filings, classified by category, one row each.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Stock ticker symbol for the company." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). | REST | `cik` |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). | REST | `filing_date` |
 | `PrimaryCategory` | String | Top-level risk category | REST | `primary_category` |

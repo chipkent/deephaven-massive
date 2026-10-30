@@ -28,9 +28,9 @@ from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import AssetClass, NotBars, UnknownSymbols
-from deephaven_massive._errors import MassiveError
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._enums import AssetClass, NotBars, OnError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table
@@ -42,6 +42,7 @@ from deephaven_massive._tables.stream import (
     StreamSink,
     open_stream_tables,
 )
+from deephaven_massive._tables.watchlist import skipped_rows_text
 from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
@@ -127,7 +128,7 @@ def wait_for(condition: Callable[[], bool]) -> None:
 
 def test_a_plan_reads_the_channel_for_the_dataset(massive_session: dm.MassiveSession) -> None:
     plan = ChannelPlan.build(
-        massive_session._core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL
+        massive_session._core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE
     )
     assert plan.symbol_field == "Ticker"
     assert plan.required == frozenset({"Ticker", "SipTimestamp"})
@@ -146,7 +147,7 @@ def test_a_plan_needs_a_symbol_key(massive_session: dm.MassiveSession) -> None:
     )
     with pytest.raises(ValueError, match="stocks/T declares no symbol key"):
         ChannelPlan.build(
-            massive_session._core.catalog, keyless, "T", unknown_symbols=UnknownSymbols.FAIL
+            massive_session._core.catalog, keyless, "T", unreadable_symbols=OnError.RAISE
         )
 
 
@@ -168,19 +169,24 @@ FOREX_ROWS = [
 ]
 
 
-def test_conversion_keeps_unreadable_symbols_in_raw_symbol_under_warn(
+@pytest.mark.parametrize(
+    ("mode", "level"), [(OnError.LOG, logging.ERROR), (OnError.IGNORE, logging.DEBUG)]
+)
+def test_conversion_keeps_unreadable_symbols_in_raw_symbol(
     massive_session: dm.MassiveSession,
+    *,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    mode: OnError,
+    level: int,
 ) -> None:
+    fresh = BoundedLog(logging.getLogger("t"), limit=5, level=level)
     monkeypatch.setattr(
-        symbols, "_unknown_spellings", BoundedWarnings(logging.getLogger("t"), limit=5)
+        symbols, "_logged_spellings" if mode is OnError.LOG else "_ignored_spellings", fresh
     )
-    plan = ChannelPlan.build(
-        massive_session._core.catalog, FOREX, "C", unknown_symbols=UnknownSymbols.WARN
-    )
+    plan = ChannelPlan.build(massive_session._core.catalog, FOREX, "C", unreadable_symbols=mode)
     cache: dict[str, str | None] = {}
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG, logger="t"):
         converted = plan.convert(FOREX_ROWS, cache, arrived=arrivals(FOREX_ROWS))
         plan.convert(FOREX_ROWS, cache, arrived=arrivals(FOREX_ROWS))  # cached: no second warning
     assert converted.failures == []
@@ -191,14 +197,16 @@ def test_conversion_keeps_unreadable_symbols_in_raw_symbol_under_warn(
     assert (converted.symbols, converted.null_symbols) == (frozenset({"C:EURUSD"}), True)
     assert batch.column("Timestamp").type == pa.timestamp("ns", tz="UTC")
     assert cache == {"EUR/USD": "C:EURUSD", "nonsense pair": None}
-    assert caplog.text.count("Massive sent the symbol 'nonsense pair'") == 1
+    records = [r for r in caplog.records if "Massive sent the symbol 'nonsense pair'" in r.message]
+    assert [r.levelno for r in records] == [level]
+    assert records[0].getMessage().endswith(LIBRARY_BUG)
 
 
-def test_conversion_fails_the_rows_of_unreadable_symbols_under_fail(
+def test_conversion_fails_the_rows_of_unreadable_symbols_under_raise(
     massive_session: dm.MassiveSession,
 ) -> None:
     plan = ChannelPlan.build(
-        massive_session._core.catalog, FOREX, "C", unknown_symbols=UnknownSymbols.FAIL
+        massive_session._core.catalog, FOREX, "C", unreadable_symbols=OnError.RAISE
     )
     converted = plan.convert(FOREX_ROWS, {}, arrived=arrivals(FOREX_ROWS))
     assert "RawSymbol" not in converted.batch.column_names
@@ -206,7 +214,8 @@ def test_conversion_fails_the_rows_of_unreadable_symbols_under_fail(
     assert [f.symbol for f in converted.failures] == [None]
     message = converted.failures[0].message
     assert "test.forex: Massive sent the symbol 'nonsense pair'" in message
-    assert "MASSIVE_UNKNOWN_SYMBOLS=warn" in message
+    assert "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=log" in message
+    assert message.endswith(LIBRARY_BUG)
     assert converted.null_symbols is False
 
 
@@ -214,7 +223,7 @@ def test_conversion_drops_and_reports_rows_with_bad_timestamps(
     massive_session: dm.MassiveSession,
 ) -> None:
     plan = ChannelPlan.build(
-        massive_session._core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL
+        massive_session._core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE
     )
     rows = [
         trade("AAPL"),
@@ -242,7 +251,7 @@ def test_conversion_drops_and_reports_rows_with_bad_timestamps(
 def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) -> None:
     # A dataset in a kind has the kind's columns, some of which another member's source carries.
     plan = ChannelPlan.build(
-        massive_session._core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL
+        massive_session._core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE
     )
     wider = replace(
         plan,
@@ -257,10 +266,10 @@ def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) 
 
 
 def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink, Table]:
-    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
     opened = open_stream_tables(
         plan,
-        core.catalog.dataset_schema(TRADES),
+        core.catalog.dataset_schema(TRADES, raw_symbol=False),
         symbols,
         core=core,
         stream_id=1,
@@ -272,52 +281,108 @@ def make_sink(core: SessionCore, symbols: NormalizedSymbols) -> tuple[StreamSink
     return opened.sink, opened.handle.blink
 
 
+def shared_batch(plan: ChannelPlan, rows: list[dict[str, object]]) -> stream.SharedBatch:
+    # A flush's batch of the rows, as the flusher shares it among its streams.
+    converted = plan.convert(rows, {}, arrived=arrivals(rows))
+    return stream.SharedBatch(to_table(converted.batch), converted)
+
+
 def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.MassiveSession) -> None:
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
-    converted = plan.convert([trade("AAPL"), trade("MSFT")], {}, arrived=[ARRIVED] * 2)
-    batch = to_table(converted.batch)
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    batch = shared_batch(plan, [trade("AAPL"), trade("MSFT"), trade("IBM")])
     every, _ = make_sink(core, ALL)
-    assert every._select(batch, converted) is batch
+    assert every._select(batch) is batch.table
     assert every.receives(None)
-    disjoint, _ = make_sink(core, ("IBM",))
-    assert disjoint._select(batch, converted) is None  # no filter: it holds no batch symbol
-    superset, _ = make_sink(core, ("AAPL", "IBM", "MSFT"))
-    assert superset._select(batch, converted) is batch  # no filter: it holds them all
-    some, _ = make_sink(core, ("AAPL",))
-    selected = some._select(batch, converted)
+    disjoint, _ = make_sink(core, ("SPY",))
+    assert disjoint._select(batch) is None  # no filter: it holds no batch symbol
+    superset, _ = make_sink(core, ("AAPL", "IBM", "MSFT", "SPY"))
+    assert superset._select(batch) is batch.table  # no filter: it holds them all
+    assert batch._partition is None  # no stream so far needed one symbol's rows
+    some, _ = make_sink(core, ("AAPL", "MSFT", "SPY"))
+    selected = some._select(batch)  # two of the batch's three symbols: a filter
     assert selected is not None
-    assert selected.size == 1
+    assert selected.size == 2
     cached = some._filter
-    assert some._select(batch, converted) is not None
+    assert some._select(batch) is not None
     assert some._filter is cached  # the symbols did not change: the filter is reused
     assert some.receives("AAPL")
     assert not some.receives(None)
-    some.set_symbols(frozenset({"AAPL", "MSFT"}))
-    assert some._select(batch, converted) is batch
+    some.set_symbols(frozenset({"AAPL", "MSFT", "IBM"}))
+    assert some._select(batch) is batch.table
     some.set_symbols(frozenset())
-    assert some._select(batch, converted) is None
-    nameless = plan.convert([trade("AAPL"), trade("not a symbol")], {}, arrived=[ARRIVED] * 2)
-    with_null = to_table(nameless.batch)
-    some.set_symbols(frozenset({"AAPL"}))
-    filtered = some._select(with_null, nameless)  # a null Symbol row needs the filter
+    assert some._select(batch) is None
+    # A session that keeps unreadable symbols (`LOG`) gives their rows a null Symbol: a stream
+    # that holds every readable symbol of the batch still needs the filter to leave them out.
+    warned = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.LOG)
+    nameless = shared_batch(warned, [trade("AAPL"), trade("MSFT"), trade("not a symbol")])
+    assert nameless.converted.null_symbols
+    some.set_symbols(frozenset({"AAPL", "MSFT"}))
+    filtered = some._select(nameless)
     assert filtered is not None
-    assert filtered.size == 1
+    assert filtered.size == 2
+
+
+def test_streams_of_one_batch_symbol_share_one_partition(
+    massive_session: dm.MassiveSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # A stream that holds one of the batch's symbols reads that symbol's rows from a partition
+    # of the batch built once per flush, not a filter of its own; arrival order is kept.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    rows = [trade("AAPL", 1), trade("MSFT", 2), trade("AAPL", 3), trade("not a symbol", 4)]
+    batch = shared_batch(plan, rows)
+    aapl, _ = make_sink(core, ("AAPL", "SPY"))  # one batch symbol among others it holds
+    msft, _ = make_sink(core, ("MSFT",))
+    aapl_rows = aapl._select(batch)
+    partition = batch._partition
+    assert partition is not None
+    msft_rows = msft._select(batch)
+    assert batch._partition is partition  # the second stream reuses the first one's partition
+    assert aapl._filter is None
+    assert msft._filter is None
+    assert aapl_rows is not None
+    assert msft_rows is not None
+    assert [(r["Symbol"], r["Price"]) for r in dh_to_pylist(aapl_rows)] == [
+        ("AAPL", 1.0),
+        ("AAPL", 3.0),
+    ]
+    assert [(r["Symbol"], r["Price"]) for r in dh_to_pylist(msft_rows)] == [("MSFT", 2.0)]
 
 
 def test_a_failed_sink_publishes_nothing_and_fails_once(
     massive_session: dm.MassiveSession,
 ) -> None:
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
-    converted = plan.convert([trade("AAPL")], {}, arrived=[ARRIVED])
-    batch = to_table(converted.batch)
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    batch = shared_batch(plan, [trade("AAPL")])
     sink, _ = make_sink(core, ALL)
-    assert sink.publish(batch, converted) == 1
+    assert sink.publish(batch) == 1
     assert sink.fail(MassiveError("refused"))
     assert not sink.fail(MassiveError("again"))
-    assert sink.publish(batch, converted) == 0
+    assert sink.publish(batch) == 0
     assert sink.rows_published == 1
+
+
+def test_a_sink_whose_failure_is_refused_publishes_nothing_more(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Deephaven refuses the failure: the row reads FAILED, so the stream stops publishing and
+    # is not failed again.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    batch = shared_batch(plan, [trade("AAPL")])
+    sink, _ = make_sink(core, ALL)
+
+    def refused(_: Exception) -> None:
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(sink, "publisher", types.SimpleNamespace(publish_failure=refused))
+    with pytest.raises(RuntimeError, match="refused"):
+        sink.fail(MassiveError("entitlement"))
+    assert sink.failed
+    assert sink.publish(batch) == 0
+    assert not sink.fail(MassiveError("again"))
 
 
 def test_open_stream_tables_releases_its_scope_on_failure(
@@ -334,9 +399,35 @@ def test_open_stream_tables_releases_its_scope_on_failure(
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     with pytest.raises(RuntimeError, match="no watch"):
         open_stream_tables(
-            ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL),
-            core.catalog.dataset_schema(TRADES),
+            ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE),
+            core.catalog.dataset_schema(TRADES, raw_symbol=False),
             SymbolTable(watchlist),
+            core=core,
+            stream_id=1,
+            host="socket.test",
+            path="/stocks",
+            on_shutdown=shut_down.set,
+            on_symbols=lambda *_: None,
+        )
+    assert shut_down.wait(TIMEOUT)
+
+
+def test_open_stream_tables_releases_its_scope_when_interrupted_at_the_end(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An interrupt after every table exists, as the handle is built, still releases the scope.
+    shut_down = threading.Event()
+
+    def interrupted(*_: object, **__: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(stream, "StreamHandle", interrupted)
+    core = massive_session._core
+    with pytest.raises(KeyboardInterrupt):
+        open_stream_tables(
+            ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE),
+            core.catalog.dataset_schema(TRADES),
+            ALL,
             core=core,
             stream_id=1,
             host="socket.test",
@@ -359,8 +450,8 @@ def test_a_reactive_streams_handle_holds_its_watch(massive_session: dm.MassiveSe
     core = massive_session._core
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     opened = open_stream_tables(
-        ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL),
-        core.catalog.dataset_schema(TRADES),
+        ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE),
+        core.catalog.dataset_schema(TRADES, raw_symbol=False),
         SymbolTable(watchlist),
         core=core,
         stream_id=1,
@@ -485,7 +576,7 @@ def test_a_futures_row_gets_the_rule_session_corrected_by_the_schedules(
 ) -> None:
     spec = massive_session._core.catalog.by_name["futures.trades"]
     plan = ChannelPlan.build(
-        massive_session._core.catalog, spec, "T", unknown_symbols=UnknownSymbols.FAIL
+        massive_session._core.catalog, spec, "T", unreadable_symbols=OnError.RAISE
     )
     rows = [
         futures_trade("GCJ5", BEFORE_ROLL_MS),
@@ -514,7 +605,7 @@ def test_a_streamed_bar_ends_its_length_after_its_start(
 ) -> None:
     spec = massive_session._core.catalog.by_name["stocks.bars"]
     plan = ChannelPlan.build(
-        massive_session._core.catalog, spec, "AM", unknown_symbols=UnknownSymbols.FAIL
+        massive_session._core.catalog, spec, "AM", unreadable_symbols=OnError.RAISE
     )
     start = 1_741_012_200_000  # 2025-03-03 14:30Z
     row = {
@@ -539,7 +630,7 @@ def test_a_futures_second_bar_ends_at_the_later_end(
 ) -> None:
     spec = massive_session._core.catalog.by_name["futures.bars"]
     plan = ChannelPlan.build(
-        massive_session._core.catalog, spec, "A", unknown_symbols=UnknownSymbols.FAIL
+        massive_session._core.catalog, spec, "A", unreadable_symbols=OnError.RAISE
     )
     start = BEFORE_ROLL_MS
     rows = [futures_bar(start, start + 60_000), futures_bar(start, start + 1_000)]
@@ -578,7 +669,7 @@ def test_a_session_miss_shows_in_the_streams_error_without_failing_it(
 ) -> None:
     core = massive_session._core
     spec = core.catalog.by_name["futures.trades"]
-    plan = ChannelPlan.build(core.catalog, spec, "T", unknown_symbols=UnknownSymbols.FAIL)
+    plan = ChannelPlan.build(core.catalog, spec, "T", unreadable_symbols=OnError.RAISE)
     updates: list[dict[int, StreamUpdate]] = []
     monkeypatch.setattr(core, "update_streams", updates.append)
     calendar = FakeSessionDates()
@@ -587,7 +678,7 @@ def test_a_session_miss_shows_in_the_streams_error_without_failing_it(
     for stream_id, wanted in ((1, ("NQM5",)), (2, ("ESM5",))):
         opened = open_stream_tables(
             plan,
-            core.catalog.dataset_schema(spec),
+            core.catalog.dataset_schema(spec, raw_symbol=False),
             wanted,
             core=core,
             stream_id=stream_id,
@@ -718,6 +809,48 @@ def test_a_batch_whose_every_row_failed_publishes_nothing(
     assert not msft.failed
 
 
+def test_a_row_failure_that_is_refused_spares_the_other_streams(
+    *,
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Deephaven refuses one stream's failure for a bad row: a stream that never received the
+    # row keeps its own rows and is not failed with the batch.
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+
+    def sink(stream_id: int, symbol: str) -> StreamSink:
+        # The two streams share the dataset's plan, as the streams of one connection do.
+        return open_stream_tables(
+            plan,
+            core.catalog.dataset_schema(TRADES, raw_symbol=False),
+            (symbol,),
+            core=core,
+            stream_id=stream_id,
+            host="socket.test",
+            path="/stocks",
+            on_shutdown=lambda: None,
+            on_symbols=lambda *_: None,
+        ).sink
+
+    aapl, msft = sink(1, "AAPL"), sink(2, "MSFT")
+
+    def refused(_: Exception) -> None:
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(aapl, "publisher", types.SimpleNamespace(publish_failure=refused))
+    flusher.routes.add("T", aapl)
+    flusher.routes.add("T", msft)
+    flusher.rows("T", [trade("AAPL", SipTimestamp=5), trade("MSFT")])
+    flusher.flush()
+    assert aapl.failed
+    assert not msft.failed
+    assert msft.rows_published == 1
+    assert "test-flush: could not fail stream 1" in caplog.text
+
+
 def test_a_failure_is_recorded_before_the_table_fails(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -772,6 +905,47 @@ def test_routes_forget_a_stream_once(flusher: Flusher, massive_session: dm.Massi
     assert flusher.routes.remove(1) is sink
     assert flusher.routes.remove(1) is None
     assert flusher.routes.sinks() == ()
+
+
+def test_a_flush_forgets_the_symbols_of_streams_no_longer_routed(
+    massive_session: dm.MassiveSession, flusher: Flusher
+) -> None:
+    sink, _ = make_sink(massive_session._core, ALL)
+    flusher.routes.add("T", sink)
+    flusher.rows("T", [trade("AAPL"), trade("MSFT")])
+    flusher.flush()
+    assert flusher._symbols == {sink.plan: {"AAPL": "AAPL", "MSFT": "MSFT"}}
+    flusher.routes.remove(1)
+    flusher.flush()
+    assert flusher._symbols == {}
+
+
+def test_a_full_symbol_cache_starts_over_and_the_rows_still_publish(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    caplog: pytest.LogCaptureFixture,
+    rows_when: RowsWhen,
+) -> None:
+    # A `dm.ALL` stream meets new contracts every day: the cache never outgrows its limit.
+    monkeypatch.setattr(stream, "SYMBOL_CACHE_LIMIT", 2)
+    sink, blink = make_sink(massive_session._core, ALL)
+    shown = blink_to_append_only(blink)
+    flusher.routes.add("T", sink)
+    flusher.rows("T", [trade("AAPL"), trade("MSFT")])
+    flusher.flush()
+    assert flusher._symbols[sink.plan] == {"AAPL": "AAPL", "MSFT": "MSFT"}
+    with caplog.at_level(logging.DEBUG, logger=stream.__name__):
+        flusher.rows("T", [trade("IBM")])
+        flusher.flush()
+    assert flusher._symbols[sink.plan] == {}
+    assert "test.trades: the T symbol cache passed 2 spellings and starts over" in caplog.text
+    flusher.rows("T", [trade("AAPL")])
+    flusher.flush()
+    assert flusher._symbols[sink.plan] == {"AAPL": "AAPL"}
+    rows = rows_when(shown, lambda rows: len(rows) == 4)
+    assert [row["Symbol"] for row in rows] == ["AAPL", "MSFT", "IBM", "AAPL"]
 
 
 def test_a_sink_whose_session_is_gone_reports_nothing(
@@ -836,6 +1010,7 @@ class _DyingFlusher(Flusher):
 class _Stubborn:
     # A routed stream whose failure raises.
     stream_id = 2
+    plan = None  # read by the flush that forgets the plans no longer routed
 
     def fail(self, error: MassiveError) -> bool:
         raise RuntimeError(f"cannot fail: {error}")
@@ -858,8 +1033,73 @@ def test_a_dying_flush_thread_fails_its_streams(
         assert f.join(TIMEOUT)
     assert healthy.failed  # a stream that cannot be failed does not spare the others
     assert "dying-flush died; its streams fail" in caplog.text
-    assert "dying-flush: could not fail a stream" in caplog.text
+    assert "dying-flush: could not fail stream 2" in caplog.text
     assert [args.exc_type for args in escaped] == [_Fatal]
+
+
+class _Recording:
+    # A routed stream that records the errors it is failed with.
+    def __init__(self, stream_id: int) -> None:
+        self.stream_id = stream_id
+        self.plan = None  # read by the flush that forgets the plans no longer routed
+        self.errors: list[MassiveError] = []
+
+    def fail(self, error: MassiveError) -> bool:
+        self.errors.append(error)
+        return True
+
+
+def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    rows_when: RowsWhen,
+) -> None:
+    # A queued failure that raises leaves the other failures, every stream's rows, and the
+    # row counts of the flush in place.
+    core = massive_session._core
+    healthy, healthy_blink = make_sink(core, ALL)
+    shown = blink_to_append_only(healthy_blink)
+    recording = _Recording(3)
+    flusher.routes.add("T", healthy)
+    flusher.routes.add("Q", cast("StreamSink", _Stubborn()))
+    flusher.routes.add("Q", cast("StreamSink", recording))
+    flusher.fail([2], MassiveError("refused"))
+    flusher.fail([3], MassiveError("also refused"))
+    flusher.rows("T", [trade("AAPL")])
+    flusher.flush()
+    assert [str(error) for error in recording.errors] == ["also refused"]
+    rows_when(shown, lambda rows: len(rows) == 1)
+    assert healthy.rows_published == 1
+    assert "test-flush: could not fail stream 2 (refused)" in caplog.text
+
+
+def test_a_drift_report_that_raises_costs_the_flush_nothing(
+    *,
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The streams' row counts still reach their session after a drift report fails.
+    core = massive_session._core
+    sink, _ = make_sink(core, ALL)
+    flusher.routes.add("T", sink)
+    reported: list[dict[int, StreamUpdate]] = []
+    monkeypatch.setattr(core, "update_streams", reported.append)
+
+    def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("no drift")
+
+    monkeypatch.setattr(Flusher, "_report_drift", staticmethod(broken))
+    flusher.drift("T", DriftReport(extra=frozenset({"zz"})), where="wss://h/stocks channel T")
+    flusher.rows("T", [trade("AAPL")])
+    flusher.flush()
+    assert [update[1].rows_published for update in reported] == [1]
+    assert "test-flush: could not report the drift of channel T (wss://h/stocks channel T)" in (
+        caplog.text
+    )
 
 
 class _BrokenFlusher(Flusher):
@@ -934,16 +1174,16 @@ def test_benchmark_fan_out(
     # one Python pass (one conversion and one table per stream). Each table is built as the
     # flush builds it, through `dataset_table`, so the cost of sharing dates is counted.
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL)
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
     symbols = [f"S{i}" for i in range(streams)]
     rows = [trade(symbols[i % streams], float(i)) for i in range(rows_per_flush)]
     sinks = [make_sink(core, (symbol,))[0] for symbol in symbols]
 
     def shared() -> None:
         converted = plan.convert(rows, {}, arrived=arrivals(rows))
-        table = dataset_table(converted.batch, plan.date_columns)
+        batch = stream.SharedBatch(dataset_table(converted.batch, plan.date_columns), converted)
         for sink in sinks:
-            sink.publish(table, converted)
+            sink.publish(batch)
 
     def grouped() -> None:
         buckets: dict[object, list[dict[str, object]]] = {}
@@ -981,16 +1221,41 @@ def test_a_failed_watchlist_of_a_finished_stream_does_nothing() -> None:
     stream._fail_later(cast("weakref.ref[StreamSink]", gone), "late")
 
 
+def test_skipped_watchlist_rows_reach_the_streams_error(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What the watch's `on_skipped` does, called here from a Python thread, which line coverage
+    # before 3.14 can see: the skipped values become the row's Error, and none clears it.
+    core = massive_session._core
+    sink, _ = make_sink(core, ALL)
+    reported: list[dict[int, StreamUpdate]] = []
+    monkeypatch.setattr(core, "update_streams", lambda changes: reported.append(dict(changes)))
+    stream._show_skipped(weakref.ref(sink), ("msft",))
+    stream._show_skipped(weakref.ref(sink), ())
+    assert reported == [
+        {sink.stream_id: StreamUpdate(skipped=skipped_rows_text(["msft"]))},
+        {sink.stream_id: StreamUpdate(clear_skipped=True)},
+    ]
+
+
+def test_skipped_watchlist_rows_of_a_finished_stream_do_nothing() -> None:
+    class _Gone:
+        pass
+
+    gone = weakref.ref(_Gone())
+    stream._show_skipped(cast("weakref.ref[StreamSink]", gone), ("msft",))
+
+
 def test_streamed_rows_of_one_day_share_one_stored_date(
     massive_session: dm.MassiveSession, string_objects: Callable[[Table, str], int]
 ) -> None:
     core = massive_session._core
     spec = core.catalog.by_name["stocks.trades"]
-    plan = ChannelPlan.build(core.catalog, spec, "T", unknown_symbols=UnknownSymbols.FAIL)
+    plan = ChannelPlan.build(core.catalog, spec, "T", unreadable_symbols=OnError.RAISE)
     flusher = Flusher(core.exec_ctx, "test-flush", interval=3600.0)
     opened = open_stream_tables(
         plan,
-        core.catalog.dataset_schema(spec),
+        core.catalog.dataset_schema(spec, raw_symbol=False),
         ALL,
         core=core,
         stream_id=1,

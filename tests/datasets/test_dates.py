@@ -1,10 +1,14 @@
 """Tests for date parsing, the kinds of bounds, and the day rules."""
 
+import importlib
+import logging
 import re
 from datetime import UTC, date, datetime, timedelta
-from typing import cast
+from typing import TypeVar, cast
 
+import numpy as np
 import pytest
+from deephaven.time import to_j_instant, to_j_local_date, to_j_local_time, to_j_zdt
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import (
@@ -30,6 +34,10 @@ from deephaven_massive._datasets.futures_sessions import (
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._massive import WireUnit
+
+T = TypeVar("T")
+
+_DATES_LOG = "deephaven_massive._datasets.dates"
 
 NOW = datetime(2025, 6, 18, 15, tzinfo=UTC)
 """A Wednesday afternoon, after every range of these tests unless a test says otherwise."""
@@ -76,7 +84,7 @@ def test_unparseable_and_wrong_types() -> None:
         parse_date_like("tomorrow", "start")
     with pytest.raises(ValueError, match="ISO-8601"):
         parse_date_like("2025-13-45", "end")
-    with pytest.raises(TypeError, match="end must be a str, date, or datetime"):
+    with pytest.raises(TypeError, match=r"^end must be a str, date, datetime, Java Instant, "):
         parse_date_like(cast("str", 20250303), "end")
 
 
@@ -262,10 +270,22 @@ def test_calendar_day_refuses_a_datetime() -> None:
         AssetClass.FUTURES,
         ClassFromPrefix.ANY,
     ):
-        with pytest.raises(ValueError, match=r"^x\.history: date is a calendar date; pass a date$"):
+        with pytest.raises(
+            ValueError, match=r"^x\.history: date=datetime\.datetime\(.* is a calendar date; pass"
+        ):
             calendar_day(_spec(asset_class), late, "date")
     with pytest.raises(ValueError, match="is a calendar date"):
         calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30:00Z", "date")
+    # A Java instant names no calendar day either.
+    for java in (
+        _present(to_j_instant("2025-03-03T14:30:00Z")),
+        _present(to_j_zdt("2025-03-03T09:30:00 America/New_York")),
+    ):
+        with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date$"):
+            calendar_day(_spec(AssetClass.STOCKS), java, "date")
+    # The message shows what the caller passed when the value is its conversion.
+    with pytest.raises(ValueError, match=r"^x\.history: date='as passed' is a calendar date"):
+        calendar_day(_spec(AssetClass.STOCKS), late, "date", given="as passed")
 
 
 def test_calendar_day_keeps_a_date_as_given() -> None:
@@ -311,16 +331,42 @@ def test_history_bounds_follow_the_symbols_class_only_with_a_path_per_class() ->
     assert crypto == unclassed  # at NOW both zones are on 06-18
 
 
-def test_text_finer_than_a_microsecond_is_refused_not_cut() -> None:
-    with pytest.raises(ValueError, match=r"more than six fractional digits of a second"):
-        parse_date_like("2025-01-02T09:30:00.123456789+00:00", "timestamp_gte")
-    with pytest.raises(ValueError, match=r"more than six fractional digits of a second"):
-        parse_date_like("2025-01-02T09:30:00,1234567Z", "start")
-    with pytest.raises(ValueError, match=r"more than six fractional digits of a second"):
-        parse_date_like("2025-06-02T120000.123456789Z", "timestamp_gte")  # the basic form
-    assert parse_date_like("2025-01-02T09:30:00.123456Z", "start") == datetime(
-        2025, 1, 2, 9, 30, 0, 123456, tzinfo=UTC
-    )
+@pytest.mark.parametrize(
+    "text",
+    [
+        "2025-01-02T09:30:00.123456789+00:00",
+        "2025-01-02T09:30:00,1234567Z",  # a comma, and only seven digits
+        "2025-01-02T093000.123456789Z",  # the basic form
+    ],
+)
+def test_iso_text_finer_than_a_microsecond_rounds_outward(
+    text: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Like Deephaven's own instants: a start rounds down, an end up, so no row is lost.
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    moment = datetime(2025, 1, 2, 9, 30, 0, 123456, tzinfo=UTC)
+    assert parse_date_like(text, "start") == moment
+    assert parse_date_like(text, "end", upper=True) == moment + timedelta(microseconds=1)
+    assert [line.split(" to ")[0] for line in caplog.messages] == [
+        f"start={text} rounded down",
+        f"end={text} rounded up",
+    ]
+
+
+def test_iso_text_with_only_zeros_below_the_microsecond_is_exact(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    text = "2025-01-02T09:30:00.123456000Z"
+    exact = datetime(2025, 1, 2, 9, 30, 0, 123456, tzinfo=UTC)
+    assert parse_date_like(text, "end", upper=True) == exact
+    assert parse_date_like("2025-01-02T09:30:00.123456Z", "start") == exact
+    assert caplog.messages == []
+
+
+@pytest.mark.parametrize("text", ["20250303", "2025-W10-1", " 2025-03-03 "])
+def test_every_iso_date_form_is_a_date(text: str) -> None:
+    assert parse_date_like(text, "start") == date(2025, 3, 3)
 
 
 def test_each_class_has_its_day_zone_and_day_start() -> None:
@@ -370,3 +416,205 @@ def test_a_day_ends_by_its_class() -> None:
     assert day_end(AssetClass.INDICES, sunday) == datetime(2025, 3, 10, 5, tzinfo=UTC)
     assert day_end(AssetClass.CRYPTO, sunday) == datetime(2025, 3, 10, tzinfo=UTC)
     assert day_end(AssetClass.FUTURES, sunday) == datetime(2025, 3, 9, 22, tzinfo=UTC)
+
+
+def _present(value: T | None) -> T:
+    # Deephaven's converters return None for None; these tests never pass one.
+    assert value is not None
+    return value
+
+
+def test_deephaven_java_dates_and_instants_are_bounds() -> None:
+    # The values Deephaven's own time functions return, as a Deephaven console holds them.
+    day = _present(to_j_local_date("2025-03-03"))
+    instant = _present(to_j_instant("2025-03-03T14:30:00.123456Z"))
+    zoned = _present(to_j_zdt("2025-03-03T09:30:00.5 America/New_York"))
+    assert parse_date_like(day, "start") == date(2025, 3, 3)
+    assert parse_date_like(instant, "start") == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    moment = parse_date_like(zoned, "end")
+    assert moment == datetime(2025, 3, 3, 14, 30, 0, 500000, tzinfo=UTC)
+    assert cast("datetime", moment).utcoffset() == timedelta(hours=-5)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("2025-03-03T14:30:00.123456789Z", id="instant"),
+        pytest.param("2025-03-03T09:30:00.123456789 America/New_York", id="zoned"),
+    ],
+)
+def test_java_instants_round_outward_to_the_microsecond(
+    value: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Deephaven's instants carry nanoseconds the user never chose. A start rounds down, so it
+    # still includes the row it came from; an end rounds up, so the range loses no row.
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
+    start = cast("datetime", parse_date_like(java, "start"))
+    end = cast("datetime", parse_date_like(java, "end", upper=True))
+    assert start.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    assert end.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123457, tzinfo=UTC)
+    assert caplog.messages == [
+        f"start={java} rounded down to 2025-03-03T14:30:00.123456+00:00, by 789.0 ns",
+        f"end={java} rounded up to 2025-03-03T14:30:00.123457+00:00, by 211.0 ns",
+    ]
+
+
+def test_an_instant_on_a_microsecond_is_not_moved_or_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
+    exact = datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+    for value in (
+        _present(to_j_instant("2025-03-03T14:30:00.123456Z")),
+        pd.Timestamp("2025-03-03T14:30:00.123456", tz="UTC"),
+    ):
+        assert parse_date_like(value, "end", upper=True) == exact
+    assert caplog.messages == []
+
+
+def test_an_instant_before_1970_rounds_outward_too() -> None:
+    # Before the epoch the count is negative; down is still earlier and up still later.
+    java = _present(to_j_instant("1969-12-31T23:59:59.999999500Z"))
+    last = datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+    assert parse_date_like(java, "start") == last
+    assert parse_date_like(java, "end", upper=True) == datetime(1970, 1, 1, tzinfo=UTC)
+    numpy_time = np.datetime64("1969-12-31T23:59:59.999999500", "ns")
+    assert parse_date_like(numpy_time, "start") == last
+    assert parse_date_like(numpy_time, "end", upper=True) == datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def test_an_end_past_the_last_microsecond_of_9999_is_the_largest_datetime(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Rounding up cannot pass the largest datetime, which no row reaches; a start still rounds
+    # down to it.
+    jpy = importlib.import_module("jpy")  # untyped: a Java instant past numpy's range
+    java = jpy.get_type("java.time.Instant").parse("9999-12-31T23:59:59.999999500Z")
+    largest = datetime.max.replace(tzinfo=UTC)
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    assert parse_date_like(java, "end", upper=True) == largest
+    assert parse_date_like(java, "start") == largest
+    # The log says what really happened: the end moved down, to the largest datetime.
+    assert caplog.messages == [
+        f"end={java} rounded down (clamped) to {largest.isoformat()}, by 500.0 ns",
+        f"start={java} rounded down to {largest.isoformat()}, by 500.0 ns",
+    ]
+
+
+def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
+    jpy = importlib.import_module("jpy")  # untyped: Java's own extreme values
+    for java in (jpy.get_type("java.time.Instant").MAX, jpy.get_type("java.time.LocalDate").MAX):
+        with pytest.raises(ValueError, match=r"^start=.* is not a time from year 1 to 9999"):
+            parse_date_like(java, "start")
+
+
+def test_a_numpy_day_is_a_date() -> None:
+    assert parse_date_like(np.datetime64("2025-03-03"), "start") == date(2025, 3, 3)
+
+
+@pytest.mark.parametrize("value", [np.datetime64("2025-03-06", "W"), np.datetime64("2025-03")])
+def test_a_numpy_week_month_or_year_is_refused(value: np.datetime64) -> None:
+    # As an end it would shrink the range to the period's first day, and a numpy week starts
+    # on a Thursday.
+    with pytest.raises(ValueError, match=r"a numpy.datetime64 of a week, month, or year; pass a"):
+        parse_date_like(value, "end", upper=True)
+
+
+_MORNING = datetime(2025, 3, 3, 9, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("value", "moment", "start", "end"),
+    [
+        pytest.param(np.datetime64("2025-03-03T09:30"), _MORNING, 0, 0, id="minutes"),
+        pytest.param(
+            np.datetime64("2025-03-03T09:30:00.123456", "us"), _MORNING, 123456, 123456, id="us"
+        ),
+        pytest.param(
+            np.datetime64("2025-03-03T09:30:00.123456789", "ns"),
+            _MORNING,
+            123456,
+            123457,
+            id="ns",
+        ),
+        # A picosecond time spans only some 106 days either side of 1970.
+        pytest.param(
+            np.datetime64("1970-01-02T00:00:00.000000000001", "ps"),
+            datetime(1970, 1, 2, tzinfo=UTC),
+            0,
+            1,
+            id="ps",
+        ),
+    ],
+)
+def test_a_numpy_time_is_an_instant_in_utc_rounded_outward(
+    *, value: np.datetime64, moment: datetime, start: int, end: int
+) -> None:
+    # A numpy time has no zone; Deephaven reads it as UTC, and so does the library.
+    assert parse_date_like(value, "start") == moment + timedelta(microseconds=start)
+    assert parse_date_like(value, "end", upper=True) == moment + timedelta(microseconds=end)
+
+
+def test_a_numpy_time_logs_that_it_is_read_as_utc_and_how_it_is_rounded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    value = np.datetime64("2025-03-03T09:30:00.123456789", "ns")
+    parse_date_like(value, "end", upper=True)
+    assert caplog.messages == [
+        f"end={value!r} has no timezone; read as UTC",
+        f"end={value} rounded up to 2025-03-03T09:30:00.123457+00:00, by 211.0 ns",
+    ]
+
+
+def test_an_aware_pandas_timestamp_keeps_its_nanoseconds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A pandas.Timestamp holds nanoseconds a datetime would drop; they round outward.
+    caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
+    pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
+    stamp = pd.Timestamp("2025-03-03T04:30:00.123456789", tz="America/New_York")
+    moment = datetime(2025, 3, 3, 9, 30, 0, 123456, tzinfo=UTC)
+    assert parse_date_like(stamp, "start") == moment
+    assert parse_date_like(stamp, "end", upper=True) == moment + timedelta(microseconds=1)
+    assert caplog.messages == [
+        f"start={stamp} rounded down to 2025-03-03T09:30:00.123456+00:00, by 789.0 ns",
+        f"end={stamp} rounded up to 2025-03-03T09:30:00.123457+00:00, by 211.0 ns",
+    ]
+
+
+def test_a_pandas_timestamp_without_a_zone_or_value_is_refused() -> None:
+    # Like a naive datetime, a naive pandas.Timestamp cannot be placed: read as UTC, a New York
+    # user's 09:30 would become 04:30.
+    pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
+    with pytest.raises(ValueError, match=r"needs a timezone: pass an aware datetime or a date"):
+        parse_date_like(pd.Timestamp("2025-03-03T09:30"), "start")
+    with pytest.raises(ValueError, match=r"^start=NaT is NaT, not a time$"):
+        parse_date_like(pd.NaT, "start")
+    # The message shows the value as passed, not its numpy form.
+    late = pd.Timestamp(np.datetime64("10000-01-01T00:00", "s")).tz_localize("UTC")
+    with pytest.raises(ValueError, match=r"^start=10000-01-01 00:00:00\+00:00 is not a time"):
+        parse_date_like(late, "start")
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (np.datetime64("NaT", "D"), "is NaT, not a time"),
+        (np.datetime64("NaT", "ns"), "is NaT, not a time"),
+        (np.datetime64("10000-01-01"), "is not a time from year 1 to 9999"),
+        (np.datetime64("10000-01-01T00:00"), "is not a time from year 1 to 9999"),
+    ],
+)
+def test_a_numpy_value_that_is_no_time_a_datetime_holds_is_refused(
+    value: np.datetime64, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_date_like(value, "start")
+
+
+def test_another_java_value_is_the_wrong_type() -> None:
+    with pytest.raises(TypeError, match=r"^start must be a str, date, datetime, Java Instant"):
+        parse_date_like(_present(to_j_local_time("09:30")), "start")

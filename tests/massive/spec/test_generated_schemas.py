@@ -64,12 +64,30 @@ def test_parse_reads_parameter_values() -> None:
         "fields": [],
         "memberships": [],
         "params": [
-            {"name": "order", "kind": "enum", "in_path": False, "values": ["asc"], "unit": None}
+            {
+                "name": "order",
+                "kind": "enum",
+                "in_path": False,
+                "values": ["asc"],
+                "unit": None,
+                "default": None,
+            },
+            {
+                "name": "window",
+                "kind": "integer",
+                "in_path": False,
+                "values": [],
+                "unit": None,
+                "default": 50,
+            },
         ],
     }
     (value,) = generated_schemas.parse(Transport.REST, _file(entry)).values()
     assert isinstance(value, RestPath)
-    assert value.params == (Param(name="order", kind=ParamKind.ENUM, values=("asc",)),)
+    assert value.params == (
+        Param(name="order", kind=ParamKind.ENUM, values=("asc",)),
+        Param(name="window", kind=ParamKind.INTEGER, default=50),
+    )
 
 
 def test_parse_rejects_two_sources_with_one_key() -> None:
@@ -115,9 +133,30 @@ def test_parse_coerces_nothing_in_a_field(change: dict[str, object], message: st
 
 
 def test_parse_rejects_parameter_values_that_are_not_strings() -> None:
-    param = {"name": "precision", "kind": "enum", "in_path": False, "values": [0], "unit": None}
+    param = {
+        "name": "precision",
+        "kind": "enum",
+        "in_path": False,
+        "values": [0],
+        "unit": None,
+        "default": None,
+    }
     entry = {"key": "/v1/x", "result_key": None, "fields": [], "memberships": [], "params": [param]}
     with pytest.raises(TypeError, match="not an array of strings"):
+        generated_schemas.parse(Transport.REST, _file(entry))
+
+
+def test_parse_rejects_a_parameter_default_that_is_not_a_scalar() -> None:
+    param = {
+        "name": "window",
+        "kind": "integer",
+        "in_path": False,
+        "values": [],
+        "unit": None,
+        "default": [50],
+    }
+    entry = {"key": "/v1/x", "result_key": None, "fields": [], "memberships": [], "params": [param]}
+    with pytest.raises(TypeError, match=r"'default' is \[50\], not a JSON scalar"):
         generated_schemas.parse(Transport.REST, _file(entry))
 
 

@@ -12,6 +12,7 @@ against synthetic namespaces that break it.
 import collections.abc
 import dataclasses
 import datetime as dt
+import inspect
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -31,7 +32,9 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     ADJUSTED_PRICE,
     ADJUSTED_VOLUME,
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
+    accepted_values,
     adjustment_notes,
     bar_query_class,
     build_query,
@@ -253,11 +256,27 @@ def test_bars_pick_their_class(massive_session: dm.MassiveSession) -> None:
     assert type(build(massive_session, STOCK_BARS, symbols="AAPL")) is HistoryQuery
 
 
-def test_venue_is_an_enum(massive_session: dm.MassiveSession) -> None:
-    q = build(massive_session, FUTURES_BARS, symbols="ESZ5", venue=FuturesVenue.CME)
-    assert q._request.venue is FuturesVenue.CME
-    with pytest.raises(TypeError, match=r"venue must be dm\.FuturesVenue"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venue="cme")
+def test_venues_are_a_set_of_the_enum(massive_session: dm.MassiveSession) -> None:
+    q = build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={FuturesVenue.CME})
+    assert q._request.venues == (FuturesVenue.CME,)
+    assert build(massive_session, FUTURES_BARS, symbols="ESZ5")._request.venues is None
+    with pytest.raises(TypeError, match=r"venues must be a set of dm\.FuturesVenue"):
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")
+    with pytest.raises(TypeError, match=r"venues must hold only dm\.FuturesVenue members, not str"):
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={"cme"})
+
+
+def test_sort_is_checked_when_the_query_is_built(massive_session: dm.MassiveSession) -> None:
+    m = massive_session
+    assert dict(m.reference.tickers(sort="name")._request.params)["sort"] == "name"
+    with pytest.raises(ValueError, match=r"^reference\.tickers: sort 'nam' is not a sort field"):
+        m.reference.tickers(sort="nam")
+    statements = m.stocks.financials.balance_sheets
+    assert dict(statements(sort="period_end.desc,fiscal_year")._request.params)["sort"] == (
+        "period_end.desc,fiscal_year"
+    )
+    with pytest.raises(ValueError, match=r"sort part 'period_end\.desc' has its own direction"):
+        statements(sort="period_end.desc", order=dm.Order.ASC)
 
 
 def test_filter_validation(massive_session: dm.MassiveSession) -> None:
@@ -299,6 +318,24 @@ def test_naive_datetime_filters_and_params_are_rejected(
         build(massive_session, INDICATOR, params={"timestamp_gte": naive})
     aware = naive.replace(tzinfo=UTC)
     assert build(massive_session, INDICATOR, filters={"timestamp_gte": aware})._request.filters
+
+
+def test_accepted_values_read_the_generated_enum(massive_session: dm.MassiveSession) -> None:
+    sma = CATALOG.by_name["indicators.sma"]
+    spans = accepted_values(massive_session._core, sma, "timespan")
+    assert "minute" in spans
+    assert "second" not in spans
+    conversion = CATALOG.by_name["forex.conversion"]
+    assert accepted_values(massive_session._core, conversion, "precision") == tuple(
+        str(digits) for digits in range(5)
+    )
+
+
+def test_every_snapshot_splits_its_tickers_alike() -> None:
+    # The per-class and unified snapshots name one shared count of tickers per request.
+    lists = [spec for spec in CATALOG.by_name.values() if spec.symbols_per_request is not None]
+    assert {spec.name for spec in lists} >= {"snapshots", "stocks.snapshots", "crypto.snapshots"}
+    assert {spec.symbols_per_request for spec in lists} == {SNAPSHOT_SYMBOLS_PER_REQUEST}
 
 
 def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
@@ -517,6 +554,7 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
         **vars(_query),
         **vars(_types),
         **vars(_enums),
+        "AbstractSet": collections.abc.Set,
         "Literal": Literal,
     }
     return typing.get_type_hints(function, localns=names)
@@ -773,6 +811,20 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
 
 def test_every_factory_docstring_starts_with_its_summary() -> None:
     assert summary_problems(dm.MassiveSession, CATALOG.by_name) == []
+
+
+def test_symbols_is_the_first_positional_parameter_of_every_factory() -> None:
+    # One form per parameter: `m.reference.news("AAPL")` reads like `m.stocks.trades("AAPL")`,
+    # also where `symbols` may be left out.
+    found = []
+    for name, factory in _factory_map(dm.MassiveSession).items():
+        params = list(inspect.signature(factory).parameters.values())[1:]  # after self
+        if any(p.name == "symbols" for p in params):
+            found.append(name)
+            assert params[0].name == "symbols", name
+            assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, name
+    assert {"reference.tickers", "reference.news", "options.contracts"} <= set(found)
+    assert "partners.benzinga.news" in found
 
 
 class _Summarized(Namespace):

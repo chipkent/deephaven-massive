@@ -46,6 +46,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from deephaven_massive._massive.net import USER_AGENT
+from deephaven_massive._massive.net.capture import capture_frame
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.net.http import TlsConsumer, ssl_context
 from deephaven_massive._massive.net.redaction import Redactor
@@ -605,6 +606,9 @@ class WsClient:
     async def _run_generation(self, websocket: ClientConnection) -> _Ended:
         """Open a generation and decode its frames until the socket closes.
 
+        Each frame, once cleaned of the key, also goes to the reply-capture sink when one is
+        installed (`net.capture`); the authentication exchange, read before this, never does.
+
         Args:
             websocket: The authenticated socket.
 
@@ -622,7 +626,9 @@ class WsClient:
         try:
             self._on_open(generation.number)
             async for frame in websocket:
-                for event in self._decoder.decode(self._clean(frame)):
+                cleaned = self._clean(frame)
+                capture_frame(host=self._host, path=self._path, frame=cleaned)
+                for event in self._decoder.decode(cleaned):
                     if isinstance(event, Status):
                         no_slot = no_slot or event.kind is StatusKind.MAX_CONNECTIONS
                         logger.debug("%s status %s: %s", self._url, event.kind.name, event.message)

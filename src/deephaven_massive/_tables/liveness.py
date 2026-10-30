@@ -19,16 +19,16 @@ a `ResultRecord`:
 4. The `Reaper`, one daemon thread per session, runs the job: it releases the result scope
    (under the update graph's shared lock, `release_scope`) and then calls the record's
    `on_released` callback, which for a stream decrements the stream's held-result count (and at
-   zero releases the stream scope), for a `poll()` table marks its row released, and for a
-   diagnostics view drops the session's count of held views. A failing job is logged at ERROR
+   zero releases the stream scope), for a `poll()` table or a background read
+   (`wait=False`) marks its row released, and for a diagnostics view drops the session's count
+   of held views. A failing job is logged at ERROR
    and the thread carries on.
-
-Releasing a result scope drops the library's liveness reference only. A table the user derived
-from the result, an open UI panel, or a user liveness scope keeps the Java table alive, and with
-it the stream or the poller: topic reference counts and pollers are bound to the blink table's
-`on_shutdown_callback`, never to result records. The owner callbacks hold the session core only
-weakly, so a result never keeps a session alive through its record; the session's live set does
-that (`_tables/session_core.py`).
+ Releasing a result scope drops the library's liveness reference only. A table the user derived from
+the result, an open UI panel, or a user liveness scope keeps the Java table alive, and with it the
+stream, the poller, or the background read: topic reference counts, pollers, and reads are bound to
+the blink table's `on_shutdown_callback`, never to result records. The owner callbacks hold the
+session core only weakly, so a result never keeps a session alive through its record; the session's
+live set does that (`_tables/session_core.py`).
 
 **Every release holds the update graph's lock.** Releasing a scope can drop the last reference
 to a refreshing table, which destroys it. The library releases every scope through
@@ -174,8 +174,9 @@ class ResultRecord:
         record_id: A process-unique identifier, for logs.
         scope: The result scope that holds the result.
         on_released: Runs on the reaper thread after the scope is released: for a stream it
-            decrements the stream's held-result count, for a `poll()` table it marks the row
-            released, and for a diagnostics view it drops the session's count of held views.
+            decrements the stream's held-result count, for a `poll()` table or a background
+            read it marks the row released, and for a diagnostics view it drops the session's
+            count of held views.
         finalizer: The collection finalizer on the result's Python wrapper, set by `track`
             right after the record is created; `finalizer.peek()` yields the wrapper while it
             is alive and None once it is collected.
@@ -265,13 +266,19 @@ class QueueWorker(Generic[_T]):
     def put(self, item: _T) -> None:
         """Queue an item; it is handled after every item queued before it. Never blocks.
 
+        An item queued after `stop()` is never handled: the thread ends at the stop request,
+        and nothing reads the queue again.
+
         Args:
             item: The item.
         """
         self._queue.put(item)
 
     def stop(self) -> None:
-        """Handle what is queued, run `on_exit`, and end the thread. Does not wait; idempotent."""
+        """Handle what is queued, run `on_exit`, and end the thread. Does not wait; idempotent.
+
+        Items queued after this call are dropped unhandled (`put`).
+        """
         self._queue.put(None)
 
     def _run(self) -> None:
@@ -373,6 +380,10 @@ class Reaper:
 
     def submit(self, job: Callable[[], None]) -> None:
         """Queue a job; it runs on the reaper thread after every job queued before it.
+
+        A job submitted after `stop()` never runs. The reaper stops only once its session is
+        collected and no tracked result remains (`ResultRegistry.retire`), so every tracked
+        result's release job runs first.
 
         Args:
             job: The work to run, typically releasing one result scope.
@@ -514,10 +525,9 @@ class ResultRegistry:
         Owner callbacks hold the session core only weakly, so a tracked result can outlive the
         session: one `release()`d while its wrapper is still alive, for example. Stopping the
         reaper with the session would leave such a result unreleased when it is collected, so
-        the reaper is
-        stopped only once the registry is empty: now if it already is, otherwise by the job
-        that forgets the last collected result. Takes no lock and makes no Java call (it runs
-        in a garbage-collection finalizer): it only queues a job on the reaper.
+        the reaper is stopped only once the registry is empty: now if it already is, otherwise
+        by the job that forgets the last collected result. Takes no lock and makes no Java call
+        (it runs in a garbage-collection finalizer): it only queues a job on the reaper.
         """
         self._reaper.submit(self._retire)
 

@@ -220,5 +220,14 @@ SAMPLE_ERRORS: tuple[SampleError, ...] = (
         "number, which lost its leading zero; the type stays text, so a real CUSIP keeps "
         "every character.",
     ),
+    SampleError(
+        path="/futures/v1/products",
+        wire_key="last_updated",
+        sample="2025-02-22",
+        reason="The specification declares format date-time, and Massive sends one: a live "
+        'response on 2026-10-30 sent "2017-01-01T17:11:39-06:00" for the first product, a '
+        "time of day with an offset, which a date cannot hold. The example's bare date is "
+        "taken as wrong; the field stays an instant, and a live bare date would fail loudly.",
+    ),
 )
 """Every documented example value the `example-type` gate skips."""

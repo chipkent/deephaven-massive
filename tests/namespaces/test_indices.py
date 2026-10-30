@@ -119,7 +119,11 @@ def test_values_history_is_flat_files_only() -> None:
 def _schema(spec: DatasetSpec) -> list[tuple[str, str]]:
     # The columns the dataset's own sources fill. A kind's schema also holds the columns only
     # its other members supply, which this dataset always leaves null.
-    return [(c.name, c.type.value) for c in CATALOG.dataset_schema(spec).columns if c.supplied_by]
+    return [
+        (c.name, c.type.value)
+        for c in CATALOG.dataset_schema(spec, raw_symbol=False).columns
+        if c.supplied_by
+    ]
 
 
 def test_values_schema() -> None:
@@ -455,14 +459,14 @@ def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
 
 def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     for moment in (datetime(2025, 6, 2, 15, 30, tzinfo=UTC), "2025-06-03T02:00:00+00:00"):
-        with pytest.raises(ValueError, match=r"date is a calendar date; pass a date"):
+        with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
             m.indices.daily_open_close("I:SPX", moment)
     naive = datetime(2025, 6, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match="needs a timezone"):
         m.indices.daily_open_close("I:SPX", naive)
-    with pytest.raises(ValueError, match="is not an ISO-8601 date"):
+    with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         m.indices.daily_open_close("I:SPX", "June 2")
-    with pytest.raises(TypeError, match="date must be a str, date, or datetime"):
+    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
         m.indices.daily_open_close("I:SPX", cast("str", 20250602))
 
 
@@ -589,6 +593,7 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
     ]
     assert out[0] == {
         "Symbol": "I:SPX",
+        "RawSymbol": None,
         "Error": None,
         "LastUpdated": 1748894400 * NS,
         "MarketStatus": "closed",
@@ -771,6 +776,7 @@ def test_daily_open_close_fetches_each_index_for_the_day(
         "Date": "2025-06-02",
         "TimestampStart": MIDNIGHT_MS * MS,
         "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
+        "RawSymbol": None,
         "High": 5940.35,
         "Low": 5876.0,
         "Open": 5896.68,
@@ -804,6 +810,7 @@ def wait_for(condition: Callable[[], bool]) -> None:
                 "Symbol": "I:SPX",
                 "Date": "2025-06-02",
                 "Timestamp": 1748894399000 * MS,
+                "RawSymbol": None,
                 "Value": 5935.94,
             },
         ),

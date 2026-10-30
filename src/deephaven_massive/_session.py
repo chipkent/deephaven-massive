@@ -29,6 +29,7 @@ import itertools
 import logging
 import threading
 import weakref
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, Self, cast
 
 from deephaven.execution_context import get_exec_ctx
@@ -72,7 +73,6 @@ from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from types import TracebackType
 
     from deephaven_massive._enums import Order
@@ -158,11 +158,11 @@ def _register(core: SessionCore) -> None:
         alive = [other for other in (ref() for ref in _open_sessions) if other is not None]
         _open_sessions[:] = [weakref.ref(other) for other in alive]
         _open_sessions.append(weakref.ref(core))
-        others = sorted(
+        others = [
             (other.label, other.config)
-            for other in alive
+            for other in alive  # in order of creation, so the oldest such session is named
             if other.config.api_key == core.config.api_key and not other.closed
-        )
+        ]
     for label, config in others:
         differ = [n for n in CONNECTION_SETTINGS if getattr(config, n) != getattr(core.config, n)]
         if differ:
@@ -396,14 +396,24 @@ class MassiveSession:
             limit: The maximum total number of rows across pages; None for every row. The
                 page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"type": "options"}`.
+                as underscores. `type` is refused: every request sends tickers, and Massive
+                answers `type` beside tickers with HTTP 400; a ticker's prefix selects its class.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or an unknown filter raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            ValueError: At once, before any request, for a `type` filter; `dm.ALL`, an
+                invalid symbol, or an unknown filter raises it too.
+
+        An argument of the wrong type raises `TypeError`.
         """
+        if isinstance(filters, Mapping) and "type" in filters:
+            logger.debug("snapshots: refused the type filter %r, sent beside tickers", filters)
+            raise ValueError(
+                "snapshots takes no type filter: Massive refuses type beside tickers, and each "
+                "ticker's prefix selects its class"
+            )
         query = build_query(
             self._core,
             snapshots.SNAPSHOTS,
@@ -429,7 +439,7 @@ class MassiveSession:
         (`channel:field-`). A connection shared with another session of the same API key shows
         in both. Each call returns a new view, a live result like any other: while it is held it
         keeps the session running and current, and after `close()` it keeps showing the final
-        rows. After `close()` this raises `MassiveError` (see `SessionCore.diagnostics_view`).
+        rows.
 
         Returns:
             A view of the `connections` table, keyed by `Transport`, `AssetClass`, and
@@ -440,17 +450,21 @@ class MassiveSession:
         return self._core.diagnostics_view(self._core.diagnostics.connections)
 
     def streams(self) -> Table:
-        """Return the live diagnostics table of streams and `poll()` tables.
+        """Return the live diagnostics table of streams, `poll()` tables, and background reads.
 
-        One row per stream: dataset, symbols, `HeldResults`, deferred option contracts,
-        host, rows published, requests per poll cycle, state, error, and `SchemaDrift`: the
-        fields the stream's payloads had beyond the documented schema (`transport:field+`) or
-        lacked (`transport:field-`), shown apart from the error because drift is not a
-        failure. `Error` also shows warnings that do not stop a stream: the options cap's
-        deferral, and the wait for a WebSocket slot that another connection with the key (for
-        example from another process) holds. Each call returns a new view, a live result like
-        any other: while it is held it keeps the session running and current, and after
-        `close()` it keeps showing the final rows, `CLOSED` included.
+        One row per WebSocket stream, `poll()` table, and background read (`fetch(wait=False)` or
+        `history(..., wait=False)`), told apart by `Kind` (`stream`, `poll`, `read`): the dataset,
+        the query, symbols, `HeldResults`, deferred option contracts, host, rows published, requests
+        per poll cycle, `State`, error, and `SchemaDrift`. A stream or poll is `RUNNING`; a
+        background read is `LOADING` until its whole result lands in its table, then `DONE`, and
+        `FAILED` with the error when its download fails. `SchemaDrift` holds the fields the stream's
+        payloads had beyond the documented schema (`transport:field+`) or lacked
+        (`transport:field-`), shown apart from the error because drift is not a failure. `Error`
+        also shows warnings that do not stop a stream: the options cap's deferral, and the wait for
+        a WebSocket slot that another connection with the key (for example from another process)
+        holds. Each call returns a new view, a live result like any other: while it is held it keeps
+        the session running and current, and after `close()` it keeps showing the final rows,
+        `CLOSED` included.
 
         Returns:
             A view of the `streams` table, keyed by `StreamId`; its columns are `STREAMS` in
@@ -486,15 +500,15 @@ class MassiveSession:
     def release(self, table: Table) -> None:
         """Release one live result now instead of waiting for garbage collection.
 
-        The library's hold on the table is released on the session's reaper thread, right
-        away; inside a console command, which holds the update graph's lock, it is released
-        once the command ends. The table keeps ticking only while something else holds it (a
-        derived table, an open UI panel); once nothing does, its stream unsubscribes, or its
-        poller stops. A table derived in the console is held only weakly by the console, so after
-        `del` it keeps its stream running until the JVM next collects it: usually seconds, but
-        unbounded on an idle heap; `close()` stops everything at once. Releasing a result twice
-        does nothing, and `release()` keeps working after `close()`. Static results (`fetch()`,
-        `history()`) are not tracked.
+        The library's hold on the table is released on the session's reaper thread, right away;
+        inside a console command, which holds the update graph's lock, it is released once the
+        command ends. The table keeps ticking only while something else holds it (a derived table,
+        an open UI panel); once nothing does, its stream unsubscribes, its poller stops, or its
+        background read (`wait=False`) stops downloading. A table derived in the console is held
+        only weakly by the console, so after `del` it keeps its stream running until the JVM next
+        collects it: usually seconds, but unbounded on an idle heap; `close()` stops everything at
+        once. Releasing a result twice does nothing, and `release()` keeps working after `close()`.
+        Static results (`fetch()`, `history()` with the default `wait=True`) are not tracked.
 
         Args:
             table: A live table returned by a verb of this session.

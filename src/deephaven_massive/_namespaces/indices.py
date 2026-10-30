@@ -32,11 +32,16 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.base import Namespace, build_query, list_params
+from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
+    Namespace,
+    build_query,
+    day_argument,
+    list_params,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -64,7 +69,7 @@ _MINUTE_FILES: Final = "us_indices/minute_aggs_v1"
 _DAY_FILES: Final = "us_indices/day_aggs_v1"
 
 _SNAPSHOT_PAGE: Final = 250
-"""The indices snapshot's largest `limit`, and the most tickers one request names."""
+"""The indices snapshot's largest `limit`."""
 
 _AGGREGATES_PAGE: Final = 50_000
 """The range endpoint's largest `limit`, which counts the base aggregates behind a page."""
@@ -136,7 +141,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOT,
     keys={(_REST, _SNAPSHOT): SourceKeys(symbol=KeySpec("Ticker"))},
     symbol_param="ticker.any_of",
-    symbols_per_request=_SNAPSHOT_PAGE,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     page_size=_SNAPSHOT_PAGE,
     revision_keys=("LastUpdated",),
 )
@@ -471,16 +476,17 @@ class _Indices(Namespace):
         Args:
             symbols: The indices, such as `["I:SPX", "I:NDX"]` (`"SPX"` is refused), or
                 a Deephaven table with a `Symbol` column, re-read on every `poll()` cycle.
-            date: The day, as an ISO-8601 date (`"2025-06-02"`) or a `date`. It is a calendar
-                date, so a `datetime` raises `ValueError`.
+            date: The day, as an ISO-8601 date (`"2025-06-02"`), a `date`, Deephaven date text
+                such as `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`.
+                It is a calendar date, so a `datetime` or an instant raises `ValueError`.
 
         Returns:
             A `Query` with `fetch()` and `poll()`. Nothing is requested until a verb is called.
 
-        A `date` that is not a `str`, `date`, or `datetime`, or `symbols` of an unsupported
-        type, raises `TypeError`. `dm.ALL`, a `datetime` or text that is not an ISO-8601 date as
-        `date`, a symbol that is not a valid index symbol, an empty symbol list, or a table
-        without a `Symbol` column raises `ValueError`.
+        A `date` of none of the `DateLike` types, or `symbols` of an unsupported type, raises
+        `TypeError`. `dm.ALL`, a `datetime` or other time as `date`, text that is neither an
+        ISO-8601 date nor Deephaven date text, a symbol that is not a valid index symbol, an
+        empty symbol list, or a table without a `Symbol` column raises `ValueError`.
 
         Example:
             ::
@@ -494,6 +500,6 @@ class _Indices(Namespace):
                 DAILY_OPEN_CLOSE,
                 symbols=symbols,
                 all_alternative="m.indices.snapshots(dm.ALL)",
-                params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             ),
         )

@@ -27,7 +27,6 @@ import logging
 from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.dates import calendar_day
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import (
     AssetClass,
@@ -42,9 +41,11 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     adjustment_notes,
     build_query,
+    day_argument,
     list_params,
     one_or_any_of,
     optional_text,
@@ -231,9 +232,6 @@ _OPEN_CLOSE: Final = "/v1/open-close/{stocksTicker}/{date}"
 
 # The snapshots declare no time key: a ticker that has not traded can carry `updated` 0,
 # which as the declared time column would fail the whole response instead of reading as null.
-# The tickers travel comma-separated in the URL, so a long watchlist is split into requests of
-# 250 symbols, the size Massive's unified snapshot documents as its limit, to keep each URL
-# well under the lengths servers refuse.
 SNAPSHOTS: Final = DatasetSpec(
     name="stocks.snapshots",
     summary="Current market snapshots of US-listed stocks, one row per ticker.",
@@ -241,7 +239,7 @@ SNAPSHOTS: Final = DatasetSpec(
     fetch_path=_SNAPSHOTS,
     keys={(_R, _SNAPSHOTS): _ticker_keys()},
     symbol_param="tickers",
-    symbols_per_request=250,
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=("Updated",),
 )
 MOVERS: Final = DatasetSpec(
@@ -1447,7 +1445,7 @@ class _StockFilings(Namespace):
     def institutional_holdings(
         self,
         *,
-        filer_cik: str | None = None,
+        filer_cik: str | Sequence[str] | None = None,
         start: DateLike | None = None,
         end: DateLike | None = None,
         sort: str | None = None,
@@ -1470,12 +1468,14 @@ class _StockFilings(Namespace):
         the web UI's column tooltips, or `columns()`.
 
         Arguments are checked when the query is built: `TypeError` if an argument has the wrong
-        type, such as an `int` CIK; `ValueError` if a bound is not a date or ISO date, `end` is
-        before `start`, or a filter is unknown, reserved, or of the wrong kind.
+        type, such as an `int` CIK; `ValueError` if a CIK sequence is empty, a bound is not a
+        date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of the
+        wrong kind.
 
         Args:
             filer_cik: The SEC CIK of the filing manager, as text with its leading zeros,
-                such as `"0001067983"`; None for every filer.
+                such as `"0001067983"` (sent as `filer_cik`), or a sequence of them for any of
+                several managers (sent as `filer_cik.any_of`); None for every filer.
             start: The first filing date to include, inclusive; None for no lower bound,
                 which `poll()` refuses unless `limit` is set: it would re-read every filing
                 each cycle. A fixed start keeps widening the window of a long-running poll.
@@ -1503,7 +1503,7 @@ class _StockFilings(Namespace):
             INSTITUTIONAL_HOLDINGS,
             start=start,
             end=end,
-            params={"filer_cik": optional_text("filer_cik", filer_cik)},
+            params=one_or_any_of("filer_cik", filer_cik, every="every filer"),
             sort=sort,
             order=order,
             limit=limit,
@@ -2592,8 +2592,9 @@ class _Stocks(Namespace):
         Args:
             symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle).
-            date: The trading day: an ISO-8601 date or a `date`. It is a calendar date, so a
-                `datetime` raises `ValueError`.
+            date: The trading day: an ISO-8601 date, a `date`, Deephaven date text such as
+                `"2025-3-3"`, a Java `LocalDate`, or a day-precision `numpy.datetime64`. It is a
+                calendar date, so a `datetime` or an instant raises `ValueError`.
             adjusted: True (the default) for prices and volume adjusted for splits (never for
                 dividends); False for the prices as traded. Massive does not echo the basis
                 here, so it cannot be checked.
@@ -2612,7 +2613,7 @@ class _Stocks(Namespace):
             symbols=symbols,
             all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(date, date)",
             adjusted=require_bool("adjusted", adjusted),
-            params={"date": calendar_day(DAILY_OPEN_CLOSE, date, "date")},
+            params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
         )
         return cast("Query", query)
 

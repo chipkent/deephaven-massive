@@ -5,8 +5,9 @@ All three are keyed Deephaven `input_table`s that the library writes and users r
 - **connections**: one row per WebSocket connection, plus one `Transport=REST` row per resolved
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
-- **streams**: one row per stream (a live subscription with its own publisher) and per `poll()`
-  table, with the `repr` of the query that opened it in `Query`. Keyed by `StreamId`.
+- **streams**: one row per stream (a live subscription with its own publisher), per `poll()`
+  table, and per background read (`wait=False`), told apart by `Kind`, with the `repr` of the
+  query that opened it in `Query`. Keyed by `StreamId`.
 - **rate_limits**: one row per REST rate-limit bucket: each Massive subscription, and `other`
   for the datasets Massive assigns to none. Keyed by `Bucket`. Its rows are not queued:
   the bucket state lives in a governor that several sessions share, so the writer pulls a fresh
@@ -45,6 +46,7 @@ where it is found, and never reaches the registry.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import threading
@@ -98,6 +100,7 @@ __all__ = [
     "RateLimitPull",
     "RateLimitRow",
     "RateLimitState",
+    "StreamKind",
     "StreamRow",
     "StreamState",
     "StreamUpdate",
@@ -130,16 +133,36 @@ class ConnectionState(StrEnum):
     CLOSED = "CLOSED"
 
 
+class StreamKind(StrEnum):
+    """The `Kind` of a row of `m.streams()`: what feeds the table the row describes.
+
+    Attributes:
+        STREAM: A WebSocket stream, shared by every live verb of an equal query.
+        POLL: A `poll()` table, which re-reads a REST dataset on an interval.
+        READ: A background read, `fetch(wait=False)` or `history(..., wait=False)`, whose
+            table fills once, when its download completes.
+    """
+
+    STREAM = "stream"
+    POLL = "poll"
+    READ = "read"
+
+
 class StreamState(StrEnum):
     """The `State` of a row of `m.streams()`.
 
+    `RUNNING` is a stream or `poll()` table that publishes. A background read is `LOADING`
+    while it downloads and `DONE` once its rows have landed; `DONE` is final, like `FAILED`.
     `RELEASED` means the library holds no result of the stream any more; the stream keeps
-    publishing until its blink table dies (a derived table or an open panel may hold it).
-    `FAILED` can follow `RUNNING` or `RELEASED`; a failed stream's row keeps `FAILED` when its
-    last result is released.
+    publishing until its blink table dies (a derived table or an open panel may hold it), and a
+    read released while loading keeps loading for such a table, becoming `DONE` if its rows
+    land. `FAILED` can follow `RUNNING`, `LOADING`, or `RELEASED`; a failed stream's row keeps
+    `FAILED` when its last result is released.
     """
 
     RUNNING = "RUNNING"
+    LOADING = "LOADING"
+    DONE = "DONE"
     FAILED = "FAILED"
     RELEASED = "RELEASED"
     CLOSED = "CLOSED"
@@ -147,6 +170,8 @@ class StreamState(StrEnum):
 
 _STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
 """The states whose `Error` names why the stream stopped, which no later update replaces."""
+_NOT_A_COLUMN: Final = "not_a_column"
+"""The metadata key of a row field that `as_row` leaves out of the table."""
 
 
 class RateLimitState(StrEnum):
@@ -214,6 +239,7 @@ STREAMS: Final = Schema(
         Column(name, column_type)
         for name, column_type in (
             ("StreamId", _L),
+            ("Kind", _S),
             ("Dataset", _S),
             ("Query", _S),
             ("SymbolCount", _I),
@@ -320,9 +346,10 @@ class StreamRow:
     """One row of `m.streams()`. Timestamps are epoch nanoseconds; None is null.
 
     Attributes:
-        stream_id: The stream's identifier (the key).
+        stream_id: The stream's identifier (the key); a background read's is its call id.
+        kind: What feeds the table: a stream, a `poll()` table, or a background read.
         dataset: The dataset name, such as `"stocks.trades"`.
-        query: The `repr` of the query whose verb opened the stream or `poll()`, such as
+        query: The `repr` of the query whose verb opened the stream, `poll()`, or read, such as
             `"<StreamHistoryQuery stocks.trades symbols=('AAPL',)>"`, which tells two streams
             of one dataset apart; cut to `QUERY_SHOWN` characters (`shown_query`).
         symbol_count: How many symbols the stream covers; null for `dm.ALL` and reactive
@@ -330,21 +357,28 @@ class StreamRow:
         symbols: A truncated, readable list of the symbols.
         held_results: Results of the stream the library still holds.
         deferred: Options contracts deferred by the contract cap.
-        transport: `Transport.WS` for a stream, `Transport.REST` for a `poll()`; the table
-            shows its label, `WebSocket` or `REST`.
-        host: The serving host.
-        path: The cluster path.
-        rows_published: Rows published so far.
+        transport: `Transport.WS` for a stream, `Transport.REST` for a `poll()`, and for a
+            background read the source it reads, `Transport.REST` or `Transport.FLAT_FILES`;
+            the table shows its label, `WebSocket`, `REST`, or `flat files`.
+        host: The serving host; null for a background read.
+        path: The cluster path; null for a background read.
+        rows_published: Rows published so far; a background read's, once its rows land.
         requests_per_cycle: REST requests per `poll()` cycle.
         state: The stream state.
-        error: The failure or warning text.
+        error: The failure, or the transport's warning (a wait for a connection slot, deferred
+            options contracts, a poll cycle's error).
         created_at: When the stream was created.
         schema_drift: The stream's drift, as `DriftRegistry.record` writes it
             (`transport:field+` for an extra field, `transport:field-` for a missing one);
             null while there is none. Separate from `error`, so drift never hides a failure.
+        skipped: The symbol-table values the stream or poll skips because they are not
+            Massive's tickers (`skipped_rows_text` in `_tables/watchlist.py`); null while none
+            is. Not a column of its own: the `Error` column shows it after `error` while the
+            stream runs (`as_row`), so neither source of a warning hides or clears the other.
     """
 
     stream_id: int
+    kind: StreamKind
     dataset: str
     query: str
     symbol_count: int | None
@@ -360,6 +394,7 @@ class StreamRow:
     error: str | None = None
     created_at: int
     schema_drift: str | None = None
+    skipped: str | None = dataclasses.field(default=None, metadata={_NOT_A_COLUMN: True})
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -380,8 +415,11 @@ class StreamUpdate:
         symbols: The readable, truncated list of those symbols, as `describe_symbols` writes it.
         host: The serving host.
         path: The cluster path.
-        error: Warning text for the `Error` column.
-        clear_error: True to set `Error` back to null; takes precedence over `error`.
+        error: The transport's warning text (`StreamRow.error`).
+        clear_error: True to set the transport's warning back to null; takes precedence over
+            `error`.
+        skipped: The skipped symbol-table values' text (`StreamRow.skipped`).
+        clear_skipped: True to set that text back to null; takes precedence over `skipped`.
 
     `SchemaDrift` is not set here: `SessionCore.record_stream_drift` records a stream's drift
     and writes its row in one step, so concurrent reports cannot leave an older text behind.
@@ -396,6 +434,8 @@ class StreamUpdate:
     path: str | None = None
     error: str | None = None
     clear_error: bool = False
+    skipped: str | None = None
+    clear_skipped: bool = False
 
     def apply(self, row: StreamRow) -> StreamRow:
         """Return `row` with the fields this update sets; the others keep their values.
@@ -424,6 +464,9 @@ class StreamUpdate:
             host=row.host if self.host is None else self.host,
             path=row.path if self.path is None else self.path,
             error=self._error(row),
+            skipped=None
+            if self.clear_skipped
+            else (row.skipped if self.skipped is None else self.skipped),
         )
 
     def _error(self, row: StreamRow) -> str | None:
@@ -484,7 +527,9 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     """Return a row keyed by column name: each field's name in PascalCase.
 
     A `Transport` value becomes its user-facing label (`TRANSPORT_LABELS`), so the tables spell
-    transports as `columns()` does: `Transport.WS` is shown as `WebSocket`.
+    transports as `columns()` does: `Transport.WS` is shown as `WebSocket`. A stream's `Error`
+    joins its two warning sources while it runs, the transport's warning and the skipped
+    symbol-table values, with `"; "`; a stopped stream's shows only why it stopped.
 
     Args:
         row: A connection, stream, or rate-limit row.
@@ -492,7 +537,14 @@ def as_row(row: ConnectionRow | StreamRow | RateLimitRow) -> dict[str, object]:
     Returns:
         A `{column: value}` mapping for `CONNECTIONS`, `STREAMS`, or `RATE_LIMITS`.
     """
-    return {pascal_case(f.name): _shown(getattr(row, f.name)) for f in fields(row)}
+    shown = {
+        pascal_case(f.name): _shown(getattr(row, f.name))
+        for f in fields(row)
+        if not f.metadata.get(_NOT_A_COLUMN)
+    }
+    if isinstance(row, StreamRow) and row.state not in _STOPPED and row.skipped is not None:
+        shown["Error"] = "; ".join(text for text in (row.error, row.skipped) if text is not None)
+    return shown
 
 
 def _shown(value: object) -> object:

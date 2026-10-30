@@ -39,7 +39,6 @@ EXPECTED_EXPORTS = [
     "TickerType",
     "SymbolConvention",
     "OnError",
-    "UnknownSymbols",
     "canonical_symbol",
     "canonical_symbol_stock",
     "canonical_symbol_stock_yahoo",
@@ -52,6 +51,7 @@ EXPECTED_EXPORTS = [
     "canonical_symbol_forex",
     "canonical_symbol_crypto",
     "canonicalize_symbols",
+    "datasets",
     "disable_debug_logging",
     "enable_debug_logging",
     "LogOutput",
@@ -102,8 +102,9 @@ def test_helper_names_are_not_reachable(name: str) -> None:
 
 def test_no_public_names_outside_all() -> None:
     # Every public name resolves lazily, so the namespace itself holds no public name at all;
-    # anything else would be reachable as `dm.<name>` beyond the exports.
-    assert {name for name in vars(dm) if not name.startswith("_")} == set()
+    # anything else would be reachable as `dm.<name>` beyond the exports. The one exception is
+    # the public submodule `queries`, which Python binds here once anything imports it.
+    assert {name for name in vars(dm) if not name.startswith("_")} <= {"queries"}
 
 
 def test_type_checking_imports_mirror_all() -> None:
@@ -137,13 +138,13 @@ def test_public_names_come_from_private_modules() -> None:
         assert obj.__module__.startswith("deephaven_massive._"), obj
 
 
-def test_nineteen_enums_are_exported() -> None:
+def test_eighteen_enums_are_exported() -> None:
     enums = [
         n
         for n in dm.__all__
         if isinstance(getattr(dm, n), type) and issubclass(getattr(dm, n), StrEnum)
     ]
-    assert len(enums) == 19
+    assert len(enums) == 18
 
 
 def test_exception_hierarchy() -> None:

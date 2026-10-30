@@ -4,7 +4,7 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
-In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.partners.benzinga.analyst_insights`, `m.partners.benzinga.ratings`, `m.partners.benzinga.bulls_bears_say`, `m.partners.benzinga.guidance`, `m.partners.benzinga.earnings`, `m.partners.etf_global.analytics`, `m.partners.etf_global.constituents`, `m.partners.etf_global.fund_flows`, `m.partners.etf_global.profiles`, `m.partners.etf_global.taxonomies`, and `m.partners.tmx.corporate_events` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+`m.partners.benzinga.analyst_insights`, `m.partners.benzinga.ratings`, `m.partners.benzinga.bulls_bears_say`, `m.partners.benzinga.guidance`, `m.partners.benzinga.earnings`, `m.partners.etf_global.analytics`, `m.partners.etf_global.constituents`, `m.partners.etf_global.fund_flows`, `m.partners.etf_global.profiles`, `m.partners.etf_global.taxonomies`, and `m.partners.tmx.corporate_events` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="benzinga-analysts"></a>
 
@@ -40,6 +40,7 @@ Benzinga analyst insights on US stocks: a rating, a price target, and the reason
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company being rated." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `BenzingaFirmId` | String | The identifier used by Benzinga for the firm record. | REST | `benzinga_firm_id` |
 | `BenzingaId` | String | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
 | `BenzingaRatingId` | String | The identifier used by Benzinga for the rating record. | REST | `benzinga_rating_id` |
@@ -66,6 +67,7 @@ Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company being rated." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `AdjustedPriceTarget` | double | The current price target adjusted for stock splits and dividends. | REST | `adjusted_price_target` |
 | `Analyst` | String | The name of the individual analyst who issued the rating. | REST | `analyst` |
 | `BenzingaAnalystId` | String | The identifier used by Benzinga for this analyst. | REST | `benzinga_analyst_id` |
@@ -132,6 +134,7 @@ Benzinga's bull case and bear case summaries for US stocks.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock ticker symbol for the company associated with the bull and bear case summaries." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `BearCase` | String | A concise summary of the bearish investment thesis, highlighting potential risks, challenges, and reasons why the stock could decline in value. | REST | `bear_case` |
 | `BenzingaId` | String | The unique identifier used by Benzinga for this bull/bear case record. | REST | `benzinga_id` |
 | `BullCase` | String | A concise summary of the bullish investment thesis, highlighting positive aspects, growth opportunities, and reasons why the stock could appreciate in value. | REST | `bull_case` |
@@ -151,6 +154,7 @@ Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company issuing guidance." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `BenzingaId` | String | A unique identifier assigned by Benzinga to the guidance record. | REST | `benzinga_id` |
 | `CompanyName` | String | The name of the company issuing guidance. | REST | `company_name` |
 | `Currency` | String | The ISO 4217 code representing the currency in which the company issued its guidance figures. | REST | `currency` |
@@ -190,6 +194,7 @@ Earnings announcements of US companies from Benzinga, with estimates and surpris
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The stock symbol of the company reporting earnings." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `ActualEps` | double | The actual earnings per share (EPS) reported by the company for the given period. | REST | `actual_eps` |
 | `ActualRevenue` | double | The actual revenue reported by the company for the given fiscal period. | REST | `actual_revenue` |
 | `BenzingaId` | String | The identifier used by Benzinga for this record. | REST | `benzinga_id` |
@@ -272,6 +277,7 @@ ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `composite_ticker` |
 | `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `ProcessedDate` | String | The date showing when ETF Global received and processed the data. | REST | `processed_date` |
 | `QuantCompositeBehavioral` | double | Behavioral analysis score measuring investor psychology and market behavior patterns. | REST | `quant_composite_behavioral` |
@@ -320,6 +326,7 @@ The holdings of US-listed ETFs from ETF Global, one row per fund, date, and hold
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol of the ETF that holds these constituent securities." | REST | `composite_ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `composite_ticker` |
 | `AssetClass` | String | The broad category of asset type, such as Equity, Corporate Bond, Municipal Bond, etc. | REST | `asset_class` |
 | `ConstituentName` | String | The full company or security name of the constituent holding. | REST | `constituent_name` |
 | `ConstituentRank` | long | The rank of this constituent within the ETF for a given effective_date, ordered by weight (descending), market_value (descending), and constituent_ticker (ascending). A rank of 1 indicates the largest holding. | REST | `constituent_rank` |
@@ -352,6 +359,7 @@ Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF on exchanges." | REST | `composite_ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `composite_ticker` |
 | `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. | REST | `effective_date` |
 | `FundFlow` | double | The net daily capital flow into or out of the ETF through the creation and redemption process, where positive values indicate inflows and negative values indicate outflows. | REST | `fund_flow` |
 | `Nav` | double | The net asset value per share, representing the per-share value of the ETF's underlying holdings. | REST | `nav` |
@@ -372,6 +380,7 @@ ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `composite_ticker` |
 | `Administrator` | String | The administrator of the ETF. | REST | `administrator` |
 | `Advisor` | String | The investment advisor of the ETF. | REST | `advisor` |
 | `AssetClass` | String | The primary type of assets held by the ETF, such as equities, bonds, commodities, or other securities. | REST | `asset_class` |
@@ -442,6 +451,7 @@ ETF Global's classification of US-listed ETFs by strategy, structure, and exposu
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." | REST | `composite_ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `composite_ticker` |
 | `AssetClass` | String | The primary type of assets held by the ETF, such as equities, bonds, commodities, or other securities. | REST | `asset_class` |
 | `Category` | String | The broad investment category that describes the ETF's investment focus and strategy. | REST | `category` |
 | `Country` | String | The specific country focus of the ETF, if applicable. | REST | `country` |
@@ -495,6 +505,7 @@ Corporate events from TMX: earnings dates, dividends, conferences, and more.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The company's stock symbol." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `CompanyName` | String | Full name of the company. | REST | `company_name` |
 | `Date` | String | Scheduled date of the corporate event, formatted as YYYY-MM-DD. | REST | `date` |
 | `Isin` | String | Standard international identifier for the company's common stock. | REST | `isin` |

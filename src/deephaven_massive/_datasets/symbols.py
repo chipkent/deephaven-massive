@@ -20,7 +20,7 @@ owns that grammar and three things built on it:
   `EUR/USD` in WebSocket forex frames, `BTC-USD` in WebSocket crypto frames, `X:EUR-USD` in the
   forex quotes flat-file sample. `canonical_from_wire` reads every spelling the library knows
   into the canonical form, `WireSymbols` applies it to a column and the session's
-  `unknown_symbols` rule to what it cannot read, `wire_spellings` lists the spellings for a
+  `unreadable_symbols` setting to what it cannot read, `wire_spellings` lists the spellings for a
   flat-file filter, and `ws_symbol` writes the topic form. An index endpoint may send an index
   without its `I:` prefix, so `canonical_from_wire` adds it there, from the endpoint's class
   alone: no conversion ever looks a name up. `option_roots` computes the `OptionRoot` column.
@@ -65,11 +65,12 @@ import pyarrow.compute as pc
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
+    OnError,
     SymbolConvention,
-    UnknownSymbols,
     _require_enum,
 )
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -102,7 +103,7 @@ __all__ = [
     "normalize",
     "option_roots",
     "symbol_class",
-    "unknown_symbol_message",
+    "unreadable_symbol_message",
     "wire_spellings",
     "ws_symbol",
 ]
@@ -352,6 +353,37 @@ def _function(asset_class: AssetClass) -> str:
     return f"dm.canonical_symbol_{_CLASS_NAMES[asset_class]}"
 
 
+_VOWEL_CLASSES: Final = frozenset({AssetClass.OPTIONS, AssetClass.INDICES})
+"""The classes whose singular noun takes `an`."""
+
+
+def _class_noun_with_article(asset_class: AssetClass) -> str:
+    """Return a class's singular noun with its article, for messages.
+
+    Args:
+        asset_class: The class.
+
+    Returns:
+        For example `"a stock"` or `"an index"`.
+    """
+    article = "an" if asset_class in _VOWEL_CLASSES else "a"
+    return f"{article} {_CLASS_NOUNS[asset_class]}"
+
+
+def _refuse_surrounding_whitespace(text: str) -> None:
+    """Refuse text that is a ticker only once its surrounding whitespace is removed.
+
+    Args:
+        text: The text.
+
+    Raises:
+        ValueError: If the text holds more than whitespace and starts or ends with some,
+            naming the stripped text.
+    """
+    if text.strip() and text != text.strip():
+        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+
+
 def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
     """Refuse text that carries another class's prefix.
 
@@ -366,15 +398,13 @@ def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
     prefix = text[:2].upper()
     other = _CLASS_BY_PREFIX.get(prefix)
     if other is not None and other is not asset_class:
+        found, wanted = _class_noun_with_article(other), _class_noun_with_article(asset_class)
         raise ValueError(
-            f"{text!r} is a{'n' if other in _VOWEL_CLASSES else ''} {_CLASS_NOUNS[other]} "
-            f"ticker (prefix {prefix}), not a{'n' if asset_class in _VOWEL_CLASSES else ''} "
-            f"{_CLASS_NOUNS[asset_class]} one; call {_function(other)}"
+            f"{text!r} is {found} ticker (prefix {prefix}), not {wanted} one; "
+            f"call {_function(other)}"
         )
 
 
-_VOWEL_CLASSES: Final = frozenset({AssetClass.OPTIONS, AssetClass.INDICES})
-"""The classes whose singular noun takes `an`."""
 _SEPARATORS: Final = frozenset("-/ +=^#$*%@!~")
 """Characters other stock conventions use as separators and Massive never does."""
 _CONVENTIONS: Final = ", ".join(f"dm.SymbolConvention.{c.name}" for c in SymbolConvention)
@@ -395,8 +425,7 @@ def _convert_stock(text: str) -> str:
             guess at the ticker, since Massive's tickers are case-sensitive.
     """
     _refuse_other_prefix(AssetClass.STOCKS, text)
-    if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+    _refuse_surrounding_whitespace(text)
     if text.strip() and _SEPARATORS.intersection(text):
         raise ValueError(
             f"{text!r} is not a Massive stock ticker: it uses another convention's separators. "
@@ -451,19 +480,19 @@ def _convert_future(text: str) -> str:
     """Say why text is not a Massive futures ticker: a futures ticker converts from nothing.
 
     Args:
-        text: Text that is neither a single contract nor a spread (the caller checked).
+        text: Text that `canonical_symbol_future` refused as a single contract, or that
+            `canonical_symbol` refused as a futures ticker as Massive writes it.
 
     Returns:
         Nothing: it always raises; the return type is the converters' common one.
 
     Raises:
         ValueError: Always, naming the reason: another class's prefix names that class's
-            function, surrounding whitespace names the stripped text, and lower case says the
-            ticker is upper case; nothing is re-cased.
+            function, surrounding whitespace names the stripped text, and any other text gets
+            the forms a contract and a spread take; nothing is re-cased.
     """
     _refuse_other_prefix(AssetClass.FUTURES, text)
-    if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+    _refuse_surrounding_whitespace(text)
     raise ValueError(
         f"{text!r} is not a Massive futures ticker: a contract is upper-case letters and digits "
         "('ESZ5'), and a spread is written as Massive writes it ('GCQ6-GCZ6', 'BOB 02-01 U6', "
@@ -514,8 +543,7 @@ def _convert_spread(text: str) -> str:
             f"{text!r} is a single futures contract, not a spread; call dm.canonical_symbol_future"
         )
     _refuse_other_prefix(AssetClass.FUTURES, text)
-    if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+    _refuse_surrounding_whitespace(text)
     raise ValueError(
         f"{text!r} is not one of Massive's futures spread spellings: a calendar spread "
         "'GCQ6-GCZ6', a CBOT inter-commodity spread 'BOB 02-01 U6', a NYMEX strategy "
@@ -1105,21 +1133,19 @@ def check_symbol(
     """
     if not isinstance(text, str):
         raise TypeError(f"a symbol must be a str, not {type(text).__name__}")
+    if is_canonical(asset_class, text, as_written=as_written):
+        return text
     if as_written:
-        if _WRITTEN.fullmatch(text) is not None:
-            return text
         raise ValueError(
             f"{text!r} is not a ticker as Massive writes it (not empty, no surrounding "
             "whitespace, no control character, no class prefix)"
         )
     resolved = symbol_class(text) if asset_class is ClassFromPrefix.ANY else asset_class
-    if _CANONICAL[resolved](text):
-        return text
     other = symbol_class(text)
     if other not in {resolved, AssetClass.STOCKS} and _CANONICAL[other](text):
         raise ValueError(
-            f"{text!r} is a{'n' if other in _VOWEL_CLASSES else ''} {_CLASS_NOUNS[other]} "
-            f"ticker; this dataset takes {_CLASS_NOUNS[resolved]} tickers"
+            f"{text!r} is {_class_noun_with_article(other)} ticker; this dataset takes "
+            f"{_CLASS_NOUNS[resolved]} tickers"
         )
     try:
         fixed = _CONVERTERS[resolved](text)
@@ -1332,30 +1358,36 @@ def option_roots(symbols: pa.Array) -> pa.Array:
     return pc.if_else(pc.starts_with(symbols, "O:"), roots, pa.scalar(None, pa.string()))
 
 
-_UNKNOWN_LIMIT: Final = 100
-"""The most unknown wire spellings logged per process; one record then says the rest are not."""
-_unknown_spellings: Final = BoundedWarnings(logger, limit=_UNKNOWN_LIMIT)
+_UNREADABLE_LIMIT: Final = 100
+"""The most unreadable wire spellings logged per process; one record then says the rest are
+not."""
+_logged_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.ERROR)
+"""The spellings logged under `OnError.LOG`: at ERROR, since each is a gap in the library."""
+_ignored_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.DEBUG)
+"""The spellings logged under `OnError.IGNORE`: at DEBUG only."""
 
 
-def unknown_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
-    """Say which symbols Massive sent in a spelling the library cannot read, and the remedy.
+def unreadable_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
+    """Say which symbols Massive sent in a spelling the library cannot read, and what to do.
+
+    Such a spelling is a gap in the library's grammar, never the caller's fault, so the message
+    asks for a bug report and names the setting that keeps the rows meanwhile.
 
     Args:
         dataset: The dataset that received them, such as `forex.quotes`.
         spellings: The texts, as sent.
 
     Returns:
-        The message a failed request or stream carries; it names the session setting that
-        keeps such rows instead.
+        The message a failed request or stream carries under `OnError.RAISE`.
     """
     texts = sorted(spellings)
     listed = ", ".join(repr(s) for s in texts)
     sent = f"the symbols {listed}, spellings" if texts[1:] else f"the symbol {listed}, a spelling"
     return (
-        f"{dataset}: Massive sent {sent} the library cannot read as Massive's ticker. "
-        "Set MASSIVE_UNKNOWN_SYMBOLS=warn, or pass "
-        "MassiveConfig(unknown_symbols=dm.UnknownSymbols.WARN), to keep such rows with a null "
-        "Symbol and the text in RawSymbol"
+        f"{dataset}: Massive sent {sent} the library cannot read as Massive's ticker. To keep "
+        "such rows with a null Symbol and the text in RawSymbol meanwhile, set "
+        "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=log or pass "
+        f"MassiveConfig(unreadable_symbols=dm.OnError.LOG). {LIBRARY_BUG}"
     )
 
 
@@ -1368,13 +1400,13 @@ class ReadSymbols:
             spelling the library cannot read.
         raw: The wire text where the spelling could not be read, null elsewhere: the
             `RawSymbol` column of a session that keeps such rows.
-        unknown: The distinct spellings that could not be read, sorted; empty for a clean
+        unreadable: The distinct spellings that could not be read, sorted; empty for a clean
             batch.
     """
 
     symbols: pa.Array
     raw: pa.Array
-    unknown: tuple[str, ...]
+    unreadable: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1382,25 +1414,35 @@ class WireSymbols:
     """How one dataset reads the symbols its rows carry, and what an unreadable one does.
 
     Built once per transport plan (REST converter, WebSocket channel plan, flat-file
-    transform) from the dataset and the session's `MassiveConfig.unknown_symbols`; immutable
-    and shared by every thread of the plan.
+    transform) from the dataset and the session's `MassiveConfig.unreadable_symbols`;
+    immutable and shared by every thread of the plan.
 
     Attributes:
         dataset: The dataset name, for messages.
         asset_class: The dataset's class (`canonical_from_wire`), or `ClassFromPrefix.ANY`
             for one that spans classes.
-        unknown: The session's rule for a spelling `canonical_from_wire` cannot read: under
-            `UnknownSymbols.WARN` each new spelling is logged once at WARNING (a bounded
-            number per process) and its rows keep the text in `ReadSymbols.raw`; under
-            `FAIL` the caller fails the request or stream with `unknown_symbol_message`.
+        unreadable: The session's setting for a spelling `canonical_from_wire` cannot read:
+            under `OnError.LOG` each new spelling is logged once at ERROR with the library-bug
+            text, and under `IGNORE` at DEBUG (a bounded number per process); under both its
+            rows keep the text in `ReadSymbols.raw`. Under `RAISE` the caller fails the request
+            or stream with `unreadable_symbol_message`.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`canonical_from_wire`).
     """
 
     dataset: str
     asset_class: AssetClass | ClassFromPrefix
-    unknown: UnknownSymbols
+    unreadable: OnError
     as_written: bool = False
+
+    @property
+    def keeps(self) -> bool:
+        """Tell whether a row whose spelling cannot be read is kept, with its text in `RawSymbol`.
+
+        Returns:
+            True under `OnError.LOG` and `IGNORE`; False under `RAISE`, which fails it.
+        """
+        return self.unreadable is not OnError.RAISE
 
     def read(self, raw: pa.Array, cache: dict[str, str | None]) -> ReadSymbols:
         """Read a column of wire symbols, calling `canonical_from_wire` once per distinct text.
@@ -1413,7 +1455,9 @@ class WireSymbols:
 
         Returns:
             The canonical symbols, the unreadable texts, and the distinct unreadable spellings.
-            Under `WARN` each new unreadable spelling is logged once at WARNING.
+            Each new unreadable spelling is logged once: at ERROR with the library-bug text
+            under `LOG`, at DEBUG under `IGNORE`; never under `RAISE`, whose failure the caller
+            reports.
         """
         known = cache
         distinct = pc.call_function("unique", [raw])
@@ -1426,17 +1470,19 @@ class WireSymbols:
         mapped = pa.array([None if t is None else known[t] for t in texts], pa.string())
         index = pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
         symbols = pc.take(mapped, index)
-        unknown = tuple(sorted(t for t in texts if t is not None and known[t] is None))
+        unreadable = tuple(sorted(t for t in texts if t is not None and known[t] is None))
         missing = pc.call_function("is_null", [symbols])
         unread = pc.call_function("and", [missing, pc.call_function("is_valid", [raw])])
         kept = pc.call_function("if_else", [unread, raw, pa.scalar(None, pa.string())])
-        if self.unknown is UnknownSymbols.WARN:
-            for text in unknown:
-                _unknown_spellings.warn(
+        if self.keeps:
+            spellings = _logged_spellings if self.unreadable is OnError.LOG else _ignored_spellings
+            for text in unreadable:
+                spellings.log(
                     f"{self.dataset}\0{text}",
                     "%s: Massive sent the symbol %r, a spelling the library cannot read; its "
-                    "rows have a null Symbol and keep the text in RawSymbol",
+                    "rows have a null Symbol and keep the text in RawSymbol. %s",
                     self.dataset,
                     text,
+                    LIBRARY_BUG,
                 )
-        return ReadSymbols(symbols, kept, unknown)
+        return ReadSymbols(symbols, kept, unreadable)

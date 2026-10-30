@@ -408,24 +408,29 @@ def _param(item: dict[str, object]) -> Param:
     """Build a parameter from its JSON object.
 
     Args:
-        item: `{"name", "kind", "in_path", "values", "unit"}`.
+        item: `{"name", "kind", "in_path", "values", "unit", "default"}`, where `default` is
+            a JSON scalar or `null`.
 
     Returns:
         The parameter.
 
     Raises:
-        TypeError: If `values` is not an array of strings.
+        TypeError: If `values` is not an array of strings, or `default` is not a scalar.
     """
     unit = _optional(item, "unit")
     values = _member(item, "values")
     if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
         raise TypeError(f"'values' is {values!r:.80}, not an array of strings")
+    default = _member(item, "default")
+    if default is not None and not isinstance(default, (str, int, float)):
+        raise TypeError(f"'default' is {default!r:.80}, not a JSON scalar")
     return Param(
         name=_text(item, "name"),
         kind=ParamKind(_text(item, "kind")),
         in_path=_flag(item, "in_path"),
         values=tuple(values),
         unit=None if unit is None else WireUnit(unit),
+        default=default,
     )
 
 

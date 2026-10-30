@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import itertools
 import json
 import logging
 import pkgutil
@@ -278,6 +279,23 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
     other.close()
 
 
+def test_the_same_key_warning_names_the_oldest_session_that_cannot_share(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Numbers 9 and 10: text order would put #10 first, creation order puts #9 first.
+    monkeypatch.setattr(_session, "_session_numbers", itertools.count(9))
+    config = dm.MassiveConfig(api_key="ordered-key")
+    ninth, tenth = dm.MassiveSession(config), dm.MassiveSession(config)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        apart = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5))
+    warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
+    assert [w.split(" with ")[0] for w in warnings] == [
+        "MassiveSession #11 uses the same API key as MassiveSession #9"
+    ]
+    for session in (ninth, tenth, apart):
+        session.close()
+
+
 def _open_cores() -> list[SessionCore]:
     return [core for core in (ref() for ref in _session._open_sessions) if core is not None]
 
@@ -321,7 +339,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         sort="ticker",
         order=dm.Order.DESC,
         limit=3,
-        filters={"type": "options"},
+        filters={"ticker_gte": "A"},
     )
     assert type(query) is Query
     assert query._spec is snapshots.SNAPSHOTS
@@ -329,7 +347,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
     assert query._request == Request(
         symbols=("AAPL", "C:EURUSD", "O:SPY251219C00600000", "X:BTCUSD"),
         params=(("order", dm.Order.DESC), ("sort", "ticker")),
-        filters=(("type", "options"),),
+        filters=(("ticker_gte", "A"),),
         limit=3,
     )
     with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
@@ -338,8 +356,8 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         massive_session.snapshots(["AAPL"], order=cast("dm.Order", "asc"))
     with pytest.raises(ValueError, match="limit must be positive"):
         massive_session.snapshots(["AAPL"], limit=0)
-    with pytest.raises(ValueError, match="filter 'type' takes"):
-        massive_session.snapshots(["AAPL"], filters={"type": "CS"})
+    with pytest.raises(ValueError, match=r"^snapshots takes no type filter: Massive refuses type"):
+        massive_session.snapshots(["AAPL"], filters={"type": "options"})
     with pytest.raises(ValueError, match="ticker_any_of"):
         massive_session.snapshots(["AAPL"], filters={"ticker_any_of": ["MSFT"]})
 

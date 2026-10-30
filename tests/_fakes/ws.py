@@ -20,6 +20,12 @@ Tests script the next connections before they happen (`reject_next`, `greet_next
 `wait_for` blocks on a condition until a predicate over it holds, so tests synchronize with the
 client's thread deterministically, never by sleeping. Built by the `fake_ws_server` fixture in
 `tests/conftest.py`.
+
+`TradeFeed` drives a connection like a busy market: a thread of its own sends frames of
+numbered trades as fast as the server writes them, so the soak tests can check that every
+table received each trade it should exactly once. For a run of hours, `keep_frames = False`
+stops the server recording each frame it receives, whose list would otherwise grow with every
+subscription change; each connection's `topics` stays current either way.
 """
 
 from __future__ import annotations
@@ -130,7 +136,10 @@ class Connection:
         path: The request path, such as `"/stocks"`.
         user_agent: The `User-Agent` request header.
         auth: The authentication frame, or `None` before it arrived.
-        frames: The frames received after authentication, in order.
+        frames: The frames received after authentication, in order, while the server's
+            `keep_frames` is set.
+        topics: The topics subscribed now: each subscribe frame adds its topics, and each
+            unsubscribe frame removes its topics.
         close_code: The close code once the connection has closed, else `None`.
     """
 
@@ -138,6 +147,7 @@ class Connection:
     user_agent: str | None
     auth: str | None = None
     frames: list[str] = field(default_factory=list)
+    topics: set[str] = field(default_factory=set)
     close_code: int | None = None
 
 
@@ -157,6 +167,7 @@ class FakeMassiveServer:
         # NoReply.TO_KEY, for a server that never answers the key.
         self.auth_replies: list[str | tuple[str, str] | bytes | NoReply] = []
         self.auto_ack = True
+        self.keep_frames = True
         self.combined_acks = False
         self.close_after_refusal = True
         self.refuse: dict[str, str] = {}
@@ -324,6 +335,22 @@ class FakeMassiveServer:
         reason = HTTPStatus(status).phrase
         return Response(status, reason, Headers(headers), reason.encode())
 
+    def _record(self, record: Connection, frame: str, request: dict[str, object]) -> None:
+        """Note a frame the client sent; the lock is held.
+
+        Args:
+            record: The connection's record.
+            frame: The frame as received.
+            request: The frame decoded.
+        """
+        if self.keep_frames:
+            record.frames.append(frame)
+        named = set(str(request.get("params", "")).split(",")) - {""}
+        if request.get("action") == "subscribe":
+            record.topics |= named
+        elif request.get("action") == "unsubscribe":
+            record.topics -= named
+
     async def _handle(self, ws: ServerConnection) -> None:
         """Serve one connection by Massive's protocol."""
         assert ws.request is not None  # set once the upgrade succeeded
@@ -357,7 +384,7 @@ class FakeMassiveServer:
                 request = json.loads(frame)
                 subscribe = request.get("action") == "subscribe"
                 with self._lock:
-                    record.frames.append(str(frame))
+                    self._record(record, str(frame), request)
                     ack = self.auto_ack
                     combined = self.combined_acks
                     refuse, silent = dict(self.refuse), set(self.silent)
@@ -378,3 +405,112 @@ class FakeMassiveServer:
             with self._lock:
                 record.close_code = ws.close_code
                 self._lock.notify_all()
+
+
+class TradeFeed:
+    """Sends numbered trades of a set of symbols to the server's latest connection, from a thread.
+
+    Each frame holds `rows_per_frame` stocks trades (channel `T`), taking the symbols in turn,
+    and each symbol's trades are numbered 1, 2, 3, ... in the sequence-number key `q`. So a table
+    that received every trade of a symbol once holds exactly the numbers 1 to `sent()[symbol]`,
+    and one that received a stretch of them holds a run with no gap and no repeat. `start()`
+    begins sending, as fast as the server writes each frame; `stop()` ends the thread once the
+    frame being written is done. A frame the server could not write (no connection, or a closed
+    one) is counted in `undelivered`, and its trades are not counted as sent. Thread-safe: the
+    counts are kept under a lock.
+
+    Example:
+        ::
+
+            feed = TradeFeed(server, ["AAPL", "MSFT"])
+            feed.start()
+            ...
+            feed.stop()
+            assert feed.sent()["AAPL"] > 0
+    """
+
+    def __init__(
+        self, server: FakeMassiveServer, symbols: list[str], *, rows_per_frame: int = 100
+    ) -> None:
+        """Prepare the feed; nothing is sent until `start()`.
+
+        Args:
+            server: The server whose latest connection the frames are sent on.
+            symbols: The symbols to trade, in turn.
+            rows_per_frame: Trades per frame.
+        """
+        self._server = server
+        self._symbols = list(symbols)
+        self._rows_per_frame = rows_per_frame
+        self._lock = threading.Lock()
+        self._sent = dict.fromkeys(self._symbols, 0)
+        self._undelivered = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="fake-massive-feed", daemon=True)
+
+    def start(self) -> None:
+        """Start sending."""
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop sending, and wait until the frame being written is done; idempotent.
+
+        Fails the test if the thread has not ended within ten seconds.
+        """
+        self._stop.set()
+        if self._thread.ident is not None:  # a feed never started has no thread to wait for
+            self._thread.join(10.0)
+        assert not self._thread.is_alive(), "the trade feed did not stop"
+
+    def sent(self) -> dict[str, int]:
+        """Return how many trades of each symbol have been written so far.
+
+        Returns:
+            The count by symbol, a copy.
+        """
+        with self._lock:
+            return dict(self._sent)
+
+    @property
+    def undelivered(self) -> int:
+        """Frames the server could not write: no connection, or a closed one."""
+        with self._lock:
+            return self._undelivered
+
+    def _run(self) -> None:
+        """Send frames until stopped."""
+        turn = 0
+        while not self._stop.is_set():
+            with self._lock:
+                numbered = dict(self._sent)
+            rows = []
+            counts: dict[str, int] = {}
+            for _ in range(self._rows_per_frame):
+                symbol = self._symbols[turn % len(self._symbols)]
+                turn += 1
+                counts[symbol] = counts.get(symbol, 0) + 1
+                number = numbered[symbol] + counts[symbol]
+                rows.append(
+                    {
+                        "ev": "T",
+                        "sym": symbol,
+                        "x": 4,
+                        "i": str(number),
+                        "p": 1.0,
+                        "q": number,
+                        "t": 1_700_000_000_000 + number,
+                        "s": 100,
+                        "z": 3,
+                        "ds": "100",
+                    }
+                )
+            try:
+                self._server.send(json.dumps(rows))
+            except (KeyError, ConnectionClosed, RuntimeError, TimeoutError):
+                with self._lock:
+                    self._undelivered += 1
+                self._stop.wait(0.01)  # no connection to write to yet
+                continue
+            with self._lock:
+                for symbol, count in counts.items():
+                    self._sent[symbol] += count
