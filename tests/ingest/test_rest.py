@@ -21,6 +21,7 @@ from deephaven import arrow as dh_arrow
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
@@ -609,6 +610,7 @@ def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
     patiences = _Patiences(monkeypatch)
     reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
+    assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the kept list takes no patience
     assert [bucket for bucket, _ in patiences.claims] == ["other", "other"]
     assert patiences.shared()
 
@@ -932,9 +934,10 @@ class _WatchedFuture(Future[rest.CryptoTickers]):
         self.waiting = threading.Event()
 
     @override
-    def result(self, timeout: float | None = None) -> rest.CryptoTickers:
+    def add_done_callback(self, fn: Callable[[Future[rest.CryptoTickers]], object]) -> None:
+        # A caller that joins the list asks to hear when it completes, then waits.
+        super().add_done_callback(fn)
         self.waiting.set()
-        return super().result(timeout)
 
 
 def _wait_for_pair(
@@ -975,6 +978,104 @@ def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
         assert str(result).endswith("reading Massive's crypto tickers failed: refused")
     else:
         assert result == ("DOT", "USD")
+
+
+class _PairLookup:
+    # A thread that splits X:DOTUSD, holding the update graph's shared lock as a console
+    # command holds its lock when `console` is set, and keeps what the call returned or raised.
+    def __init__(self, m: dm.MassiveSession, *, console: bool) -> None:
+        self.result: object = None
+        self._m = m
+        self._console = console
+        self._thread = threading.Thread(target=self._run)
+        self._thread.start()
+
+    def _run(self) -> None:
+        if self._console:
+            # Deephaven's lock wraps an error raised inside it, so the call keeps its own.
+            with shared_lock(self._m._core.exec_ctx.update_graph):
+                self._split()
+        else:
+            self._split()
+
+    def _split(self) -> None:
+        reader = cast("Any", self._m._core.rest_transport())._reader("crypto pairs")
+        try:
+            self.result = reader.crypto_pair("X:DOTUSD")
+        except dm.MassiveError as error:
+            self.result = error
+
+    def join(self) -> object:
+        self._thread.join(TIMEOUT)
+        assert not self._thread.is_alive()
+        return self.result
+
+
+@pytest.mark.parametrize("console", [True, False], ids=["console", "patient"])
+def test_a_read_joining_the_crypto_ticker_list_waits_with_its_own_patience(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    console: bool,
+) -> None:
+    # A manual clock: each pause of the lookup lasts until the test moves time past it.
+    clock = FakeClock(manual=True)
+    create = functools.partial(
+        _massive.RequestGovernor,
+        rate_limits.BUCKETS,
+        learn_only=rate_limits.LEARN_ONLY,
+        clock=clock,
+        labels=rate_limits.LABELS,
+    )
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    refusal = Reply(
+        {"status": "ERROR", "message": "slow down"}, status=429, headers={"Retry-After": "60"}
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
+        refusal,
+        refusal,
+        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    caplog.set_level(logging.DEBUG, LOGGER)
+    try:
+        starter = _PairLookup(m, console=False)  # ten minutes of pauses
+        clock.wait_for_deadlines([60.0])  # the lookup waits out Massive's first pause
+        joiner = _PairLookup(m, console=console)  # 90 s inside a console command, else 600 s
+        clock.wait_for_deadlines([60.0, math.inf])  # it shares the lookup, charged 60 s
+        clock.advance(60.0)  # the lookup's next request is refused: 60 s more, 120 s in all
+        if console:
+            failure = joiner.join()
+            assert isinstance(failure, dm.MassiveError)
+            assert failure.status == 429
+            assert re.search(
+                r"reading Massive's crypto tickers failed: rate limited: Massive is refusing "
+                r".*this read waits out at most 90 s of pauses and has spent 60 s",
+                str(failure),
+            )
+            clock.wait_for_deadlines([120.0])  # the lookup goes on for the read that started it
+        else:
+            clock.wait_for_deadlines([120.0, math.inf])
+        clock.advance(60.0)
+        assert starter.join() == ("DOT", "USD")
+        if not console:
+            assert joiner.join() == ("DOT", "USD")
+    finally:
+        m.close()
+    assert len(sent(fake_rest)) == 4  # one lookup: three listed pages tried, one delisted
+    patience = 90 if console else 600
+    assert (
+        f"{m._core.label}: waits for the crypto ticker list another read is making, through at "
+        f"most {patience} s of its pauses"
+    ) in caplog.messages
+    stopped = [r for r in caplog.records if "stops waiting for the crypto" in r.getMessage()]
+    assert [r.levelno for r in stopped] == ([logging.ERROR] if console else [])
 
 
 def test_a_poll_of_a_pair_massive_does_not_list_fails_rather_than_retrying(
@@ -2220,6 +2321,41 @@ def test_a_404_without_a_symbol_fails_the_call(
     # Only a per-symbol request drops on 404; a list path that is missing is an error.
     with pytest.raises(dm.MassiveError, match="HTTP 404"):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
+
+
+def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without_data(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    path = reader.rest_path(CRYPTO_LAST_PATH)
+    request = Request(symbols=("X:BTCUSD",))
+    calls = rest.plan_calls(CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair)
+
+    def pages(*_: object, **__: object) -> NoReturn:
+        # The session closes while the symbol's request is on the wire, which then ends in 404.
+        reader.state.close()
+        raise _massive.WireError("HTTP 404 from GET /v1/last/crypto/BTC/USD", status=404)
+
+    monkeypatch.setattr(reader.state.client, "pages", pages)
+    with (
+        caplog.at_level(logging.DEBUG, LOGGER),
+        ThreadPoolExecutor(1) as pool,
+        pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"),
+    ):
+        reader.read(
+            CRYPTO_LAST,
+            path,
+            calls,
+            request=request,
+            limit=None,
+            executor=pool,
+            patience=_massive.Patience(math.inf),
+        )
+    assert "has no data" not in caplog.text  # the symbol is not dropped as missing
+    assert (
+        f"crypto.last: HTTP 404 for X:BTCUSD from {CRYPTO_LAST_PATH} arrived after "
+        f"{session._core.label} closed; the call reports the close"
+    ) in caplog.messages
 
 
 def test_an_error_row_needs_only_its_symbol(

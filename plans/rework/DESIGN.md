@@ -3117,7 +3117,10 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   governor); and gives the remedies: retry after that time, stop the other program, and, for
   a subscription, declare it Basic or upgrade it (none of these for `other`). Only that read
   stops; the requests of other reads, a stream's host decision and other sessions included,
-  keep their own patience. No setting changes the patience.
+  keep their own patience. A read that joins a lookup another read started, such as the
+  session's crypto ticker list, sends no request of its own: it charges the lookup's pauses
+  to its own patience (`RequestGovernor.charge_pause`) and gives up with the same error, while
+  the lookup goes on for the read that started it. No setting changes the patience.
 - **Learning.** A 429 whose message names the per-minute maximum makes its bucket learned
   Basic, paced from then on, for the governor's life (see Sharing); any other 429 only
   pauses. `other` learns as a subscription does.
@@ -4150,7 +4153,7 @@ client.pages(rest_path, path_params, query_params, *, bucket, cancel=None,
              patience=UNLIMITED, limit=None) -> Iterator[Page]       # follows next_url
 RequestGovernor(buckets, *, learn_only=(), clock=SYSTEM_CLOCK, labels={})
     # declare, admission(bucket, *, lane, patience=UNLIMITED) -> Admission, done, release,
-    # refused, snapshot, next_change, estimate, idle, subscribe, unsubscribe
+    # refused, charge_pause, snapshot, next_change, estimate, idle, subscribe, unsubscribe
 Admission.acquire(cancel) -> Permit   # inside `with governor.admission(...)`; exit reports it
 Patience(seconds)                     # one read's budget of pause time, shared by its requests
 Cancel(*parents)                                  # a threading.Event set once, following parents
@@ -5987,7 +5990,7 @@ document already reflects them.
       waits never count: the coordinator's reading of the owner's approval to give up after
       about 10 minutes paused.
     - A read that joins a lookup another read started bounds its own wait with its own
-      patience and keeps sharing the lookup (once console commands can read, issue #206).
+      patience and keeps sharing the lookup (issue #206).
     ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
 
 ## 23. Open verification items

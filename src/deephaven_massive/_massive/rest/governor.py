@@ -62,7 +62,9 @@ read waits out pauses, shared by all its requests. Only pauses count: a read pac
 a minute for an hour spends none of its patience on its slot waits. A request that would wait
 for a pause its read's patience cannot cover fails at once with status 429, saying when the
 bucket's next request goes; its read stops, while the requests of other reads, other sessions
-included, keep their own patience. Waiting for a slot never gives up by itself: a long history
+included, keep their own patience. A read that waits on a lookup another read is making sends
+no request, so it charges the bucket's pauses to its own patience itself (`charge_pause`) and
+gives up the same way. Waiting for a slot never gives up by itself: a long history
 at 5 requests per minute takes as long as it takes, and a `Cancel` token ends the wait.
 
 A request that may start at once, with nothing queued before it, is granted without queuing:
@@ -759,6 +761,37 @@ class RequestGovernor:
             raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
         return Admission(self, bucket, lane=lane, patience=patience)
 
+    def charge_pause(self, bucket: str, patience: Patience) -> WireError | None:
+        """Charge a bucket's current pause to a read that waits on another read's requests.
+
+        A read that shares a lookup another read started sends no request of its own, so no
+        admission ever charges its patience. It calls this instead, when it starts waiting and
+        after every change of the governor (`subscribe`), and stops waiting once the bucket's
+        pause outlasts what its own patience still covers, as a request of its own would
+        (`Admission.acquire`). The read that started the lookup keeps its own patience.
+
+        Args:
+            bucket: The bucket the shared lookup's requests are charged to.
+            patience: The waiting read's patience; the part of the pause it has not already
+                counted is charged to it.
+
+        Returns:
+            None when the bucket is not paused or the patience covers its pause; otherwise a
+            `WireError` with status 429 and the message of a request that gives up (when the
+            bucket's next request goes, the patience and what it has spent, and the remedies),
+            and nothing is charged.
+
+        Raises:
+            ValueError: If `bucket` is not a bucket.
+        """
+        state = self._buckets.get(bucket)
+        if state is None:
+            raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
+        with self._lock:
+            now = self._clock.monotonic()
+            state.settle(now)
+            return self._beyond_patience(state, patience, now)
+
     def admit(self, admission: Admission, cancel: Cancel) -> tuple[Permit | None, WireError | None]:
         """Grant an attempt at once or after waiting, recording the permit on its claim.
 
@@ -1120,9 +1153,25 @@ class RequestGovernor:
             return WireError(f"{bucket}: the wait for a request slot was cancelled")
         state = self._buckets[bucket]
         state.settle(now)
+        return self._beyond_patience(state, admission.patience, now)
+
+    def _beyond_patience(self, state: _Bucket, patience: Patience, now: float) -> WireError | None:
+        """Charge a bucket's pause to a read, or return the error of a read that gives up.
+
+        Called with the lock held, after `settle`.
+
+        Args:
+            state: The bucket.
+            patience: The read's patience.
+            now: The monotonic time.
+
+        Returns:
+            None when the patience covers the pause (the part not yet counted is charged), or
+            a `WireError` with status 429 when it does not (nothing is charged).
+        """
         # A pause already over adds nothing to charge, so an unpaused bucket never fails.
-        if not admission.patience.charge(now, state.pause_until):
-            return WireError(self._give_up_text(state, admission.patience, now), status=429)
+        if not patience.charge(now, state.pause_until):
+            return WireError(self._give_up_text(state, patience, now), status=429)
         return None
 
     def _give_up_text(self, state: _Bucket, patience: Patience, now: float) -> str:

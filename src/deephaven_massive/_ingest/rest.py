@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 import re
 import threading
 import time
@@ -1150,7 +1151,9 @@ class RestReader:
         each ticker's `base_currency_symbol` and `currency_symbol`, whose join must be the
         ticker. Its requests count against Massive's limit on reference data, so on a
         Basic subscription they wait their turn. Blocks the calling thread for that read, or
-        while another thread makes it; holds no lock meanwhile. A failed read is not kept, so
+        while another thread makes it, sharing that read rather than starting a second one; a
+        caller that shares it still waits out no more of its pauses than its own patience
+        covers (`_joined`). Holds no lock meanwhile. A failed read is not kept, so
         the next call tries again. A read that succeeds is kept for the session as it is, even
         when it lists no pair: every pair is then refused.
 
@@ -1196,7 +1199,8 @@ class RestReader:
         """
         future, created = self.state.crypto_future()
         if not created:
-            return future.result()
+            # A list already read needs no wait, and so no patience (a Java call).
+            return future.result() if future.done() else self._joined(future)
         tickers: dict[str, tuple[str, str] | str] = {}
         try:
             # The list is reference data, which Massive counts in a bucket of its own. Its
@@ -1232,6 +1236,59 @@ class RestReader:
             raise
         future.set_result(tickers)
         return tickers
+
+    def _joined(self, future: Future[CryptoTickers]) -> CryptoTickers:
+        """Wait for the crypto ticker list another read is making, within this read's patience.
+
+        The lookup is shared, but its pauses are not: this read charges each pause of the
+        lookup's bucket (`OTHER`) to its own patience (`RequestGovernor.charge_pause`), when
+        it starts waiting and after every change of the governor, and stops waiting once a
+        pause outlasts what its patience still covers. So a console command, which waits out
+        90 s of pauses, never waits out the ten minutes of the read it joined. The lookup goes
+        on for the read that started it and for every other read still waiting on it. Blocks
+        the calling thread; holds no lock meanwhile. Logs the wait at DEBUG, and giving up at
+        ERROR.
+
+        Args:
+            future: The list's future, which the read that claimed it completes.
+
+        Returns:
+            The list.
+
+        Once a pause of the lookup outlasts this read's patience, it raises the public error
+        of a read that gives up (`_public`): `MassiveError("rate limited: ...")` with status
+        429, or `"... is closed"` if the session closed meanwhile. A failed lookup raises the
+        error its future holds, as `_crypto_tickers` describes.
+        """
+        patience = self.patience()
+        logger.debug(
+            "%s: waits for the crypto ticker list another read is making, through at most "
+            "%.0f s of its pauses",
+            self.state.label,
+            patience.seconds,
+        )
+        governor = self.state.client.governor
+        changed = threading.Event()
+        future.add_done_callback(lambda _: changed.set())
+        governor.subscribe(changed.set)
+        try:
+            while True:
+                changed.clear()  # before looking, so no change is missed
+                if future.done():
+                    return future.result()
+                failure = governor.charge_pause(OTHER, patience)
+                if failure is not None:
+                    public = self._public(failure)
+                    logger.error(
+                        "%s: stops waiting for the crypto ticker list, which goes on for the "
+                        "read making it: %s",
+                        self.state.label,
+                        public,
+                    )
+                    raise public from failure
+                governor.clock.wait(changed, math.inf)
+        finally:
+            governor.unsubscribe(changed.set)
 
     def read(
         self,
@@ -1400,10 +1457,12 @@ class RestReader:
                 data was cut short: the message names the dataset, the symbol, the path, and
                 how many pages had arrived.
 
-        A failed request otherwise raises the public error of its `WireError` (`_public`); a
-        row that breaks the schema the `RowDataError` of `_Converter.convert`; a page on
-        another adjustment basis the `MassiveError` of `_check_adjusted`; and a bar stamped
-        at a time Massive is not known to use the `MassiveError` of `_stamped`.
+        A failed request otherwise raises the public error of its `WireError` (`_public`), and
+        once the session is closed every failed request does, a 404 included: the call raises
+        `MassiveError("... is closed")` rather than dropping its symbol. A row that breaks the
+        schema raises the `RowDataError` of `_Converter.convert`; a page on another adjustment
+        basis the `MassiveError` of `_check_adjusted`; and a bar stamped at a time Massive is
+        not known to use the `MassiveError` of `_stamped`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
@@ -1445,6 +1504,18 @@ class RestReader:
                 kept.extend(_whole(rows, window) for rows in filled)
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
+                # A 404 that arrives after the session closed is no answer about the symbol,
+                # so the call reports the close rather than dropping a symbol with no data.
+                if self.state.closed:
+                    logger.debug(
+                        "%s: HTTP 404 for %s from %s arrived after %s closed; the call "
+                        "reports the close",
+                        spec.name,
+                        call.symbol,
+                        template,
+                        self.state.label,
+                    )
+                    raise self._public(error) from error
                 if requests:
                     raise MassiveError(
                         f"{spec.name}: {call.symbol}'s data was cut short: Massive answered "
