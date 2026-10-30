@@ -71,6 +71,8 @@ class Script:
         self.outcomes: queue.SimpleQueue[object] = queue.SimpleQueue()
         self.symbols: list[NormalizedSymbols | None] = []
         self.drift: DriftReport | None = None
+        self.took = 0.0  # how far each cycle's read moves the clock
+        self.clock: FakeClock | None = None
 
     def rows(self, *pairs: tuple[str, float]) -> None:
         data = [{"Symbol": symbol, "CashAmount": amount} for symbol, amount in pairs]
@@ -94,6 +96,8 @@ class Script:
         if self.drift is not None:
             record(self.drift)
         outcome = self.outcomes.get(timeout=TIMEOUT)
+        if self.clock is not None:
+            self.clock.advance(self.took)
         if isinstance(outcome, BaseException):
             raise outcome
         return cast("pa.Table", outcome), 3
@@ -386,7 +390,51 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
     assert caplog.messages == [
         "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in 0.000 s",
         "stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 0 published in 0.000 s",
-        "stocks.dividends poll() stream 1: HTTP 503 from GET /stocks/v1/dividends",
+        (
+            "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as scheduled: "
+            "HTTP 503 from GET /stocks/v1/dividends"
+        ),
+    ]
+
+
+def test_late_cycles_warn_once_and_on_time_cycles_say_so(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.clock = clock
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    clock.wait_for_sleepers(1)
+    # Two cycles whose reads take 90 s, longer than the 60 s interval: one WARNING for the run.
+    script.took = 90.0
+    with caplog.at_level(logging.INFO, LOGGER):
+        script.rows(("AAPL", 2.0))
+        script.rows(("AAPL", 3.0))
+        clock.advance(60)
+        until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0)])
+        script.took = 0.0
+        script.rows(("AAPL", 4.0))  # in time again: INFO
+        until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 4.0)])
+        clock.wait_for_sleepers(1)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "stocks.dividends poll() stream 1: a cycle took 90 s, longer than the 60 s "
+                "interval, so the table updates late; m.rate_limits() shows whether its requests "
+                "are paced or paused by Massive's rate limit"
+            ),
+        ),
+        (
+            logging.INFO,
+            "stocks.dividends poll() stream 1: cycles end within the 60 s interval again",
+        ),
     ]
 
 
@@ -497,21 +545,45 @@ def test_other_errors_keep_the_rows_and_the_next_cycle_clears_them(
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
     script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
-    with caplog.at_level(logging.ERROR, LOGGER):
+    with caplog.at_level(logging.INFO, LOGGER):
         next_cycle(clock)
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == ("RUNNING", "HTTP 503 from GET /stocks/v1/dividends")
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0)]
-    assert "HTTP 503" in caplog.text
-    script.fail(RuntimeError("a defect"))
-    with caplog.at_level(logging.ERROR, LOGGER):
+    # An expected failure: one WARNING for the run.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as "
+                "scheduled: HTTP 503 from GET /stocks/v1/dividends"
+            ),
+        )
+    ]
+    caplog.clear()
+    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    with caplog.at_level(logging.INFO, LOGGER):
         next_cycle(clock)
-    assert "the cycle failed" in caplog.text
+    assert caplog.records == []  # the same run: DEBUG only
+    script.fail(RuntimeError("a defect"))
+    with caplog.at_level(logging.INFO, LOGGER):
+        next_cycle(clock)
+    # A defect is never hidden behind the outage: it starts its own run, at ERROR.
+    [defect] = caplog.records
+    assert defect.levelno == logging.ERROR
+    assert defect.getMessage().startswith(
+        "stocks.dividends poll() stream 1: the cycle failed. This is a bug in deephaven-massive."
+    )
     assert stream_rows()[0]["Error"] == "a defect"
+    caplog.clear()
     script.rows(("AAPL", 2.0))
-    next_cycle(clock)
-    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 2.0)])
+    with caplog.at_level(logging.INFO, LOGGER):
+        next_cycle(clock)
+        until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 2.0)])
     assert stream_rows()[0]["Error"] is None
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, "stocks.dividends poll() stream 1: a cycle succeeded again")
+    ]
 
 
 def test_a_reactive_symbol_table_is_read_each_cycle(

@@ -128,10 +128,10 @@ src = ["src", "."]
 namespace-packages = ["tests", "scripts"]
 
 [tool.ruff.lint]
-# Besides ALL: the preview rules selected by name. DOC201, DOC501, and DOC502 check that
-# docstring Returns and Raises sections match the code; PLR0904, PLR0914, and PLR0916 are the
+# Besides ALL: the preview rules selected by name. DOC201 and DOC501 check that docstring
+# Returns and Raises sections cover the code; PLR0904, PLR0914, and PLR0916 are the
 # pylint limits on public methods, local variables, and boolean expressions.
-select = ["ALL", "DOC201", "DOC501", "DOC502", "PLR0904", "PLR0914", "PLR0916"]
+select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916"]
 # Preview is on so the preview rules above can be selected by name; explicit-preview-rules keeps
 # every other preview rule off. Preview also switches some stable rules (F401, UP007, the S3xx
 # family, ...) to their preview behavior.
@@ -145,6 +145,9 @@ ignore = [
     "EM102",  # raising with an f-string message is clearer than binding it to a variable first
     "PLR0913",  # keyword-only parameters are the API style; PLR0917 caps positional ones at 3
     "CPY001",  # the license is declared once in LICENSE and pyproject.toml, not per file
+    # Many functions raise through helpers, and tests/test_errors.py checks the public API's
+    # Raises sections in both directions; DOC501 still catches an undocumented raise.
+    "DOC502",
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -11,6 +11,7 @@ flush interval is an hour unless a test needs the flush thread itself.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import gc
 import importlib
 import json
@@ -21,6 +22,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
@@ -32,6 +34,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import futures_calendar, hosts, poll, ws
 from deephaven_massive._massive import Cancel, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, StreamUpdate
@@ -282,7 +285,10 @@ def test_a_refused_topic_fails_only_its_streams(
     ws_session.flush()
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
-    assert "socket.test/stocks refused Q.AAPL: not authorized to access Q.AAPL" in rows[1]["Error"]
+    assert (
+        "socket.test/stocks refused the subscription to Q.AAPL; Massive said: not authorized "
+        "to access Q.AAPL"
+    ) in rows[1]["Error"]
     assert "MassiveConfig.ws_hosts[AssetClass.STOCKS]" in rows[1]["Error"]
     ws_session.send(trade("AAPL"))
     ws_session.flush()
@@ -374,16 +380,22 @@ def test_a_timestamp_out_of_bounds_fails_only_its_streams(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
     rows_when: RowsWhen,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     aapl = ws_session.query(TRADES, ["AAPL"]).append_only()
     msft = ws_session.query(TRADES, ["MSFT"]).blink()
     ws_session.subscribed("T.AAPL", "T.MSFT")
-    ws_session.send(trade("MSFT", t=5), trade("AAPL"))
-    ws_session.flush()
-    rows_when(aapl, lambda rows: len(rows) == 1)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        ws_session.send(trade("MSFT", t=5), trade("AAPL"))
+        ws_session.flush()
+        rows_when(aapl, lambda rows: len(rows) == 1)
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
     assert "timestamp unit mismatch for test.trades.Timestamp: 5 ms" in rows[1]["Error"]
+    # A value the library cannot convert is its defect: an ERROR with how to report it.
+    [failed] = [r for r in caplog.records if "timestamp unit mismatch" in r.getMessage()]
+    assert failed.levelno == logging.ERROR
+    assert failed.getMessage().endswith(LIBRARY_BUG)
     del msft
 
 
@@ -451,17 +463,28 @@ def test_close_returns_promptly_during_a_backoff_wait(
 
 
 def test_a_rejected_key_fails_every_stream(
+    *,
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     q = ws_session.query(TRADES, ["AAPL"])
     result = q.blink()
     ws_session.subscribed("T.AAPL")  # attached: the failure below cannot race the open
+    other = ws_session.query(TRADES, ["MSFT"]).blink()  # a second stream the failure fails
+    ws_session.subscribed("T.MSFT")
     failed = ws_session.connection()
     fake_ws_server.auth_replies.append("auth_failed")  # for the reconnect
-    fake_ws_server.close(1011)
-    ws_session.wait(lambda s: WsState.FAILED in s.states)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        fake_ws_server.close(1011)
+        ws_session.wait(lambda s: WsState.FAILED in s.states)
+        assert failed.flusher.join(TIMEOUT)
+    # An expected failure, not a defect: one WARNING for the cause, however many streams it
+    # fails, and no ERROR.
+    rejected = [r for r in caplog.records if "rejected the API key" in r.getMessage()]
+    assert [r.levelno for r in rejected] == [logging.WARNING]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     with ws_session.connections.group.lock:
         assert failed.retired
         assert ws_session.connections.group.connections == {}  # retired: the next stream opens anew
@@ -469,11 +492,10 @@ def test_a_rejected_key_fails_every_stream(
     [row] = connections_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert "rejected the API key" in row["LastError"]
-    [stream] = streams_of(ws_session, dh_to_pylist)
-    assert stream["State"] == "FAILED"
+    assert [s["State"] for s in streams_of(ws_session, dh_to_pylist)] == ["FAILED", "FAILED"]
     again = q.blink()  # a fresh stream, on a fresh connection
     assert len(ws_session.urls) == 2
-    del result, again
+    del result, other, again
 
 
 def test_a_fatal_handshake_names_the_status_and_host(
@@ -2913,9 +2935,14 @@ def test_an_unexpected_lookup_failure_fails_the_stream(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["Error"] == (
-        "looking up the crypto pairs ['X:DOTUSD'] failed: RuntimeError('the lookup broke')"
+        "looking up the crypto pairs ['X:DOTUSD'] failed: RuntimeError('the lookup broke'). "
+        + LIBRARY_BUG
     )
-    assert "looking up crypto pairs failed" in caplog.text
+    # A defect of the library: one ERROR, with its trace, for the lookup and the stream it fails.
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
+        (f"{ws_session.session._core.label}: {row['Error']}", True)
+    ]
 
 
 def test_a_watchlist_change_racing_close_is_dropped(ws_session: WsSession) -> None:
@@ -3179,6 +3206,130 @@ def test_the_connection_logs_drift_rejects_and_a_summary(
         ws_session.on_loop(connection, connection._summarize)
     assert "last 60 s" not in caplog.text
     del result, other
+
+
+def test_a_lost_connection_warns_once_per_outage_and_its_reconnect_is_info(
+    ws_session: WsSession, fake_ws_server: FakeMassiveServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        fake_ws_server.close(1011)
+        ws_session.wait(lambda s: s.opens == 2)
+        ws_session.subscribed("T.AAPL")
+    ours = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == ws.__name__]
+    down = [entry for entry in ours if "the connection is down" in entry[1]]
+    assert [level for level, _ in down] == [logging.WARNING]
+    assert re.fullmatch(
+        rf"{re.escape(_URL)}: the connection is down \(reconnecting\); its 1 live tables get no "
+        r"data until it reconnects, next attempt in \d+ s; m\.connections\(\) shows its state",
+        down[0][1],
+    )
+    back = [entry for entry in ours if "reconnected after" in entry[1]]
+    assert [level for level, _ in back] == [logging.INFO]
+    ws_session.session.release(result)
+
+
+def test_an_outage_names_a_full_account_and_logs_once(
+    ws_session: WsSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        for wait in (30.0, 60.0):  # two attempts of one outage
+            ws_session.on_loop(
+                connection,
+                functools.partial(connection._on_state, WsState.WAITING_SLOT, time.time() + wait),
+            )
+    down = [r for r in caplog.records if "the connection is down" in r.getMessage()]
+    assert [r.levelno for r in down] == [logging.WARNING]
+    assert "is down (the account has no free connection, max_connections)" in down[0].getMessage()
+    ws_session.session.release(result)
+
+
+def test_an_outage_without_live_tables_logs_nothing(
+    ws_session: WsSession, fake_ws_server: FakeMassiveServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    ws_session.session.release(result)
+    ws_session.unsubscribed("T.AAPL")
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        fake_ws_server.close(1011)
+        ws_session.wait(lambda s: s.opens == 2)
+    messages = [r.getMessage() for r in caplog.records if r.name == ws.__name__]
+    assert not [m for m in messages if "is down" in m or "reconnected after" in m]
+
+
+def _quiet_connection(acknowledged: frozenset[str], last: int) -> ws.Connection:
+    # The state `Connection._check_frames` reads, without a socket: a live connection's status
+    # frames would move its last-frame time while the test owns it.
+    state = SimpleNamespace(
+        url=_URL,
+        asset_class=AssetClass.STOCKS,
+        _state=ConnectionState.CONNECTED,
+        subscriptions=SimpleNamespace(acknowledged=acknowledged),
+        _episodes=ws._Episodes(last_frame_at=last),
+        _last_message_at=None,
+    )
+    state._check_frames = functools.partial(
+        ws.Connection._check_frames, cast("ws.Connection", state)
+    )
+    return cast("ws.Connection", state)
+
+
+def test_a_silent_connection_warns_once_while_its_market_trades(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    trading = [False]
+    monkeypatch.setattr(ws, "in_trading_hours", lambda _asset_class, _moment: trading[0])
+    last = 1_800_000_000 * 10**9
+    connection = _quiet_connection(frozenset({"T.AAPL"}), last)
+    quiet = last + int(ws.NO_FRAMES_WARNING * 1e9)
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        connection._check_frames(quiet)  # silent long enough, but the market is closed
+        trading[0] = True
+        connection._check_frames(quiet - 10**9)  # not silent long enough yet
+        connection._check_frames(quiet)
+        connection._check_frames(quiet + 60 * 10**9)  # the same episode: logged once
+        connection._episodes.last_frame_at = quiet + 61 * 10**9  # a frame arrives
+        connection._check_frames(quiet + 62 * 10**9)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == ws.__name__] == [
+        (
+            logging.WARNING,
+            (
+                f"{_URL}: no frame for 300 s during stocks trading hours, though 1 topics are "
+                "acknowledged, so its live tables may be stale; a market holiday or symbols "
+                "that are not trading explain it, and m.connections() shows the connection's "
+                "state"
+            ),
+        ),
+        (logging.INFO, f"{_URL}: frames arrive again"),
+    ]
+
+
+def test_a_connection_with_nothing_acknowledged_is_never_silent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(ws, "in_trading_hours", lambda _asset_class, _moment: True)
+    connection = _quiet_connection(frozenset(), 0)
+    with caplog.at_level(logging.INFO, logger=ws.__name__):
+        connection._check_frames(int(2 * ws.NO_FRAMES_WARNING * 1e9))
+    assert not caplog.records
+
+
+def test_the_summary_checks_for_silence(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    checked: list[int] = []
+    monkeypatch.setattr(connection, "_check_frames", checked.append)
+    ws_session.on_loop(connection, connection._summarize)
+    assert len(checked) == 1
+    ws_session.session.release(result)
 
 
 def test_symbol_changes_and_shutdowns_are_logged(

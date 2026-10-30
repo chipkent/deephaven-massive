@@ -33,6 +33,7 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
+from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
@@ -259,6 +260,7 @@ class _Forex(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "forex"
 
+    @raises_through(build_query)
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.
 
@@ -282,9 +284,11 @@ class _Forex(Namespace):
         Returns:
             A query; nothing is requested or subscribed until one of its verbs is called.
 
-        The call raises `TypeError` if `symbols` is not a `str`, a sequence of `str`, a table,
-        or `dm.ALL`, and `ValueError` if a pair is not two three-letter currency codes, the
-        sequence is empty (`"no symbols"`), or a table has no `Symbol` column.
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If a pair is not two three-letter currency codes, the sequence is empty
+                (`"no symbols"`), or a table has no `Symbol` column. Also for `symbols` of None,
+                with a message that names the forms it takes.
 
         Example:
             ::
@@ -296,6 +300,7 @@ class _Forex(Namespace):
         query = build_query(self._core, QUOTES, symbols=symbols)
         return cast("StreamHistoryQuery", query)
 
+    @raises_through(build_query)
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest best bid and ask of each currency pair.
 
@@ -323,9 +328,11 @@ class _Forex(Namespace):
         Returns:
             A query; nothing is requested until one of its verbs is called.
 
-        The call raises `TypeError` if `symbols` is not a `str`, a sequence of `str`, or a
-        table, and `ValueError` if `symbols` is `dm.ALL`, a pair is not two three-letter
-        currency codes, the sequence is empty, or a table has no `Symbol` column.
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
+            ValueError: If `symbols` is `dm.ALL`, a pair is not two three-letter currency codes, the
+                sequence is empty, or a table has no `Symbol` column. Also for `symbols` of None,
+                with a message that names the forms it takes.
 
         Example:
             ::
@@ -336,7 +343,7 @@ class _Forex(Namespace):
             self._core,
             LAST_QUOTE,
             symbols=symbols,
-            all_alternative="m.forex.snapshots(dm.ALL).fetch()",
+            all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
         )
         return cast("Query", query)
 
@@ -356,6 +363,7 @@ class _Forex(Namespace):
         *,
         multiplier: int = 1,
     ) -> HistoryQuery: ...
+    @raises_through(build_query)
     def bars(
         self,
         symbols: Symbols,
@@ -414,11 +422,13 @@ class _Forex(Namespace):
             A `StreamHistoryQuery` for one-second or one-minute bars and a `HistoryQuery`
             otherwise. Nothing is requested or subscribed until a verb is called.
 
-        The call raises `TypeError` if `symbols` is not a pair, a sequence of pairs, a table,
-        or `dm.ALL`, `timespan` is not a `dm.Timespan`, or `multiplier` is not an `int`; and
-        `ValueError` if a pair is not two three-letter
-        currency codes, the sequence is empty, a table has no `Symbol` column, `multiplier`
-        is not positive, or `timespan` is `dm.Timespan.SESSION`.
+        Raises:
+            TypeError: If `symbols` is not a pair, a sequence of pairs, a table, or `dm.ALL`,
+                `timespan` is not a `dm.Timespan`, or `multiplier` is not an `int`.
+            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, a
+                table has no `Symbol` column, `multiplier` is not positive, or `timespan` is
+                `dm.Timespan.SESSION`. Also for `symbols` of None, with a message that names the
+                forms it takes.
 
         Example:
             ::
@@ -437,6 +447,7 @@ class _Forex(Namespace):
         )
         return cast("HistoryQuery", query)
 
+    @raises_through(build_query)
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous UTC day's open, high, low, close, and volume of each currency pair.
 
@@ -467,9 +478,11 @@ class _Forex(Namespace):
         Returns:
             A query; nothing is requested until one of its verbs is called.
 
-        The call raises `TypeError` if `symbols` is not a `str`, a sequence of `str`, or a
-        table, and `ValueError` if `symbols` is `dm.ALL`, a pair is not two three-letter
-        currency codes, the sequence is empty, or a table has no `Symbol` column.
+        Raises:
+            TypeError: If `symbols` is not a `str`, a sequence of `str`, or a table.
+            ValueError: If `symbols` is `dm.ALL`, a pair is not two three-letter currency codes, the
+                sequence is empty, or a table has no `Symbol` column. Also for `symbols` of None,
+                with a message that names the forms it takes.
 
         Example:
             ::
@@ -480,11 +493,15 @@ class _Forex(Namespace):
             self._core,
             PREVIOUS_DAY_BAR,
             symbols=symbols,
-            all_alternative="m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            all_alternative=(
+                "use m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
             timespan=Timespan.DAY,
         )
         return cast("Query", query)
 
+    @raises_through(build_query)
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value of each currency pair, streamed as it updates.
 
@@ -505,9 +522,11 @@ class _Forex(Namespace):
         Returns:
             A query; nothing is subscribed until one of its verbs is called.
 
-        The call raises `TypeError` if `symbols` is not a pair, a sequence of pairs, a table,
-        or `dm.ALL`, and `ValueError` if a pair is not two three-letter currency codes, the
-        sequence is empty, or a table has no `Symbol` column.
+        Raises:
+            TypeError: If `symbols` is not a pair, a sequence of pairs, a table, or `dm.ALL`.
+            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, or
+                a table has no `Symbol` column. Also for `symbols` of None, with a message that
+                names the forms it takes.
 
         Example:
             ::
@@ -516,6 +535,7 @@ class _Forex(Namespace):
         """
         return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
 
+    @raises_through(build_query)
     def snapshots(self, symbols: Symbols) -> Query:
         """The current state of currency pairs: today's bar, the last minute, and the last quote.
 
@@ -538,9 +558,11 @@ class _Forex(Namespace):
         Returns:
             A query; nothing is requested until `fetch()` or `poll()` is called.
 
-        The call raises `TypeError` if `symbols` is not a pair, a sequence of pairs, a table,
-        or `dm.ALL`, and `ValueError` if a pair is not two three-letter currency codes, the
-        sequence is empty, or a table has no `Symbol` column.
+        Raises:
+            TypeError: If `symbols` is not a pair, a sequence of pairs, a table, or `dm.ALL`.
+            ValueError: If a pair is not two three-letter currency codes, the sequence is empty, or
+                a table has no `Symbol` column. Also for `symbols` of None, with a message that
+                names the forms it takes.
 
         Example:
             ::
@@ -550,6 +572,7 @@ class _Forex(Namespace):
         """
         return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))
 
+    @raises_through(_require_enum)
     def movers(self, direction: Direction) -> Query:
         """The twenty currency pairs that gained or lost the most since the previous UTC close.
 
@@ -572,8 +595,9 @@ class _Forex(Namespace):
         Returns:
             A query; nothing is requested until `fetch()` or `poll()` is called.
 
-        The call raises `TypeError` if `direction` is not a `dm.Direction` (convert text with
-        `dm.Direction("gainers")`).
+        Raises:
+            TypeError: If `direction` is not a `dm.Direction` (convert text with
+                `dm.Direction("gainers")`).
 
         Example:
             ::
@@ -583,6 +607,7 @@ class _Forex(Namespace):
         side = _require_enum(direction, Direction, "direction")
         return cast("Query", build_query(self._core, MOVERS, params={"direction": side}))
 
+    @raises_through(build_query, _currency)
     def conversion(
         self, from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2
     ) -> Query:

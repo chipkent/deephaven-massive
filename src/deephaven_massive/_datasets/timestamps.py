@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import ErrorCause, MassiveError
 from deephaven_massive._log_limits import log_once
 from deephaven_massive._massive import Transport
 
@@ -96,8 +96,12 @@ class UnitMismatchError(MassiveError):
 
     A `MassiveError`, so a caller that does nothing special reports it as one; a transport
     catches it by this type to add where the value came from (the flat-file transport names
-    the file) and raises a plain `MassiveError` with the same text.
+    the file) and raises a plain `MassiveError` with the same text and cause. A value from
+    Massive the library cannot convert is the library's to fix, so its cause is
+    `ErrorCause.LIBRARY_DEFECT`.
     """
+
+    default_cause = ErrorCause.LIBRARY_DEFECT
 
 
 class TimeUnit(StrEnum):

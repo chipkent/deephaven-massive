@@ -199,12 +199,13 @@ class RestTransport(Protocol):
             A static table with the dataset's columns, in its schema's order.
 
         Raises:
-            ValueError: The request sets a parameter a path of the call does not take; raised
-                before any request.
-            AuthenticationError: Massive rejected the API key (HTTP 401).
-            EntitlementError: The plan does not include the dataset (HTTP 403).
-            RowDataError: A row breaks the dataset's schema.
-            MassiveError: Any other failure, such as a rate limit or a closed session.
+            ValueError: Before any request, if a path the call reads does not take a parameter
+                or filter the request sets.
+            AuthenticationError: If Massive rejects the API key (HTTP 401).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
+                schema, a symbol's later page answers HTTP 404, or a request fails in any other
+                way.
         """
         ...
 
@@ -247,8 +248,9 @@ class RestTransport(Protocol):
             after it exists fails the table rather than raising.
 
         Raises:
-            ValueError: The request sets a parameter no path of the call takes; raised
-                before the table exists.
+            ValueError: Before the table exists, if a path the call can read does not take a
+                parameter or filter the request sets. A cycle's failure later fails the table
+                instead of raising.
         """
         ...
 
@@ -275,13 +277,12 @@ class RestTransport(Protocol):
             A static table with the dataset's columns, holding the rows inside `window`.
 
         Raises:
-            ValueError: The request sets a parameter the history path does not take; raised
-                before any request.
-            AuthenticationError: Massive rejected the API key (HTTP 401).
-            EntitlementError: The plan does not include the dataset (HTTP 403).
-            RowDataError: A row breaks the dataset's schema.
-            MassiveError: Any other failure, including a page or bar the library cannot
-                place in the window.
+            AuthenticationError: If Massive rejects the API key (HTTP 401).
+            EntitlementError: If the plan does not include the endpoint (HTTP 403).
+            MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
+                schema, a page of adjusted bars echoes another basis than the request, a
+                symbol's later page answers HTTP 404, a bar of a day or longer is stamped at a
+                time Massive is not known to use, or a request fails in any other way.
         """
         ...
 
@@ -331,11 +332,14 @@ class StreamTransport(Protocol):
             The stream's handle, carrying `stream_id`, its blink table, and its scope.
 
         Raises:
-            ValueError: Static options symbols would put more explicit topics on the options
-                connection than Massive allows.
-            EntitlementError: The plan has no WebSocket access for the asset class.
-            MassiveError: The session is closed, host resolution failed, or a crypto ticker
-                cannot be split into its base and quote.
+            ValueError: If explicit options contracts would put more than 1,000 topics on the
+                session's `/options` connection.
+            AuthenticationError: If Massive rejects the API key on the request that decides the
+                WebSocket host.
+            EntitlementError: If the plan has no WebSocket access for the class (the request
+                that decides the host is refused).
+            MassiveError: If the session is closed, the host cannot be decided, or Massive's
+                crypto ticker list cannot be read or does not hold a crypto pair.
         """
         ...
 
@@ -377,10 +381,13 @@ class FlatFileTransport(Protocol):
             range without rows or files gives an empty table with every column.
 
         Raises:
-            AuthenticationError: S3 rejected the S3 credentials.
-            EntitlementError: S3 answered HTTP 403 for a file.
-            MassiveError: A file the window needs is missing or not yet published, S3 or its
-                bucket cannot be reached, a read failed, or the session closed meanwhile.
+            AuthenticationError: If S3 rejects the flat-file credentials.
+            EntitlementError: If the plan does not include the files (S3 answers 403); for
+                futures files the message names the venue and the `venue=` parameter.
+            MassiveError: If the bucket or endpoint is wrong, the last requested day's file is
+                missing within a day of its publication time, a bar of a day or longer is
+                stamped at a time Massive is not known to use, or a read fails in any other
+                way.
         """
         ...
 

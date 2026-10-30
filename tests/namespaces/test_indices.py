@@ -384,7 +384,8 @@ def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     with pytest.raises(
         ValueError,
         match=r"^indices\.previous_day_bar does not accept dm\.ALL; use "
-        r"m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)$",
+        r"m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\), "
+        r"every ticker's bar of that day$",
     ):
         m.indices.previous_day_bar(dm.ALL)
 
@@ -899,7 +900,9 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
     wait_for(lambda: error() is not None)
     message = str(error())
-    assert "socket.test/indices refused V.I:SPX: not authorized" in message
+    assert (
+        "socket.test/indices refused the subscription to V.I:SPX; Massive said: not authorized"
+    ) in message
     assert "MassiveConfig.ws_hosts[AssetClass.INDICES]" in message
     assert "business.massive.com" in message
     assert [type(error) for error in failures] == [dm.EntitlementError]

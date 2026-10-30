@@ -104,7 +104,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Self, cast
 
-from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK, rate_limit_wait
 
 if TYPE_CHECKING:
@@ -951,7 +951,7 @@ class RequestGovernor:
         to an attempt that started after the latest pause counts toward the run and sets a
         new pause; one to an attempt that started before it only lengthens the pause to its
         own `Retry-After`. A `Retry-After` of zero counts as none, and one longer than
-        `MAX_RETRY_AFTER` pauses that long, logged at WARNING with the value asked. A run that
+        `MAX_RETRY_AFTER` pauses that long, logged at INFO with the value asked. A run that
         time has ended (see the module) ends first, so this refusal starts a new one. The
         caller then asks for a new permit, which waits out the pause, or fails if the pause
         ends past its own read's patience. Does nothing for a permit already reported.
@@ -970,7 +970,9 @@ class RequestGovernor:
         basic = is_basic_refusal(message)
         asked = retry_after if retry_after is not None and retry_after > 0 else None
         if asked is not None and asked > MAX_RETRY_AFTER:
-            logger.warning(
+            # A decision, not something to act on: the paused-poll WARNING and the read's own
+            # error tell the user when a pause matters.
+            logger.info(
                 "%s: a refusal's Retry-After asks for %s s; pausing %s s, the most honoured",
                 permit.bucket,
                 asked,
@@ -1274,4 +1276,4 @@ class RequestGovernor:
             try:
                 listener()
             except Exception:
-                logger.exception("a rate-limit listener failed")
+                logger.exception("a rate-limit listener failed. %s", LIBRARY_BUG_REPORT)

@@ -1,7 +1,7 @@
-"""Log records that are rate-limited: once per process, or once per value up to a limit.
+"""Log records that are rate-limited: once per process, per value up to a limit, or per failure.
 
 Some facts are worth logging once rather than on every event, and some bad values can arrive
-without end. The two helpers here keep both kinds of record from flooding the log:
+without end. The helpers here keep these records from flooding the log:
 
 - `log_once` logs a fact the first time its key is seen in the process, and never again: the
   unit the FMV magnitude rule detected, the WebSocket host chosen for a Business key, a futures
@@ -10,18 +10,25 @@ without end. The two helpers here keep both kinds of record from flooding the lo
   fixed number of distinct values, so a stream of bad values that may never end (a watchlist
   row typed wrong, a symbol spelling Massive keeps sending) keeps both the log and the memory
   it uses bounded.
+- `log_failure` logs a failure that fails a live table, once per failure object, at the level
+  its cause gives (`_errors.ErrorCause`): one connection failure that fails a hundred streams
+  is one record, not a hundred.
 
-Both are thread-safe. Each holds a leaf lock only while it updates the keys or values it has
-seen, never while it logs. The module imports only the standard library, so every layer of the
-library may use it; it is private, and nothing in it is exported from `deephaven_massive`.
+All are thread-safe. Each holds a leaf lock only while it updates the keys, values, or failures
+it has seen, never while it logs. The module imports only the standard library and `_errors`,
+so every layer above the wire may use it; it is private, and nothing in it is exported from
+`deephaven_massive`.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import weakref
 
-__all__ = ["BoundedLog", "log_once"]
+from deephaven_massive._errors import ErrorCause, MassiveError, cause_of, failure_text
+
+__all__ = ["BoundedLog", "log_failure", "log_once", "mark_failure_logged"]
 
 
 _logged_lock = threading.Lock()
@@ -107,3 +114,71 @@ class BoundedLog:
             )
         else:
             self._log.log(self._level, message, *args)
+
+
+_failures_lock = threading.Lock()
+_failures_logged: weakref.WeakSet[MassiveError] = weakref.WeakSet()
+
+
+def mark_failure_logged(error: BaseException) -> bool:
+    """Record that a failure is being logged, so `log_failure` logs it only at DEBUG from now on.
+
+    For a caller that logs a failure itself, with its trace, before the failure reaches the
+    tables it fails (`logger.exception` in an `except` block).
+
+    Args:
+        error: The failure; only a `MassiveError` is remembered.
+
+    Returns:
+        True the first time a `MassiveError` is marked, and always for any other exception;
+        False when the failure had been logged already.
+    """
+    if not isinstance(error, MassiveError):
+        return True
+    with _failures_lock:
+        first = error not in _failures_logged
+        _failures_logged.add(error)
+    return first
+
+
+def log_failure(
+    log: logging.Logger,
+    error: BaseException,
+    message: str,
+    *args: object,
+    expected: int = logging.WARNING,
+    exc_info: BaseException | None = None,
+) -> bool:
+    """Log a failure that fails a live table, once per failure, at the level its cause gives.
+
+    A defect (`ErrorCause.USER_DEFECT` or `ErrorCause.LIBRARY_DEFECT`, and any exception that is
+    not a `MassiveError`) logs at ERROR, a library defect with how to report it
+    (`_errors.failure_text`); an expected failure logs at `expected`. One `MassiveError` object
+    is logged once: the connection that fails a hundred streams with one error logs one
+    record, and every later call with the same object logs at DEBUG instead. Thread-safe; the
+    set of failures logged holds them weakly, so it never keeps one alive.
+
+    Args:
+        log: The logger to write to.
+        error: The failure.
+        message: The `%`-style message; its last `%s` receives the failure's text.
+        *args: The message's other arguments, before the failure's text.
+        expected: The level of an expected failure; WARNING by default, DEBUG for one the
+            caller also raises.
+        exc_info: The exception whose traceback the record carries, or None for none.
+
+    Returns:
+        True when this call logged the failure at its level; False when the same failure had
+        been logged already, and this call logged at DEBUG.
+    """
+    first = mark_failure_logged(error)
+    level = expected if cause_of(error) is ErrorCause.EXPECTED else logging.ERROR
+    log.log(
+        level if first else logging.DEBUG,
+        message,
+        *args,
+        failure_text(error),
+        exc_info=exc_info if first else None,
+        stacklevel=2,  # the record names the caller's file and line, not this one's
+    )
+    return first
