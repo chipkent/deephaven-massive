@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import hashlib
 import json
+import logging
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Self
 
 import pytest
+import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.refresh import fetch, knowledge_base
@@ -219,11 +223,13 @@ class _Server:
     def __init__(self) -> None:
         self.script: list[tuple[int, dict[str, str], bytes]] = []
         self.requests: list[tuple[str, str]] = []
+        self.proxy_authorizations: list[str | None] = []
         server = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 server.requests.append((self.path, self.headers.get("User-Agent", "")))
+                server.proxy_authorizations.append(self.headers.get("Proxy-Authorization"))
                 status, headers, body = server.script.pop(0)
                 self.send_response(status)
                 for name, value in headers.items():
@@ -231,6 +237,14 @@ class _Server:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_CONNECT(self) -> None:
+                # A proxy that refuses the tunnel's credentials, as a corporate proxy does.
+                server.requests.append((f"CONNECT {self.path}", self.headers.get("User-Agent", "")))
+                server.proxy_authorizations.append(self.headers.get("Proxy-Authorization"))
+                self.send_response(407, "Proxy Authentication Required")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
         self.http = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(
@@ -276,12 +290,38 @@ def test_any_other_status_fails_at_once(server: _Server, status: int) -> None:
     assert (waits, len(server.requests)) == ([], 1)
 
 
-def test_a_429_waits_the_retry_after_seconds(server: _Server) -> None:
+def test_a_429_waits_the_retry_after_seconds(
+    server: _Server, caplog: pytest.LogCaptureFixture
+) -> None:
     server.script = [(429, {"Retry-After": "3"}, b""), (200, {}, b"ok")]
+    waits: list[float] = []
+    with (
+        caplog.at_level(logging.DEBUG, logger=fetch.__name__),
+        fetch.HttpGetter(sleep=waits.append) as getter,
+    ):
+        assert getter(f"{server.url}/x") == b"ok"
+    assert waits == [3.0]
+    assert caplog.messages == [
+        "downloads from 127.0.0.1 connect directly, through no proxy",
+        (
+            f"GET {server.url}/x answered HTTP 429; Retry-After asks 3.0 s, the cap is 60.0 s; "
+            "waiting 3.0 s"
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("header", "wait"),
+    [("Wed, 21 Oct 2015 07:28:00 GMT", 0.0), ("Fri, 31 Dec 9999 23:59:59 GMT", 60.0)],
+)
+def test_a_429_waits_until_the_retry_after_date_capped_at_a_minute(
+    server: _Server, header: str, wait: float
+) -> None:
+    server.script = [(429, {"Retry-After": header}, b""), (200, {}, b"ok")]
     waits: list[float] = []
     with fetch.HttpGetter(sleep=waits.append) as getter:
         assert getter(f"{server.url}/x") == b"ok"
-    assert waits == [3.0]
+    assert waits == [wait]
 
 
 def test_a_retry_after_beyond_a_minute_is_capped(server: _Server) -> None:
@@ -327,6 +367,69 @@ def test_an_https_proxy_carries_the_request(
     with fetch.HttpGetter() as getter:
         assert getter("http://massive.invalid/docs/llms.txt") == b"via proxy"
     assert server.requests[0][0] == "http://massive.invalid/docs/llms.txt"
+    assert server.proxy_authorizations == [None]
+
+
+def test_a_proxy_reached_over_https_is_verified_like_massive(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "https://proxy.corp:3129")
+    with fetch.HttpGetter() as getter:
+        pool = getter._pool("massive.invalid")
+        assert isinstance(pool, urllib3.ProxyManager)
+        proxy_context = pool.connection_pool_kw["_proxy_config"].ssl_context
+        assert proxy_context is not None
+        assert proxy_context.verify_mode is ssl.CERT_REQUIRED
+        assert proxy_context.check_hostname
+        # One context serves both legs: the proxy and the server are verified alike.
+        assert proxy_context is pool.connection_pool_kw["ssl_context"]
+
+
+def test_a_tunnel_the_proxy_refuses_names_https_proxy_never_the_password(
+    server: _Server, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    port = server.url.rpartition(":")[2]
+    monkeypatch.setenv("HTTPS_PROXY", f"http://alice:p%40ss@127.0.0.1:{port}")
+    with (
+        caplog.at_level(logging.DEBUG, logger=fetch.__name__),
+        fetch.HttpGetter() as getter,
+        pytest.raises(fetch.FetchError) as caught,
+    ):
+        getter("https://massive.invalid/docs/llms.txt")
+    token = base64.b64encode(b"alice:p@ss").decode("ascii")
+    assert server.requests[0][0] == "CONNECT massive.invalid:443"
+    assert server.proxy_authorizations == [f"Basic {token}"]
+    assert str(caught.value) == (
+        "GET https://massive.invalid/docs/llms.txt: the proxy refused its credentials (HTTP 407 "
+        "for a tunnel to massive.invalid); check the user and password in HTTPS_PROXY"
+    )
+    shown = str(caught.value) + str(caught.value.__cause__) + caplog.text
+    assert "p@ss" not in shown
+    assert "p%40ss" not in shown
+    assert caplog.messages == [
+        (
+            f"downloads from massive.invalid go through the proxy http://127.0.0.1:{port} "
+            "(credentials sent: True)"
+        )
+    ]
+
+
+def test_a_proxy_user_and_password_go_to_the_proxy_as_proxy_authorization(
+    server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # urllib3 never sends the credentials of a proxy URL itself; a percent-encoded password
+    # is decoded first.
+    port = server.url.rpartition(":")[2]
+    monkeypatch.setenv("HTTPS_PROXY", f"http://alice:p%40ss@127.0.0.1:{port}")
+    server.script = [(200, {}, b"via proxy")]
+    with fetch.HttpGetter() as getter:
+        assert getter("http://massive.invalid/docs/llms.txt") == b"via proxy"
+        [pool] = getter._pools.values()
+        assert isinstance(pool, urllib3.ProxyManager)
+        assert "p@ss" not in str(pool.proxy)
+        assert "p%40ss" not in str(pool.proxy)
+    token = base64.b64encode(b"alice:p@ss").decode("ascii")
+    assert server.proxy_authorizations == [f"Basic {token}"]
 
 
 def test_fetch_uses_and_closes_an_http_getter_by_default(

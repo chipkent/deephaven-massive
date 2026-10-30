@@ -8,11 +8,15 @@
   context, the script session's query scope, not an update-graph thread, the update graph's
   lock);
 - `liveness`: liveness scopes, result records, `QueueWorker`, and the reaper;
-- `diagnostics`: the `connections()` and `streams()` tables and their writer thread;
-- `columns`: the Deephaven type of each column type and the column definitions of a schema;
+- `diagnostics`: the `connections()`, `streams()`, and `rate_limits()` tables and their
+  writer thread;
+- `columns`: the Deephaven type of each column type, the column definitions of a schema, and
+  the tables a dataset's rows and column descriptions become;
 - `watchlist`: the check of a symbol table's rows and the watch that follows a reactive one;
 - `symbols`: `canonicalize_symbols`, the table form of the symbol converters;
-- `stream`: live streams' publishers, the flush thread, and the shared-batch fan-out.
+- `publisher`: `blink_publisher`, which creates every blink table the library feeds, and its
+  `BlinkPublisher`, whose failure Deephaven delivers exactly once;
+- `stream`: live streams' sinks, the flush thread, and the shared-batch fan-out.
 
 Layer: tables, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_log_limits`, `_types`), and the datasets (`_datasets`), which it may import; it never
