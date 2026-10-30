@@ -1462,6 +1462,8 @@ _WIRE_VOCABULARY = frozenset(
 _WIRE_CLIENTS = frozenset(
     {
         "Cancel",
+        "CapturedReply",
+        "set_reply_capture",
         "RequestGovernor",
         "BucketState",
         "BASIC_REQUESTS_PER_MINUTE",

@@ -16,6 +16,10 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 - `summary`: the open-questions summary that ends a live run;
 - `parallel`: which selected tests are live, and the refusal to run them on parallel workers.
 
-`tests/conftest.py` turns them into fixtures, which the live test modules use; only the unit
-tests of this package, under `tests/live/` (one per module, against the fakes), import it.
+Its subpackage `live_run` holds the live-run program, which a tester runs with their own keys
+through `scripts/live_run.py` to run every live check the key allows, unattended, for days.
+
+`tests/conftest.py` turns the modules above into fixtures, which the live test modules use; only
+the unit tests of this package, under `tests/live/` (one per module, against the fakes), and
+the program import it.
 """

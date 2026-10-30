@@ -448,6 +448,7 @@ Supporting files outside the package:
 | `tests/data/` | Payload fixtures. |
 | `tests/_fakes/` | Fake REST server, WebSocket server, S3, clock, and stream helpers, and the shared streaming session harness ([section 4.2](#42-test-layout)). |
 | `tests/_live/` | The logic behind the live tests' fixtures: the plans' coverage and history windows, the plan probe, the exchange calendar, the futures front contract, the choice of recent corporate actions, the delayed-feed timing, the week-window rule, and the open-questions summary ([section 4.2](#42-test-layout)). |
+| `tests/_live/live_run/` | The live-run program, `scripts/live_run.py`'s logic ([section 4.2](#42-test-layout)). |
 
 Deephaven is imported at module level where it is used at runtime. Type-only imports go under
 `TYPE_CHECKING`. The library imports nothing from `deephaven_server`;
@@ -538,7 +539,12 @@ others:
   covers and keeps, the probe that finds a key's plans and its cache, which class a request
   reads, the exchange calendar, the front futures contract, the recent splits and dividends to
   check, when a delayed stream must deliver rows, the week-window rule, and the open-questions
-  summary. `tests/conftest.py` turns it into fixtures. It runs against Massive only in a live
+  summary. `tests/conftest.py` turns it into fixtures. Its subpackage `tests/_live/live_run/` holds the live-run
+  program (`cli.py`, `commands.py`, and the modules they name), tested under
+  `tests/live/live_run/`, which the tester runs with
+  their own keys through `scripts/live_run.py`, a thin entry point: it runs every live check the
+  key allows on a fixed timetable, records Massive's raw replies through the reply-capture hook,
+  streams a trading day, and packs the results after a scan for the secrets. It runs against Massive only in a live
   run, so each module has a unit test against the fakes at the mirrored path
   (`tests/live/test_plans.py`), and coverage measures it with the library. Only this helper
   package has mirrored tests (`TESTED_HELPER_PACKAGES`). The first is
@@ -603,6 +609,7 @@ gone; the transports it builds hold the core itself, never the weak reference.
   one of them loads no client and no network module) and
   client names (`RestClient`, `Page`, `to_batch`, `RequestGovernor`, `BucketState`, `Patience`,
   `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`, `Cancel`,
+  `set_reply_capture`, `CapturedReply`,
   `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`, `FlatFileClient`, `FlatFile`,
   `ReadPlan`, `ReadColumn`, `object_key`); under `src/`, only `_ingest` uses a client name (by import, attribute,
   literal `getattr`, or string), nor anything that can reach one (a star import of `_massive`,
@@ -1817,7 +1824,7 @@ Notation:
 | `previous_day_bar(symbols, *, adjusted=True)` | Query | | `/v2/aggs/ticker/{o}/prev` per contract | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/options`) | | |
 | `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
-| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` from `underlying_asset.ticker`; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request, always with `type=options`, so `ALL` lists only options contracts; `type` is set by the library and rejected as a filter. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
+| `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` from `underlying_asset.ticker`; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request. `ALL` sends `type=options` in place of tickers, so it lists only options contracts; tickers are sent without `type`, which Massive refuses beside them (HTTP 400, "Cannot specify tickers and type."). `type` is rejected as a filter. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
 | `contracts(symbols=None, *, underlying: str \| None = None, contract_type: ContractType \| None = None, as_of: DateLike \| None = None, expired: bool = False, …F)` (`expired=False`, Massive's default, lists contracts still trading and is not sent, so the per-contract path accepts it; `True` lists expired ones and is sent); `filters` takes `expiration_date_*`, `strike_price_*` | Query | | `/v3/reference/options/contracts`; with `symbols`: `/v3/reference/options/contracts/{o}` per contract | |
 | `daily_open_close(symbols, date: DateLike, *, adjusted: bool = True)` | Query | | `/v1/open-close/{o}/{date}` per contract | |
 
@@ -2164,7 +2171,7 @@ nanosecond timestamp, or ISO-8601 text, whose precision Massive does not documen
 base name and `.any_of` keep the date. An aware `datetime` is always sent as given. The
 reservation is one shared check in the filter validation, fed the dataset's typed parameters,
 never a guard in a namespace module. Parameters the library always sets itself (the
-`type=options` of `options.snapshots`) are reserved the same way. When Massive adds a filter,
+`expand_underlying=false` of the indicators) are reserved the same way. When Massive adds a filter,
 refreshing the snapshot adds it; no code changes.
 
 **`sort` and `order`.** Most list endpoints have no `order` parameter: the direction is an
@@ -3548,7 +3555,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
   `<time axis field>.asc` on the futures paths, which default to newest first). The order of
   rows inside a flat file is Massive's and is not documented.
 - **Library-fixed parameters.** A parameter the library sets itself, with no argument of its
-  own (the options snapshot's `type=options`), is declared on the dataset as
+  own (the indicators' `expand_underlying=false`), is declared on the dataset as
   `DatasetSpec.fixed_params`. The catalog's `wire parameters` gate requires every REST path of
   the dataset to take it as a query parameter, so it is never blamed on the caller as a
   parameter a path lacks. `build_query` sends it like a typed parameter, and its whole
@@ -4478,6 +4485,8 @@ net/                 shared by every client; imports nothing else in _massive
   redaction.py       Redactor, redact: a client's secrets, however JSON
                      spells them, become *** in whatever it receives, before it is decoded,
                      quoted, or logged
+  capture.py         set_reply_capture, CapturedReply: the optional sink every cleaned REST
+                     body and WebSocket frame is handed to
 spec/                run-time wire vocabulary; imports nothing else in _massive
   __init__.py        source(transport, key), sources(transport), provenance(): load once under
                      a lock, and the cache that holds them
@@ -4570,7 +4579,7 @@ vendor/massive/      outside the package; Massive's published content, vendored 
   knowledge-base/  (the articles the library relies on, as Markdown extracted from HTML)
 ```
 
-**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 36
+**The interface.** `_massive/__init__.py` defines `__all__` and re-exports exactly these 39
 names, resolving them lazily (PEP 562), so a REST-only session never imports boto3 or
 websockets:
 
@@ -4581,13 +4590,18 @@ websockets:
 - WebSocket: `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`;
 - flat files: `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`;
 - spec: `source`, `sources`, `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`,
-  `WireType`, `WireUnit`, `DriftReport`, `provenance`, `Provenance`, and `encode_value` (one
-  parameter value's wire text by its `ParamKind`, in `spec.values`, which the REST client and
-  the library's filter check both run, so a filter the check accepts always encodes; it loads
-  no client, and a subprocess test checks that no vocabulary name loads a client or network
-  module);
+  `WireType`, `WireUnit`, `DriftReport`, `DriftSample`, `provenance`, `Provenance`, and
+  `encode_value` (one parameter value's wire text by its `ParamKind`, in `spec.values`, which
+  the REST client and the library's filter check both run, so a filter the check accepts
+  always encodes; it loads no client, and a subprocess test checks that no vocabulary name
+  loads a client or network module);
 - origins: `origin_of` (from `net.origins`), the vocabulary name the library uses to key a
   shared governor by REST origin.
+- reply capture: `set_reply_capture` and `CapturedReply` (from `net.capture`), an optional
+  process-wide sink that receives every reply the REST and WebSocket clients read, each REST
+  body (refusals included) and each frame after authentication, already cleaned of the
+  clients' secrets by their `Redactor`; off by default, at the cost of one `None` check per
+  reply. Only the live-run program uses it, to record Massive's real replies.
 
 `Param` is reached as an attribute of `RestPath`. `Transport` (`REST`, `WS`, `FLAT_FILES`) is
 the library's one transport enum.

@@ -193,3 +193,10 @@ def test_the_first_day_a_plan_keeps_is_inside_its_window() -> None:
     assert plans.history_verdict(first, basic, _DAY) is None
     before = _refusal("/v2/aggs/ticker/AAPL/range/1/day/2024-10-28/2024-11-05")
     assert plans.history_verdict(before, basic, _DAY) is not None
+
+
+def test_a_declaration_may_name_the_flat_file_prefixes_reached() -> None:
+    read = plans.declared_plans("stocks=starter, s3=us_stocks_sip/day_aggs_v1, S3=Mixed/Case")
+    assert read.flat_files == ("Mixed/Case", "us_stocks_sip/day_aggs_v1")
+    assert read.s3
+    assert plans.declared_plans("s3").flat_files is None

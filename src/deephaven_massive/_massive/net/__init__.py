@@ -13,6 +13,8 @@ WebSocket, and flat-file clients all build on it:
 - `net.origins`: `origin_of`, the scheme, host, and port a URL reaches.
 - `net.redaction`: `Redactor` and `redact`, which replace a client's secrets with `***` in
   whatever it receives, however JSON spells them, before it is decoded, quoted, or logged.
+- `net.capture`: `set_reply_capture` and `CapturedReply`, the optional process-wide sink the
+  REST and WebSocket clients hand every cleaned reply to.
 
 Attributes:
     USER_AGENT: The `User-Agent` every client sends, `deephaven-massive/<version>`, where the
