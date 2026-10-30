@@ -2,11 +2,11 @@
 
 Two rules over the factory methods live here too. The annotation rule: for every dataset of
 the catalog, the return annotation of its factory method is the class `query_class` derives
-from the spec (for `bars`, each overload matches `bar_query_class` and the implementation
-returns `HistoryQuery`), and every public factory method maps to exactly one dataset. The
-summary rule: every factory's docstring starts with its `DatasetSpec.summary`. Each rule is a
-function over a session class and a catalog, so it is checked against the real tree and
-against synthetic namespaces that break it.
+from the spec (for `bars`, each overload matches `bar_query_class`, the implementation
+returns `HistoryQuery`, and `timespan` has no default anywhere), and every public factory
+method maps to exactly one dataset. The summary rule: every factory's docstring starts with
+its `DatasetSpec.summary`. Each rule is a function over a session class and a catalog, so it
+is checked against the real tree and against synthetic namespaces that break it.
 """
 
 import collections.abc
@@ -17,7 +17,7 @@ import logging
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
-from typing import Any, Literal, cast, overload
+from typing import Any, ClassVar, Literal, cast, overload
 
 import pytest
 from deephaven import new_table
@@ -133,7 +133,7 @@ def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSess
     q = build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=5)
     assert q._request.limit == 5
     assert "limit" not in dict(q._request.params)
-    assert "limit=5" in repr(q)
+    assert "limit=5" in repr(massive_session.stocks.dividends("AAPL", limit=5))
     assert build(massive_session, DIVIDENDS, symbols=["AAPL"])._request.limit is None
     with pytest.raises(TypeError, match="limit must be an int"):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=cast("int", "10"))
@@ -367,6 +367,20 @@ def test_namespaces_repr_as_their_path(massive_session: dm.MassiveSession) -> No
         assert repr(namespace) == f"<{label} {path}>"
 
 
+def test_a_wrong_call_names_the_method_by_its_path(massive_session: dm.MassiveSession) -> None:
+    m = massive_session
+    bars = cast("Callable[..., object]", m.stocks.bars)  # a call no overload accepts
+    with pytest.raises(
+        TypeError, match=r"^stocks\.bars\(\) takes 3 positional arguments but 5 were"
+    ):
+        bars("AAPL", dm.Timespan.MINUTE, 1, "adjusted")
+    news = cast("Callable[..., object]", m.partners.benzinga.news)
+    with pytest.raises(TypeError, match=r"^partners\.benzinga\.news\(\) got an unexpected"):
+        news(tickerz="AAPL")
+    assert m.options.chain.__qualname__ == "options.chain"
+    assert m.stocks.financials.balance_sheets.__qualname__ == "stocks.financials.balance_sheets"
+
+
 NEWS = DatasetSpec(
     name="reference.news",
     summary="A dataset for the tests.",
@@ -450,8 +464,16 @@ def test_a_symbol_table_is_boxed_by_identity(
 def test_a_symbol_table_needs_a_symbol_column(
     massive_session: dm.MassiveSession, dh_exec_ctx: object
 ) -> None:
-    with pytest.raises(ValueError, match="a symbol table must have a Symbol column"):
-        build(massive_session, TRADES_SPEC, symbols=new_table([string_col("Ticker", ["AAPL"])]))
+    table = new_table([string_col("Ticker", ["AAPL"]), string_col("Name", ["Apple"])])
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^a symbol table must have a Symbol column; this one has: Ticker, Name\. Name the "
+            r"column of tickers Symbol, as in t\.view\(\"Symbol = Ticker\"\); .* "
+            r"dm\.canonicalize_symbols\(t, asset_class, column=\"Ticker\"\)$"
+        ),
+    ):
+        build(massive_session, TRADES_SPEC, symbols=table)
 
 
 # The query class of a dataset.
@@ -538,6 +560,8 @@ def _bar_problems(name: str, spec: DatasetSpec, factory: Callable[..., object]) 
 
     An overload's return type must be a base of the class `bar_query_class` picks for every
     timespan and multiplier its annotations allow, and that class itself for at least one.
+    `timespan` must be required in the implementation and in every overload: every call names
+    its bar length.
 
     Args:
         name: The dataset name, for the messages.
@@ -553,6 +577,9 @@ def _bar_problems(name: str, spec: DatasetSpec, factory: Callable[..., object]) 
     overloads = typing.get_overloads(factory)
     if not overloads:
         problems.append(f"{name}: a bars factory needs its overloads")
+    timespans = [inspect.signature(v).parameters.get("timespan") for v in (factory, *overloads)]
+    if any(p is not None and p.default is not inspect.Parameter.empty for p in timespans):
+        problems.append(f"{name}: timespan must be required, with no default")
     for variant in overloads:
         hints = _hints(variant)
         returned = hints["return"]
@@ -645,16 +672,15 @@ def test_every_factory_returns_the_class_of_its_dataset() -> None:
 
 class _Good(Namespace):
     __slots__ = ()
+    # Each stand-in has a path of its own: a namespace renames its methods to their paths, and
+    # `typing` files overloads by that name, so two stand-ins on one path would share overloads.
+    _path: ClassVar[str] = "stocks"
 
     @overload
-    def bars(
-        self, timespan: StreamSpan = Timespan.MINUTE, *, multiplier: Literal[1] = 1
-    ) -> StreamHistoryQuery: ...
+    def bars(self, timespan: StreamSpan, *, multiplier: Literal[1] = 1) -> StreamHistoryQuery: ...
     @overload
-    def bars(
-        self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
-    ) -> HistoryQuery: ...
-    def bars(self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1) -> HistoryQuery:
+    def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery: ...
+    def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery:
         raise NotImplementedError
 
     def dividends(self) -> Query:
@@ -663,6 +689,7 @@ class _Good(Namespace):
 
 class _Bad(Namespace):
     __slots__ = ()
+    _path: ClassVar[str] = "options"
 
     @overload
     def bars(
@@ -672,7 +699,9 @@ class _Bad(Namespace):
     def bars(
         self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
     ) -> HistoryQuery: ...
-    def bars(self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1) -> QueryBase:
+    def bars(  # a default timespan, which every bars factory must not have
+        self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
+    ) -> QueryBase:
         raise NotImplementedError
 
     def trades(self) -> Query:  # the trades dataset streams, so this must be a StreamQuery
@@ -743,6 +772,7 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
         "options.news: a factory with no dataset",
         "snapshots: a factory with no dataset",
         "options.bars: the bars implementation must return HistoryQuery",
+        "options.bars: timespan must be required, with no default",
         (
             "options.bars: an overload returns StreamHistoryQuery, but its timespans give "
             "['HistoryQuery']"

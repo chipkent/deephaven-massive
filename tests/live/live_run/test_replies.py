@@ -202,7 +202,7 @@ def test_a_stream_example_records_frames_and_a_refused_stream(
 
     example = replies.Example(
         "refused-bars",
-        lambda m, _: m.crypto.bars("X:BTCUSD").append_only(),
+        lambda m, _: m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).append_only(),
         expects=replies.REFUSAL,
         stream=True,
     )

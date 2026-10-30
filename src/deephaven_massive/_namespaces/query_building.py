@@ -4,7 +4,9 @@ Each namespace class (`_Stocks`, `_Options`, ...) is a thin set of typed factory
 module does the work they share when a dataset method is called:
 
 - `Namespace` is the base class of the namespace classes; it holds the session core, which
-  each factory method passes to `build_query`.
+  each factory method passes to `build_query`, and wraps each factory in `shows_call`.
+- `shows_call` records on each query the call that built it (`QueryCall`), which is the
+  query's `repr`: the method's path and the arguments that differ from their defaults.
 - `build_query` checks symbols (`normalize` in `_datasets/symbols.py`, which takes only
   Massive's exact tickers; a reactive
   `Table` is checked for its `Symbol` column and boxed in a `SymbolTable` here), rejects
@@ -30,11 +32,14 @@ here runs synchronously on the calling thread, makes no network call, and create
 
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
+from dataclasses import replace
 from datetime import date, datetime
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final, TypeVar, cast, get_overloads, overload
 
 from deephaven.table import Table
 
@@ -57,7 +62,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable, normalize
 from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._massive import ParamKind, Transport
-from deephaven_massive._query import Query, QueryBase, bar_query_class, query_class
+from deephaven_massive._query import Query, QueryBase, QueryCall, bar_query_class, query_class
 from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._types import _All, override
 
@@ -84,6 +89,7 @@ __all__ = [
     "one_or_any_of",
     "optional_text",
     "require_bool",
+    "shows_call",
     "ticker_key",
 ]
 
@@ -105,6 +111,8 @@ ADJUSTED_VOLUME: Final = (
 )
 """The note on every volume column of a dataset with a split-adjustment choice."""
 
+
+_F = TypeVar("_F", bound=Callable[..., QueryBase])
 
 SNAPSHOT_SYMBOLS_PER_REQUEST: Final = 250
 """The most tickers one snapshot request names in its comma-separated ticker list.
@@ -141,18 +149,132 @@ def adjustment_notes(prices: Iterable[str], volumes: Iterable[str]) -> Mapping[s
     }
 
 
+def _is_default(value: object, default: object) -> bool:
+    """Tell whether an argument has its parameter's default, so a query's repr leaves it out.
+
+    Args:
+        value: The argument as passed.
+        default: The parameter's default, or `inspect.Parameter.empty` for none.
+
+    Returns:
+        True for the default object itself, or a value equal to a default other than None
+        (`{dm.FuturesVenue.CME, ...}` equals the default `frozenset`). None is compared by
+        identity, so a symbol table is never compared with `==`.
+    """
+    return value is default or (
+        default is not None and default is not inspect.Parameter.empty and value == default
+    )
+
+
+def _frozen(value: object) -> object:
+    """Return an argument as a query's call keeps it, safe from later changes by the caller.
+
+    Args:
+        value: The argument as passed.
+
+    Returns:
+        A list as a tuple, a set as a `frozenset`, a mapping as the tuple of its items, and
+        anything else unchanged.
+    """
+    if isinstance(value, list):
+        return tuple(value)
+    if isinstance(value, AbstractSet):
+        return frozenset(value)
+    if isinstance(value, Mapping):
+        return tuple(value.items())
+    return value
+
+
+def shows_call(path: str) -> Callable[[_F], _F]:
+    """Make a dataset method record its call on the query it returns, as the query's `repr`.
+
+    The wrapper binds the arguments to the method's signature after the method has returned
+    (so a refused call raises the method's own error) and stores a `QueryCall` on the query:
+    the method's path from the session, and the arguments that differ from their defaults
+    (`_is_default`), in signature order (`_frozen`), and the parameters it requires, which the
+    repr writes by position; the repr writes each argument from the query's normalized request
+    where that holds it (`QueryCall.text`). Equality of queries is
+    unchanged: the call is not part of it. `Namespace` applies it to every public method of
+    each namespace class, and `MassiveSession` to its own dataset method, `snapshots`.
+
+    Args:
+        path: The method's owner as reached from a session, such as `"m.options"`.
+
+    Returns:
+        A decorator; its wrapper has the method's name, docstring, signature, and
+        `raises_through` helpers (`functools.wraps`).
+    """
+
+    def decorate(method: _F) -> _F:
+        signature = inspect.signature(method)
+        called = f"{path}.{method.__name__}"
+        required = frozenset(
+            name
+            for name, param in list(signature.parameters.items())[1:]
+            if param.default is inspect.Parameter.empty
+            and param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        )
+
+        @functools.wraps(method)
+        def factory(*args: object, **kwargs: object) -> QueryBase:
+            query = method(*args, **kwargs)
+            given = signature.bind(*args, **kwargs).arguments
+            arguments = tuple(
+                (name, _frozen(given[name]))
+                for name, param in list(signature.parameters.items())[1:]
+                if name in given and not _is_default(given[name], param.default)
+            )
+            return replace(query, _call=QueryCall(called, arguments, required))
+
+        return cast("_F", factory)
+
+    return decorate
+
+
 class Namespace:
     """Base class of the namespace classes reached from a session, such as `m.stocks`.
 
     A namespace is created once per session by `MassiveSession.__init__` and only holds the
     session core. Its methods are the dataset factories; they validate arguments and return
-    queries, and never touch the network. Thread-safe: it has no mutable state.
+    queries, and never touch the network. Each subclass's public methods are wrapped in
+    `shows_call` when the class is defined, so every query a namespace returns shows the call
+    that built it. Thread-safe: it has no mutable state.
     """
 
     __slots__ = ("_core",)
 
     _path: ClassVar[str] = ""
     """The namespace's path from the session, such as `"stocks"` or `"partners.benzinga"`."""
+
+    @override
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Name each public method by its path, such as `stocks.bars`, and wrap it in `shows_call`.
+
+        Python names a function by its `__qualname__` in the `TypeError` of a wrong call
+        (`stocks.bars() takes from 2 to 3 positional arguments but 5 were given`). The class
+        name, such as `_Stocks`, is private and means nothing to a user who reached the method
+        as `m.stocks.bars`, so each public function the class defines itself is renamed to its
+        path from the session when the class is created, at import. `typing` files a
+        function's overloads under its `__qualname__`, so each overload is renamed too and
+        registered again under the new name, which keeps `typing.get_overloads` finding them.
+
+        Every public method of a namespace class is a dataset factory, so each is then wrapped
+        in `shows_call`, whose wrapper keeps the new name; a sub-namespace is a property, which
+        is left alone.
+
+        Args:
+            **kwargs: Passed on to `object.__init_subclass__`.
+        """
+        super().__init_subclass__(**kwargs)
+        record = shows_call(f"m.{cls._path}")
+        for name, member in list(vars(cls).items()):
+            if not name.startswith("_") and inspect.isfunction(member):
+                path = f"{cls._path}.{name}"
+                for variant in get_overloads(member):
+                    variant.__qualname__ = path
+                    overload(variant)
+                member.__qualname__ = path
+                setattr(cls, name, record(member))
 
     def __init__(self, core: SessionCore) -> None:
         """Bind the namespace to its session.
@@ -610,7 +732,8 @@ def build_query(
 
     Returns:
         An instance of the spec's query class (`query_class`, or the class `bar_query_class`
-        picks for a bars dataset).
+        picks for a bars dataset), whose call names only the dataset; the dataset method's
+        `shows_call` wrapper replaces it with the call as made.
 
     Raises:
         ValueError: If `symbols` is None for an instrument dataset that needs symbols (the
@@ -644,7 +767,17 @@ def build_query(
         raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
     if isinstance(symbols, Table):
         if "Symbol" not in symbols.column_names:
-            raise ValueError("a symbol table must have a Symbol column")
+            columns = ", ".join(symbols.column_names)
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug(
+                "%s refused: a symbol table without Symbol, columns %s", spec.name, columns
+            )
+            raise ValueError(
+                f"a symbol table must have a Symbol column; this one has: {columns}. Name the "
+                'column of tickers Symbol, as in t.view("Symbol = Ticker"); for tickers spelled '
+                "another way (lower case, another convention), convert them first with "
+                'dm.canonicalize_symbols(t, asset_class, column="Ticker")'
+            )
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)
@@ -695,7 +828,7 @@ def build_query(
         filters=check_filters(core.catalog, spec, dict(given), typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
     )
-    return cls(core, spec, request)
+    return cls(core, spec, request, QueryCall(f"m.{spec.name}"))
 
 
 def list_query(

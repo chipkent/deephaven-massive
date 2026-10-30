@@ -14,7 +14,8 @@ body:
           `DEEPHAVEN_MASSIVE_LOG_FILE=/path/to/massive.log`) and restart the worker.
 
         The lines appear in the Deephaven log panel, in the server or container log, or in the
-        file you named.
+        file you named. Writing a file is easiest: you attach it below as it is. The log never
+        holds your API key or S3 secret.
   - type: textarea
     id: code
     attributes:
@@ -33,22 +34,27 @@ body:
   - type: textarea
     id: log
     attributes:
-      label: The log of the run, with DEBUG on
+      label: The log of the run, with DEBUG on, as an attached file
       description: >-
-        Everything from the `logging deephaven_massive at DEBUG` line, and the
-        `deephaven-massive <version>, Python ...` line that follows it, to the failure.
-      render: text
+        Drag the log file into this box to attach it (a .log, .txt, or .zip file up to 25 MB);
+        do not paste it, because GitHub cuts an issue's text at 65,536 characters. If the file
+        is larger than 25 MB, zip it, or keep only its first lines (from
+        `logging deephaven_massive at DEBUG` through the `deephaven-massive <version>, Python ...`
+        line and each session's settings) and every line from a few minutes before the failure
+        to a minute after it. The log's times are in UTC; say when the failure happened, in UTC
+        or in your local time with its zone.
     validations:
       required: true
   - type: textarea
     id: diagnostics
     attributes:
-      label: m.streams() and m.connections()
+      label: m.rate_limits(), m.streams(), and m.connections()
       description: >-
         Printed after the problem, with `m` your session:
-        `print(m.streams().to_string(num_rows=1000))` and
-        `print(m.connections().to_string(num_rows=1000))`.
-      render: text
+        `print(m.rate_limits().to_string(num_rows=1000))`,
+        `print(m.streams().to_string(num_rows=1000))`, and
+        `print(m.connections().to_string(num_rows=1000))`. Paste them, or attach them as a
+        file if they are long.
   - type: markdown
     attributes:
       value: |

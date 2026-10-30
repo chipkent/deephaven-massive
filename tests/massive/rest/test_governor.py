@@ -424,7 +424,8 @@ def test_a_retry_after_beyond_ten_minutes_pauses_ten_minutes_and_says_so(
     [record] = caplog.records
     assert record.levelname == "INFO"
     assert record.getMessage() == (
-        f"stocks: a refusal's Retry-After asks for {asked} s; pausing 600.0 s, the most honoured"
+        f"stocks: paused 600.0 s (Retry-After {asked:g} s, cut to 600 s, the most honoured) "
+        "after HTTP 429; the refusal: HTTP 429: slow down"
     )
     # A read with ten minutes of patience waits the clamped pause out.
     permit = governor.admission("stocks", lane=object(), patience=Patience(600.0)).acquire(Cancel())
@@ -432,7 +433,7 @@ def test_a_retry_after_beyond_ten_minutes_pauses_ten_minutes_and_says_so(
     assert clock.waits == [600.0]
 
 
-def test_a_retry_after_of_ten_minutes_is_honoured_without_a_log_line(
+def test_a_retry_after_of_ten_minutes_is_honoured_as_asked(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     governor = _governor(FakeClock())
@@ -442,8 +443,151 @@ def test_a_retry_after_of_ten_minutes_is_honoured_without_a_log_line(
             governor.admission("stocks", lane=object()).acquire(Cancel()),
             retry_after=600.0,
         )
-    assert caplog.messages == []
+    assert caplog.messages == [
+        (
+            "stocks: paused 600.0 s (Retry-After 600 s) after HTTP 429; the refusal: HTTP 429: "
+            "slow down"
+        )
+    ]
     assert governor.next_change() == 600.0
+
+
+# --- The log of each pause -----------------------------------------------------------------------
+
+
+def _infos(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+
+
+def test_each_counted_refusal_logs_its_step_of_the_schedule(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _governor(FakeClock())
+    with caplog.at_level(logging.INFO, logger=_GOVERNOR_LOGGER):
+        for _ in range(4):
+            _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
+    assert _infos(caplog) == [
+        f"stocks: paused {pause} s (schedule step {step} of 15, 30, 60 s) after HTTP 429; "
+        "the refusal: HTTP 429: slow down"
+        for pause, step in [("15.0", 1), ("30.0", 2), ("60.0", 3), ("60.0", 3)]
+    ]
+
+
+def test_a_refusal_that_names_the_basic_limit_logs_what_it_learned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _governor(FakeClock())
+    with caplog.at_level(logging.INFO, logger=_GOVERNOR_LOGGER):
+        for _ in range(2):
+            permit = governor.admission("stocks", lane=object()).acquire(Cancel())
+            _refuse(governor, permit, message=BASIC)
+    # Only the refusal that taught it says so; both pause one window of the Basic pace.
+    assert _infos(caplog) == [
+        (
+            "stocks: paused 61.0 s (one window, paced at 5 per minute) after HTTP 429; learned "
+            f"Basic, so paced at 5 per minute from now on; the refusal: {BASIC}"
+        ),
+        (
+            "stocks: paused 61.0 s (one window, paced at 5 per minute) after HTTP 429; the "
+            f"refusal: {BASIC}"
+        ),
+    ]
+
+
+def test_a_refusal_with_a_retry_after_that_names_the_basic_limit_logs_both(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _governor(FakeClock(), basic={"stocks"})
+    with caplog.at_level(logging.INFO, logger=_GOVERNOR_LOGGER):
+        permit = governor.admission("stocks", lane=object()).acquire(Cancel())
+        _refuse(governor, permit, retry_after=20.0, message=BASIC)
+    assert _infos(caplog) == [
+        (
+            "stocks: paused 20.0 s (Retry-After 20 s) after HTTP 429; learned Basic, so paced at 5 "
+            f"per minute from now on; the refusal: {BASIC}"
+        )
+    ]
+
+
+def test_a_refusal_of_a_request_sent_before_the_pause_logs_the_pause_it_leaves(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _governor(FakeClock())
+    early = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(3)]
+    with caplog.at_level(logging.INFO, logger=_GOVERNOR_LOGGER):
+        _refuse(governor, early[0])
+        _refuse(governor, early[1])
+        _refuse(governor, early[2], retry_after=90.0)
+    assert _infos(caplog) == [
+        (
+            "stocks: paused 15.0 s (schedule step 1 of 15, 30, 60 s) after HTTP 429; the refusal: "
+            "HTTP 429: slow down"
+        ),
+        (
+            "stocks: paused 15.0 s (a request sent before the pause) after HTTP 429; the refusal: "
+            "HTTP 429: slow down"
+        ),
+        (
+            "stocks: paused 90.0 s (a request sent before the pause; Retry-After 90 s) after HTTP "
+            "429; the refusal: HTTP 429: slow down"
+        ),
+    ]
+
+
+def test_a_late_refusal_after_its_pause_ended_logs_no_pause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    governor = _governor(clock)
+    first, late = (governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in "12")
+    _refuse(governor, first)
+    clock.advance(20.0)  # the 15 s pause is over when the late refusal arrives
+    with caplog.at_level(logging.INFO, logger=_GOVERNOR_LOGGER):
+        _refuse(governor, late)
+    assert _infos(caplog) == [
+        (
+            "stocks: paused 0.0 s (a request sent before the pause) after HTTP 429; the refusal: "
+            "HTTP 429: slow down"
+        )
+    ]
+
+
+def test_a_refusal_already_reported_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    governor = _governor(FakeClock())
+    permit = governor.admission("stocks", lane=object()).acquire(Cancel())
+    governor.done(permit, answered=True)
+    with caplog.at_level(logging.DEBUG, logger=_GOVERNOR_LOGGER):
+        _refuse(governor, permit)
+    assert caplog.messages == []
+
+
+def test_the_end_of_a_pause_logs_the_probe_and_the_resume_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _governor(FakeClock())
+    first = governor.admission("stocks", lane=object()).acquire(Cancel())
+    assert not first.probe
+    _refuse(governor, first)
+    with caplog.at_level(logging.DEBUG, logger=_GOVERNOR_LOGGER):
+        probe = governor.admission("stocks", lane=object()).acquire(Cancel())
+        governor.done(probe, answered=True)
+        after = governor.admission("stocks", lane=object()).acquire(Cancel())
+        governor.done(after, answered=True)
+    assert probe.probe
+    assert not after.probe
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.DEBUG,
+            (
+                "stocks: the pause is over; this request probes alone, and the bucket's other "
+                "requests wait for its answer"
+            ),
+        ),
+        (
+            logging.DEBUG,
+            "stocks: Massive answered the first request after the pause; requests resume",
+        ),
+    ]
 
 
 def test_a_request_whose_patience_ends_with_the_pause_waits_for_it() -> None:

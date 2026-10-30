@@ -105,7 +105,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Self, cast
 
 from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
-from deephaven_massive._massive.net.retry import SYSTEM_CLOCK, rate_limit_wait
+from deephaven_massive._massive.net.retry import RATE_LIMIT_WAITS, SYSTEM_CLOCK, rate_limit_wait
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -137,10 +137,13 @@ RATE_WINDOW: Final = 61.0
 
 MAX_RETRY_AFTER: Final = 600.0
 """The longest pause a 429's `Retry-After` sets, in seconds: 10 minutes. A longer one is clamped
-to it and logged at WARNING; the bucket probes again when it ends."""
+to it, and the refusal's log line gives both; the bucket probes again when it ends."""
 
 _BASIC_REFUSAL: Final = "exceeded the maximum requests per minute"
 """The words of Massive's 429 message that mark a subscription on the Basic tier."""
+
+_SCHEDULE: Final = ", ".join(f"{wait:g}" for wait in RATE_LIMIT_WAITS)
+"""The pauses of an unpaced bucket's run of refusals without a `Retry-After`, for the log."""
 
 _UNTIL_WOKEN: Final = math.inf
 """The wait of a request with no deadline: only a change of its bucket wakes it."""
@@ -177,10 +180,13 @@ class Permit:
         bucket: The bucket the attempt is charged to.
         episode: The pause the attempt started after (a count of the bucket's pauses), which
             tells a response to the latest pause apart from one to an earlier burst.
+        probe: True for the first attempt to start after a pause, which goes alone while
+            the bucket's other requests wait for its answer.
     """
 
     bucket: str
     episode: int
+    probe: bool = False
 
 
 class Patience:
@@ -334,7 +340,8 @@ class Admission:
         reports it otherwise. A cancellation, a failure, or an interrupt anywhere after the
         grant (`KeyboardInterrupt` while the thread sleeps, in a listener, or while it stops
         listening to `cancel`) releases the permit before the exception propagates. The lane
-        (see `RequestGovernor.admission`) orders the attempt among the bucket's others.
+        (see `RequestGovernor.admission`) orders the attempt among the bucket's others. The
+        first attempt after a pause, its probe, logs one DEBUG line saying the pause is over.
 
         Args:
             cancel: Ends the wait when set: the attempt gives up its place.
@@ -353,7 +360,14 @@ class Admission:
         if failure is not None:
             logger.debug("%s: the wait for a permit ends: %s", self.bucket, failure.message)
             raise WireError(failure.message, status=failure.status)
-        return cast("Permit", permit)
+        permit = cast("Permit", permit)
+        if permit.probe:
+            logger.debug(
+                "%s: the pause is over; this request probes alone, and the bucket's other "
+                "requests wait for its answer",
+                self.bucket,
+            )
+        return permit
 
     def __exit__(
         self,
@@ -623,7 +637,7 @@ class _Bucket:
         Returns:
             The permit, in flight; the pause's probe when the bucket is probing.
         """
-        permit = admission.permit = Permit(name, self.episode)
+        permit = admission.permit = Permit(name, self.episode, probe=self.probing)
         self.open.add(permit)  # the grant
         self.attempts += 1
         if self.probing:
@@ -905,7 +919,8 @@ class RequestGovernor:
     def done(self, permit: Permit, *, answered: bool) -> None:
         """Report an attempt that ended without a 429; its slot stays held for a window.
 
-        Does nothing for a permit already reported.
+        Does nothing for a permit already reported. An answer that ends a pause's probing
+        (the bucket's requests resume) logs one DEBUG line.
 
         Args:
             permit: The attempt's permit.
@@ -915,12 +930,19 @@ class RequestGovernor:
                 nothing else.
         """
         state = self._buckets[permit.bucket]
+        resumed = False
         with self._lock:
             if not state.finish(permit, self._clock.monotonic(), hold=True):
                 return
             if answered and permit.episode == state.episode:
+                resumed = state.probing
                 state.run_refusals = 0  # the run is over
                 state.probing = False  # Massive answered after the pause: no more probe
+        if resumed:
+            logger.debug(
+                "%s: Massive answered the first request after the pause; requests resume",
+                permit.bucket,
+            )
         self._notify(permit.bucket)
 
     def release(self, permit: Permit) -> None:
@@ -951,10 +973,16 @@ class RequestGovernor:
         to an attempt that started after the latest pause counts toward the run and sets a
         new pause; one to an attempt that started before it only lengthens the pause to its
         own `Retry-After`. A `Retry-After` of zero counts as none, and one longer than
-        `MAX_RETRY_AFTER` pauses that long, logged at INFO with the value asked. A run that
-        time has ended (see the module) ends first, so this refusal starts a new one. The
-        caller then asks for a new permit, which waits out the pause, or fails if the pause
-        ends past its own read's patience. Does nothing for a permit already reported.
+        `MAX_RETRY_AFTER` pauses that long. A run that time has ended (see the module) ends
+        first, so this refusal starts a new one. The caller then asks for a new permit, which
+        waits out the pause, or fails if the pause ends past its own read's patience. Does
+        nothing for a permit already reported.
+
+        Each refusal logs one INFO line, after the listeners are called: the bucket, how long
+        it is now paused and why (the `Retry-After`, as asked and as honoured; the step of the
+        15, 30, 60 s schedule; one window of a paced bucket; or a request sent before the
+        pause, which leaves the pause as it was unless its `Retry-After` is longer), whether
+        the refusal taught it the Basic limit, and the refusal's message.
 
         Args:
             permit: The attempt's permit.
@@ -969,16 +997,12 @@ class RequestGovernor:
         state = self._buckets[permit.bucket]
         basic = is_basic_refusal(message)
         asked = retry_after if retry_after is not None and retry_after > 0 else None
-        if asked is not None and asked > MAX_RETRY_AFTER:
-            # A decision, not something to act on: the paused-poll WARNING and the read's own
-            # error tell the user when a pause matters.
-            logger.info(
-                "%s: a refusal's Retry-After asks for %s s; pausing %s s, the most honoured",
-                permit.bucket,
-                asked,
-                MAX_RETRY_AFTER,
-            )
-            asked = MAX_RETRY_AFTER
+        honoured = ""
+        if asked is not None:
+            honoured = f"Retry-After {asked:g} s"
+            if asked > MAX_RETRY_AFTER:
+                honoured = f"{honoured}, cut to {MAX_RETRY_AFTER:g} s, the most honoured"
+                asked = MAX_RETRY_AFTER
         with self._lock:
             now = self._clock.monotonic()
             state.settle(now)  # before `finish`, so a slow probe still holds its run open
@@ -986,19 +1010,42 @@ class RequestGovernor:
                 return basic
             state.refusals += 1
             state.last_refusal = message
+            learned = basic and not state.learned
             if basic:
                 state.learned = True
             if permit.episode == state.episode:
                 state.episode += 1
                 state.run_refusals += 1
-                if asked is not None or state.limit is None:
-                    pause = rate_limit_wait(state.run_refusals, asked)
+                if asked is not None:
+                    pause, reason = asked, honoured
+                elif state.limit is None:
+                    pause = rate_limit_wait(state.run_refusals, None)
+                    step = min(state.run_refusals, len(RATE_LIMIT_WAITS))
+                    reason = f"schedule step {step} of {_SCHEDULE} s"
                 else:
                     pause = RATE_WINDOW
+                    reason = f"one window, paced at {BASIC_REQUESTS_PER_MINUTE} per minute"
                 state.pause(now + pause)
-            elif asked is not None:
-                state.pause(now + asked)
+            else:
+                reason = "a request sent before the pause"
+                if asked is not None:
+                    reason = f"{reason}; {honoured}"
+                    state.pause(now + asked)
+            # A request sent before a pause that has already ended leaves no pause.
+            paused = max(0.0, state.pause_until - now)
         self._notify(permit.bucket)
+        # One INFO line per refusal, with the pause it chose: a decision, not something to act
+        # on. The paused-poll WARNING and the read's own error say when a pause matters.
+        logger.info(
+            "%s: paused %.1f s (%s) after HTTP 429%s; the refusal: %s",
+            permit.bucket,
+            paused,
+            reason,
+            f"; learned Basic, so paced at {BASIC_REQUESTS_PER_MINUTE} per minute from now on"
+            if learned
+            else "",
+            message,
+        )
         return basic
 
     def snapshot(self) -> tuple[BucketState, ...]:

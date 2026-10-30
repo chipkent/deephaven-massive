@@ -311,8 +311,10 @@ class _Forex(Namespace):
         pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
         `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so a quote between
         two cycles is never seen (`quotes()` streams every one). Some plans lack the endpoint (HTTP
-        403 raises `EntitlementError`); `snapshots(symbols)` carries each pair's last quote on every
-        plan. A pair with no quote (HTTP 404) is left out, with a WARNING.
+        403 raises `EntitlementError`); `snapshots(symbols)` also carries each pair's last quote,
+        on a plan that includes snapshots (see
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/plans.md).
+        A pair with no quote (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,
         since the endpoint takes one pair per request: use `m.forex.snapshots(dm.ALL).fetch()`.
@@ -351,7 +353,7 @@ class _Forex(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan = Timespan.MINUTE,
+        timespan: StreamSpan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
@@ -359,7 +361,7 @@ class _Forex(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery: ...
@@ -367,7 +369,7 @@ class _Forex(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: Timespan = Timespan.MINUTE,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
     ) -> HistoryQuery:
@@ -376,8 +378,9 @@ class _Forex(Namespace):
         Each row is one bar: its window, from `TimestampStart` to the exclusive `TimestampEnd`,
         its trading day `Date` (ISO `yyyy-MM-dd` text, the UTC day), and `TimestampInsert`,
         when the library received it. `TimestampEnd` is the first instant at which the bar is
-        complete, so join on it (`aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`) to
-        attach only closed bars; an intraday bar ends its length after its start, and a bar of
+        complete, so join on it (`t.aj(bar_table, on=["Symbol", "Timestamp>=TimestampEnd"])`,
+        where `bar_table` is a table a verb such as `history()` returned) to attach only closed
+        bars; an intraday bar ends its length after its start, and a bar of
         a day or longer at 00:00 UTC after its window's last day. `Date` is null for a bar that
         spans more than one UTC date.
 
@@ -413,8 +416,8 @@ class _Forex(Namespace):
             symbols: The currency pairs: one pair, a sequence of pairs, a Deephaven table with
                 a `Symbol` column, or `dm.ALL`. Each pair is Massive's ticker, such as `C:EURUSD`
                 (`dm.canonical_symbol_forex` converts `EUR/USD`).
-            timespan: The unit of one bar's window. `dm.Timespan.SESSION` is futures only.
-                Defaults to one minute.
+            timespan: The unit of one bar's window, a `dm.Timespan`; required, with no
+                default. `dm.Timespan.SESSION` is futures only.
             multiplier: The number of `timespan` units in one bar's window, a positive
                 integer. Defaults to 1.
 
@@ -433,7 +436,7 @@ class _Forex(Namespace):
         Example:
             ::
 
-                live = m.forex.bars("C:EURUSD").append_only()
+                live = m.forex.bars("C:EURUSD", dm.Timespan.MINUTE).append_only()
                 hourly = m.forex.bars(["C:EURUSD"], dm.Timespan.HOUR).history(
                     "2026-10-01", "2026-10-23"
                 )

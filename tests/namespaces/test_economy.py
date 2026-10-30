@@ -112,7 +112,7 @@ def test_each_factory_builds_its_query(massive_session: dm.MassiveSession, serie
     assert query._spec is series.spec
     assert query._request == Request(start=date(2025, 1, 1), end=date(2025, 6, 30), limit=10)
     assert repr(query) == (
-        f"<Query economy.{series.method} start=2025-01-01 end=2025-06-30 limit=10>"
+        f"m.economy.{series.method}(start='2025-01-01', end='2025-06-30', limit=10)"
     )
     assert factory()._request == Request()
 

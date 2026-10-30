@@ -123,7 +123,7 @@ def _front(product: str, day: date) -> str:
 def _futures_bars(today: date) -> Callable[[MassiveSession], Any]:
     """Return the query builder of the front ES and NQ contracts' minute bars on a day."""
     contracts = [_front("ES", today), _front("NQ", today)]
-    return lambda m: m.futures.bars(contracts)
+    return lambda m: m.futures.bars(contracts, dm.Timespan.MINUTE)
 
 
 def option_contracts(rows: list[dict[str, Any]], today: date) -> list[str]:
@@ -167,7 +167,11 @@ def stream_day_streams(
     for unit in units:
         name = unit.split()[0]
         if name == "stocks":
-            streams.append(Stream("stocks-minute-bars", unit, lambda m: m.stocks.bars(STOCKS)))
+            streams.append(
+                Stream(
+                    "stocks-minute-bars", unit, lambda m: m.stocks.bars(STOCKS, dm.Timespan.MINUTE)
+                )
+            )
             if tiers["stocks"] != "business":  # the base Business plan has no per-second bars
                 streams.append(
                     Stream(
@@ -187,10 +191,22 @@ def stream_day_streams(
                     )
                 )
         elif name == "options" and options:
-            streams.append(Stream("options-minute-bars", unit, lambda m: m.options.bars(options)))
+            streams.append(
+                Stream(
+                    "options-minute-bars",
+                    unit,
+                    lambda m: m.options.bars(options, dm.Timespan.MINUTE),
+                )
+            )
         elif name == "currencies":
-            streams.append(Stream("forex-minute-bars", unit, lambda m: m.forex.bars(FOREX)))
-            streams.append(Stream("crypto-minute-bars", unit, lambda m: m.crypto.bars(CRYPTO)))
+            streams.append(
+                Stream("forex-minute-bars", unit, lambda m: m.forex.bars(FOREX, dm.Timespan.MINUTE))
+            )
+            streams.append(
+                Stream(
+                    "crypto-minute-bars", unit, lambda m: m.crypto.bars(CRYPTO, dm.Timespan.MINUTE)
+                )
+            )
             streams.append(
                 Stream(
                     "forex-quotes",
@@ -201,7 +217,13 @@ def stream_day_streams(
                 )
             )
         elif name == "indices":
-            streams.append(Stream("indices-minute-bars", unit, lambda m: m.indices.bars(INDICES)))
+            streams.append(
+                Stream(
+                    "indices-minute-bars",
+                    unit,
+                    lambda m: m.indices.bars(INDICES, dm.Timespan.MINUTE),
+                )
+            )
         elif name == "futures":
             streams.append(Stream("futures-minute-bars", unit, _futures_bars(today)))
     return streams
@@ -222,7 +244,13 @@ def throughput_streams(units: Iterable[str], *, tiers: dict[str, str]) -> list[S
     streams: list[Stream] = []
     for unit in units:
         if unit.startswith("stocks") and tiers.get("stocks") == "business":
-            streams.append(Stream("stocks-all-minute-bars", unit, lambda m: m.stocks.bars(dm.ALL)))
+            streams.append(
+                Stream(
+                    "stocks-all-minute-bars",
+                    unit,
+                    lambda m: m.stocks.bars(dm.ALL, dm.Timespan.MINUTE),
+                )
+            )
         elif unit.startswith("stocks"):
             streams.append(
                 Stream(

@@ -1206,7 +1206,9 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
         rest_session._core, DIVIDENDS, symbols=new_table([string_col("Symbol", ["aapl"])])
     )
     assert isinstance(bad, Query)
-    with pytest.raises(ValueError, match=r"^stocks\.dividends: no row of the symbol table is"):
+    with pytest.raises(
+        ValueError, match=r"^m\.stocks\.dividends\(\): no row of the symbol table is"
+    ):
         bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
@@ -1494,7 +1496,7 @@ def test_append_skips_every_row_it_already_appended(
     assert row["RowsPublished"] == 4  # the skipped rows are not counted
     # The row names the query, which tells two polls of one dataset apart, and its transport.
     assert (row["Query"], row["Transport"]) == (
-        "<Query stocks.dividends symbols=('AAPL',) start=2025-01-02>",
+        "m.stocks.dividends()",
         "REST",
     )
     assert len(fake_rest.requests) == 4

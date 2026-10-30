@@ -153,9 +153,9 @@ def test_bars_schema() -> None:
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
         ("Open", "double"),
-        ("Close", "double"),
         ("High", "double"),
         ("Low", "double"),
+        ("Close", "double"),
         ("OfficialOpen", "double"),
         ("TimestampInsert", "Instant"),
     ]
@@ -165,21 +165,21 @@ def test_snapshots_schema() -> None:
     # The snapshot in full; its update time keeps its own name, as on every snapshot.
     assert _schema(indices.SNAPSHOTS) == [
         ("Symbol", "String"),
+        ("Value", "double"),
         ("Error", "String"),
         ("LastUpdated", "Instant"),
         ("MarketStatus", "String"),
         ("Message", "String"),
-        ("Name", "String"),
-        ("SessionChange", "double"),
-        ("SessionChangePercent", "double"),
-        ("SessionClose", "double"),
+        ("SessionOpen", "double"),
         ("SessionHigh", "double"),
         ("SessionLow", "double"),
-        ("SessionOpen", "double"),
+        ("SessionClose", "double"),
+        ("SessionChange", "double"),
+        ("SessionChangePercent", "double"),
         ("SessionPreviousClose", "double"),
+        ("Name", "String"),
         ("Timeframe", "String"),
         ("Type", "String"),
-        ("Value", "double"),
         ("TimestampInsert", "Instant"),
     ]
 
@@ -191,11 +191,11 @@ def test_daily_open_close_schema() -> None:
         ("Date", "String"),
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
-        ("AfterHours", "double"),
-        ("Close", "double"),
+        ("Open", "double"),
         ("High", "double"),
         ("Low", "double"),
-        ("Open", "double"),
+        ("Close", "double"),
+        ("AfterHours", "double"),
         ("PreMarket", "double"),
         ("TimestampInsert", "Instant"),
     ]
@@ -280,7 +280,9 @@ def test_flat_file_fixtures_have_the_generated_header(
     load_fixture: Callable[[str, str], bytes], name: str, prefix: str
 ) -> None:
     header = next(csv.reader(io.StringIO(load_fixture(OWNER, name).decode())))
-    assert header == [f.wire_key for f in sources(Transport.FLAT_FILES)[prefix].fields]
+    # The reader matches headers by name; the generated order puts the prices first.
+    generated = sources(Transport.FLAT_FILES)[prefix].fields
+    assert sorted(header) == sorted(f.wire_key for f in generated)
 
 
 # --- Factory methods --------------------------------------------------------------------------
@@ -291,7 +293,7 @@ def test_values_query(m: dm.MassiveSession) -> None:
     assert type(q) is StreamHistoryQuery
     assert q._spec is indices.VALUES
     assert q._request.symbols == ("I:NDX", "I:SPX")
-    assert repr(q) == "<StreamHistoryQuery indices.values symbols=('I:NDX', 'I:SPX')>"
+    assert repr(q) == "m.indices.values(['I:NDX', 'I:SPX'])"
     assert m.indices.values(dm.ALL)._request.symbols is dm.ALL
 
 
@@ -347,11 +349,9 @@ def test_bars_pick_their_class(m: dm.MassiveSession, case: tuple[dm.Timespan, in
 
 
 def test_bars_default_to_streamed_minutes(m: dm.MassiveSession) -> None:
-    q = m.indices.bars(["I:SPX"])
+    q = m.indices.bars(["I:SPX"], dm.Timespan.MINUTE)
     assert type(q) is StreamHistoryQuery
-    assert repr(q) == (
-        "<StreamHistoryQuery indices.bars symbols=('I:SPX',) timespan=Timespan.MINUTE>"
-    )
+    assert repr(q) == ("m.indices.bars('I:SPX', dm.Timespan.MINUTE)")
 
 
 def test_bars_reject_the_futures_session(m: dm.MassiveSession) -> None:
@@ -375,9 +375,7 @@ def test_bars_check_their_argument_types(m: dm.MassiveSession) -> None:
 def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     q = m.indices.previous_day_bar(["I:SPX", "I:NDX"])
     assert type(q) is Query
-    assert repr(q) == (
-        "<Query indices.previous_day_bar symbols=('I:NDX', 'I:SPX') timespan=Timespan.DAY>"
-    )
+    assert repr(q) == ("m.indices.previous_day_bar(['I:NDX', 'I:SPX'])")
     with pytest.raises(
         ValueError,
         match=r"^indices\.previous_day_bar does not accept dm\.ALL; use "
@@ -473,7 +471,11 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
 )
 def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
     method = cast("Callable[..., object]", getattr(m.indices, name))
-    extra: tuple[object, ...] = ("2025-06-02",) if name == "daily_open_close" else ()
+    extras: dict[str, tuple[object, ...]] = {
+        "daily_open_close": ("2025-06-02",),
+        "bars": (dm.Timespan.MINUTE,),
+    }
+    extra = extras.get(name, ())
     with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker; this dataset takes"):
         method("X:BTCUSD", *extra)
     with pytest.raises(ValueError, match=r"^'SPX' is not Massive's ticker; use 'I:SPX'"):
@@ -661,7 +663,7 @@ def test_bars_history_over_rest_fills_the_range_and_the_symbol(
 ) -> None:
     path = f"/v2/aggs/ticker/I:SPX/range/1/minute/{MIDNIGHT_MS}/{MIDNIGHT_MS + 86_400_000 - 1}"
     fake_rest.reply(quote(path), Reply(load_fixture(OWNER, "range.json")))
-    q = rest_session.indices.bars(["I:SPX"])
+    q = rest_session.indices.bars(["I:SPX"], dm.Timespan.MINUTE)
     out = rows(q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST))
     assert sent(fake_rest) == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
@@ -876,7 +878,7 @@ def test_a_frame_lands_in_blink(
     elif topic.startswith("A."):
         blink = indices.bars("I:SPX", dm.Timespan.SECOND).blink()
     else:
-        blink = indices.bars("I:SPX").blink()
+        blink = indices.bars("I:SPX", dm.Timespan.MINUTE).blink()
     seen = blink_to_append_only(blink)
     ws_session.subscribed(topic)
     ws_session.publish(*json.loads(load_fixture(OWNER, fixture)))
@@ -989,7 +991,7 @@ def test_one_flat_file_round_trips(
     elif prefix == "us_indices/day_aggs_v1":
         q, value = s3_session.indices.bars(["I:SPX"], dm.Timespan.DAY), "Close"
     else:
-        q, value = s3_session.indices.bars(["I:SPX"]), "Close"
+        q, value = s3_session.indices.bars(["I:SPX"], dm.Timespan.MINUTE), "Close"
     out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
     time = "Timestamp" if value == "Value" else "TimestampStart"
     assert [

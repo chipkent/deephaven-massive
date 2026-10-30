@@ -55,7 +55,9 @@ become `Date`.
   the evening before its holiday), or on its label if that is later; `Date` is null.
 - **Futures week or longer.** `window_start` to 17:00 Chicago time on the last weekday of the
   latest period its label allows; `Date` is null.
-- **Daily open-close.** As a 1-day bar of its date.
+- **Daily open-close.** As a 1-day bar of its date. A crypto summary whose `isUTC` is false
+  is served too, with the UTC day's window; its day boundary differs from the other crypto
+  tables', so it logs one WARNING per dataset per session.
 
 The indices' extra hour is conservative: an index day bar is stamped at midnight in Chicago,
 and whether it covers the New York or the Chicago day is not verified, so its end is the later
@@ -86,8 +88,9 @@ step of filling a bar's window, and every other rule here fills one of those col
 rows by them.
 
 The module does no I/O and makes no Deephaven call. Its only state is the once-only log line of
-a futures WebSocket bar whose end disagrees with its length; the WARNING of an unexpected bar
-stamp goes to the session's once-per-session warnings, which the transports pass in.
+a futures WebSocket bar whose end disagrees with its length; the WARNINGs of an unexpected bar
+stamp and of a day summary not in UTC go to the session's once-per-session warnings, which the
+transports pass in.
 """
 
 from __future__ import annotations
@@ -121,7 +124,6 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_sessions,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
-from deephaven_massive._errors import ErrorCause, MassiveError
 from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
@@ -523,6 +525,9 @@ class TimeRule:
         timespan: The bar unit of a `BAR` request; `DAY` for a daily summary; None for every
             other dataset.
         multiplier: How many units one bar spans; 1 for everything but bars.
+        warnings: The session's once-per-session warnings (`SessionCore.warnings`), which log
+            the WARNING of a day summary whose `IsUtc` is false; required for a `DAY` rule and
+            None, absent, for every other.
     """
 
     dataset: str
@@ -530,16 +535,20 @@ class TimeRule:
     asset_class: AssetClass | ClassFromPrefix
     timespan: Timespan | None = None
     multiplier: int = 1
+    warnings: BoundedLog | None = None
 
     def __post_init__(self) -> None:
-        """Reject a bar rule without a timespan.
+        """Reject a bar rule without a timespan and a daily rule without its warnings.
 
         Raises:
             ValueError: If `row_times` is `BAR` and `timespan` is None: a bar's window needs
-                its unit.
+                its unit; or if `row_times` is `DAY` and `warnings` is None: a day summary
+                not in UTC is reported there.
         """
         if self.row_times is RowTimes.BAR and self.timespan is None:
             raise ValueError(f"{self.dataset}: a bar rule needs its timespan")
+        if self.row_times is RowTimes.DAY and self.warnings is None:
+            raise ValueError(f"{self.dataset}: a daily rule needs the session's warnings")
 
     @property
     def _futures(self) -> bool:
@@ -574,8 +583,8 @@ class TimeRule:
             The rows, of the same type and schema, with `Date`, `TimestampStart`,
             `TimestampEnd`, and `TimestampInsert` filled as the dataset has them.
 
-        A daily summary whose `IsUtc` is false (the crypto open-close) raises the
-        `MassiveError` of `_daily`: its day would not be the UTC day its window is filled with.
+        A daily summary whose `IsUtc` is false (the crypto open-close) is filled like any other
+        and logs one WARNING per dataset per session (`_daily`).
         """
         arrived = (
             pa.repeat(pa.scalar(received, _INSTANT), rows.num_rows)
@@ -639,18 +648,22 @@ class TimeRule:
         Returns:
             The batch with `TimestampStart` and `TimestampEnd`.
 
-        Raises:
-            MassiveError: If a row's `IsUtc` (the crypto open-close's) is false: its day is
-                filled as the UTC day, which would then cover other hours than Massive's.
+        A row whose `IsUtc` (the crypto open-close's) is false is served with the UTC day's
+        window like every other, though Massive cut its day elsewhere, so it logs one WARNING
+        per dataset per session through `warnings`: its open and close may not line up with
+        the dates of the other crypto tables, which are UTC days.
         """
-        if _UTC_FLAG in rows.schema.names:
+        if _UTC_FLAG in rows.schema.names and self.warnings is not None:
             flags = _column(rows, _UTC_FLAG)
             if pc.any(pc.invert(pc.fill_null(flags, fill_value=True))).as_py():
-                raise MassiveError(
-                    f"{self.dataset}: Massive sent a day summary with isUTC false, so its day "
-                    "is not the UTC day whose window the library gives it; report it at "
-                    f"{ISSUES_URL}",
-                    cause=ErrorCause.LIBRARY_DEFECT,
+                self.warnings.log(
+                    f"day summary not in UTC {self.dataset}",
+                    "%s: Massive sent a day summary with isUTC false, so its day boundary is "
+                    "not the UTC midnight the other crypto tables use, and its dates may not "
+                    "line up with theirs. The row is served, with the UTC day's window; please "
+                    "report it at %s (logged once per dataset per session)",
+                    self.dataset,
+                    ISSUES_URL,
                 )
         zone = self._zone()
         labels = _column(rows, DATE)
@@ -862,7 +875,11 @@ def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:
 
 
 def time_rule(
-    spec: DatasetSpec, request: Request, *, asset_class: AssetClass | ClassFromPrefix
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    asset_class: AssetClass | ClassFromPrefix,
+    warnings: BoundedLog,
 ) -> TimeRule:
     """Return how the time columns of a request's rows are computed.
 
@@ -872,6 +889,8 @@ def time_rule(
             multiplier.
         asset_class: The class whose day rules the request follows (`dates.day_class`): the
             dataset's own, or for a dataset of every class (the indicators) its symbols'.
+        warnings: The session's once-per-session warnings, which a daily summary's rule logs
+            to (`TimeRule._daily`).
 
     Returns:
         The rule: of the request's timespan and multiplier for bars and indicators, of one day
@@ -881,7 +900,7 @@ def time_rule(
     if times is RowTimes.BAR:
         return TimeRule(spec.name, times, asset_class, request.timespan, request.multiplier)
     if times is RowTimes.DAY:
-        return TimeRule(spec.name, times, asset_class, Timespan.DAY)
+        return TimeRule(spec.name, times, asset_class, Timespan.DAY, warnings=warnings)
     return TimeRule(spec.name, times, asset_class)
 
 

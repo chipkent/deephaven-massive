@@ -42,9 +42,9 @@ Open, high, low, and close index levels over fixed windows of time.
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. | REST, flat files, WebSocket |  |  | `e` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `Open` | double | The open value for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
-| `Close` | double | The close value for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
 | `High` | double | The highest value for the symbol in the given time period. | REST, flat files, WebSocket | `h` | `high` | `h` |
 | `Low` | double | The lowest value for the symbol in the given time period. | REST, flat files, WebSocket | `l` | `low` | `l` |
+| `Close` | double | The close value for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
 | `OfficialOpen` | double | Today's official opening value. | WebSocket |  |  | `op` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
@@ -70,9 +70,9 @@ The previous trading day's open, high, low, and close of each index.
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. | REST |  |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `T` |
 | `Open` | double | The open value for the symbol in the given time period. | REST | `o` |
-| `Close` | double | The close value for the symbol in the given time period. | REST | `c` |
 | `High` | double | The highest value for the symbol in the given time period. | REST | `h` |
 | `Low` | double | The lowest value for the symbol in the given time period. | REST | `l` |
+| `Close` | double | The close value for the symbol in the given time period. | REST | `c` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
@@ -89,21 +89,21 @@ The current state of each index: its level, its session so far, and its status.
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "Ticker of asset queried." | REST | `ticker` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
+| `Value` | double | Value of Index. | REST | `value` |
 | `Error` | String | The error while looking for this ticker. | REST | `error` |
 | `LastUpdated` | Instant | The nanosecond timestamp of when this information was updated. | REST | `last_updated` |
 | `MarketStatus` | String | The market status for the market that trades this ticker. | REST | `market_status` |
 | `Message` | String | The error message while looking for this ticker. | REST | `message` |
-| `Name` | String | Name of Index. | REST | `name` |
-| `SessionChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.change` |
-| `SessionChangePercent` | double | The percent of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.change_percent` |
-| `SessionClose` | double | The closing value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.close` |
+| `SessionOpen` | double | The open value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.open` |
 | `SessionHigh` | double | The highest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.high` |
 | `SessionLow` | double | The lowest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.low` |
-| `SessionOpen` | double | The open value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.open` |
+| `SessionClose` | double | The closing value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.close` |
+| `SessionChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.change` |
+| `SessionChangePercent` | double | The percent of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.change_percent` |
 | `SessionPreviousClose` | double | The closing value for the index of previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. | REST | `session.previous_close` |
+| `Name` | String | Name of Index. | REST | `name` |
 | `Timeframe` | String | The time relevance of the data. | REST | `timeframe` |
 | `Type` | String | The indices market. | REST | `type` |
-| `Value` | double | Value of Index. | REST | `value` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
@@ -123,11 +123,11 @@ One day's opening, closing, high, and low levels of each index.
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. | REST |  |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. | REST |  |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `symbol` |
-| `AfterHours` | double | The close value of the ticker symbol in after hours trading. | REST | `afterHours` |
-| `Close` | double | The close value for the symbol in the given time period. | REST | `close` |
+| `Open` | double | The open value for the symbol in the given time period. | REST | `open` |
 | `High` | double | The highest value for the symbol in the given time period. | REST | `high` |
 | `Low` | double | The lowest value for the symbol in the given time period. | REST | `low` |
-| `Open` | double | The open value for the symbol in the given time period. | REST | `open` |
+| `Close` | double | The close value for the symbol in the given time period. | REST | `close` |
+| `AfterHours` | double | The close value of the ticker symbol in after hours trading. | REST | `afterHours` |
 | `PreMarket` | double | The open value of the ticker symbol in pre-market trading. | REST | `preMarket` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 

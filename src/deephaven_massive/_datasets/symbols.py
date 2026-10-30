@@ -414,8 +414,10 @@ def _convert_stock(text: str) -> str:
 
     Raises:
         ValueError: Always. Separators of another convention (`-`, `/`, a space) name the
-            conventions that convert them; all lower-case text says that case matters, with no
-            guess at the ticker, since Massive's tickers are case-sensitive.
+            conventions that convert them; all lower-case text says that case matters and
+            names the upper-case ticker to use if that is the one meant. It is only offered,
+            never converted to: Massive's tickers are case-sensitive, so `kimpl` may mean
+            `KIMpL`.
     """
     _refuse_other_prefix(AssetClass.STOCKS, text)
     _refuse_surrounding_whitespace(text)
@@ -430,7 +432,7 @@ def _convert_stock(text: str) -> str:
         raise ValueError(
             f"{text!r} is not a Massive stock ticker: tickers are case-sensitive, with an "
             "upper-case root and possibly a lower-case suffix (KIMpL is a preferred); write "
-            "Massive's ticker exactly"
+            f"Massive's ticker exactly: use {text.upper()!r} if that is the ticker you mean"
         )
     raise ValueError(f"{text!r} is not a Massive stock ticker such as 'AAPL', 'BRK.B', or 'KIMpL'")
 

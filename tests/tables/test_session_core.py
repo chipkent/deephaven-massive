@@ -1173,7 +1173,7 @@ def test_a_long_verb_in_a_console_command_is_reported_once(
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         console_command(command)
     (message,) = caplog.messages
-    assert message.startswith(f"{label(massive_session)}: test.trades append_only() ran for ")
+    assert message.startswith(f"{label(massive_session)}: m.test.trades().append_only() ran for ")
     assert "until the command ends; pass wait=False to fetch() or history() to read in" in message
     for result in made:
         massive_session.release(result)

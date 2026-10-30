@@ -343,8 +343,8 @@ _RAISE_NOTHING = frozenset(
     {
         "deephaven_massive._dataset_list.datasets",
         "deephaven_massive._debug_log.disable_debug_logging",
-        "deephaven_massive._namespaces.reference._Reference.market_holidays",
-        "deephaven_massive._namespaces.reference._Reference.market_status",
+        "deephaven_massive._namespaces.reference.reference.market_holidays",
+        "deephaven_massive._namespaces.reference.reference.market_status",
     }
 )
 """The public functions that take no argument a caller can get wrong and raise nothing."""
@@ -370,7 +370,7 @@ def test_every_raises_section_lists_exactly_what_its_function_and_helpers_raise(
 def test_the_check_covers_the_public_api() -> None:
     checked = _checked_functions()
     for name in (
-        "deephaven_massive._namespaces.stocks._Stocks.trades",
+        "deephaven_massive._namespaces.stocks.stocks.trades",
         "deephaven_massive._query.Query.fetch",
         "deephaven_massive._query.HistoryQuery.history",
         "deephaven_massive._session.MassiveSession.release",

@@ -148,8 +148,21 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None
         dm.canonicalize_symbols(table, AssetClass.FOREX, column=cast("str", 1))
     with pytest.raises(ValueError, match=r"^column 'Size' must be a String column of the table$"):
         dm.canonicalize_symbols(table, AssetClass.FOREX, column="Size")
-    with pytest.raises(ValueError, match=r"^column 'Pair' must be a String column of the table$"):
+    with pytest.raises(
+        ValueError,
+        match=r"^table has no column 'Pair' \(columns: Symbol, Size\); pass column='Symbol', ",
+    ):
         dm.canonicalize_symbols(table, AssetClass.FOREX, column="Pair")
+    tickers = new_table([string_col("Ticker", ["C:EURUSD"])])
+    with pytest.raises(
+        ValueError, match=r"^table has no column 'Symbol' \(columns: Ticker\); pass column='Ticker'"
+    ):
+        dm.canonicalize_symbols(tickers, AssetClass.FOREX)
+    sizes = new_table([int_col("Size", [1])])
+    with pytest.raises(
+        ValueError, match=r"^table has no column 'Symbol' \(columns: Size\); it has no String"
+    ):
+        dm.canonicalize_symbols(sizes, AssetClass.FOREX)
 
 
 def test_the_row_converter_raises_or_nulls() -> None:

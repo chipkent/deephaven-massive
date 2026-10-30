@@ -208,7 +208,7 @@ def _check_kinds(
     problems += member_problems
     problems += kinds.type_agreement(found)
     problems += kinds.transport_agreement(hand, found)
-    orders, order_problems = kinds.column_orders(found)
+    orders, order_problems = kinds.column_orders(found, uses)
     problems += order_problems
     if problems:
         raise RefreshError(problems)

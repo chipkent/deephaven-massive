@@ -364,7 +364,7 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
             (
                 r"^'kimpl' is not a Massive stock ticker: tickers are case-sensitive, with an "
                 r"upper-case root and possibly a lower-case suffix \(KIMpL is a preferred\); "
-                r"write Massive's ticker exactly$"
+                r"write Massive's ticker exactly: use 'KIMPL' if that is the ticker you mean$"
             ),
         ),
         (

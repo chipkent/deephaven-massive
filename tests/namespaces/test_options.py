@@ -402,7 +402,7 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
 
 def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSession) -> None:
     bars = massive_session.options.bars
-    assert type(bars(CONTRACT)) is StreamHistoryQuery
+    assert type(bars(CONTRACT, dm.Timespan.MINUTE)) is StreamHistoryQuery
     assert type(bars(CONTRACT, dm.Timespan.SECOND)) is StreamHistoryQuery
     assert type(bars(CONTRACT, dm.Timespan.DAY)) is HistoryQuery
     assert type(bars(CONTRACT, dm.Timespan.MINUTE, multiplier=5)) is HistoryQuery
@@ -410,17 +410,17 @@ def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSess
     q = bars(CONTRACT, dm.Timespan.DAY, adjusted=False)
     assert (q._request.timespan, q._request.multiplier) == (dm.Timespan.DAY, 1)
     assert q._request.adjusted is False
-    assert bars(CONTRACT)._request.adjusted is True
+    assert bars(CONTRACT, dm.Timespan.MINUTE)._request.adjusted is True
     with pytest.raises(ValueError, match="SESSION exists only for futures"):
         bars(CONTRACT, dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars(CONTRACT, cast("dm.Timespan", "minute"))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars(CONTRACT, adjusted=cast("bool", 1))
+        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=cast("bool", 1))
     # None would read as a path without `adjusted`: REST would send Massive's default,
     # adjusted, while the flat files, as traded, could serve the same call.
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars(CONTRACT, adjusted=cast("bool", None))
+        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=cast("bool", None))
 
 
 def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.MassiveSession) -> None:
@@ -449,8 +449,16 @@ def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.Massiv
 
 def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None:
     chain = massive_session.options.chain
-    with pytest.raises(TypeError, match="underlying must be a str, not _All"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^options\.chain reads one underlying's chain and does not take dm\.ALL; "
+            r"m\.options\.snapshots\(dm\.ALL\) lists every contract$"
+        ),
+    ):
         chain(cast("str", dm.ALL))
+    with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not int$"):
+        chain(cast("str", 1))
     with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
     with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
@@ -525,6 +533,20 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     contracts = massive_session.options.contracts
     with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
         contracts(symbols=dm.ALL)
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^'AAPL' is an underlying, not an options contract: list its contracts with "
+            r"m\.options\.contracts\(underlying='AAPL'\)$"
+        ),
+    ):
+        contracts("AAPL")
+    with pytest.raises(ValueError, match=r"'I:SPX' is an underlying"):
+        contracts("I:SPX")
+    with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
+        contracts("aapl")  # not canonical: the symbol check explains it
+    with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
+        contracts(underlying=cast("str", dm.ALL))
     with pytest.raises(TypeError, match="expired must be a bool, not int"):
         contracts(expired=cast("bool", 1))
     with pytest.raises(ValueError, match="needs a timezone"):
@@ -1138,7 +1160,7 @@ def test_a_frame_of_each_channel_lands_in_blink(
         "trades": lambda: m.options.trades(SPY),
         "quotes": lambda: m.options.quotes(SPY),
         "bars-second": lambda: m.options.bars(SPY, dm.Timespan.SECOND),
-        "bars-minute": lambda: m.options.bars(SPY),
+        "bars-minute": lambda: m.options.bars(SPY, dm.Timespan.MINUTE),
         "fmv": lambda: m.options.fmv(SPY),
     }
     blink = queries[dataset]().blink()
@@ -1219,7 +1241,7 @@ CALL = "O:IWM230327C00137000"
                 f"{PUT},1,11.82,11.82,11.82,11.82,1678715580000000000,1",
                 f"{CALL},15,11.07,11.07,11.07,11.07,1678716000000000000,1",
             ],
-            lambda m: m.options.bars(PUT, adjusted=False),
+            lambda m: m.options.bars(PUT, dm.Timespan.MINUTE, adjusted=False),
             {
                 "Date": "2023-03-13",
                 "TimestampStart": 1678715580000000000,

@@ -34,15 +34,13 @@ if TYPE_CHECKING:
 
 FIXTURES = "namespaces/partners"
 
-# The `Symbol` of a dataset whose path takes the ticker, which fills `Symbol` from the request.
-FROM_PATH = "{ticker}"
 # Each dataset's factory below `m.partners`, the REST path it reads, and the wire field its
-# `Symbol` comes from (`FROM_PATH` for the request, None for no `Symbol`).
+# `Symbol` comes from (None for no `Symbol`).
 DATASETS = {
     "partners.benzinga.analysts": ("/benzinga/v1/analysts", None),
     "partners.benzinga.analyst_insights": ("/benzinga/v1/analyst-insights", "ticker"),
     "partners.benzinga.ratings": ("/benzinga/v1/ratings", "ticker"),
-    "partners.benzinga.consensus_ratings": ("/benzinga/v1/consensus-ratings/{ticker}", FROM_PATH),
+    "partners.benzinga.consensus_ratings": ("/benzinga/v1/consensus-ratings/{ticker}", "ticker"),
     "partners.benzinga.bulls_bears_say": ("/benzinga/v1/bulls-bears-say", "ticker"),
     "partners.benzinga.guidance": ("/benzinga/v1/guidance", "ticker"),
     "partners.benzinga.earnings": ("/benzinga/v1/earnings", "ticker"),
@@ -69,10 +67,14 @@ SYMBOL_PARAMS = {
     "partners.benzinga.news": "tickers.any_of",
 }
 # The Benzinga datasets whose rows name a stock in an optional `ticker`.
+# The Benzinga datasets whose `ticker` is optional. A consensus row always names the stock it
+# was requested for, so a consensus row without one fails instead.
 BENZINGA_TICKER_DATASETS = [
     name
     for name, (_, symbol) in DATASETS.items()
-    if name.startswith("partners.benzinga.") and symbol == "ticker"
+    if name.startswith("partners.benzinga.")
+    and symbol == "ticker"
+    and name != "partners.benzinga.consensus_ratings"
 ]
 WITHOUT_SYMBOLS = [
     "partners.benzinga.analysts",
@@ -170,8 +172,7 @@ def test_symbol_is_the_one_instrument_of_a_row(name: str) -> None:
         assert not CATALOG.takes_symbols(spec_of(name))
     else:
         assert names[0] == "Symbol"
-        if symbol != FROM_PATH:
-            assert fields[symbol] not in names  # renamed, not repeated
+        assert fields[symbol] not in names  # renamed, not repeated
         assert CATALOG.takes_symbols(spec_of(name))
     # Every other generated field is a column under its generated name.
     others = {column for key, column in fields.items() if key != symbol}
@@ -272,11 +273,13 @@ def test_each_fixture_has_every_generated_field(
     assert rows
     for row in rows:
         assert set(row) == {f.wire_key for f in fields}
-        if symbol not in {None, FROM_PATH}:
+        if symbol is not None:
             assert row[symbol]
 
 
-@pytest.mark.parametrize("name", [n for n in DATASETS if DATASETS[n][1] != FROM_PATH])
+@pytest.mark.parametrize(
+    "name", [n for n in DATASETS if n != "partners.benzinga.consensus_ratings"]
+)
 def test_every_poll_key_tells_fixture_rows_apart(
     name: str, load_fixture: Callable[[str, str], bytes]
 ) -> None:
@@ -624,12 +627,10 @@ def test_fetch_returns_every_fixture_value(
     rows = fixture_rows(load_fixture, name)
     assert len(out) == len(rows)
     columns = {f.wire_key: f.column for f in sources(Transport.REST)[path].fields}
-    if symbol not in {None, FROM_PATH}:
+    if symbol is not None:
         columns[symbol] = "Symbol"
     if name == "partners.benzinga.news":
         columns["published"] = "Timestamp"
-    if symbol == FROM_PATH:
-        assert {r["Symbol"] for r in out} == {"AAPL"}  # the symbol requested
     types = {c.name: c.type for c in schema.columns}
     for got, row in zip(out, rows, strict=True):
         for key, value in row.items():
@@ -732,8 +733,12 @@ def test_consensus_ratings_send_one_request_per_symbol(
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    # The echo of one is spelled another way and the other has none: `Symbol` is the request's.
-    echoes = {"BRK.B": {"ticker": "BRK/B", "buy_ratings": 6}, "MSFT": {"buy_ratings": 9}}
+    # `Symbol` is the row's own ticker; one Massive spells in a way the library cannot read
+    # leaves `Symbol` null and keeps the spelling in `RawSymbol`.
+    echoes = {
+        "BRK.B": {"ticker": "BRK/B", "buy_ratings": 6},
+        "MSFT": {"ticker": "MSFT", "buy_ratings": 9},
+    }
     for ticker, row in echoes.items():
         fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
     table = rest_session.partners.benzinga.consensus_ratings(
@@ -744,11 +749,22 @@ def test_consensus_ratings_send_one_request_per_symbol(
         ("/benzinga/v1/consensus-ratings/BRK.B", window),
         ("/benzinga/v1/consensus-ratings/MSFT", window),
     ]
-    out = dh_to_pylist(table.view(["Symbol", "Ticker", "BuyRatings"]))
-    assert sorted((r["Symbol"], r["Ticker"], r["BuyRatings"]) for r in out) == [
-        ("BRK.B", "BRK/B", 6),
-        ("MSFT", None, 9),
+    assert "Ticker" not in table.column_names
+    out = dh_to_pylist(table.view(["Symbol", "RawSymbol", "BuyRatings"]))
+    assert sorted((r["RawSymbol"] or "", r["Symbol"], r["BuyRatings"]) for r in out) == [
+        ("", "MSFT", 9),
+        ("BRK/B", None, 6),
     ]
+
+
+def test_a_consensus_row_without_its_ticker_fails(
+    rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Every consensus row names its stock, so a row without one is a wire defect, never a
+    # row with a null `Symbol`.
+    fake_rest.reply("/benzinga/v1/consensus-ratings/MSFT", Reply(envelope([{"buy_ratings": 9}])))
+    with pytest.raises(dm.MassiveError, match="ticker"):
+        rest_session.partners.benzinga.consensus_ratings("MSFT").fetch()
 
 
 @pytest.mark.parametrize(("name", "param"), SYMBOL_PARAMS.items())

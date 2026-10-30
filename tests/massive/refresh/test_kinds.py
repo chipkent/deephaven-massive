@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import kinds, overrides
+from deephaven_massive._massive.refresh import kinds, naming, overrides
+from deephaven_massive._massive.refresh.gates import PathUse
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.spec.types import (
     Field,
@@ -81,6 +82,55 @@ _FILE = Source(
     ),
 )
 _SOURCES = {s.key: s for s in (_PATH, _CHANNEL, _FILE)}
+
+
+def _uses(sources: Iterable[Source]) -> dict[str, PathUse]:
+    """Return what generating each source consumed, for `column_orders`.
+
+    Here only each column's concept: its own name in snake case, as for a source with no
+    nested object.
+    """
+    return {
+        s.key: PathUse(concepts={f.column: naming.snake(f.column) for f in s.fields})
+        for s in sources
+    }
+
+
+_USES = _uses(_SOURCES.values())
+# The trades sources with fields outside the lead order, which the kind's order places: the
+# file and the stream list `Exchange` and `Conditions` in opposite orders.
+_ORDER_SOURCES = {
+    s.key: s
+    for s in (
+        dataclasses.replace(
+            _PATH,
+            fields=(
+                _field("conditions", "Conditions", WireType.STRING),
+                _field("exchange", "Exchange", WireType.LONG),
+                *_PATH.fields,
+            ),
+        ),
+        dataclasses.replace(
+            _CHANNEL,
+            fields=(
+                *_CHANNEL.fields,
+                _field("c", "Conditions", WireType.STRING),
+                _field("x", "Exchange", WireType.LONG),
+            ),
+        ),
+        dataclasses.replace(
+            _FILE,
+            fields=(
+                _field("ticker", "Ticker", WireType.STRING),
+                _field("exchange", "Exchange", WireType.LONG),
+                _field("conditions", "Conditions", WireType.STRING),
+                _field("size", "Size"),
+                _field("price", "Price"),
+            ),
+        ),
+    )
+}
+_ORDER_USES = _uses(_ORDER_SOURCES.values())
 _TRADES = {"trades": {"stocks": ["/v3/trades", "stocks/T", "us_stocks_sip/trades_v1"]}}
 
 
@@ -278,25 +328,46 @@ def test_gate_stale_entry_a_transport_only_column_two_transports_supply() -> Non
 
 
 def test_the_flat_file_then_the_stream_orders_every_member() -> None:
-    found = _members(dataclasses.replace(_EMPTY, kinds=_TRADES))
-    orders, problems = kinds.column_orders(found)
+    # The lead fields come first; the rest take the file's order, then the path's own.
+    found = _members(dataclasses.replace(_EMPTY, kinds=_TRADES), _ORDER_SOURCES)
+    orders, problems = kinds.column_orders(found, _ORDER_USES)
     assert problems == []
     assert orders == {
-        "us_stocks_sip/trades_v1": ("ticker", "size", "price"),
-        "stocks/T": ("sym", "s", "p"),
-        "/v3/trades": ("size", "price", "id"),
+        "us_stocks_sip/trades_v1": ("price", "size", "ticker", "exchange", "conditions"),
+        "stocks/T": ("p", "s", "sym", "x", "c"),
+        "/v3/trades": ("price", "size", "exchange", "conditions", "id"),
     }
+
+
+def test_the_lead_order_reads_each_column_s_concept() -> None:
+    # `day.c` and `day.o` lead their own object, which no flat file or stream has: the
+    # concepts the path's generation recorded say so, whatever the columns read.
+    path = dataclasses.replace(
+        _PATH, fields=(_field("day.c", "DayClose"), _field("day.o", "DayOpen"), _PATH.fields[0])
+    )
+    channel = dataclasses.replace(_CHANNEL, fields=_CHANNEL.fields[:2])
+    uses = {
+        **_uses([channel]),
+        path.key: PathUse(
+            concepts={"DayClose": "day.close", "DayOpen": "day.open", "Price": "price"}
+        ),
+    }
+    hand = dataclasses.replace(_EMPTY, kinds={"trades": {"stocks": ["/v3/trades", "stocks/T"]}})
+    found = _members(hand, {path.key: path, channel.key: channel})
+    orders, problems = kinds.column_orders(found, uses)
+    assert problems == []
+    assert orders == {"stocks/T": ("p", "sym"), "/v3/trades": ("price", "day.o", "day.c")}
 
 
 def test_the_stream_orders_a_group_without_a_flat_file() -> None:
     hand = dataclasses.replace(_EMPTY, kinds={"trades": {"stocks": ["/v3/trades", "stocks/T"]}})
-    orders, _ = kinds.column_orders(_members(hand))
+    orders, _ = kinds.column_orders(_members(hand), _USES)
     assert orders["/v3/trades"] == ("price", "size", "id")
 
 
 def test_gate_column_order_a_group_with_no_stream_or_file() -> None:
     hand = dataclasses.replace(_EMPTY, kinds={"trades": {"stocks": ["/v3/trades"]}})
-    orders, problems = kinds.column_orders(_members(hand))
+    orders, problems = kinds.column_orders(_members(hand), _USES)
     assert orders == {}
     assert _found(problems) == [("column-order", "/v3/trades", "trades")]
 
@@ -309,7 +380,7 @@ def test_gate_column_order_two_groups_that_order_a_source_differently() -> None:
             "ticks": {"stocks": ["/v3/trades", "stocks/T"]},
         },
     )
-    _, problems = kinds.column_orders(_members(hand))
+    _, problems = kinds.column_orders(_members(hand, _ORDER_SOURCES), _ORDER_USES)
     assert _found(problems) == [("column-order", "/v3/trades", "ticks")]
 
 
@@ -323,7 +394,7 @@ def test_a_projected_member_is_neither_ordered_nor_an_order_reference() -> None:
         },
         projections={("trades", "/v3/trades"): projection, ("x", "/v3/trades"): projection},
     )
-    orders, problems = kinds.column_orders(_members(hand))
+    orders, problems = kinds.column_orders(_members(hand), _USES)
     assert "/v3/trades" not in orders
     # The kind `x` has a member, but none that keeps all its fields to order it.
     assert _found(problems) == [("column-order", "/v3/trades", "x")]
@@ -335,7 +406,7 @@ def test_a_projected_member_is_neither_ordered_nor_an_order_reference() -> None:
             ("trades", "stocks/T"): overrides.Projection(fields={"p": "price"}, reason="t")
         },
     )
-    orders, problems = kinds.column_orders(_members(hand, _SOURCES))
+    orders, problems = kinds.column_orders(_members(hand, _SOURCES), _USES)
     assert orders == {}
     assert [(p.gate, p.source) for p in problems] == [
         ("column-order", "/v3/trades"),
@@ -345,27 +416,31 @@ def test_a_projected_member_is_neither_ordered_nor_an_order_reference() -> None:
 
 def test_a_projection_that_only_renames_is_ordered_and_gives_the_order() -> None:
     # The stream spells its fields its own way; renamed into the kind's names, it gives the
-    # order (`Ticker`, `Price`, `Size`) and takes it.
+    # order (`Exchange` before `Conditions`, after the lead fields) and takes it.
     renames = overrides.Projection(renames={"sym": "ticker"}, reason="t")
-    reversed_channel = dataclasses.replace(_CHANNEL, fields=tuple(reversed(_CHANNEL.fields)))
-    sources = {**_SOURCES, "stocks/T": reversed_channel}
+    channel = _ORDER_SOURCES["stocks/T"]
+    reversed_channel = dataclasses.replace(channel, fields=tuple(reversed(channel.fields)))
+    sources = {**_ORDER_SOURCES, "stocks/T": reversed_channel}
     hand = dataclasses.replace(
         _EMPTY,
         kinds={"trades": {"stocks": ["/v3/trades", "stocks/T"]}},
         projections={("trades", "stocks/T"): renames},
     )
-    orders, problems = kinds.column_orders(_members(hand, sources))
+    orders, problems = kinds.column_orders(_members(hand, sources), _ORDER_USES)
     assert problems == []
-    assert orders == {"stocks/T": ("s", "p", "sym"), "/v3/trades": ("size", "price", "id")}
+    assert orders == {
+        "stocks/T": ("p", "s", "x", "c", "sym"),
+        "/v3/trades": ("price", "size", "exchange", "conditions", "id"),
+    }
 
 
 def test_apply_writes_memberships_and_the_order_and_keeps_the_type() -> None:
     hand = dataclasses.replace(_EMPTY, kinds=_TRADES)
     found = _members(hand)
-    orders, _ = kinds.column_orders(found)
+    orders, _ = kinds.column_orders(found, _USES)
     (path,) = kinds.apply([_PATH], found, orders)
     assert isinstance(path, RestPath)
-    assert [f.column for f in path.fields] == ["Size", "Price", "Id"]
+    assert [f.column for f in path.fields] == ["Price", "Size", "Id"]
     assert path.memberships == (Membership(kind="trades", group="stocks", position=0),)
     lone = Source(key="stocks/LULD", transport=Transport.WS, fields=_CHANNEL.fields)
     (unchanged,) = kinds.apply([lone], found, orders)

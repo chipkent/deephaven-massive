@@ -683,7 +683,7 @@ Two environment variables turn it on, read once per process when the first sessi
 | Variable | Meaning |
 |---|---|
 | `DEEPHAVEN_MASSIVE_LOG` | A level name (`DEBUG`, `INFO`, `WARN`, `WARNING`, `ERROR`, `CRITICAL`, any case). Unset or blank changes nothing; any other value raises `ValueError` naming the variable from `MassiveSession()`. |
-| `DEEPHAVEN_MASSIVE_LOG_FILE` | With `DEEPHAVEN_MASSIVE_LOG`, append the lines to this file (UTF-8) instead of stderr; ignored alone. A file that cannot be opened raises `OSError` naming the variable. |
+| `DEEPHAVEN_MASSIVE_LOG_FILE` | Append the lines to this file (UTF-8) instead of stderr. Alone, without `DEEPHAVEN_MASSIVE_LOG`, it turns the log on at DEBUG: naming a file asks for a log in it, and silently ignoring it would leave a tester with an empty file. A file that cannot be opened raises `OSError` naming the variable. |
 
 ## 6. `MassiveSession` and lifecycle
 
@@ -1145,10 +1145,29 @@ There is no `stop()` on queries. Release is automatic (garbage collection) or ex
 ## 7. Query classes and verbs
 
 Four classes, defined in `_query.py`. Nothing touches the network until a verb is called. Queries
-are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
-arguments that differ from their defaults, for example
-`<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
-symbol table, static or refreshing, as `<symbol table>`. Queries have no other attributes: the verbs and `columns()`
+are immutable, hashable, and reusable. A query's repr is the call that built it, as a user would
+type it: `m.options.contracts(underlying='AAPL')`, `m.stocks.trades(['AAPL', 'MSFT'])`. It is
+built from the normalized arguments, so equal queries print alike:
+
+- public parameter names, never wire names;
+- `symbols` positional: one symbol as `'AAPL'`, several as the sorted list `['AAPL', 'MSFT']`,
+  whose first five are followed by `… (N more)`; `dm.ALL` as `dm.ALL` and a symbol table,
+  static or refreshing, as `<symbol table>`;
+- an argument the method requires, such as a bar's `timespan`, by position after the symbols
+  (`m.stocks.bars('AAPL', dm.Timespan.DAY)`); every other one as `name=value`;
+- enum members as `dm.ContractType.CALL`, dates and times as ISO-8601 text, a set of enum members
+  in its enum's order;
+- only the arguments that differ from their defaults, in signature order.
+
+A query built without its dataset method (the library's own reads, tests) carries only its
+dataset's path, `m.stocks.trades()`.
+
+The dataset method records the call when it returns the query; equality stays on the normalized
+request, so the call is not part of it. The repr appears in the `Query` column of `m.streams()`
+and in the messages about the query: a verb that held the update graph's lock too long, a feed's
+`poll()` without a start or a limit, a symbol table that holds no ticker. Messages about the
+whole dataset (a verb or column it does not have, a source that cannot serve it) name the
+dataset. Queries have no other attributes: the verbs and `columns()`
 are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
 “`columns()` on every query”).
 
@@ -1438,6 +1457,9 @@ The bar timespan decides which transport exists: `SECOND` and `MINUTE` have WebS
 and everything else is history only. The previous day's bar from `/prev` is the
 `previous_day_bar` dataset, not a verb of `bars()` ([section 7.5](#75-one-row-datasets)).
 Typed overloads pick the class statically so no verb-time error is needed for the timespan.
+`timespan` is a required positional argument with no default: a bar's length is the first thing
+a reader of the call needs, and no one length suits most uses (one-minute bars stream, daily
+bars feed most studies), so every call names it.
 
 ```python
 # _types.py
@@ -1447,27 +1469,28 @@ FuturesSpan = Literal[Timespan.SECOND, Timespan.MINUTE, Timespan.HOUR, Timespan.
 
 class _Stocks:   # same shape on m.options; m.indices, m.forex, and m.crypto have no `adjusted`
     @overload
-    def bars(self, symbols: Symbols, timespan: StreamSpan = Timespan.MINUTE, *,
+    def bars(self, symbols: Symbols, timespan: StreamSpan, *,
              multiplier: Literal[1] = 1, adjusted: bool = True) -> StreamHistoryQuery: ...
     @overload
-    def bars(self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *,
+    def bars(self, symbols: Symbols, timespan: Timespan, *,
              multiplier: int = 1, adjusted: bool = True) -> HistoryQuery: ...
 
 class _Futures:
     @overload
-    def bars(self, symbols: Symbols, timespan: StreamSpan = Timespan.MINUTE, *,
+    def bars(self, symbols: Symbols, timespan: StreamSpan, *,
              multiplier: Literal[1] = 1,
              venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)) -> StreamHistoryQuery: ...
     @overload
-    def bars(self, symbols: Symbols, timespan: FuturesSpan = Timespan.MINUTE, *,
+    def bars(self, symbols: Symbols, timespan: FuturesSpan, *,
              multiplier: int = 1,
              venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)) -> HistoryQuery: ...
 ```
 
 The implementation returns the most specific class for the actual values. The general overload
 returns the base class, so the overlapping overloads type-check (the narrower return type is a
-subtype). `bars(syms)` is stream plus history. `bars(syms, Timespan.DAY)` and
-`bars(syms, Timespan.MINUTE, multiplier=5)` are history only.
+subtype). `bars(syms, Timespan.MINUTE)` and `bars(syms, Timespan.SECOND)` are stream plus
+history. `bars(syms, Timespan.DAY)` and `bars(syms, Timespan.MINUTE, multiplier=5)` are history
+only. `bars(syms)` without a timespan is a static type error and a `TypeError` at the call.
 
 `Timespan.DAY` on futures is a static type error and a synchronous `ValueError` at construction:
 the futures aggregates endpoint accepts the units `sec`, `min`, `hour`, `session`, `week`,
@@ -1671,8 +1694,8 @@ endpoint, with `fetch()` and `poll()` like every `Query`:
   labelled by the day it falls on, and logs one WARNING per dataset and timespan per session
   (decision 70). Stock and
   option bars are split-adjusted unless `adjusted=False`, and every page's `adjusted` echo is
-  checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, so the
-  repr shows `timespan=Timespan.DAY`.
+  checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, which
+  the caller never passes, so the repr is the call alone: `m.stocks.previous_day_bar('AAPL')`.
 - **`poll()`.** `REPLACE`, keyed by `Symbol`, so a polled one-row dataset holds each symbol's
   latest row; an explicit `APPEND` records each cycle's row when it is new, through its revision
   key (`Timestamp`, or `TimestampStart` for the bar). A poll sees only the latest trade or quote
@@ -1759,9 +1782,11 @@ Notation:
   `DatasetSpec` by name); a test asserts that every namespace module contributes. The query
   class in each table below follows from the dataset's transports
   ([section 7](#7-query-classes-and-verbs)).
-- `limit` is a total-row cap, except on a dataset whose symbols overlap
-  (`DatasetSpec.symbols_overlap`, `reference.news`): there it caps each symbol's request, so
-  one ticker's rows never crowd out another's. Page size is internal. Every docstring says so. The cap is
+- `limit` is a total-row cap, except where each request names one symbol: a per-symbol path
+  (the indicators) or a symbol parameter that takes one ticker
+  (`reference.tickers`, `stocks.ipos`), and a dataset whose symbols overlap
+  (`DatasetSpec.symbols_overlap`, `reference.news`). There it caps each symbol's request, so
+  one ticker's rows never crowd out another's (owner decision 74). Page size is internal. Every docstring says so. The cap is
   stored apart from the wire parameters, in `Request.limit`, so it can never be sent as the
   endpoint's page-size `limit`; the page size is `DatasetSpec.page_size`, or `Request.limit`
   when that is smaller (`snapshots(ALL, limit=10)` asks for 10 rows, not 250), and paging
@@ -1804,7 +1829,7 @@ Notation:
 | `last_trade(symbols)` ([7.5](#75-one-row-datasets)) | Query | | `/v2/last/trade/{t}` per symbol | |
 | `quotes(symbols)` | StreamHistoryQuery | `Q` | history `/v3/quotes/{t}` | `us_stocks_sip/quotes_v1` |
 | `last_quote(symbols)` | Query | | `/v2/last/nbbo/{t}` per symbol | |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads ([7.1](#71-bars-overloads)) | `A` (1 s), `AM` (1 min) | history `/v2/aggs/ticker/{t}/range/{m}/{span}/{from}/{to}`; `ALL` with DAY: `/v2/aggs/grouped/locale/us/market/stocks/{date}` per day | `us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1` (`adjusted=False` only) |
+| `bars(symbols, timespan, *, multiplier=1, adjusted=True)` | overloads ([7.1](#71-bars-overloads)) | `A` (1 s), `AM` (1 min) | history `/v2/aggs/ticker/{t}/range/{m}/{span}/{from}/{to}`; `ALL` with DAY: `/v2/aggs/grouped/locale/us/market/stocks/{date}` per day | `us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1` (`adjusted=False` only) |
 | `previous_day_bar(symbols, *, adjusted=True)` | Query | | `/v2/aggs/ticker/{t}/prev` per symbol | |
 | `luld(symbols)` | StreamQuery | `LULD` | | |
 | `imbalances(symbols)` | StreamQuery | `NOI` | | |
@@ -1835,7 +1860,7 @@ Notation:
 | `trades(symbols)` | StreamHistoryQuery | `T` | history `/v3/trades/{o}` | `us_options_opra/trades_v1` |
 | `last_trade(symbols)` | Query | | `/v2/last/trade/{o}` per contract | |
 | `quotes(symbols)` | StreamHistoryQuery | `Q` | history `/v3/quotes/{o}` | `us_options_opra/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `A`, `AM` | range | `us_options_opra/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1, adjusted=True)` | overloads | `A`, `AM` | range | `us_options_opra/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols, *, adjusted=True)` | Query | | `/v2/aggs/ticker/{o}/prev` per contract | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/options`) | | |
 | `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
@@ -1868,9 +1893,9 @@ but a set of `FuturesVenue` raises `TypeError`.
 |---|---|---|---|---|
 | `trades(symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue))` | StreamHistoryQuery | `T` | history `/futures/v1/trades/{t}` (dates: one request series per weekday session, `session_end_date=<date>`; datetimes: the exact `timestamp` range; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/trades_v1` |
 | `quotes(symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue))` | StreamHistoryQuery | `Q` | history `/futures/v1/quotes/{t}` (as `trades`) | `us_futures_{venue}/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue))` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns; dates: from the first session's open less 4 days to 18:00 CT on the last date, kept by their session label (`Date`), a bar of several units only when it fits under both readings of its label; datetimes: the exact `window_start` range, bars kept by their own window; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue))` | overloads | `A`, `AM` | history `/futures/v1/aggs/{t}` (`resolution`; `window_start` in ns; dates: from the first session's open less 4 days to 18:00 CT on the last date, kept by their session label (`Date`), a bar of several units only when it fits under both readings of its label; datetimes: the exact `window_start` range, bars kept by their own window; [section 12](#12-timestamp-units-and-day-boundaries)) | `us_futures_{venue}/minute_aggs_v1`, `us_futures_{venue}/session_aggs_v1` |
 | `snapshots(symbols, *, product_code: str \| Sequence[str] \| None = None, …F)`; `ALL` with `product_code` is every contract of the products; `Symbol` is the contract's top-level `ticker`, where both vendor samples send it, though the OpenAPI schema nests it as `details.ticker` (a `KEY_FIXES` entry; [section 23](#23-open-verification-items)) | Query | | `/futures/v1/snapshot` | |
-| `contracts(*, product_code: str \| Sequence[str] \| None = None, …F)`, `products(*, product_code: str \| Sequence[str] \| None = None, …F)`, `exchanges(*, limit: int \| None = None)`, `market_status(*, product_code: str \| Sequence[str] \| None = None, limit: int \| None = None)` (neither path has a filter beyond the typed arguments, nor `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
+| `contracts(symbols=None, *, product_code: str \| Sequence[str] \| None = None, as_of: DateLike \| None = None, …F)`: `Symbol` and `RawSymbol` are the row's `ticker`, as on the market data, so a contracts table feeds `trades()`, `quotes()`, `bars()`, and `snapshots()` directly; explicit `symbols` are sent as `ticker.any_of`, 250 a request (the size of the stock, option, index, forex, and crypto snapshots), so `ticker.any_of` is no filter; None lists every contract and `ALL` is refused (leave `symbols` out); the `poll()` key is `Symbol` and `Date`. `products(*, product_code: str \| Sequence[str] \| None = None, as_of: DateLike \| None = None, …F)`. On both, `as_of` is sent as `date`, the day whose point-in-time specifications are listed; None for Massive's default, today. `exchanges(*, limit: int \| None = None)`, `market_status(*, product_code: str \| Sequence[str] \| None = None, limit: int \| None = None)` (neither path has a filter beyond the typed arguments, nor `sort`) | Query | | `/futures/v1/{contracts,products,exchanges,market-status}` | |
 | `schedules(*, product_code: str \| Sequence[str] \| None = None, …T)`, axis `session_end_date` | Query | | `/futures/v1/schedules` | |
 
 `product_code` is typed on every futures dataset whose path takes it (`snapshots`,
@@ -1894,7 +1919,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
 | `values(symbols)` | StreamHistoryQuery | `V` | none: history flat files only | `us_indices/values_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: the endpoint has none) | overloads | `A`, `AM` | range | `us_indices/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: the endpoint has none) | overloads | `A`, `AM` | range | `us_indices/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{t}/prev` per index | |
 | `snapshots(symbols, *, …F)` | Query | | `/v3/snapshot/indices`, 250 tickers per request | |
 | `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{t}/{date}` | |
@@ -1905,7 +1930,7 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 |---|---|---|---|---|
 | `quotes(symbols)` | StreamHistoryQuery | `C` | history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
 | `last_quote(symbols)` | Query | | `/v1/last_quote/currencies/{from}/{to}` per pair | |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp is moved the same way and warns (decision 70), [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp is moved the same way and warns (decision 70), [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{C:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
@@ -1919,11 +1944,11 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 | `trades(symbols)` | StreamHistoryQuery | `XT` | history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
 | `last_trade(symbols)` | Query | | `/v1/last/crypto/{from}/{to}` per pair | |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, is still served, moved to 00:00 UTC of the day it falls on, and logs one WARNING per dataset and timespan per session naming the stamp (decision 70); `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, is still served, moved to 00:00 UTC of the day it falls on, and logs one WARNING per dataset and timespan per session naming the stamp (decision 70); `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
 | `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{X:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
-| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
+| `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent; a row whose `isUTC` is false is served with the UTC day's window and logs one WARNING per dataset per session, decision 77) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
 
 ### 8.7 `m.reference`
 
@@ -2015,7 +2040,7 @@ All return `Query`.
 | Vendor | Methods | REST |
 |---|---|---|
 | `benzinga` | `analysts`, `analyst_insights`, `ratings`, `bulls_bears_say`, `guidance`, `earnings`, `firms` — `(symbols=None, …F)` where the endpoint takes tickers, `(…F)` otherwise | `/benzinga/v1/{analysts,analyst-insights,ratings,bulls-bears-say,guidance,earnings,firms}` |
-| `benzinga` | `consensus_ratings(symbols, *, filters: Mapping[str, FilterValue] \| None = None)` | `/benzinga/v1/consensus-ratings/{t}` per symbol (the ticker is a path segment); `filters` reaches the path's `date` family |
+| `benzinga` | `consensus_ratings(symbols, *, filters: Mapping[str, FilterValue] \| None = None)`; `Symbol` and `RawSymbol` are the row's `ticker`, as on the other Benzinga datasets, and there is no separate `Ticker` column | `/benzinga/v1/consensus-ratings/{t}` per symbol (the ticker is a path segment); `filters` reaches the path's `date` family |
 | `benzinga` | `news(symbols=None, *, …T)`, axis `published` (an instant) | `/benzinga/v2/news` |
 | `etf_global` | `analytics`, `constituents`, `fund_flows`, `profiles`, `taxonomies` — `(symbols=None, …F)` | `/etf-global/v1/{analytics,constituents,fund-flows,profiles,taxonomies}` |
 | `tmx` | `corporate_events(symbols=None, …T)`, axis `date` | `/tmx/v1/corporate-events` |
@@ -3987,7 +4012,7 @@ the diagnostics scope is released; a view obtained before the close keeps showin
 | `StreamId` | key; a read's is its call id |
 | `Kind` | `stream` (a WebSocket stream), `poll` (a `poll()` table), or `read` (a background `fetch()` or `history()`) |
 | `Dataset` | `"stocks.trades"` |
-| `Query` | the `repr` of the query whose verb opened the stream or `poll()`, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
+| `Query` | the `repr` of the query whose verb opened the stream or `poll()`, the call that built it, such as `m.stocks.trades(['AAPL', 'MSFT'])`, so two streams of one dataset can be told apart, truncated at 200 characters like `SchemaDrift`; a stream reused by an equal query keeps the opener's text |
 | `SymbolCount`, `Symbols` | count and a truncated list |
 | `HeldResults` | results currently held by the library (result records not yet released) |
 | `Deferred` | options contracts deferred by the cap |
@@ -4081,7 +4106,7 @@ the old one:
   starts `deephaven_server.Server` may import the library before the server replaces
   `sys.stderr`, and a handler made then would keep the old stream. A session needs the server,
   so by then `sys.stderr` is final. The variables are skipped once `enable_debug_logging` has
-  run.
+  run. The file variable alone turns the log on at DEBUG.
 - `dm.enable_debug_logging(output=LogOutput.STDERR)`, for a running console, where a new variable
   takes effect only after a worker restart. It sets DEBUG; `output` is `LogOutput.STDERR` or a
   file path to append to, an unopenable file raises its `OSError` and keeps the previous
@@ -4122,11 +4147,16 @@ DEBUG, and its worker threads are `call-<id> rest_<n>` or `call-<id> files_<n>`.
 clients cannot see the group, so `WsClient` takes the prefix as a constructor argument.
 
 **The environment line.** Each time the log is turned on, by a variable or by the function,
-it logs one INFO line describing the process: the library's version; Python's, with whether
-the GIL is enabled; the version of every dependency the library declares (an absent `orjson`
-means the standard library decodes JSON); the date of the Massive spec snapshot; and whether
-`HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values. Each `MassiveSession()` then logs
-its label and its configuration's `repr` at INFO, with each secret shown only as set or unset.
+it first logs one INFO line naming the level, where the lines go (a file by its absolute path,
+symbolic links resolved), and what turned it on. Then it logs one INFO line describing the
+process: the library's version and the git commit it was installed from (`vcs_info.commit_id`
+of the distribution's PEP 610 `direct_url.json`, or "not recorded"); Python's, with whether
+the GIL is enabled; `platform.platform()`; the local time's offset from UTC and zone name, so
+the log's UTC times map to the tester's clock; the version of every dependency the library
+declares (an absent `orjson` means the standard library decodes JSON); the date of the Massive
+spec snapshot; and whether `HTTPS_PROXY` and `SSL_CERT_FILE` are set, never their values. Each
+`MassiveSession()` then logs its label and its configuration's fields at INFO, with each
+credential (the API key, the S3 access key id, and the S3 secret) shown only as set or unset.
 
 **Secrets.** The API key travels only in the REST client's header and the WebSocket
 authentication frame; the S3 secret goes only to boto3; the proxy password is already
@@ -4230,7 +4260,8 @@ reader must do, not how bad the event feels:
   table; data the user would misread (vendor drift, a bad symbol under the log setting); and
   configuration to fix.
 - **INFO: decisions and progress**: the host chosen, a long read's estimate, the first 429,
-  recoveries, session open and close, and a session garbage-collected without `close()`.
+  each rate-limit pause with its length and reason, recoveries, session open and close, and a
+  session garbage-collected without `close()`.
 - **DEBUG: everything else**, including every expected error that is also raised to the
   caller, each reconnect attempt, each retry and give-up, and per-request detail.
 
@@ -4248,8 +4279,9 @@ enforced by ruff's `G` rules); a value that costs a call to compute is computed 
 `isEnabledFor`. Nothing is logged per row or per frame except a failure.
 
 **Bug reports.** `.github/ISSUE_TEMPLATE/bug_report.yml` asks for the code that was run, the
-log of a run with `DEBUG` on, `m.streams()` and `m.connections()` printed, and what was
-expected, with a recipe for a hang.
+log of a run with `DEBUG` on as an attached file (GitHub cuts an issue's text at 65,536
+characters), with its first lines and the minutes around the failure, `m.rate_limits()`,
+`m.streams()`, and `m.connections()` printed, and what was expected, with a recipe for a hang.
 
 ## 18. Concurrency model
 
@@ -5113,8 +5145,8 @@ verification, never a column list.
   object part, and stay objects), treats a `oneOf` or `anyOf` with exactly one branch as that branch, flattens
   nested objects into dotted wire paths below the result key (`results` unless `RESULT_KEYS`
   names another key, a dotted path of keys such as `results.values`, or `None` for a body that
-  is itself the rows), keeps fields in the order the vendor documents them (see the naming
-  policy, rule 6), and records the parameters (wire name,
+  is itself the rows), keeps fields in the order the vendor documents them, then moves the price
+  columns first (see the naming policy, rules 6a and 6b), and records the parameters (wire name,
   `ParamKind`, enum values, path or query, the unit of a `TIMESTAMP`, and the default the spec
   gives the parameter, as a JSON scalar or `null`). A JSON-object body
   without a result key is one row, and its `ENVELOPE_KEYS` are left out of the fields; one of
@@ -5166,7 +5198,7 @@ verification, never a column list.
   with `ask`/`ap` as `AskPrice` and `bid`/`bp` as `BidPrice`. The generator writes each long
   name through the naming rule, and the recorded projection maps every wire key it keeps to
   its PascalCase column, the same vocabulary as `Field.column`. A member whose projection
-  renames is ordered, and gives the order, like an unprojected one (rule 6); a member that
+  renames is ordered, and gives the order, like an unprojected one (rule 6a); a member that
   keeps only some fields does neither, and its source keeps its own order.
 - **Memberships are written into the generated files.** `KINDS` and `PROJECTIONS` are generator
   inputs in `refresh/`, which is not shipped. The generator writes each source's memberships
@@ -5249,8 +5281,10 @@ per-column exceptions:
    from a declared key or from the library's time columns, never from a vendor field that merely
    carries the name. The test lives with the catalog because the roles are declared in
    `_datasets`, which `_massive` cannot import. There are no `Ticker` or `Pair` stand-ins.
-6. **Order.** Columns keep the vendor's natural order, recorded explicitly in each generated
-   file's field lists. Massive's REST documentation lists every object's fields
+6. **Order.** Each generated file's field lists record the column order explicitly, set in two
+   steps.
+
+   6a. **Vendor order.** Columns first take the vendor's natural order. Massive's REST documentation lists every object's fields
    alphabetically (the specification's keys, its pages' response-attribute tables, and their
    sample responses all agree), so a REST source keeps that documented order, and a
    REST-only dataset's columns are alphabetical. The sources of each group of a dataset kind
@@ -5261,6 +5295,28 @@ per-column exceptions:
    renames) takes that order. A group with no flat-file or WebSocket member keeping all its
    fields fails the refresh (`column-order`). The snapshot stores every document in the order served, never re-sorted. The
    dataset's key columns come first at run time.
+
+   6b. **Price columns lead** (owner-approved, 2026-10-30). One rule, after the vendor order,
+   orders every dataset of every asset class and transport alike, so a table opens on its
+   prices, and two feeds of one kind put them in the same place:
+   1. The key columns (`Symbol`, `Date`, `Timestamp*`, `OptionRoot`, `RawSymbol`) come first,
+      unchanged; the generator never moves a field the library treats as a key column.
+   2. A column's group is its nested-object parent, known from its long-name path: the top
+      level, `Day`, `PrevDay`, `LastMinute`, `LastTrade`, `LastQuote`, `Session`,
+      `UnderlyingAsset`, and so on.
+   3. Each lead field moves to the start of its group, in this order: `Price`, `Size`,
+      `BidPrice` or `Bid`, `BidSize`, `AskPrice` or `Ask`, `AskSize`, `Open`, `High`, `Low`,
+      `Close`, `Volume`, `Vwap`, `Value`. A field leads only when its own name, without its
+      parents', is exactly one of these: `DayClose` leads the `Day` group, while
+      `DayDecimalVolume` and a top-level `PreviousClose` do not lead.
+   4. Every other `Bid<X>` moves to just before its `Ask<X>` partner in the same group
+      (`BidExchange` before `AskExchange`). Nothing else moves.
+
+   So bars read `Open High Low Close Volume Vwap …`, trades `Price Size …`, quotes
+   `BidPrice BidSize AskPrice AskSize BidExchange AskExchange …`, and snapshots
+   `DayOpen DayHigh DayLow DayClose DayVolume DayVwap …`. The refresh applies the rule last
+   (`naming.lead_order`): to each kind group's order, and to every REST source as generated,
+   so a source in no kind follows it too.
 7. **Consistency.** Within one dataset kind, one column for two concepts fails the refresh
    (the `concept-collision` gate); one concept always gets one column, by rules 1–4.
 
@@ -5316,7 +5372,7 @@ description for the reviewer. Every gate has a descriptive name, which is how th
 - **`venue-agreement`:** a futures kind whose venue pages differ;
 - **`column-order`:** a source whose column order cannot be taken from its kind: its
   `KINDS` group has no flat-file or WebSocket member keeping all its fields to give the
-  order, or two of its groups order its columns differently (naming policy, rule 6);
+  order, or two of its groups order its columns differently (naming policy, rule 6a);
 - **`concept-collision` (one concept, one column):** within one kind, one column name holding
   two concepts. A concept is a field's full long-name path, each segment in snake case, so `DayClose` and
   `PrevDayClose` are two concepts, while the v2 snapshot's `lastTrade.p` and the unified
@@ -6208,7 +6264,8 @@ document already reflects them.
 21. **Sessions and queries expose no introspection attributes; their reprs are defined.**
     `MassiveSession` has no `name` or `config`, and queries have no `dataset`: a session's label
     appears only in its repr (`<MassiveSession #1 open>`), the same-key WARNING, and error
-    messages, and a query's dataset and arguments only in its repr. The public surface stays
+    messages, and a query's dataset and arguments only in its repr, the call that built it
+    (`m.stocks.trades('AAPL')`). The public surface stays
     exactly the verbs, `columns()` (see “`columns()` on every query” below), and the namespaces,
     and the API key stays out of objects users routinely leave in console globals.
 22. **Names come from the generated tables** (2026-10-26). The generator names every field from
@@ -6787,6 +6844,40 @@ document already reflects them.
     guard (a page whose `adjusted` echo differs from the request raises `MassiveError`) stays:
     it keeps one table from mixing split-adjusted and as-traded prices, which is not a stamp
     question.
+71. **Every `bars()` call names its bar size** (2026-10-30, owner). `timespan` is required,
+    with no default, on the stocks, options, futures, indices, forex, and crypto `bars()`; a
+    call without it is a static type error and a `TypeError`. No length suits most uses, and
+    the length is the first thing a reader of the call needs. The indicators keep
+    `timespan=Timespan.DAY` ([section 7.1](#71-bars-overloads)).
+72. **A futures contract is a symbol** (2026-10-30, owner). `futures.contracts` names the row's
+    `ticker` `Symbol` (with `RawSymbol`), takes optional positional `symbols` sent as
+    `ticker.any_of`, polls by `Symbol` and `Date`, and with `products` takes `as_of`, sent as
+    `date`. A contracts table then feeds the market-data datasets directly. Benzinga consensus
+    ratings take `Symbol` from the row's own `ticker` (`KeySpec("Ticker")`), as the other
+    Benzinga datasets do ([section 8.3](#83-mfutures)).
+73. **A query's repr is the call the user typed** (2026-10-30, owner): public names, `symbols`
+    first and positionally, `… (N more)` after five symbols, a required argument by position,
+    and only the arguments that differ from their defaults
+    ([section 7](#7-query-classes-and-verbs)).
+74. **`limit` caps each symbol's rows where a request names one symbol** (2026-10-30, owner),
+    so a few symbols with many rows never crowd out the rest; elsewhere it stays a total cap.
+75. **Price columns lead every table** (2026-10-30, owner): the naming policy's rule 6b,
+    applied at refresh time by `naming.lead_order`.
+76. **The debug log says what it needs to** (2026-10-30, owner). A rate-limit pause logs its
+    length, its reason, and its end, and each GET its wait for a permit; an HTTP 429 logs once.
+    The WebSocket client's `max_connections` warning and its reconnect attempts log at DEBUG,
+    since the connection already warns once per outage, and its close line gives the server's
+    close reason (without the key) and how long the connection was up. The bug-report form
+    asks for the log as an attached file. The environment line names the git commit and the
+    platform; `DEEPHAVEN_MASSIVE_LOG_FILE` alone turns the log on at DEBUG; the line that turns
+    it on gives the file's resolved path; a session's configuration shows `s3_access_key_id`
+    only as set or unset. The library never rotates the log file
+    ([section 17.1](#171-the-log)).
+77. **A crypto day summary not in UTC is served with a warning** (2026-10-30, owner). A crypto
+    `daily_open_close` row whose `isUTC` is false is returned with the UTC day's window and
+    logs one WARNING per dataset per session, through the session's once-per-session warnings
+    as decision 70's bar stamps do: its day boundary differs from the other crypto tables', so
+    its dates may not line up with theirs. It never raises.
 
 ## 23. Open verification items
 

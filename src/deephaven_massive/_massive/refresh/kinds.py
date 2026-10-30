@@ -21,8 +21,10 @@ source order. Once every transport is generated, this module:
    are the vendor's own (a file's columns, a message's keys); the group's other sources add
    their remaining columns after, in their own order. A member takes the group's order, so a
    REST member of a kind is reordered too, while a REST source in no kind keeps the
-   specification's (alphabetical) order. A group with no flat-file or WebSocket source, or a
-   source two of whose groups order its columns differently, fails the refresh;
+   specification's (alphabetical) order. Last, `naming.lead_order` moves each nested object's
+   price, size, and bar columns to its start, as it does for every REST source as generated.
+   A group with no flat-file or WebSocket source, or a source two of whose groups order its
+   columns differently, fails the refresh;
 5. writes each source's memberships (`spec.types.Membership`), which the generated files
    record, so the run-time merge never reads `refresh/`.
 
@@ -46,6 +48,7 @@ from deephaven_massive._massive.spec.types import Membership, Source, Transport,
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, Sequence
 
+    from deephaven_massive._massive.refresh.gates import PathUse
     from deephaven_massive._massive.refresh.hand_input import HandInput
     from deephaven_massive._massive.spec.types import Field
 
@@ -315,17 +318,23 @@ def transport_agreement(hand: HandInput, found: Sequence[Member]) -> Iterator[Pr
         )
 
 
-def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], list[Problem]]:
+def column_orders(
+    found: Sequence[Member], uses: Mapping[str, PathUse]
+) -> tuple[dict[str, tuple[str, ...]], list[Problem]]:
     """Order the fields of every member that keeps all its fields from its group.
 
     Within each `(kind, group)`, the group's order is the columns of its flat-file sources,
     then of its WebSocket sources, then of its other sources, each in `KINDS` order and each
-    column at its first appearance. A member that keeps all its fields (unprojected, or with a
-    projection that only renames, `Projection.renames`) takes that order and may give it; a
-    member projected to a few of its fields does neither, and its source keeps its own order.
+    column at its first appearance, then put in lead order (`naming.lead_order`, by the
+    concept of the field behind each column's first appearance). A member that keeps all its
+    fields (unprojected, or with a projection that only renames, `Projection.renames`) takes
+    that order and may give it; a member projected to a few of its fields does neither, and
+    its source keeps its own order.
 
     Args:
         found: The members.
+        uses: What generating each source consumed, by key; every member's source has an
+            entry, whose concepts give each field's nested-object group and own name.
 
     Returns:
         Each reordered source's key mapped to its wire keys in order, and a `column-order`
@@ -353,10 +362,13 @@ def column_orders(found: Sequence[Member]) -> tuple[dict[str, tuple[str, ...]], 
                 for m in grouped
             ]
             continue
-        rank: dict[str, int] = {}
+        concepts: dict[str, str] = {}
         for member in [*ordered, *(m for m in grouped if all(m is not o for o in ordered))]:
-            for column, _ in member.columns():
-                rank.setdefault(column, len(rank))
+            own = uses[member.source.key].concepts
+            for column, item in member.columns():
+                concepts.setdefault(column, own[item.column])
+        leading = naming.lead_order(list(concepts), concepts.__getitem__)
+        rank = {column: index for index, column in enumerate(leading)}
         for member in whole:
             wire_keys = tuple(
                 f.wire_key for column, f in sorted(member.columns(), key=lambda c: rank[c[0]])

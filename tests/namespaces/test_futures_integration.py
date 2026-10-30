@@ -220,7 +220,11 @@ def test_the_session_after_a_holiday_and_year_candles(
     if "futures" in classes_on_basic:
         evidence(f"Futures on Basic: the library's minute bars of {session_day} are not read")
     else:
-        minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
+        minutes = table_rows(
+            live_session.futures.bars(contract, dm.Timespan.MINUTE).history(
+                session_day, session_day
+            )
+        )
         evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
         if minutes:
             evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")
@@ -376,7 +380,7 @@ def test_shapes_of_futures_contract_tickers(
     evidence(f"NG contracts: {len(tickers)} tickers, e.g. {tickers[:10]} ... {tickers[-10:]}")
     evidence(f"NG tickers outside letters, a month code, and a 1-2 digit year: {odd}")
     library = table_rows(live_session.futures.contracts(product_code="NG", limit=20).fetch())
-    evidence(f"library contracts(NG): Ticker {[r['Ticker'] for r in library]}")
+    evidence(f"library contracts(NG): Symbol {[r['Symbol'] for r in library]}")
     assert tickers
 
 

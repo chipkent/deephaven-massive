@@ -101,9 +101,10 @@ class Timespan(StrEnum):
     """The unit of a bar or an indicator window.
 
     For `bars()` the timespan also selects the transport: `SECOND` and `MINUTE` (with
-    `multiplier=1`) stream over WebSocket, `DAY` adds the previous-session `fetch()`, and every
-    other combination is history only. `SESSION` exists only for futures, whose aggregates
-    endpoint has a trading-session unit and no `DAY`.
+    `multiplier=1`) stream over WebSocket, and every other combination is history only. The
+    previous session's 1-day bar is not a `bars()` call: each namespace that has one serves it
+    as `previous_day_bar()`. `SESSION` exists only for futures, whose aggregates endpoint has a
+    trading-session unit and no `DAY`.
 
     Example:
         ::

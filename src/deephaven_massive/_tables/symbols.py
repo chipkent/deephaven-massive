@@ -174,7 +174,8 @@ def _arguments(
 
     Raises:
         TypeError: If `table` is not a Deephaven `Table` or `column` is not a `str`.
-        ValueError: If `column` is not a `String` column of the table, or `convention` is a
+        ValueError: If the table has no `column` (the message lists its columns and names a
+            `String` one to pass), `column` is not a `String` column, or `convention` is a
             stock convention and the class is not stocks.
 
     An enum argument of the wrong type raises the `TypeError` of `_require_enum`.
@@ -191,7 +192,17 @@ def _arguments(
     if not isinstance(column, str):
         raise TypeError(f"column must be a str, not {type(column).__name__}")
     types = {c.name: c.data_type for c in table.columns}
-    if types.get(column) != dtypes.string:
+    if column not in types:
+        texts = [name for name, data_type in types.items() if data_type == dtypes.string]
+        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+        logger.debug("canonicalize_symbols refused: no column %r in %s", column, list(types))
+        remedy = (
+            f"pass column={texts[0]!r}, or the name of another String column of symbols"
+            if texts
+            else "it has no String column to read symbols from"
+        )
+        raise ValueError(f"table has no column {column!r} (columns: {', '.join(types)}); {remedy}")
+    if types[column] != dtypes.string:
         raise ValueError(f"column {column!r} must be a String column of the table")
     return resolved, chosen, mode
 
