@@ -407,9 +407,23 @@ def _symbol_rows(query: HistoryQuery, day: date) -> Table:
     """Return the test symbol's rows of one day of a `dm.ALL` history over REST.
 
     Returns:
+        The rows, filtered in Deephaven (`_only_the_symbol`).
+    """
+    return _only_the_symbol(query.history(day, day, source=dm.HistorySource.REST))
+
+
+def _only_the_symbol(table: Table) -> Table:
+    """Keep the test symbol's rows of a table.
+
+    The filter runs in a frame that holds only the table. A formula hands the locals of the
+    frame that calls it to the JVM, which keeps them until its own garbage collection: a
+    frame holding the query would keep the query's session, and its reaper thread, alive
+    after the test closed it.
+
+    Returns:
         The rows, filtered in Deephaven.
     """
-    return query.history(day, day, source=dm.HistorySource.REST).where(f"Symbol == `{_SYMBOL}`")
+    return table.where(f"Symbol == `{_SYMBOL}`")
 
 
 def _record_library_stock_stamps(
@@ -732,7 +746,8 @@ def test_daily_indicator_stamps(
     stamps elsewhere make the library refuse the values, and say which day each value really
     belongs to.
     """
-    start, end = recent_week[0].isoformat(), (recent_week[1] + timedelta(days=1)).isoformat()
+    # The wire client encodes a date parameter from a `date`, never from text.
+    start, end = recent_week[0], recent_week[1] + timedelta(days=1)
     found = 0
     paths = {"AAPL": ("stockTicker", "AAPL"), "X:BTCUSD": ("cryptoTicker", "X:BTCUSD")}
     for symbol, (name, ticker) in paths.items():

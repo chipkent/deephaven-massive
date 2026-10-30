@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -67,9 +68,11 @@ def test_an_absent_retry_after_is_none_and_silent(caplog: pytest.LogCaptureFixtu
 def test_an_unusable_retry_after_is_none_and_logged(
     header: str, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger=retry.__name__)
     assert retry.retry_after_seconds(header, now=0.0) is None
     [record] = caplog.records
-    assert (record.name, record.levelname) == (retry.__name__, "WARNING")
+    # The caller's fallback wait is the outcome; nothing for a user to act on.
+    assert (record.name, record.levelname) == (retry.__name__, "DEBUG")
     assert record.getMessage() == (
         f"ignoring a Retry-After that is neither seconds nor an HTTP date: {header!r}"
     )

@@ -612,6 +612,7 @@ def build_query(
     spec: DatasetSpec,
     *,
     symbols: Symbols | None = None,
+    symbols_optional: bool = False,
     all_alternative: str | None = None,
     timespan: Timespan | None = None,
     multiplier: int = 1,
@@ -639,9 +640,15 @@ def build_query(
         spec: The dataset.
         symbols: The instruments, or None for datasets without them. A Deephaven `Table`
             must have a `Symbol` column; it is boxed by identity in a `SymbolTable` and read
-            when a verb runs.
-        all_alternative: None when the dataset accepts `dm.ALL`; otherwise the alternative to
-            name in the `ValueError`, such as `"m.stocks.snapshots(dm.ALL)"`.
+            when a verb runs. None is refused for an instrument dataset
+            (`Catalog.takes_symbols`) unless `symbols_optional` is set.
+        symbols_optional: True for a dataset whose `symbols` only filters the request, so
+            None asks for every ticker; False (the default) for one that must be told its
+            instruments.
+        all_alternative: None when the dataset accepts `dm.ALL`; otherwise what the
+            `ValueError` tells the caller to do instead, an instruction such as
+            `"use m.stocks.snapshots(dm.ALL)"` or `"leave symbols out, which returns every
+            ticker"`.
         timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it also selects
             the query class through `bar_query_class`.
         multiplier: The bar multiplier.
@@ -673,7 +680,9 @@ def build_query(
         picks for a bars dataset).
 
     Raises:
-        ValueError: If `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
+        ValueError: If `symbols` is None for an instrument dataset that needs symbols (the
+            message names the forms it takes, `dm.ALL` among them where the dataset takes
+            it), `dm.ALL` is passed where `all_alternative` is set, a `Table` has no
             `Symbol` column, `params` or `filters` holds `adjusted`, which has its own typed
             argument, or `params` names one of the dataset's `fixed_params`; or if `params`
             sets `order` without `sort` and none of the dataset's REST paths has an `order`
@@ -690,6 +699,16 @@ def build_query(
     calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`).
     """
     normalized: NormalizedSymbols | None = None
+    if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
+        forms = (
+            "a ticker, a list of tickers, a table with a Symbol column, or dm.ALL for every ticker"
+            if all_alternative is None
+            else "a ticker, a list of tickers, or a table with a Symbol column (it does not "
+            f"take dm.ALL: {all_alternative})"
+        )
+        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+        logger.debug("%s refused: symbols=None on a dataset that needs symbols", spec.name)
+        raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
     if isinstance(symbols, Table):
         if "Symbol" not in symbols.column_names:
             raise ValueError("a symbol table must have a Symbol column")
@@ -697,7 +716,7 @@ def build_query(
     elif symbols is not None:
         normalized = normalize(spec.asset_class, symbols, as_written=spec.symbols_as_written)
     if isinstance(normalized, _All) and all_alternative is not None:
-        raise ValueError(f"{spec.name} does not accept dm.ALL; use {all_alternative}")
+        raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     if params is not None and "adjusted" in params:

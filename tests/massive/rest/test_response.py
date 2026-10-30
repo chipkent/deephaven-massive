@@ -110,6 +110,7 @@ def test_a_missing_result_key_under_any_other_status_is_an_error(status: str) ->
         "(request_id r): the body has no 'results'"
     )
     assert (caught.value.status, caught.value.request_id) == (200, "r")
+    assert caught.value.unreadable  # a body of the wrong shape is a gap in the library
     assert type(caught.value) is WireError
 
 
@@ -220,6 +221,7 @@ def test_error_is_a_wire_error_on_every_path_even_with_rows(rest_path: RestPath)
     with pytest.raises(WireError, match=r"with status ERROR .*: bad ticker$") as caught:
         _decode(body, rest_path)
     assert type(caught.value) is WireError
+    assert not caught.value.unreadable  # Massive's own answer, not a body it cannot read
 
 
 def test_an_error_status_without_a_message_says_so() -> None:
@@ -277,6 +279,7 @@ def test_a_body_that_is_not_json_is_an_error_quoting_its_start(data: bytes) -> N
     assert repr(data[:200]) in caught.value.message
     assert caught.value.status == 200
     assert isinstance(caught.value.__cause__, ValueError)
+    assert caught.value.unreadable
 
 
 def test_a_huge_bad_body_is_quoted_only_for_200_bytes() -> None:

@@ -2,8 +2,14 @@ import ssl
 
 import pytest
 
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive.net import errors
-from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
+from deephaven_massive._massive.net.errors import (
+    LIBRARY_BUG_REPORT,
+    WireAuthError,
+    WireEntitlementError,
+    WireError,
+)
 
 ALL_CLASSES = [WireError, WireAuthError, WireEntitlementError]
 
@@ -102,3 +108,8 @@ def test_a_proxy_credential_refusal_is_recognised_however_it_is_wrapped() -> Non
 )
 def test_other_failures_are_not_proxy_credential_refusals(error: BaseException) -> None:
     assert not errors.is_proxy_auth_failure(error)
+
+
+def test_the_wire_bug_report_text_is_the_library_s() -> None:
+    # The wire package keeps its own copy, since it imports nothing else of the library.
+    assert LIBRARY_BUG_REPORT == LIBRARY_BUG

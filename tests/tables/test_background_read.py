@@ -16,6 +16,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import background_read
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
@@ -171,7 +172,7 @@ def test_a_failed_download_fails_the_table_and_its_row(
     def run(stop: threading.Event) -> Table:
         raise dm.MassiveError("HTTP 500 for /v3/trades/AAPL (request_id=r1)")
 
-    with caplog.at_level(logging.ERROR, logger=background_read.__name__):
+    with caplog.at_level(logging.WARNING, logger=background_read.__name__):
         result = open_test_read(massive_session, run)
         the_read(massive_session).thread.join(TIMEOUT)
     until(lambda: failed(result))
@@ -181,6 +182,7 @@ def test_a_failed_download_fails_the_table_and_its_row(
         "HTTP 500 for /v3/trades/AAPL (request_id=r1)",
     )
     (record,) = caplog.records
+    assert record.levelno == logging.WARNING  # an expected failure: stale data, not a defect
     assert record.getMessage().endswith(": HTTP 500 for /v3/trades/AAPL (request_id=r1)")
     assert record.getMessage().startswith(f"call {row['StreamId']} failed after ")
     assert record.exc_info is None  # the text says it all
@@ -202,7 +204,10 @@ def test_a_defect_fails_the_table_with_a_massive_error_naming_it(
     assert row["State"] == "FAILED"
     assert row["Error"].startswith("test.trades: the background read failed: ")
     assert "Price" in row["Error"]
-    (record,) = caplog.records
+    assert row["Error"].endswith(LIBRARY_BUG)
+    (record,) = caplog.records  # once, though the table's failure is logged too
+    assert record.levelno == logging.ERROR
+    assert record.getMessage().endswith(LIBRARY_BUG)
     assert record.exc_info is not None  # a defect is logged with its traceback
     massive_session.release(result)
 

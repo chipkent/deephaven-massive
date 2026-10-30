@@ -40,9 +40,10 @@ loading becomes `DONE` if a derived table kept it going until its rows landed.
 **Failures.** A transport call that raises fails the table through `publish_failure` (the
 normal failed-table state, which reaches the merged result through the append-only and
 partitioned tables), after marking the row `FAILED` and logging `call 7 failed after 3.2 s:
-...` at ERROR. An error that is not a `MassiveError` is logged with its traceback, and the table
-fails with a `MassiveError` that names it. A close or a failure that comes after the rows have
-landed changes nothing: the table has its complete result.
+...` once, at WARNING for an expected failure and at ERROR for a defect, naming whose. An error
+that is not a `MassiveError` is a defect of the library, logged with its traceback and how to
+report it, and the table fails with a `MassiveError` that names it. A close or a failure that
+comes after the rows have landed changes nothing: the table has its complete result.
 
 **Threads and locks.** `open_read` runs on the caller thread, which may hold the update graph's
 lock (a console command): it creates tables, registers the row, and starts the thread, and
@@ -68,7 +69,8 @@ from deephaven.column import InputColumn
 from deephaven.stream import blink_to_append_only
 from deephaven.table import PartitionedTable
 
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
+from deephaven_massive._log_limits import log_failure, mark_failure_logged
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import (
     StreamKind,
@@ -223,8 +225,9 @@ class BackgroundRead:
 
         A read stopped meanwhile (its result released and unused, or the session closed)
         publishes nothing and logs only at DEBUG, whatever the call returned or raised. A
-        `MassiveError` fails the table as it is; anything else is a defect, logged with its
-        traceback, and fails the table with a `MassiveError` that names it.
+        `MassiveError` fails the table as it is; anything else is a defect of the library, logged
+        at ERROR with its traceback and how to report it, and fails the table with a
+        `MassiveError` that names it (`ErrorCause.LIBRARY_DEFECT`).
         """
         core = cast("SessionCore", self._core())  # registered before the thread started
         with entered(self._exec_ctx):
@@ -235,26 +238,31 @@ class BackgroundRead:
                     self._failed_with(core, error)
             except BaseException as error:
                 if not self._stopped_by(f"{type(error).__name__}: {error}"):
-                    logger.exception("call %d failed after %.3f s", self._call, self._took)
-                    self._fail_once(
-                        core,
-                        MassiveError(
+                    failure = MassiveError(
+                        library_bug(
                             f"{self._name}: the background read failed: "
                             f"{type(error).__name__}: {error}"
                         ),
+                        cause=ErrorCause.LIBRARY_DEFECT,
                     )
+                    mark_failure_logged(failure)  # logged here, with its trace
+                    logger.exception(
+                        "call %d failed after %.3f s. %s", self._call, self._took, LIBRARY_BUG
+                    )
+                    self._fail_once(core, failure)
 
     def _failed_with(self, core: SessionCore, error: MassiveError) -> None:
-        """Log a `MassiveError` that ended the read at ERROR, by its text, and fail the table.
+        """Log a `MassiveError` that ended the read, by its text, and fail the table.
 
-        Its text names the status, the path, and the `request_id`; its traceback adds nothing a
-        user can act on.
+        It logs once at the level its cause gives (`log_failure`): WARNING for an expected
+        failure, ERROR for a defect, naming whose. Its text names the status, the path, and the
+        `request_id`; its traceback adds nothing a user can act on.
 
         Args:
             core: The session's core.
             error: The error.
         """
-        logger.error("call %d failed after %.3f s: %s", self._call, self._took, error)
+        log_failure(logger, error, "call %d failed after %.3f s: %s", self._call, self._took)
         self._fail_once(core, error)
 
     @property

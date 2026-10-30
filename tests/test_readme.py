@@ -263,3 +263,56 @@ def _history_and_live_merges_history_with_live_bars(
         datetime(2024, 6, 14, 13, 30, tzinfo=UTC),
         datetime(2024, 6, 14, 19, tzinfo=UTC),
     ]
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_first_tables_example_runs(
+    *,
+    readme_server: FakeRestServer,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+) -> None:
+    # The whole New York days of 2024-06-03 to 2024-06-07, as the range path's `{from}/{to}`.
+    path = (
+        f"/v2/aggs/ticker/AAPL/range/1/day/{_ms('2024-06-03T04:00:00')}/"
+        f"{_ms('2024-06-08T04:00:00') - 1}"
+    )
+    days = [_bar(f"2024-06-0{day}", 190.0 + day, 1_000) for day in range(3, 8)]
+    readme_server.reply(path, Reply(envelope(days, adjusted=True, ticker="AAPL")))
+    [block] = _section_blocks("First tables")
+    script = tmp_path / "first_tables.py"
+    script.write_text(block, encoding="utf-8")
+    names = runpy.run_path(str(script))
+
+    assert [r["Date"] for r in dh_to_pylist(names["week"])] == [
+        "2024-06-03",
+        "2024-06-04",
+        "2024-06-05",
+        "2024-06-06",
+        "2024-06-07",
+    ]
+    described = {r["Name"]: r["Description"] for r in dh_to_pylist(names["columns"])}
+    assert {"Symbol", "Open", "Close", "TimestampEnd"} <= described.keys()
+    fake_ws_server.wait_for(
+        lambda server: any(
+            "T.AAPL" in json.loads(frame).get("params", "")
+            for connection in server.connections
+            for frame in connection.frames
+        )
+    )
+    trades = [
+        {"ev": "T", "sym": symbol, "x": 4, "i": "1", "p": price, "s": 100, "t": 1_700_000_000_000}
+        for symbol, price in (("AAPL", 190.0), ("MSFT", 410.0), ("AAPL", 191.0))
+    ]
+    fake_ws_server.send(json.dumps(trades))
+    # Bounded wait for the flush thread and an update-graph cycle to publish the trades.
+    pace = threading.Event()  # never set; only paces the loop
+    latest: dict[str, float] = {}
+    for _ in range(500):
+        latest = {r["Symbol"]: r["Price"] for r in dh_to_pylist(names["latest"])}
+        if latest == {"AAPL": 191.0, "MSFT": 410.0}:
+            break
+        pace.wait(0.02)
+    assert latest == {"AAPL": 191.0, "MSFT": 410.0}
+    names.clear()

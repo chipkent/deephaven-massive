@@ -520,6 +520,29 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
     assert transform.apply(batch, received=7).num_rows == kept
 
 
+def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
+    transform = flatfiles._Transform.build(
+        synthetic_catalog(),
+        SYNTHETIC,
+        prefix=SYNTHETIC_FILES,
+        request=request(dm.ALL),
+        window=whole_days(SYNTHETIC, "2025-03-03"),
+        unreadable_symbols=dm.OnError.RAISE,
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["!!"],
+            "Timestamp": [1741012200000000123],
+            "ParticipantTimestamp": [1741012199999],
+            "Size": [100],
+            "Conditions": [12],
+        }
+    )
+    with pytest.raises(dm.MassiveError, match="'!!'") as info:
+        transform.apply(batch, received=7)
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+
+
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     window = whole_days(SYNTHETIC, "2025-03-03")
     transform = flatfiles._Transform.build(
@@ -1661,7 +1684,7 @@ def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
     fake_s3.drop(TRADES_0304, times=4, at=len(fake_s3.data(TRADES_0304)) // 2)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
-        caplog.at_level(logging.INFO, logger=LOGGER),
+        caplog.at_level(logging.DEBUG, logger=LOGGER),
         pytest.raises(
             dm.MassiveError, match=re.escape(f"cannot read {LOCATION.format(TRADES_0304)}: ")
         ),
@@ -1669,8 +1692,9 @@ def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
         q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
     assert sorted(fake_s3.keys()) == [TRADES_0303] + [TRADES_0304] * 4
     assert len(retry_clock.waits) == 3
+    # The call raises the failure, so the client's give-up is DEBUG detail.
     assert [r.levelno for r in caplog.records if "giving up after 4 reads" in r.getMessage()] == [
-        logging.WARNING
+        logging.DEBUG
     ]
 
 
@@ -1679,9 +1703,11 @@ def test_a_reread_is_not_made_for_a_broken_file(
 ) -> None:
     fake_s3.put(TRADES_0303, b"not gzip")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(dm.MassiveError, match="Not a gzipped file"):
+    with pytest.raises(dm.MassiveError, match="Not a gzipped file") as info:
         q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     assert (fake_s3.keys(), retry_clock.waits) == ([TRADES_0303], [])
+    # A file that cannot be read is a defect of the library, never an expected failure.
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
 
 
 @pytest.mark.parametrize(
@@ -1705,7 +1731,7 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
     fake_s3.refuse("", status=404, code=code, message=message)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
-        caplog.at_level(logging.WARNING, logger=LOGGER),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
         pytest.raises(dm.MassiveError) as info,
     ):
         q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
@@ -1715,8 +1741,10 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
         "MassiveConfig s3_bucket and s3_endpoint_url"
     )
     assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
-    # Not skipped as holidays: the call fails, and its failure is logged with its id.
-    [failed] = caplog.messages
+    # Not skipped as holidays: the call fails, and its failure is logged with its id, at DEBUG
+    # since the caller receives it, and nothing is logged above that.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    [failed] = [m for m in caplog.messages if m.startswith("call 1 failed")]
     assert re.fullmatch(
         rf"call 1 failed after \d+\.\d{{3}} s: {re.escape(str(info.value))}", failed
     )
@@ -2287,7 +2315,7 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     client = flat_file_client(m)
     reaper = m._core._reaper.thread
     assert fake_s3.closes == 0
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.session_core"):
         del m
         gc.collect()
         reaper.join(TIMEOUT)

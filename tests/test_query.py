@@ -34,6 +34,7 @@ from deephaven_massive._enums import (
     PollMode,
     Timespan,
 )
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
@@ -532,7 +533,7 @@ def test_a_failed_call_logs_its_error(
     assert (failed.levelno, failed.exc_info is not None) == (logging.DEBUG, True)
 
 
-def test_a_failed_request_is_logged_once_at_error(
+def test_an_expected_failure_is_logged_once_at_debug(
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
@@ -543,13 +544,47 @@ def test_a_failed_request_is_logged_once_at_error(
         raise dm.EntitlementError("HTTP 403 from GET /v3/x (request_id r1): not entitled")
 
     monkeypatch.setattr(rest, "fetch", refused)
-    with pytest.raises(dm.EntitlementError):
+    with (
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
+        pytest.raises(dm.EntitlementError),
+    ):
         news(massive_session).fetch()
+    # The caller receives the refusal, so the call logs it only at DEBUG.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    failed = [r for r in caplog.records if "failed after" in r.getMessage()]
+    assert [(r.levelno, _ELAPSED.sub("<s> s", r.getMessage())) for r in failed] == [
+        (
+            logging.DEBUG,
+            "call 1 failed after <s> s: HTTP 403 from GET /v3/x (request_id r1): not entitled",
+        )
+    ]
+    assert failed[0].exc_info is None  # the traceback travels with the exception instead
+
+
+@pytest.mark.parametrize(
+    ("cause", "suffix"),
+    [(dm.ErrorCause.LIBRARY_DEFECT, f". {LIBRARY_BUG}"), (dm.ErrorCause.USER_DEFECT, "")],
+)
+def test_a_defect_is_logged_at_error_even_though_it_is_raised(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cause: dm.ErrorCause,
+    suffix: str,
+) -> None:
+    def broken(*_: object, **__: object) -> Table:
+        raise dm.MassiveError("stocks.trades: a row broke", cause=cause)
+
+    monkeypatch.setattr(rest, "fetch", broken)
+    with pytest.raises(dm.MassiveError):
+        news(massive_session).fetch()
+    # A broad except in the caller must never hide a defect, so it is an ERROR that says whose.
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert [_ELAPSED.sub("<s> s", r.getMessage()) for r in errors] == [
-        "call 1 failed after <s> s: HTTP 403 from GET /v3/x (request_id r1): not entitled"
+        f"call 1 failed after <s> s: stocks.trades: a row broke{suffix}"
     ]
-    assert errors[0].exc_info is None  # the traceback travels with the exception instead
 
 
 def test_a_history_call_through_flat_files_passes_its_id(
@@ -1634,3 +1669,34 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
         + BACKGROUND_NOTE
     )
     _released(s3_session, files, forced, landed)
+
+
+def test_a_refused_flat_file_read_names_rest_when_rest_can_serve_it(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+
+    def refused(*_: object, **__: object) -> Table:
+        raise dm.EntitlementError("the plan does not include these flat files", status=403)
+
+    monkeypatch.setattr(flat, "history", refused)
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
+    assert isinstance(q, HistoryQuery)
+    # AUTO chose the flat files (60 symbols), and raises rather than switch columns silently.
+    for source in (HistorySource.AUTO, HistorySource.FLAT_FILES):
+        with pytest.raises(dm.EntitlementError) as info:
+            q.history("2025-03-03", "2025-03-03", source=source)
+        assert str(info.value) == (
+            "the plan does not include these flat files; REST serves this read too: pass "
+            "source=dm.HistorySource.REST to history() (it can fill other columns; columns() "
+            "shows which)"
+        )
+        assert info.value.status == 403
+    assert rest.calls == []
+    # Where REST cannot serve the read, the refusal is raised as it came.
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    with pytest.raises(dm.EntitlementError, match=r"^the plan does not include these flat files$"):
+        values.history("2025-03-03", "2025-03-03")

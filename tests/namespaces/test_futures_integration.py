@@ -214,8 +214,8 @@ def test_the_session_after_a_holiday_and_year_candles(
         minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
         evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
         if minutes:
-            evidence(f"    first {instant_text(minutes[0]['Timestamp'])} {minutes[0]}")
-            evidence(f"    last {instant_text(minutes[-1]['Timestamp'])}")
+            evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")
+            evidence(f"    last {instant_text(minutes[-1]['TimestampStart'])}")
     year = holiday.year - 1
     for start in (date(year, 1, 1), date(year, 6, 15)):
         candles = _aggregates(
