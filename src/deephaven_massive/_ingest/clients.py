@@ -31,7 +31,8 @@ from deephaven_massive._errors import MassiveError
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
-from deephaven_massive._ingest.ws import CONNECTION_SETTINGS, WsConnections, WsTransport
+from deephaven_massive._ingest.ws import WsConnections, WsTransport
+from deephaven_massive._ingest.ws_connection import CONNECTION_SETTINGS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

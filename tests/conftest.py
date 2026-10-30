@@ -834,14 +834,14 @@ def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
     """
     core = importlib.import_module("deephaven_massive._tables.session_core")
     session = importlib.import_module("deephaven_massive._session")
-    ws = importlib.import_module("deephaven_massive._ingest.ws")
+    ws_connection = importlib.import_module("deephaven_massive._ingest.ws_connection")
     with core._live_lock:
         live: set[str] = {each.label for each in core._live.values()}
     with session._keys_lock:
         cores = [ref() for ref in session._open_sessions]
     alive = {each.label for each in cores if each is not None}
-    with ws._groups_lock:
-        groups: set[object] = set(ws._groups.values())
+    with ws_connection._groups_lock:
+        groups: set[object] = set(ws_connection._groups.values())
     threads = {
         t for t in threading.enumerate() if t.is_alive() and t.name.startswith(_LIBRARY_THREADS)
     }

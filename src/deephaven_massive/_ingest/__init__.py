@@ -8,8 +8,11 @@
   with `rest_requests` (the requests of a call) and `rest_rows` (page rows to batches);
 - `host_decision`: which WebSocket host serves an asset class and channel family, and the
   session's cache of those decisions;
-- `ws`: the WebSocket transport, one connection per URL over `WsClient`, and the
-  subscription protocol (the reconcile loop, acknowledgements, refusals, the options cap).
+- `ws`: the WebSocket transport, a session's registry of streams on shared connections;
+- `ws_connection`: one connection per URL over `WsClient`, and the group that shares
+  connections between sessions;
+- `subscriptions`: the subscription protocol of one connection (the reconcile loop,
+  acknowledgements, refusals).
 
 Layer: ingest, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_log_limits`, `_types`), the datasets (`_datasets`), and the tables (`_tables`), all of
