@@ -17,10 +17,10 @@ description:
   string per distinct calendar date (`Schema.date_columns`).
 
 Keeping this here, beside the other code that creates tables, leaves `_datasets` free of
-Deephaven calls. `dh_type` and `col_defs` are pure; `describe` and `column_table` create a
-table, so they run where the caller wants the table managed (inside a result's liveness scope
-for `describe`), on a thread inside the session's execution context. All four are
-thread-safe; `dataset_table` creates a table too.
+Deephaven calls. `dh_type` and `col_defs` are pure; `describe`, `column_table`, and
+`dataset_table` create a table, so they run where the caller wants the table managed (inside
+a result's liveness scope for `describe`), on a thread inside the session's execution context.
+All five are thread-safe.
 """
 
 from __future__ import annotations

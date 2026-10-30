@@ -488,11 +488,9 @@ class Query(QueryBase):
         request on up to `max_concurrency` threads. `limit`, when the dataset was built with
         one, caps the total number of rows; the page size is internal. Columns are the
         dataset's schema, ending with `TimestampInsert`, when the row's page arrived. A
-        reactive symbol table is read once, when the verb is called. HTTP 401 raises
-        `AuthenticationError`, HTTP 403 `EntitlementError`, and any other failure
-        `MassiveError`; a symbol with no data (HTTP 404 on its first request) returns no rows,
-        with a WARNING, while HTTP 404 on a later page of its pages raises `MassiveError`,
-        since its data was cut short.
+        reactive symbol table is read once, when the verb is called. A symbol with no data
+        (HTTP 404 on its first request) returns no rows, with a WARNING, while HTTP 404 on a
+        later page of its pages raises `MassiveError`, since its data was cut short.
 
         Before any request it raises `ValueError` if a path the call reads does not take a
         parameter or filter the query set (an explicit `adjusted` on a path without it), or a
@@ -535,9 +533,8 @@ class Query(QueryBase):
         left, and `m.close()` stops it at once. A table derived in the console stays in use
         until the JVM next collects it, and until then the poll keeps making its requests,
         which on the Basic tier come out of the five a minute every session of the key shares.
-        A
-        non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and a
-        non-positive `interval` raises `ValueError`. A feed (a dataset whose default mode is
+        A non-numeric `interval` or a `mode` that is not a `PollMode` raises `TypeError`, and
+        a non-positive `interval` raises `ValueError`. A feed (a dataset whose default mode is
         `APPEND`: the news and filings datasets) raises `ValueError` in every mode when the
         query has neither `start` nor `limit`, since every cycle would re-read the whole archive
         Massive keeps; the message names the fix. A fixed `start` keeps widening the window on

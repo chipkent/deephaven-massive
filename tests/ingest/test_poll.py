@@ -33,8 +33,12 @@ from deephaven_massive._ingest.poll import LIVE_COLUMN, Pollers, RowDataError, o
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import Query
-from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
+from deephaven_massive._tables.liveness import (
+    ResultRecord,
+    ResultRegistry,
+    new_scope,
+    release_scope,
+)
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
@@ -150,11 +154,6 @@ def start(
     )
 
 
-def dm_exec(m: dm.MassiveSession) -> ExecutionContext:
-    # The session's execution context, for releasing a user scope from the test thread.
-    return entered(m._core.exec_ctx)
-
-
 def until(condition: Callable[[], bool]) -> None:
     # Waits for the update graph to apply a published cycle; fails after TIMEOUT.
     event = threading.Event()
@@ -244,7 +243,7 @@ def test_upsert_keeps_every_key(
 
 
 def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
-    dh_exec_ctx: object,
+    dh_exec_ctx: ExecutionContext,
     rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
 ) -> None:
     # Every vendor column of the related companies is a poll key; only the arrival time is
@@ -283,7 +282,7 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     expected = [("AAPL", "AMZN", 2), ("AAPL", "GOOGL", 1), ("AAPL", "MSFT", 2)]
     rows = rows_when(table, lambda rows: held(rows) == expected)
     assert len(rows) == 3
-    scope.release()
+    release_scope(dh_exec_ctx, scope)
 
 
 def test_append_appends_only_keys_not_seen_before(
@@ -838,8 +837,7 @@ def test_a_poll_keeps_polling_while_a_derived_table_remains(
     until(lambda: pairs(derived[0], dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
     assert stream_rows()[0]["RowsPublished"] == 3
     derived.clear()
-    with dm_exec(massive_session):
-        scope.release()  # the last use of the poll: its poller stops
+    release_scope(massive_session._core.exec_ctx, scope)  # the last use: its poller stops
     until(lambda: poller.stopped)
     clock.advance(60)
     poller.thread.join(TIMEOUT)

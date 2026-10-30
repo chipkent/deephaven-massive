@@ -41,8 +41,10 @@ decides which requests share one, how long each read waits, and what the user is
 
 Locks: the registry has one leaf lock. It calls into a governor (`declare`, `idle`) while
 holding it, so the order is the registry's lock, then the governor's, then whatever a governor
-listener takes (the diagnostics queue's leaf lock). None of them is ever taken under
-`SessionCore.registry_lock`, and none is held across a Deephaven call, a request, or a wait.
+listener takes (the diagnostics queue's leaf lock). Neither the registry's lock nor the
+governor's is ever taken under `SessionCore.registry_lock`; the diagnostics queue's lock is, by
+every diagnostics write, which is safe because that lock is a leaf on both paths. None of them
+is held across a Deephaven call, a request, or a wait.
 """
 
 from __future__ import annotations

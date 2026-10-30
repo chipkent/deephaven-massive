@@ -1262,6 +1262,32 @@ def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
 
 
 @pytest.mark.parametrize("kind", ["crypto", "host"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        rest._AbandonedError("rate limited: the maker gave up"),
+        dm.MassiveError("the read failed: boom", status=500),
+    ],
+    ids=["abandoned", "failed"],
+)
+def test_a_failed_lookup_is_never_returned_as_known(
+    *, session: dm.MassiveSession, kind: str, failure: Exception
+) -> None:
+    # A caller can read a lookup's future just before its maker forgets it and fails it. The
+    # quick check must then say "not known", so the caller claims or waits as usual: it must
+    # neither raise the maker's abandonment, which is never raised, nor the maker's own error
+    # object, which every other caller gets a copy of.
+    future, created = _claim(session, kind)
+    assert created
+    future.set_exception(failure)  # failed, and not yet forgotten: what the late reader sees
+    state = cast("rest.RestEndpoints", session._core.rest_transport())._state
+    if kind == "crypto":
+        assert state.known_crypto() is None
+    else:
+        assert state.known_host((AssetClass.STOCKS, ChannelFamily.TICK)) is None
+
+
+@pytest.mark.parametrize("kind", ["crypto", "host"])
 def test_an_interrupt_before_a_lookup_leaves_nothing_claimed(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:

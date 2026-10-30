@@ -1930,6 +1930,51 @@ def test_a_hand_over_leaves_a_stream_whose_lease_is_gone(
     del gone
 
 
+def test_a_stream_that_shuts_down_during_its_hand_over_is_not_adopted(
+    make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The hand-over has chosen the stream, but its blink table shuts down before `adopt` is
+    # posted: the lease is returned and the release reaches the successor first, where the
+    # stream is no longer awaited, so the release is dropped. `adopt` must then leave the
+    # stream out, or its topic stays subscribed with nothing to release it.
+    custom_session = make_ws_session(decide=unknown_futures)
+    custom_session.connections.group.reconnect_backoff = 0.01
+    kept = custom_session.query(FUTURES, ["ESZ5"]).blink()
+    gone = custom_session.query(FUTURES, ["NQZ5"]).blink()
+    custom_session.subscribed("T.ESZ5", "T.NQZ5")
+    old = custom_session.connection("wss://socket.test/futures")
+    group = custom_session.connections.group
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        held.set()
+        assert release.wait(TIMEOUT)
+
+    assert old.post(hold)  # the hand-over waits behind it
+    try:
+        assert held.wait(TIMEOUT)
+        group._move(old, DELAYED)
+        successor = custom_session.connection("wss://delayed.test/futures")
+        real_post = successor.post
+
+        def shut_down_first(callback: Callable[..., None], *args: object) -> bool:
+            if getattr(callback, "__name__", "") == "adopt":
+                with group.lock:
+                    custom_session.connections._forget(2)  # what the shutdown callback does
+                real_post(successor.release_stream, 2)
+            return real_post(callback, *args)
+
+        monkeypatch.setattr(successor, "post", shut_down_first)
+    finally:  # a failed check must not leave the old loop held
+        release.set()
+    assert old.join(TIMEOUT)
+    wait_for(lambda: not successor.awaiting)
+    assert custom_session.on_loop(successor, lambda: sorted(successor._streams)) == [1]
+    assert [s.stream_id for s in successor.flusher.routes.sinks()] == [1]
+    custom_session.session.release(kept)
+    del gone
+
+
 def test_an_open_that_fails_during_a_move_returns_the_moved_lease(
     make_ws_session: Callable[..., WsSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1987,6 +2032,50 @@ def test_a_moved_options_stream_counts_against_the_cap_until_adopted(
         assert successor.cap_pending == {}
         assert successor.cap_admitted == frozenset({f"T.{contract}"})
     del result
+
+
+def test_a_move_whose_old_connection_fails_first_releases_the_successor(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The old connection fails after the move posted its hand-over, but before the hand-over
+    # runs: the failure fails the moved stream, which shuts down and returns its lease. The
+    # successor must stop awaiting the stream and stop counting its topics against the cap.
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    contract = "O:SPY251219C00600000"
+    result = ws_session.query(OPTIONS, [contract]).blink()
+    ws_session.subscribed(f"T.{contract}")
+    old = ws_session.connection("wss://socket.test/options")
+    ws_session.on_loop(old, lambda: None)  # the admitted set is published
+    group = ws_session.connections.group
+    group.reconnect_backoff = 0.01
+    held, release = threading.Event(), threading.Event()
+
+    def fail_when_released() -> None:
+        held.set()
+        assert release.wait(TIMEOUT)
+        error = _massive.WireError("the server went away", host="socket.test", path="/options")
+        old._on_state(WsState.FAILED, error)  # what the client reports, ahead of the hand-over
+
+    assert old.post(fail_when_released)
+    assert held.wait(TIMEOUT)
+    group._move(old, DELAYED)
+    successor = ws_session.connection("wss://delayed.test/options")
+    try:  # a symbol change that reaches the successor first is kept for the awaited stream
+        added = frozenset({"O:SPY251219C00610000"})
+        ws_session.on_loop(successor, lambda: successor.change_symbols(1, added, frozenset()))
+        assert ws_session.on_loop(successor, lambda: sorted(successor._early)) == [1]
+    finally:  # a failed check must not leave the old loop held
+        release.set()
+    assert old.join(TIMEOUT)
+    wait_for(lambda: not group.streams)  # the failed stream shut down and returned its lease
+    with group.lock:
+        assert successor.awaiting == set()
+        assert successor.cap_pending == {}
+    assert ws_session.on_loop(successor, lambda: dict(successor._early)) == {}
+    assert ws_session.on_loop(successor, lambda: successor._idle is not None)  # it may go idle
+    again = ws_session.query(OPTIONS, ["O:SPY251219C00610000"]).blink()  # the cap is free
+    ws_session.subscribed("T.O:SPY251219C00610000")
+    del result, again
 
 
 def test_a_hand_over_applies_what_the_old_flusher_queued(
