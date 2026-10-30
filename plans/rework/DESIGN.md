@@ -2045,8 +2045,11 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
 ```
 
 - A `str` is one symbol. A `Sequence[str]` is materialized to a tuple at construction. An
-  exhausted generator raises `ValueError("no symbols")`.
-- **`symbols` is required on every market-data dataset, including every `snapshots()`.** `ALL`
+  exhausted generator raises `ValueError` ("no symbols: the list is empty; ..."), naming the
+  next step.
+- **`symbols` is required on every market-data dataset, including every `snapshots()`.**
+  `None` there raises `ValueError` when the query is built, naming the forms it takes and
+  `dm.ALL` where the dataset accepts it. `ALL`
   is accepted by stream verbs (the `<channel>.*` topic), by every per-class `snapshots(ALL)`
   (full market, all pairs, all contracts), and by `history()` when a flat file or a grouped-daily
   REST path exists. Everywhere else `ALL` raises `ValueError` naming the alternative.
@@ -2855,7 +2858,9 @@ TICK family:
      Per-ticker rows carrying "error"/"message" (NOT_ENTITLED) count as absent.
   4. Classify:
      a. HTTP 403 / NOT_AUTHORIZED
-          -> raise EntitlementError("<class> plan has no WebSocket access")   # Basic plans
+          -> raise EntitlementError("<class> plan has no WebSocket access: ...")   # Basic plans
+             (the message says the refused request was the library's own host check, names
+             its path, and quotes Massive's text)
      b. Read the class's ordered timeframe fields, excluding underlying_asset:
           STOCKS, OPTIONS: last_trade.timeframe, last_quote.timeframe
           INDICES:         timeframe (top level; documented DELAYED | REAL-TIME)
