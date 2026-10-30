@@ -1,0 +1,148 @@
+"""Tests of the live run's `stream-day-reconcile` group (`tests/_live/reconcile.py`).
+
+A stream day's bars are written as the stream day writes them, one Parquet file per hour, and
+the REST history of the same day is scripted on the fake REST server; the tests read the
+comparison the group writes.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING, cast
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+import deephaven_massive as dm
+from tests._fakes.rest import Reply, envelope
+from tests._live import reconcile
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from deephaven_massive import MassiveSession
+    from tests._fakes.rest import FakeRestServer
+
+DAY = date(2026, 10, 28)
+OPEN = datetime(2026, 10, 28, 14, 30, tzinfo=UTC)
+MINUTE_NS = 60 * 10**9
+
+
+def _ns(moment: datetime) -> int:
+    return int(moment.timestamp()) * 10**9
+
+
+def _write_streamed(folder: Path, stream: str, bars: list[tuple[str, int, float]]) -> None:
+    """Write a stream's bars, `(symbol, start ns, close)`, as one hour's Parquet file."""
+    (folder / "rows").mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "Symbol": [b[0] for b in bars],
+            "TimestampStart": pa.array([b[1] for b in bars], pa.timestamp("ns", tz="UTC")),
+            "Open": [1.0] * len(bars),
+            "High": [2.0] * len(bars),
+            "Low": [0.5] * len(bars),
+            "Close": [b[2] for b in bars],
+            "Volume": [100.0] * len(bars),
+        }
+    )
+    pq.write_table(table, folder / "rows" / f"{stream}-2026-10-28T14.parquet")
+
+
+def _rest_bar(start_ns: int, close: float) -> dict[str, object]:
+    return {"t": start_ns // 10**6, "o": 1.0, "h": 2.0, "l": 0.5, "c": close, "v": 100}
+
+
+def test_streamed_bars_are_compared_with_history_per_symbol_and_minute(
+    fake_rest: FakeRestServer, tmp_path: Path
+) -> None:
+    start = _ns(OPEN)
+    streamed = tmp_path / "stream-day"
+    _write_streamed(
+        streamed,
+        "stocks-minute-bars",
+        [("AAPL", start, 1.5), ("AAPL", start + MINUTE_NS, 1.6), ("AAPL", start, 1.5)],
+    )
+    history = [_rest_bar(start, 1.5), _rest_bar(start + 2 * MINUTE_NS, 1.7)]
+    fake_rest.reply(
+        "/v2/aggs/ticker/AAPL/range/1/minute/1793160000000/1793246399999",
+        # The library asks for the New York day in epoch milliseconds.
+        Reply(envelope(history, ticker="AAPL", resultsCount=2, adjusted=False)),
+    )
+    seen: list[tuple[str, str, str]] = []
+    folder = tmp_path / "reconcile"
+    folder.mkdir()
+    with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
+        reconcile.run_reconcile(
+            m,
+            units=["stocks delayed", "indices delayed"],
+            stream_folder=streamed,
+            day=DAY,
+            folder=folder,
+            report=lambda *result: seen.append(result),
+        )
+    assert seen == [("stocks delayed", "passed", ""), ("indices delayed", "passed", "")]
+    assert "adjusted=false" in fake_rest.requests[-1].target
+    with (folder / "reconciliation.csv").open(encoding="utf-8") as file:
+        [row] = list(csv.DictReader(file))
+    assert row == {
+        "stream": "stocks-minute-bars",
+        "symbol": "AAPL",
+        "streamed": "2",
+        "fetched": "2",
+        "only_streamed": "1",
+        "only_fetched": "1",
+        "both": "1",
+        "match_share": "1.0",
+    }
+    summary = json.loads((folder / "summary.json").read_text())
+    assert summary == {
+        "day": "2026-10-28",
+        "streams": {
+            "stocks-minute-bars": {"symbols": 1, "bars_on_both_sides": 1, "match_share": 1.0},
+            "indices-minute-bars": {"symbols": 0, "bars_on_both_sides": 0, "match_share": None},
+        },
+    }
+
+
+def test_a_symbol_on_one_side_only_has_no_match_share() -> None:
+    rows = reconcile.compare({("A", 1): (1.0,)}, {("B", 1): (1.0,), ("A", 1): (2.0,)})
+    assert [(r["symbol"], r["both"], r["match_share"]) for r in rows] == [
+        ("A", 1, 0.0),
+        ("B", 0, None),
+    ]
+
+
+class _Session:
+    """Stands in for a session: every attribute and call is recorded and returns itself."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    def __getattr__(self, name: str) -> _Session:
+        self._calls.append(name)
+        return self
+
+    def __call__(self, *args: object, **kwargs: object) -> _Session:
+        self._calls.append(repr((args, kwargs)))
+        return self
+
+
+def test_each_stream_reads_its_own_class_history() -> None:
+    expected: dict[str, Callable[[list[str]], bool]] = {
+        "stocks-minute-bars": lambda calls: "stocks" in calls and "adjusted" in calls[2],
+        "options-minute-bars": lambda calls: "options" in calls,
+        "forex-minute-bars": lambda calls: "forex" in calls,
+        "crypto-minute-bars": lambda calls: "crypto" in calls,
+        "indices-minute-bars": lambda calls: "indices" in calls,
+        "futures-minute-bars": lambda calls: "futures" in calls,
+    }
+    for stream, check in expected.items():
+        calls: list[str] = []
+        session = cast("MassiveSession", _Session(calls))
+        reconcile._history(session, stream, symbols=["X"], day=DAY)
+        assert check(calls), (stream, calls)
+        assert calls[-2] == "history"

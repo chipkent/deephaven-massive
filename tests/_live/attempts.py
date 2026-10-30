@@ -1,0 +1,399 @@
+"""The live run's attempts: one run of a group in a child process, and its recorded results.
+
+An *attempt* runs one group once, in its own folder, `<group>/<New York date>-<n>`, holding
+`group.log` (the child's filtered output), `debug.log` (the library's DEBUG log), and the
+group's own files. This module starts each kind of attempt and records what it found:
+
+- **A pytest group** (`run_pytest_group`) first lists its tests with `--collect-only` and the
+  outcomes plugin (`collection.json`), then runs only the due ones, writing `outcomes.jsonl`.
+  A `live-evidence.log` left in the repository root moves to `orphans/` before the run, and the
+  run's own moves into the attempt after it. When a test failed with Massive's refusal although
+  the key's tiers allow it, the key is probed again at once: if a tier fell, the test stays due
+  (its next run skips with what it needs); otherwise it is recorded `refused`.
+- **A built-in group** (`run_built_in_group`) writes `request.json` (the due checks, the
+  tiers, its stop) and runs `scripts/live_run.py _group`, whose child writes one line per
+  check to `results.jsonl` (`group_child`). The `responses` child gets no S3 pair.
+
+A check without a result is recorded `interrupted` (still due) when the program stopped the
+child, and `error` when the child ended by itself. Only the main thread calls these.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, Final
+
+from tests._live import children, run_state
+from tests._live.calendar import NEW_YORK
+from tests._live.outcomes import (
+    COLLECTION_VARIABLE,
+    OUTCOMES_VARIABLE,
+    check_outcome,
+    read_outcomes,
+)
+from tests._live.run_probe import plans_variable
+from tests._live.run_schedule import PYTEST_GROUPS, due_names, half_day_suffix
+from tests._live.run_state import Attempt, RunState, check_of, is_due, record
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from tests._live.run_context import RunContext, RunMemory
+
+BUILT_IN_GROUPS: Final = ("responses", "stream-day", "throughput", "stream-day-reconcile")
+"""The groups the program runs in a child of its own script."""
+
+STREAM_GRACE: Final = timedelta(minutes=10)
+"""How long after its own end a streaming child gets before the program stops it."""
+
+STREAM_GROUPS: Final = ("stream-day", "throughput")
+"""The groups whose child stops itself, two minutes before the group's stop."""
+
+BASIC_REQUESTS_PER_MINUTE: Final = 5
+
+
+def new_attempt(ctx: RunContext, state: RunState, group: str) -> Attempt:
+    """Create a group's next attempt and its folder.
+
+    A stream day's later attempts of the same day reuse its first folder, so the day's files
+    stay together and a restarted child records its gap there.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state; the attempt is appended.
+        group: The group.
+
+    Returns:
+        The attempt, running, with a fresh token.
+    """
+    now = ctx.now()
+    day = now.astimezone(NEW_YORK).date().isoformat()
+    same_day = [a for a in state.attempts if a.group == group and a.day == day]
+    if group == "stream-day" and same_day:
+        folder = same_day[0].folder
+    else:
+        folder = f"{group}/{day}-{len(same_day) + 1}"
+    (ctx.out / folder).mkdir(parents=True, exist_ok=True)
+    attempt = Attempt(
+        group=group, folder=folder, day=day, started=now.isoformat(), token=children.new_token()
+    )
+    state.attempts.append(attempt)
+    return attempt
+
+
+def mark_stale_attempts(state: RunState) -> list[Attempt]:
+    """Mark the attempts recorded as running whose child is gone as interrupted.
+
+    Args:
+        state: The run's state, read on resume.
+
+    Returns:
+        The attempts marked.
+    """
+    stale = [
+        a for a in state.attempts if a.status == "running" and not children.is_alive(a.pid, a.token)
+    ]
+    for attempt in stale:
+        attempt.status = "interrupted"
+    return stale
+
+
+def run_child(
+    ctx: RunContext,
+    state: RunState,
+    attempt: Attempt,
+    *,
+    argv: list[str],
+    env: dict[str, str],
+    until: datetime,
+) -> bool:
+    """Start an attempt's child, wait for it until its stop, and record how it ended.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state, saved once the child's pid is known.
+        attempt: The attempt; its pid, exit code, end, and status are set.
+        argv: The child's command line.
+        env: The child's environment.
+        until: When the child is stopped.
+
+    Returns:
+        Whether the program stopped the child at `until`.
+
+    Raises:
+        KeyboardInterrupt: When Control-C stopped the child; the attempt is interrupted.
+    """
+    child = children.start(
+        argv,
+        cwd=ctx.root,
+        env=env,
+        log=ctx.out / attempt.folder / "group.log",
+        secrets_filter=ctx.secrets,
+        echo=lambda line: ctx.echo(f"  | {line[:96]}"),
+    )
+    attempt.pid = child.process.pid
+    run_state.save(ctx.out, state)
+    try:
+        code, stopped = children.wait(child, deadline=until, now=ctx.now, grace=ctx.stop_grace)
+    except KeyboardInterrupt:
+        attempt.status, attempt.ended = "interrupted", ctx.now().isoformat()
+        raise
+    attempt.exit_code, attempt.ended, attempt.status = code, ctx.now().isoformat(), "finished"
+    return stopped
+
+
+def environment(
+    ctx: RunContext,
+    state: RunState,
+    *,
+    folder: Path,
+    extra: dict[str, str],
+    with_s3: bool = True,
+) -> dict[str, str]:
+    """Return a child's environment, with the current entitlement's plans.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state.
+        folder: The attempt's folder, for its debug log.
+        extra: Further variables.
+        with_s3: Whether the child gets the S3 pair.
+
+    Returns:
+        The environment (`children.child_environment`).
+    """
+    stored = state.entitlements[state.current]
+    return children.child_environment(
+        ctx.environ,
+        plans=plans_variable(stored["tiers"], stored["flat_files"]),
+        debug_log=folder / "debug.log",
+        extra=extra,
+        with_s3=with_s3,
+    )
+
+
+def _pytest_argv(ctx: RunContext, attempt: Attempt, *, group: str, rest: list[str]) -> list[str]:
+    """Return a pytest child's command line.
+
+    Args:
+        ctx: The command's context.
+        attempt: The attempt, for its token.
+        group: The group, for its selection.
+        rest: Further arguments: `--collect-only -q`, or the due node ids.
+
+    Returns:
+        The command line.
+    """
+    plugins = ["-p", "tests._live.outcomes", "-p", "no:cacheprovider"]
+    token = ["--live-run-token", attempt.token]
+    return [ctx.python, "-m", "pytest", *plugins, *token, *PYTEST_GROUPS[group], *rest]
+
+
+def collect(
+    ctx: RunContext, state: RunState, attempt: Attempt, *, group: str, until: datetime
+) -> dict[str, Any]:
+    """List a pytest group's tests, and remember their node ids.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state; `known[group]` is replaced.
+        attempt: The attempt.
+        group: The group.
+        until: When the collection is stopped.
+
+    Returns:
+        Each test's items and declared requests, by node id; empty when the collection
+        failed (its output is in `group.log`).
+    """
+    folder = ctx.out / attempt.folder
+    target = folder / "collection.json"
+    argv = _pytest_argv(ctx, attempt, group=group, rest=["--collect-only", "-q"])
+    env = environment(ctx, state, folder=folder, extra={COLLECTION_VARIABLE: str(target)})
+    run_child(ctx, state, attempt, argv=argv, env=env, until=until)
+    attempt.status = "running"
+    collection: dict[str, Any] = {}
+    if target.exists():
+        collection = json.loads(target.read_text(encoding="utf-8"))
+        state.known[group] = sorted(collection)
+    return collection
+
+
+def move_evidence(source: Path, folder: Path) -> None:
+    """Move a `live-evidence.log` into a folder, never over one already there.
+
+    Args:
+        source: The file in the repository root, which may be missing.
+        folder: Where it goes.
+    """
+    if not source.exists():
+        return
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "live-evidence.log"
+    number = 1
+    while target.exists():
+        number += 1
+        target = folder / f"live-evidence-{number}.log"
+    shutil.move(source, target)
+
+
+def run_pytest_group(
+    ctx: RunContext,
+    state: RunState,
+    memory: RunMemory,
+    *,
+    group: str,
+    until: datetime,
+    reprobe: Callable[[], None],
+) -> None:
+    """Run one attempt of a pytest group: collect, run the due tests, record each outcome.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state, saved after every change.
+        memory: The run's memory.
+        group: The group.
+        until: When the attempt is stopped.
+        reprobe: Probes the key again and adopts the result, after a refusal.
+
+    Control-C stops the child; what finished is recorded, and the `KeyboardInterrupt` goes on.
+    """
+    attempt = new_attempt(ctx, state, group)
+    folder = ctx.out / attempt.folder
+    suffix = half_day_suffix(ctx.now().astimezone(NEW_YORK).date()) if group == "half-day" else ""
+    collection = collect(ctx, state, attempt, group=group, until=until)
+    for nodeid, entry in collection.items():
+        check_of(state, group, nodeid + suffix).items = list(entry["items"])
+    due = [n for n in sorted(collection) if is_due(state, check_of(state, group, n + suffix))]
+    if not due:
+        attempt.status, attempt.ended = "finished", ctx.now().isoformat()
+        ctx.say(f"{group}: nothing due")
+        run_state.save(ctx.out, state)
+        return
+    minutes = sum(int(collection[n]["requests"]) for n in due) // BASIC_REQUESTS_PER_MINUTE
+    ctx.say(f"{group}: {len(due)} checks; on Basic, up to {minutes} minutes of requests")
+    move_evidence(ctx.root / "live-evidence.log", ctx.out / "orphans")
+    outcomes = folder / "outcomes.jsonl"
+    argv = _pytest_argv(ctx, attempt, group=group, rest=due)
+    env = environment(ctx, state, folder=folder, extra={OUTCOMES_VARIABLE: str(outcomes)})
+    stopped = True
+    try:
+        stopped = run_child(ctx, state, attempt, argv=argv, env=env, until=until)
+    finally:
+        move_evidence(ctx.root / "live-evidence.log", folder)
+        found = _pytest_results(outcomes, due)
+        if not stopped and any(r is not None and r[0] == "refused" for r in found.values()):
+            before = state.current
+            reprobe()
+            if state.current != before:
+                found = {
+                    n: ("interrupted", "") if r and r[0] == "refused" else r
+                    for n, r in found.items()
+                }
+        _record_all(
+            ctx,
+            state,
+            memory,
+            group=group,
+            found={n + suffix: r for n, r in found.items()},
+            stopped=stopped,
+        )
+
+
+def _pytest_results(outcomes: Path, due: list[str]) -> dict[str, tuple[str, str] | None]:
+    """Turn the outcomes file into each due test's status and reason.
+
+    Args:
+        outcomes: The attempt's `outcomes.jsonl`.
+        due: The tests run.
+
+    Returns:
+        Each test's `(status, reason)`, or None when it left no record.
+    """
+    by_test: dict[str, list[dict[str, Any]]] = {}
+    for line in read_outcomes(outcomes):
+        by_test.setdefault(line["nodeid"], []).append(line)
+    return {n: check_outcome(by_test[n]) if n in by_test else None for n in due}
+
+
+def _record_all(
+    ctx: RunContext,
+    state: RunState,
+    memory: RunMemory,
+    *,
+    group: str,
+    found: dict[str, tuple[str, str] | None],
+    stopped: bool,
+) -> None:
+    """Record each check's result, and save the state.
+
+    A check with no result, or one that did not finish, is `interrupted` (still due) when the
+    program stopped the child, and `error` when the child ended by itself.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state.
+        memory: The run's memory; it notes that a pack is due.
+        group: The group.
+        found: Each check's `(status, reason)`, or None.
+        stopped: Whether the program stopped the child.
+    """
+    day = ctx.now().astimezone(NEW_YORK).date().isoformat()
+    for name, result in found.items():
+        status, reason = result if result is not None else ("error", "the child ended first")
+        if status == "error" and stopped:
+            status, reason = "interrupted", ""
+        record(state, check_of(state, group, name), status=status, reason=reason, day=day)
+    memory.finished_since_pack = True
+    run_state.save(ctx.out, state)
+
+
+def run_built_in_group(
+    ctx: RunContext, state: RunState, memory: RunMemory, *, group: str, until: datetime
+) -> None:
+    """Run one attempt of a built-in group in a child of the program's own script.
+
+    Args:
+        ctx: The command's context.
+        state: The run's state, saved after every change.
+        memory: The run's memory.
+        group: The group.
+        until: When the group ends; a streaming child ends itself two minutes before, and is
+            stopped `STREAM_GRACE` after.
+
+    Control-C stops the child; what finished is recorded, and the `KeyboardInterrupt` goes on.
+    """
+    today = ctx.now().astimezone(NEW_YORK).date()
+    due = due_names(state, group, today, any_time=group in memory.any_time) or []
+    attempt = new_attempt(ctx, state, group)
+    folder = ctx.out / attempt.folder
+    streams = [a.folder for a in state.attempts if a.group == "stream-day"]
+    request = {
+        "group": group,
+        "due": due,
+        "tiers": state.entitlements[state.current]["tiers"],
+        "entitlement": state.current,
+        "until": until.isoformat(),
+        "stream_folder": str(ctx.out / streams[-1]) if streams else "",
+        "stream_day": state.stream_days[-1] if state.stream_days else "",
+    }
+    (folder / "request.json").write_text(json.dumps(request, indent=1) + "\n", encoding="utf-8")
+    if group == "stream-day" and today.isoformat() not in state.stream_days:
+        state.stream_days.append(today.isoformat())
+    ctx.say(f"{group}: {len(due)} checks")
+    argv = [ctx.python, str(ctx.script), "_group", "--out", str(ctx.out)]
+    argv += ["--attempt", attempt.folder, "--token", attempt.token]
+    env = environment(ctx, state, folder=folder, extra={}, with_s3=group != "responses")
+    stop = until + STREAM_GRACE if group in STREAM_GROUPS else until
+    stopped = True
+    try:
+        stopped = run_child(ctx, state, attempt, argv=argv, env=env, until=stop)
+    finally:
+        reported = {r["name"]: r for r in read_outcomes(folder / "results.jsonl")}
+        found = {
+            n: (reported[n]["status"], reported[n]["reason"]) if n in reported else None
+            for n in due
+        }
+        _record_all(ctx, state, memory, group=group, found=found, stopped=stopped)
