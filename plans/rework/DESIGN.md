@@ -3244,8 +3244,8 @@ Basic subscription. There is no way to ask which tier a subscription is on.
   cycle behind two long histories of eight workers each waits for one request of each, not
   sixteen.
 - **Pauses.** A 429 pauses its bucket for every session sharing it: for its `Retry-After`
-  (seconds, or an HTTP date measured against the response's own `Date`); without one, or with
-  one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
+  (seconds, or an HTTP date measured against the response's own `Date`), up to 10 minutes;
+  without one, or with one of zero or in the past, a paced bucket for one whole window (61 s) and an unpaced one 15,
   30, then 60 s by the refusals of the run, so a request is never sent again at once. A pause
   only grows. When it ends, one request of the bucket goes first as a probe while the others
   wait for its answer: an answer other than 429 releases them, and a 429 pauses again. So a
@@ -4261,8 +4261,10 @@ spec/                run-time wire vocabulary; imports nothing else in _massive
   convert.py         convert(wire_type, value): one checked, exact scalar per WireType, shared by
                      every JSON decoder (REST to_batch, WebSocket frames); UnconvertibleError;
                      convert_field applies a field's named conversion and raises with the
-                     shared bad-value message; missing_key_message and excerpt, so both
-                     decoders word a row failure alike and add only their own context
+                     shared bad-value message; field_converter gives a decoder each field's
+                     converter once, and unconvertible_message, missing_key_message and
+                     excerpt word a row failure alike in both decoders, which add only their
+                     own context
   values.py          encode_value(param, value, *, label): one REST parameter value's wire
                      text by ParamKind, for the REST client and the library's filter check
   rest.json  ws.json  flatfiles.json        generated, committed
@@ -4521,7 +4523,8 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   paced bucket (declared, or learned from a 429 whose message names the per-minute maximum)
   admits a request only while fewer than 5 slots are held, a slot lasting from the request's
   start until 61 s after its response; a 429 pauses the bucket (its `Retry-After` in either
-  form, an HTTP date measured against the response's own `Date` header, else a whole window
+  form, an HTTP date measured against the response's own `Date` header, up to 10 minutes
+  (`MAX_RETRY_AFTER`; a longer one is clamped and logged at INFO), else a whole window
   when paced, else 15, 30, then 60 s by the run's refusals; a `Retry-After` of zero counts as
   none), the burst of 429s in flight when the pause began counting once; after a pause one
   probe request goes alone until it is answered; a run ends with an answer to a request
@@ -4598,7 +4601,12 @@ result key, and parameter kinds from that value, so its tests build `RestPath` v
   unconvertible value, never assumed to be UTC: a field that really is offset-less UTC gets a
   named `TYPE_FIXES` conversion. `DriftReport.missing` holds only the vendor-`required`
   fields that some row lacked or held as null; an extra nested object is reported by its own
-  key, not by each leaf.
+  key, not by each leaf. A page is read a column at a time: each field's values are gathered
+  into one list, the types of the whole list are checked at once, and a column of plain values
+  goes to Arrow without a Python call per value. A page that this reading cannot vouch for (a
+  bad row, a value only its converter can judge and refuses, an integer Arrow cannot hold
+  exactly as a double) is read again row by row, which gives the same batch, drift, and error
+  as before; the fallback logs its reason at DEBUG, once per page.
 - **Logging.** Each request logs at DEBUG: method, path, query (with no secret), status,
   `request_id`, row count, and elapsed time. Retries log at INFO with the wait, and exhausted
   retries at DEBUG: the call that raises the error is what the user sees. The `Authorization` header is never logged.
@@ -5951,7 +5959,7 @@ document already reflects them.
 30. **Wire behaviour settled in review** (2026-10-26; the REST 429 half revised 2026-10-28 by
     decision 60). A REST 429 pauses its subscription's requests: without a usable
     `Retry-After`, for a whole 61 s window when the subscription is paced and for 15, 30, then
-    60 s when it is not; with one, for as long as it asks; and for at most 10 minutes of pauses
+    60 s when it is not; with one, for as long as it asks, up to 10 minutes; and for at most 10 minutes of pauses
     in a run; a TLS certificate failure is never
     retried; a 429 at the WebSocket upgrade is retried; wildcard transitions make before they
     break, accepting a brief duplicate rather than a gap

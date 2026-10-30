@@ -78,6 +78,33 @@ def test_an_unusable_retry_after_is_none_and_logged(
     )
 
 
+def test_a_long_retry_after_is_returned_as_asked_since_each_caller_caps_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert retry.retry_after_seconds("9" * 20, now=0.0) == 1e20
+    assert retry.retry_after_seconds("9" * 400, now=0.0) == math.inf
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Fri, 15 Jan 2027 08:00:00 GMT",
+        "Fri, 15 Jan 2027 08:00:00 -0000",
+    ],
+)
+def test_an_http_date_is_seconds_since_the_epoch_in_gmt(header: str) -> None:
+    assert retry.http_date_seconds(header) == 1_800_000_000.0
+
+
+@pytest.mark.parametrize("header", [None, "", "soon", "30"])
+def test_what_is_not_an_http_date_is_none_and_silent(
+    header: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert retry.http_date_seconds(header) is None
+    assert caplog.records == []
+
+
 def test_a_retry_after_date_without_a_zone_is_gmt() -> None:
     header = "Wed, 21 Oct 2026 07:28:00 -0000"
     assert retry.retry_after_seconds(header, now=1_792_567_660.0) == 20.0

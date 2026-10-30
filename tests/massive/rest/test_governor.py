@@ -19,6 +19,7 @@ from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.rest.governor import (
     BASIC_REQUESTS_PER_MINUTE,
+    MAX_RETRY_AFTER,
     RATE_WINDOW,
     UNLIMITED,
     Admission,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 BUCKETS = ("stocks", "options", "other")
 BASIC = "You've exceeded the maximum requests per minute, please wait or upgrade."
 TIMEOUT = 10.0
+_GOVERNOR_LOGGER = "deephaven_massive._massive.rest.governor"
 
 
 def _governor(clock: FakeClock | None = None, *, basic: set[str] | None = None) -> RequestGovernor:
@@ -381,16 +383,16 @@ def test_a_request_whose_patience_ends_before_the_pause_fails_at_once() -> None:
     clock = FakeClock(wall=1_800_000_000.0)
     governor = _governor(clock)
     _refuse(
-        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=601.0
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=301.0
     )
     with pytest.raises(WireError) as caught:
-        governor.admission("stocks", lane=object(), patience=Patience(600.0)).acquire(Cancel())
+        governor.admission("stocks", lane=object(), patience=Patience(300.0)).acquire(Cancel())
     assert caught.value.status == 429
-    local = datetime.fromtimestamp(1_800_000_601, UTC).astimezone().isoformat()
+    local = datetime.fromtimestamp(1_800_000_301, UTC).astimezone().isoformat()
     assert str(caught.value) == (
         "Massive is refusing stocks requests with HTTP 429 (latest refusal: HTTP 429: slow "
-        "down). Its next request, a probe, goes at 2027-01-15T08:10:01+00:00 "
-        f"({local} local time), but this read waits out at most 600 s of pauses and has "
+        "down). Its next request, a probe, goes at 2027-01-15T08:05:01+00:00 "
+        f"({local} local time), but this read waits out at most 300 s of pauses and has "
         "spent 0 s of its patience. The usual cause is another program or process using the "
         "same Massive account, whose limit they share. To go on: retry after that time; stop "
         "the other program; or, if this subscription is on the Basic tier, declare it Basic "
@@ -399,7 +401,48 @@ def test_a_request_whose_patience_ends_before_the_pause_fails_at_once() -> None:
     assert clock.waits == []  # it failed without waiting
     # The bucket has not given up: a request with more patience waits the pause out.
     _requests(governor, "stocks", 1)
-    assert clock.monotonic() == 601.0
+    assert clock.monotonic() == 301.0
+
+
+@pytest.mark.parametrize("asked", [600.5, 1e10, 1e12, math.inf])
+def test_a_retry_after_beyond_ten_minutes_pauses_ten_minutes_and_says_so(
+    asked: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = FakeClock(wall=1_800_000_000.0)
+    governor = _governor(clock)
+    with caplog.at_level(logging.DEBUG, logger=_GOVERNOR_LOGGER):
+        _refuse(
+            governor,
+            governor.admission("stocks", lane=object()).acquire(Cancel()),
+            retry_after=asked,
+        )
+    assert MAX_RETRY_AFTER == 600.0
+    assert governor.snapshot()[0].paused_until == 1_800_000_600.0
+    # A diagnostics writer sleeps until the next change: always a bounded, finite wait.
+    assert governor.next_change() == 600.0
+    [record] = caplog.records
+    assert record.levelname == "INFO"
+    assert record.getMessage() == (
+        f"stocks: a refusal's Retry-After asks for {asked} s; pausing 600.0 s, the most honoured"
+    )
+    # A read with ten minutes of patience waits the clamped pause out.
+    permit = governor.admission("stocks", lane=object(), patience=Patience(600.0)).acquire(Cancel())
+    governor.done(permit, answered=True)
+    assert clock.waits == [600.0]
+
+
+def test_a_retry_after_of_ten_minutes_is_honoured_without_a_log_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _governor(FakeClock())
+    with caplog.at_level(logging.DEBUG, logger=_GOVERNOR_LOGGER):
+        _refuse(
+            governor,
+            governor.admission("stocks", lane=object()).acquire(Cancel()),
+            retry_after=600.0,
+        )
+    assert caplog.messages == []
+    assert governor.next_change() == 600.0
 
 
 def test_a_request_whose_patience_ends_with_the_pause_waits_for_it() -> None:
@@ -1297,12 +1340,12 @@ def test_a_longer_pause_fails_an_impatient_request_behind_a_patient_one() -> Non
     clock.wait_for_sleepers(1)
     impatient = _Waiting(governor, "stocks", lane=object(), patience=Patience(90.0))
     assert clock.wait_for_sleepers(2) == [15.0, math.inf]
-    _refuse(governor, in_flight, retry_after=700.0)  # stale: the pause grows to 700
+    _refuse(governor, in_flight, retry_after=500.0)  # stale: the pause grows to 500
     impatient.join()
     assert impatient.error is not None
     assert impatient.error.status == 429
-    assert clock.wait_for_sleepers(1) == [700.0]  # the patient one waits the pause out
-    clock.advance(700.0)
+    assert clock.wait_for_sleepers(1) == [500.0]  # the patient one waits the pause out
+    clock.advance(500.0)
     patient.join()
     assert patient.permit is not None
     governor.done(patient.permit, answered=True)
