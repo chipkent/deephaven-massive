@@ -26,8 +26,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   and quotes named by session dates are requested one session at a time
   (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
   (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
-  are stamped at 00:00 of their day in the class day zone, and a stamp Massive is not known to
-  use raises (`row_times.stamp_rule`, `stamped`).
+  are stamped at 00:00 of their day in the class day zone, and every bar is served: a stamp
+  Massive is not known to use logs one WARNING per dataset and timespan per session
+  (`row_times.stamp_rule`, `stamped`).
 - **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`):
   `Date`, a bar's `TimestampStart` and `TimestampEnd`, and `TimestampInsert`, the instant the
   page arrived. The day zone of each call follows its own symbols' class (`dates.day_class`),
@@ -110,9 +111,9 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.dates import day_class, is_trading_day
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
-from deephaven_massive._datasets.row_times import RowTimes, stamp_rule, time_rule
+from deephaven_massive._datasets.row_times import stamp_rule, time_rule
 from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
-from deephaven_massive._enums import AssetClass, OnError, Timespan, subscription_of
+from deephaven_massive._enums import AssetClass, OnError, subscription_of
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorCause,
@@ -149,7 +150,6 @@ from deephaven_massive._ingest.rest_rows import (
     keep_window,
     stamped,
     whole_bars,
-    with_remedy,
 )
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
 from deephaven_massive._tables import poll
@@ -171,6 +171,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
+    from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
     from deephaven_massive._tables.session_core import SessionCore
@@ -444,6 +445,8 @@ class RestReader:
             `"massive #1 call-7 rest"`: the session, the call, and the transport.
         exec_ctx: The session's execution context, which tells whether a read's thread holds
             the update graph's lock, and so how long the read waits out a pause.
+        warnings: The session's once-per-session warnings (`SessionCore.warnings`), such as
+            that of a bar stamped where Massive is not known to stamp one.
     """
 
     state: RestState
@@ -453,6 +456,7 @@ class RestReader:
     unreadable_symbols: OnError
     threads: str
     exec_ctx: ExecutionContext
+    warnings: BoundedLog
 
     def patience(self) -> Patience:
         """Return the patience of a read starting now (`rate_limits.read_patience`).
@@ -693,7 +697,6 @@ class RestReader:
         request: Request,
         limit: int | None,
         window: HistoryWindow | None = None,
-        remedy: str = "",
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
@@ -718,10 +721,9 @@ class RestReader:
             request: The normalized arguments: the timespan and multiplier of bars, and the
                 `adjusted` basis every page must echo.
             limit: The cap on each call's rows, or None; `read_fetch` caps the total.
-            window: The `history()` window whose rows to keep, or None.
-            remedy: What the caller can do instead when a bar's stamp is refused, which the
-                verb supplies; bars of a day or longer move to 00:00 of their day in the class
-                day zone, and a stamp Massive is not known to use raises `MassiveError`
+            window: The `history()` window whose rows to keep, or None. Bars of a day or longer
+                move to 00:00 of their day in the class day zone, and a stamp Massive is not
+                known to use logs one WARNING per dataset and timespan per session
                 (`row_times.stamp_rule`).
             record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
@@ -737,7 +739,7 @@ class RestReader:
 
         Errors: the public error of each `WireError` (`_public`), `RowDataError` for a row
         that breaks the schema, and the `MassiveError` of `_call` for a page on another
-        adjustment basis, a refused stamp, or a symbol whose data was cut short. A closed
+        adjustment basis or a symbol whose data was cut short. A closed
         session raises `MassiveError("... is closed")`.
         """
         converter = RowConverter.build(
@@ -750,7 +752,6 @@ class RestReader:
                 request=request,
                 limit=limit,
                 window=window,
-                remedy=remedy,
                 record=record,
                 spec=spec,
                 stop=stop,
@@ -816,7 +817,6 @@ class RestReader:
         request: Request,
         limit: int | None,
         window: HistoryWindow | None,
-        remedy: str,
         record: Callable[[DriftReport], None] | None,
         stop: Cancel,
         patience: Patience,
@@ -824,8 +824,9 @@ class RestReader:
         """Request one call's pages and convert their rows.
 
         Each page is checked against the requested adjustment basis (`_check_adjusted`), its
-        bars of a day or longer are stamped (`stamped`), its rows outside the `history()`
-        window dropped (`keep_window`), and its rows given the library's time columns
+        bars of a day or longer are stamped (`stamped`; a stamp Massive is not known to use is
+        served and logs one WARNING per dataset and timespan per session), its rows outside the
+        `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`).
 
@@ -836,7 +837,6 @@ class RestReader:
             request: The normalized arguments.
             limit: The cap on the call's rows, or None.
             window: The `history()` window whose rows to keep, or None.
-            remedy: What the caller can do instead when a stamp is refused.
             record: Also given each page's drift, or None.
             stop: The read's token, which ends the call's waits.
             patience: The patience of the call's read, which its pause waits are charged to.
@@ -854,16 +854,15 @@ class RestReader:
         A failed request otherwise raises the public error of its `WireError` (`_public`), and
         once the session is closed every failed request does, a 404 included: the call raises
         `MassiveError("... is closed")` rather than dropping its symbol. A row that breaks the
-        schema raises the `RowDataError` of `rest_rows.RowConverter.convert`; a page on another
-        adjustment basis the `MassiveError` of `_check_adjusted`; and a bar stamped at a time
-        Massive is not known to use the `MassiveError` of `stamped`.
+        schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, and a page on
+        another adjustment basis the `MassiveError` of `_check_adjusted`.
         """
         kept: list[pa.RecordBatch] = []
         requests = 0
         template = converter.rest_path.template
         own = own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
-        stamps = with_remedy(stamp_rule(spec, request, asset_class=zone_class), remedy)
+        stamps = stamp_rule(spec, request, warnings=self.warnings, asset_class=zone_class)
         times = time_rule(spec, request, asset_class=zone_class)
         bucket = _request_bucket(spec, template, call)
         try:
@@ -887,8 +886,8 @@ class RestReader:
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol)
-                # Stamp before keeping: an unknown stamp outside the window must still raise,
-                # not be dropped unseen by `keep_window`.
+                # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
+                # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
                     batches = [stamped(spec, template, batch, rule=stamps) for batch in batches]
                 filled = (
@@ -1313,7 +1312,6 @@ class RestReader:
                 calls,
                 request=request,
                 limit=request.limit,
-                remedy=_fetch_remedy(spec),
                 record=record,
                 executor=executor,
                 cancel=cancel,
@@ -1386,6 +1384,7 @@ class RestEndpoints:
             core.config.unreadable_symbols,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
+            core.warnings,
         )
 
     def _static(self, spec: DatasetSpec, table: pa.Table) -> Table:
@@ -1652,7 +1651,9 @@ class RestEndpoints:
         dataset's time axis, or as the aggregates' `{from}/{to}` millisecond epochs, one
         request series per symbol where the path takes one. Rows outside the window are
         dropped (`keep_window`), bars of a day or longer are stamped at 00:00 of their day in the
-        class day zone (`stamped`, `row_times.day_starts`), and every row gets the library's
+        class day zone (`stamped`, `row_times.day_starts`; a stamp Massive is not known to use
+        is served and logs one WARNING per dataset and timespan per session), and every row gets
+        the library's
         time columns. A symbol with no data adds no rows. Before the first request, one INFO
         line announces a long download (`rate_limits.announce`): a grouped-daily or
         per-session download of more than five requests, and any read whose paced requests
@@ -1669,10 +1670,9 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Errors: as `fetch` raises them, and `MassiveError` for a bar of a day or longer stamped
-        at a time or on a day Massive is not known to use for its class, for a page whose
-        `adjusted` echo differs from the request, and for a symbol whose later page answers
-        HTTP 404, its data cut short.
+        Errors: as `fetch` raises them, and `MassiveError` for a page whose `adjusted` echo
+        differs from the request and for a symbol whose later page answers HTTP 404, its data
+        cut short.
         """
         reader = self._reader(f"call-{call}")
         rest_path, calls, shape = _history_plan(
@@ -1692,7 +1692,6 @@ class RestEndpoints:
             request=request,
             limit=None,
             window=window,
-            remedy=_history_remedy(request),
             cancel=_token(stop),
             patience=reader.patience(),
         )
@@ -1946,59 +1945,3 @@ def _token(stop: threading.Event | None) -> Cancel | None:
         The same object, typed as a `Cancel`.
     """
     return cast("Cancel | None", stop)
-
-
-_FLAT_FILES_REMEDY: Final = (
-    "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES if S3 credentials are "
-    "configured"
-)
-"""What a `history()` caller of unadjusted 1-day bars can do when a REST stamp is refused."""
-
-_UNADJUSTED_REMEDY: Final = (
-    "read the 1-day flat files with source=dm.HistorySource.FLAT_FILES and adjusted=False "
-    "(as-traded prices; the files hold no adjusted bars) if S3 credentials are configured"
-)
-"""What a `history()` caller of adjusted 1-day bars can do when a REST stamp is refused: the
-flat files serve only unadjusted bars, so the way out names the price basis it changes."""
-
-_LONGER_REMEDY: Final = "request 1-day bars; no other source serves these"
-"""What a `history()` caller of longer or multiplied bars can do: only REST serves them."""
-
-_FETCH_REMEDY: Final = "use bars(symbols, dm.Timespan.DAY).history() for that day"
-"""What a `previous_day_bar` caller can do when `/prev`'s stamp is refused: the 1-day bars of
-`history()` hold the same day, from a source whose stamp the day rules accept."""
-
-_INDICATOR_REMEDY: Final = "compute the indicator from bars().history() of the same timespan"
-"""What an indicator caller can do when a value's stamp is refused: no other source serves the
-values, but the bars they are computed over are checked and labelled the same way."""
-
-
-def _fetch_remedy(spec: DatasetSpec) -> str:
-    """Return what a `fetch()` or `poll()` caller can do when a stamp is refused.
-
-    Args:
-        spec: The dataset.
-
-    Returns:
-        Computing the indicator from bars for an indicator; reading the 1-day bars'
-        `history()` for the day for `previous_day_bar`.
-    """
-    if not spec.holds_bars and spec.times is RowTimes.BAR:
-        return _INDICATOR_REMEDY
-    return _FETCH_REMEDY
-
-
-def _history_remedy(request: Request) -> str:
-    """Return what a REST `history()` caller can do when a bar's stamp is refused.
-
-    Args:
-        request: The normalized arguments.
-
-    Returns:
-        For 1-day bars, reading the 1-day flat files, which for adjusted bars (`adjusted`
-        True) means passing adjusted=False as well; for longer or multiplied bars, asking for
-        1-day bars, since no flat file holds them.
-    """
-    if request.timespan is Timespan.DAY and request.multiplier == 1:
-        return _UNADJUSTED_REMEDY if request.adjusted is True else _FLAT_FILES_REMEDY
-    return _LONGER_REMEDY

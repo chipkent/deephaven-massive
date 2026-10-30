@@ -1227,10 +1227,11 @@ class HistoryQuery(QueryBase):
                 ~11:00 ET next day), or was a market holiday"; after that the day is skipped
                 with a WARNING, as a holiday); a futures range named by instants ends on a
                 holiday and the next session's file, which holds the holiday's hours, is not
-                published yet or does not exist within 7 days; or a bar of a day or longer is
+                published yet or does not exist within 7 days. A bar of a day or longer
                 stamped at a time of day, or on a day, Massive is not known to use for its
                 class (a crypto 1-day bar at midnight New York time, or a week bar on a
-                Monday), naming the dataset, the source, and what to do instead.
+                Monday) raises nothing: it is returned, labelled by the day its stamp falls
+                on, and logs one WARNING per dataset and timespan per session.
 
         Example:
             ::
