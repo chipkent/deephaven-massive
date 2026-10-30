@@ -72,8 +72,6 @@ CANONICAL = [
     (FUT, "CL:BF Q6-U6-V6"),
     (FUT, "CL:BZ U6-V6"),
     (FUT, "6A:XF:AUDUSD:Q6"),
-    (FUT, "esz5"),  # a dataset takes any ticker as written; only the converters check forms
-    (FUT, "BOB 2-1 U6"),
     (IDX, "I:SPX"),
     (IDX, "I:AAVE10RP"),
     (IDX, "I:APy"),
@@ -119,6 +117,32 @@ NOT_CANONICAL = [
     (CRY, "X:"),
     (CRY, "x:BTCUSD"),
 ]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("esz5", r"^'esz5' is not a Massive futures ticker: a contract is upper-case letters"),
+        ("hello world", r"^'hello world' is not a Massive futures ticker: a contract is"),
+        ("BOB 2-1 U6", r"^'BOB 2-1 U6' is not a Massive futures ticker: a contract is"),
+        (" ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
+        ("X:ESZ5", "is a crypto ticker"),
+    ],
+)
+def test_the_general_converter_is_as_strict_for_futures_as_the_contract_one(
+    text: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message) as general:
+        dm.canonical_symbol(text, FUT)
+    with pytest.raises(ValueError, match=message) as contract:
+        dm.canonical_symbol_future(text)
+    assert str(general.value) == str(contract.value)
+
+
+def test_a_dataset_takes_futures_text_the_converters_refuse() -> None:
+    # A dataset takes any futures ticker as Massive writes it; only the converters check forms.
+    for text in ("esz5", "hello world", "BOB 2-1 U6"):
+        assert check_symbol(FUT, text) == text
 
 
 @pytest.mark.parametrize(("asset_class", "text"), CANONICAL)
