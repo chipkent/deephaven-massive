@@ -533,6 +533,24 @@ def test_a_refusal_of_a_request_sent_before_the_pause_logs_the_pause_it_leaves(
     ]
 
 
+def test_a_late_refusal_after_its_pause_ended_logs_no_pause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    governor = _governor(clock)
+    first, late = (governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in "12")
+    _refuse(governor, first)
+    clock.advance(20.0)  # the 15 s pause is over when the late refusal arrives
+    with caplog.at_level(logging.INFO, logger=_GOVERNOR_LOGGER):
+        _refuse(governor, late)
+    assert _infos(caplog) == [
+        (
+            "stocks: paused 0.0 s (a request sent before the pause) after HTTP 429; the refusal: "
+            "HTTP 429: slow down"
+        )
+    ]
+
+
 def test_a_refusal_already_reported_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
     governor = _governor(FakeClock())
     permit = governor.admission("stocks", lane=object()).acquire(Cancel())

@@ -974,12 +974,15 @@ class RequestGovernor:
         new pause; one to an attempt that started before it only lengthens the pause to its
         own `Retry-After`. A `Retry-After` of zero counts as none, and one longer than
         `MAX_RETRY_AFTER` pauses that long. A run that time has ended (see the module) ends
-        first, so this refusal starts a new one. Each refusal logs one INFO line: the bucket,
-        how long it is now paused and why (the `Retry-After`, as asked and as honoured; the
-        step of the 15, 30, 60 s schedule; or one window of a paced bucket), whether it
-        learned Basic, and the refusal's message. The
-        caller then asks for a new permit, which waits out the pause, or fails if the pause
-        ends past its own read's patience. Does nothing for a permit already reported.
+        first, so this refusal starts a new one. The caller then asks for a new permit, which
+        waits out the pause, or fails if the pause ends past its own read's patience. Does
+        nothing for a permit already reported.
+
+        Each refusal logs one INFO line, after the listeners are called: the bucket, how long
+        it is now paused and why (the `Retry-After`, as asked and as honoured; the step of the
+        15, 30, 60 s schedule; one window of a paced bucket; or a request sent before the
+        pause, which leaves the pause as it was unless its `Retry-After` is longer), whether
+        the refusal taught it the Basic limit, and the refusal's message.
 
         Args:
             permit: The attempt's permit.
@@ -1028,7 +1031,9 @@ class RequestGovernor:
                 if asked is not None:
                     reason = f"{reason}; {honoured}"
                     state.pause(now + asked)
-            paused = state.pause_until - now
+            # A request sent before a pause that has already ended leaves no pause.
+            paused = max(0.0, state.pause_until - now)
+        self._notify(permit.bucket)
         # One INFO line per refusal, with the pause it chose: a decision, not something to act
         # on. The paused-poll WARNING and the read's own error say when a pause matters.
         logger.info(
@@ -1041,7 +1046,6 @@ class RequestGovernor:
             else "",
             message,
         )
-        self._notify(permit.bucket)
         return basic
 
     def snapshot(self) -> tuple[BucketState, ...]:
