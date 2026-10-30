@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 
-from deephaven_massive import _errors
+from deephaven_massive import _log_limits
 from deephaven_massive._datasets.timestamps import (
     FMV_NS_THRESHOLD,
     ISSUES_URL,
@@ -100,7 +100,7 @@ def test_every_fixed_unit_scales_to_nanoseconds() -> None:
 def test_fmv_rule_classifies_at_the_threshold(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_errors, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", set())
     with caplog.at_level(logging.INFO, logger="deephaven_massive._datasets.timestamps"):
         # The documentation sample, 13 digits: milliseconds.
         assert to_epoch_ns("stocks.fmv.t", FMV, 1678220098130) == 1678220098130 * 10**6
@@ -118,7 +118,7 @@ def test_fmv_rule_classifies_at_the_threshold(
 def test_fmv_rule_logs_only_a_decided_unit(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_errors, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", set())
     with caplog.at_level(logging.INFO, logger="deephaven_massive._datasets.timestamps"):
         assert to_epoch_ns_array("x", FMV, ints(None, None)).to_pylist() == [None, None]
         assert not [r for r in caplog.records if "FMV timestamps detected" in r.getMessage()]

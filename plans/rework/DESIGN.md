@@ -385,11 +385,11 @@ _massive/                the wire package (section 19)
 py.typed
 ```
 
-The root holds the vocabulary every layer names (`_config`, `_enums`, `_errors`, `_types`) and
-the API users touch (`__init__`, `_session`, `_query`, `_namespaces/`). The rest of the library
-is grouped into three packages: `_datasets/` describes datasets (and renders their column
-reference from a catalog it is given), `_tables/` is the Deephaven side, and `_ingest/` is the
-only code that holds wire clients. The `__init__.py` of each of the three, and of
+The root holds the vocabulary every layer names (`_config`, `_enums`, `_errors`, `_log_limits`,
+`_types`) and the API users touch (`__init__`, `_session`, `_query`, `_namespaces/`). The rest of
+the library is grouped into three packages: `_datasets/` describes datasets (and renders their
+column reference from a catalog it is given), `_tables/` is the Deephaven side, and `_ingest/` is
+the only code that holds wire clients. The `__init__.py` of each of the three, and of
 `_namespaces/`, holds only a docstring. [Section 4.3](#43-layers) orders these groups into
 layers.
 

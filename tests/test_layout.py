@@ -51,9 +51,9 @@ wire package.
 
 Then the file enforces the library's layers. Every module under `src/` is in one of six
 layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`, `_enums`, `_errors`,
-`_types`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`), and API (the root
-`__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/`); a module in no known layer is
-itself a violation. Then:
+`_log_limits`, `_types`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`), and API
+(the root `__init__`, `_debug_log`, `_session`, `_query`, and `_namespaces/`); a module in no known
+layer is itself a violation. Then:
 
 - every import, relative import, resolvable literal dynamic import, and module-name string,
   inside `if TYPE_CHECKING:` or not, targets the module's own layer or a lower one;
@@ -1387,7 +1387,7 @@ def test_only_this_file_may_name_the_snapshot_files() -> None:
 # The six layers, lowest first. A module imports only its own layer or lower ones.
 _RANKS = {"wire": 0, "vocabulary": 1, "datasets": 2, "tables": 3, "ingest": 4, "api": 5}
 # The root modules of the vocabulary and of the API; every other root module is in no layer.
-_VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_types"})
+_VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_log_limits", "_types"})
 _API_MODULES = frozenset({"__init__", "_debug_log", "_session", "_query"})
 # The packages that are each one layer.
 _LAYER_PACKAGES = {

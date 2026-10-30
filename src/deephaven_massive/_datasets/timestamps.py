@@ -59,7 +59,8 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._errors import MassiveError, log_once
+from deephaven_massive._errors import MassiveError
+from deephaven_massive._log_limits import log_once
 from deephaven_massive._massive import Transport
 
 if TYPE_CHECKING:

@@ -69,7 +69,7 @@ from deephaven_massive._enums import (
     UnknownSymbols,
     _require_enum,
 )
-from deephaven_massive._errors import BoundedWarnings
+from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
