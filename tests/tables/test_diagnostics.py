@@ -36,6 +36,7 @@ from deephaven_massive._tables.diagnostics import (
     LimitSource,
     RateLimitRow,
     RateLimitState,
+    StreamKind,
     StreamRow,
     StreamState,
     StreamUpdate,
@@ -51,6 +52,7 @@ TIMEOUT = 30.0
 
 STREAM = StreamRow(
     stream_id=7,
+    kind=StreamKind.STREAM,
     dataset="stocks.trades",
     query="<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>",
     symbol_count=2,
@@ -89,6 +91,7 @@ def test_column_sets() -> None:
     )
     assert STREAMS.column_names == (
         "StreamId",
+        "Kind",
         "Dataset",
         "Query",
         "SymbolCount",
@@ -105,7 +108,15 @@ def test_column_sets() -> None:
         "CreatedAt",
         "SchemaDrift",
     )
-    assert [s.value for s in StreamState] == ["RUNNING", "FAILED", "RELEASED", "CLOSED"]
+    assert [s.value for s in StreamState] == [
+        "RUNNING",
+        "LOADING",
+        "DONE",
+        "FAILED",
+        "RELEASED",
+        "CLOSED",
+    ]
+    assert [k.value for k in StreamKind] == ["stream", "poll", "read"]
     assert [s.value for s in ConnectionState] == [
         "RESOLVING",
         "CONNECTING",

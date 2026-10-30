@@ -30,7 +30,7 @@ from deephaven_massive._datasets import history_source, symbols
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.futures_sessions import CHICAGO
-from deephaven_massive._datasets.history_source import HistoryWindow
+from deephaven_massive._datasets.history_source import HistoryWindow, history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -3771,3 +3771,75 @@ def test_fetch_rows_reads_every_page_raw(
     with pytest.raises(dm.MassiveError, match="cancelled"):
         transport.fetch_rows("/futures/v1/schedules", query, bucket="futures", cancel=stopped)
     assert len(fake_rest.requests) == 3
+
+
+# --- Background reads ------------------------------------------------------------------------
+
+
+def _join_reads(m: dm.MassiveSession) -> None:
+    # Waits for every background read of the session to end.
+    for state in list(m._core._workers.values()):
+        cast("Any", state.fail).__self__.thread.join(30.0)
+
+
+def test_a_background_fetch_checks_its_parameters_with_no_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    rest = session._core.rest_transport()
+    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
+    assert isinstance(q, Query)
+    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+        q.fetch(wait=False)
+    # A crypto pair is not split by the check, which would read Massive's ticker list.
+    pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
+    rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request)
+    assert fake_rest.requests == []
+    assert session._core._workers == {}
+
+
+def test_a_background_fetch_lands_the_rows_the_read_requested(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, Query)
+    table = q.fetch(wait=False)
+    _join_reads(session)
+    # The read's own row says how it ended; a failure shows its error here.
+    assert session._core.diagnostics.barrier().wait(30.0)
+    (row,) = dh_arrow.to_arrow(session.streams()).to_pylist()
+    assert (row["State"], row["Error"], row["RowsPublished"]) == ("DONE", None, 1)
+    pause = threading.Event()
+    for _ in range(3000):  # the rows land on the next update cycle
+        if table.size:
+            break
+        pause.wait(0.01)
+    assert [(r["Symbol"], r["CashAmount"]) for r in rows(table)] == [("AAPL", 0.25)]
+    session.release(table)
+
+
+def test_a_background_history_checks_its_plan_with_no_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Grouped daily bars of every symbol, a symbol's bars, and a crypto pair, which the check
+    # does not split: none of them makes a request.
+    rest = session._core.rest_transport()
+    first, last = date(2025, 3, 3), date(2025, 3, 4)
+    for spec, tickers in ((BARS, dm.ALL), (BARS, ["AAPL"]), (CRYPTO_BARS, ["X:BTCUSD"])):
+        q = query(session, spec, symbols=tickers, timespan=Timespan.DAY)
+        request = dataclasses.replace(q._request, start=first, end=last)
+        window = history_window(spec, request, start=first, end=last, classes=())
+        rest.check_history(spec, request, window)
+    assert fake_rest.requests == []
+
+
+def test_a_set_stop_token_ends_a_read_before_its_first_request(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    rest = session._core.rest_transport()
+    stop = Cancel()
+    stop.set()
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    with pytest.raises(dm.MassiveError):
+        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop)
+    assert fake_rest.requests == []

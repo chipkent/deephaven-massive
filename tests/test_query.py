@@ -44,6 +44,7 @@ from deephaven_massive._query import (
     StreamHistoryQuery,
     StreamQuery,
 )
+from deephaven_massive._tables.background_read import BACKGROUND_NOTE
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import BlinkPublisher
@@ -168,15 +169,25 @@ class Recorder:
         self.calls: list[tuple[str, DatasetSpec, Request, dict[str, Any]]] = []
         # The call id each static verb passed, in call order.
         self.call_ids: list[int] = []
+        # The request checks a background read made on the calling thread.
+        self.checks: list[tuple[str, DatasetSpec, Request]] = []
         self._catalog = catalog
 
     def _record(self, verb: str, spec: DatasetSpec, request: Request, **extra: object) -> Table:
         self.calls.append((verb, spec, request, dict(extra)))
         return dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
 
-    def fetch(self, spec: DatasetSpec, request: Request, *, call: int) -> Table:
+    def fetch(
+        self, spec: DatasetSpec, request: Request, *, call: int, stop: threading.Event | None = None
+    ) -> Table:
         self.call_ids.append(call)
-        return self._record("fetch", spec, request)
+        return self._record("fetch", spec, request, **({} if stop is None else {"stop": stop}))
+
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+        self.checks.append(("fetch", spec, request))
+
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+        self.checks.append(("history", spec, request))
 
     def poll(
         self,
@@ -197,9 +208,11 @@ class Recorder:
         *,
         dates: Sequence[date] | None = None,
         call: int,
+        stop: threading.Event | None = None,
     ) -> Table:
         self.call_ids.append(call)
-        return self._record("history", spec, request, window=window, dates=dates)
+        extra = {} if stop is None else {"stop": stop}
+        return self._record("history", spec, request, window=window, dates=dates, **extra)
 
 
 @pytest.fixture
@@ -1034,7 +1047,11 @@ def test_a_refused_static_verb_logs_nothing(
     one_row = last_trade(massive_session)
     massive_session.close()
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
-        for verb in (one_row.fetch, lambda: q.history("2025-03-03", source=HistorySource.REST)):
+        verbs: list[Callable[[], Table]] = [
+            one_row.fetch,
+            lambda: q.history("2025-03-03", source=HistorySource.REST),
+        ]
+        for verb in verbs:
             with pytest.raises(dm.MassiveError, match="is closed"):
                 verb()
     assert [r.getMessage() for r in caplog.records if r.levelno < logging.WARNING] == []
@@ -1285,7 +1302,7 @@ def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None
     config = dm.MassiveConfig(api_key="test-key", unreadable_symbols=unreadable)
     with dm.MassiveSession(config) as session:
         q = trades(session)
-        empty = q._empty()
+        empty = q._empty_rows()
         names = [c.name for c in empty.columns]
         assert ("RawSymbol" in names) is (unreadable is not dm.OnError.RAISE)
         assert names == [name for (name,) in q.columns().iter_tuple(cols="Name")]
@@ -1499,3 +1516,121 @@ def test_auto_warns_that_an_unpublished_file_changes_the_source_the_next_day(
 def _futures(count: int) -> list[str]:
     months = "FGHJKMNQUVXZ"
     return [f"E{chr(65 + n // 12)}{months[n % 12]}5" for n in range(count)]
+
+
+# --- wait=False ------------------------------------------------------------------------------
+
+
+def _join_reads(session: dm.MassiveSession) -> None:
+    # Waits for every background read of the session to end, then for its row to be written.
+    for state in list(session._core._workers.values()):
+        cast("Any", state.fail).__self__.thread.join(TIMEOUT)
+
+
+def _released(session: dm.MassiveSession, *tables: Table) -> None:
+    for table in tables:
+        session.release(table)
+
+
+def test_wait_false_reads_in_the_background(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    q = news(massive_session)
+    with caplog.at_level(logging.DEBUG):
+        fetched = q.fetch(wait=False)
+        history = trades(massive_session).history(
+            "2025-03-03", "2025-03-04", source=HistorySource.REST, wait=False
+        )
+        _join_reads(massive_session)
+    assert fetched.is_refreshing
+    assert history.is_refreshing
+    # The parameters were checked on the calling thread, then the transport ran with a token.
+    assert [check[0] for check in rest.checks] == ["fetch", "history"]
+    assert [call[0] for call in rest.calls] == ["fetch", "history"]
+    assert all(isinstance(call[3]["stop"], threading.Event) for call in rest.calls)
+    rows = stream_rows()
+    assert [(r["StreamId"], r["Kind"], r["State"], r["Transport"]) for r in rows] == [
+        (1, "read", "DONE", "REST"),
+        (2, "read", "DONE", "REST"),
+    ]
+    # Each read logs its own outcome, from its thread; the call logs no `done` line.
+    assert sorted(_calls(caplog)) == [
+        "call 1 done: 0 rows in <s> s",
+        f"call 1 start: {q!r}.fetch(wait=False)",
+        "call 2 done: 0 rows in <s> s",
+        (
+            f"call 2 start: {trades(massive_session)!r}.history('2025-03-03', '2025-03-04', "
+            "source=<HistorySource.REST: 'rest'>, wait=False)"
+        ),
+    ]
+    _released(massive_session, fetched, history)
+
+
+def test_wait_must_be_a_bool(massive_session: dm.MassiveSession, rest: Recorder) -> None:
+    with pytest.raises(TypeError, match="wait must be a bool, not int"):
+        news(massive_session).fetch(wait=cast("bool", 0))
+    with pytest.raises(TypeError, match="wait must be a bool, not str"):
+        trades(massive_session).history("2025-03-03", wait=cast("bool", "no"))
+    assert rest.calls == []
+    assert massive_session._core._workers == {}
+
+
+def test_wait_false_raises_argument_errors_at_the_call(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    every = trades(massive_session, dm.ALL)
+    with pytest.raises(ValueError, match="needs explicit symbols"):
+        every.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=False)
+    with pytest.raises(ValueError, match=r"history has no possible source"):
+        every.history("2025-03-03", "2025-03-03", wait=False)
+
+    def refuse(*_: object) -> None:
+        raise ValueError("/fed/v1/inflation does not take adjusted")
+
+    monkeypatch.setattr(rest, "check_fetch", refuse)  # a path that refuses a parameter
+    with pytest.raises(ValueError, match="does not take adjusted"):
+        news(massive_session).fetch(wait=False)
+    assert rest.calls == []
+    assert flat.calls == []
+    assert massive_session._core._workers == {}
+
+
+def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
+    values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
+    assert isinstance(values, HistoryQuery)
+    instant = datetime(2025, 3, 3, 15, tzinfo=UTC)  # equal instants: no row lies between
+    files = values.history(instant, instant, wait=False)
+    forced = trades(s3_session).history(instant, instant, source=HistorySource.REST, wait=False)
+    landed = values.history("2025-03-03", "2025-03-03", wait=False)
+    _join_reads(s3_session)
+    assert (rest.calls, rest.checks) == ([], [])
+    assert [call[0] for call in flat.calls] == ["history"]  # only the range with rows
+    assert isinstance(flat.calls[0][3]["stop"], threading.Event)
+    assert s3_session._core.diagnostics.barrier().wait(TIMEOUT)
+    rows = sorted(dh_to_pylist(s3_session.streams()), key=lambda r: r["StreamId"])
+    assert [(r["State"], r["Transport"]) for r in rows] == [
+        ("DONE", "flat files"),
+        ("DONE", "REST"),
+        ("DONE", "flat files"),
+    ]
+    assert files.attributes()["TableDescription"].endswith(
+        "AUTO chose it (REST cannot serve it: indices.values has no REST history). "
+        + BACKGROUND_NOTE
+    )
+    _released(s3_session, files, forced, landed)
