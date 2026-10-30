@@ -73,6 +73,8 @@ _SPLIT_TOLERANCE = 0.01
 Massive rounds adjusted prices."""
 _SAME_PRICE = 1e-9
 """The relative error within which two closes of one day are the same price."""
+_SAME_VOLUME = 1e-9
+"""The relative error within which a bar's volume is the sum of its days' volumes."""
 _CANDIDATES = 3
 """How many recent events a corporate-action test tries before it gives up on bars."""
 _GROUPED = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
@@ -714,26 +716,52 @@ def test_unknown_ticker_statuses(
 
 
 @pytest.mark.needs("stocks:basic")
-@pytest.mark.settles("63")
+@pytest.mark.verifies("63")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
-def test_bars_of_several_days_count_calendar_or_trading_days(
+def test_bars_of_several_days_count_calendar_days(
     *, recent_week: DaySpan, rest_rows: RestRows, instant_text: Text, evidence: Evidence
 ) -> None:
-    """Whether a stock bar of several days counts calendar days or trading days.
+    """Whether a stock bar of several days counts calendar days, as the library assumes.
 
     Records AAPL's 2-day and 1-day bars from the Monday of the week before the most recent
-    week without a holiday to that week's Friday. Reading it: a 2-day bar from a Friday whose
-    volume equals Friday's alone counts calendar days; one whose volume equals Friday's and
-    Monday's counts trading days, the reading the library's `TimestampEnd` allows for, with one
-    weekday more for a holiday.
+    week without a holiday to that week's Friday. Passes when the volume of every 2-day bar
+    inside that span equals the 1-day volumes of the two calendar days from its New York
+    stamp date: a bar stamped on a Friday holds Friday's volume alone, and the next one is
+    stamped on the Sunday and holds Monday's. The library's `TimestampEnd` counts the same
+    calendar days; a bar that counted trading days would hold Friday's and Monday's, and a
+    failure names it.
     """
-    bounds = (recent_week[0] - timedelta(days=7), recent_week[0] + timedelta(days=4))
-    two = _bars(rest_rows, "day", multiplier=2, bounds=bounds)
-    one = _bars(rest_rows, "day", multiplier=1, bounds=bounds)
+    first, last = recent_week[0] - timedelta(days=7), recent_week[0] + timedelta(days=4)
+    two = _bars(rest_rows, "day", multiplier=2, bounds=(first, last))
+    one = _bars(rest_rows, "day", multiplier=1, bounds=(first, last))
     evidence(f"2-day bars (t, v): {[(instant_text(b['t'] * _MS), b['v']) for b in two]}")
     evidence(f"1-day bars (t, v): {[(instant_text(b['t'] * _MS), b['v']) for b in one]}")
-    assert two
+    daily = {_new_york_date(b["t"]): b["v"] for b in one}
+    checked, misses = 0, []
+    for bar in two:
+        start = _new_york_date(bar["t"])
+        if start + timedelta(days=1) > last:
+            continue
+        expected = daily.get(start, 0.0) + daily.get(start + timedelta(days=1), 0.0)
+        checked += 1
+        if abs(bar["v"] - expected) > _SAME_VOLUME * max(expected, 1.0):
+            misses.append((start.isoformat(), bar["v"], expected))
+    evidence(f"2-day bars checked: {checked}; not their two calendar days: {misses}")
+    assert checked >= 4, f"only {checked} 2-day bars inside {first}..{last}"
+    assert not misses, f"2-day bars whose volume is not their two calendar days': {misses}"
+
+
+def _new_york_date(millis: int) -> date:
+    """Return the New York date of a bar stamp.
+
+    Args:
+        millis: Massive's `t`, in epoch milliseconds.
+
+    Returns:
+        The date the stamp falls on in New York time.
+    """
+    return datetime.fromtimestamp(millis / 1000, UTC).astimezone(_NEW_YORK).date()
 
 
 def _year_before(month: DaySpan) -> DaySpan:
