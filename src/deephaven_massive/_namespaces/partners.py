@@ -32,6 +32,10 @@ to filter the request. Benzinga analysts and firms, and both Fable datasets, tak
 The TMX corporate events come from Wall Street Horizon's global calendar, whose tickers are not
 US-market ones (each event names its venue's MIC and an ISIN), so that dataset takes and keeps
 its tickers exactly as Massive writes them (`DatasetSpec.symbols_as_written`).
+
+The module is one subject although it runs past 1,000 lines: it is one namespace and its four
+partner sub-namespaces, and every dataset is a REST list endpoint built the same way
+(`list_query`).
 """
 
 from __future__ import annotations

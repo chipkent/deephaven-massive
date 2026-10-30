@@ -65,6 +65,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ADJUSTED_PRICE",
     "ADJUSTED_VOLUME",
+    "EVERY_TICKER",
     "Namespace",
     "adjustment_notes",
     "build_query",
@@ -93,6 +94,10 @@ ADJUSTED_VOLUME: Final = (
     "ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded."
 )
 """The note on every volume column of a dataset with a split-adjustment choice."""
+
+
+EVERY_TICKER: Final = "symbols=None, which returns every ticker"
+"""The alternative to `dm.ALL` that the REST list datasets name in their `ValueError`."""
 
 
 def adjustment_notes(prices: Iterable[str], volumes: Iterable[str]) -> Mapping[str, str]:

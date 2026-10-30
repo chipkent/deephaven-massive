@@ -49,6 +49,8 @@ from deephaven_massive._namespaces import (
     options,
     partners,
     reference,
+    stock_filings,
+    stock_financials,
     stocks,
 )
 from deephaven_massive._namespaces.crypto import _Crypto
@@ -84,6 +86,8 @@ logger = logging.getLogger(__name__)
 
 NAMESPACE_MODULES: Final = (
     stocks,
+    stock_financials,
+    stock_filings,
     options,
     futures,
     indices,
