@@ -186,8 +186,9 @@ def test_every_generated_channel_and_prefix_belongs_to_a_kind(real: generate.Gen
 
 def test_the_stocks_aggregate_order_is_the_flat_files_own(real: generate.Generated) -> None:
     # The vendor's file order, from the page's example header (its "Columns" table is
-    # alphabetical), orders every source of the kind's stocks group.
-    order = ["ticker", "volume", "open", "close", "high", "low", "window_start", "transactions"]
+    # alphabetical: `ticker, volume, open, close, high, low, window_start, transactions`), with
+    # the bar fields moved first, orders every source of the kind's stocks group.
+    order = ["open", "high", "low", "close", "volume", "ticker", "window_start", "transactions"]
     files = {s.key: s for s in real.flat_files}
     for prefix in ("us_stocks_sip/day_aggs_v1", "us_stocks_sip/minute_aggs_v1"):
         assert [f.wire_key for f in files[prefix].fields] == order

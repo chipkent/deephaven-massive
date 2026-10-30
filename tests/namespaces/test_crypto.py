@@ -188,11 +188,11 @@ def test_trades_schema() -> None:
         ("Symbol", "String"),
         ("Date", "String"),
         ("Timestamp", "Instant"),
+        ("Price", "double"),
+        ("Size", "double"),
         ("Conditions", "long[]"),
         ("Exchange", "long"),
         ("Id", "String"),
-        ("Price", "double"),
-        ("Size", "double"),
         ("ReceivedTimestamp", "Instant"),
         ("TimestampInsert", "Instant"),
     ]
@@ -231,13 +231,13 @@ def test_bars_schema() -> None:
         ("Date", "String"),
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
-        ("Volume", "double"),
         ("Open", "double"),
-        ("Close", "double"),
         ("High", "double"),
         ("Low", "double"),
-        ("Transactions", "long"),
+        ("Close", "double"),
+        ("Volume", "double"),
         ("Vwap", "double"),
+        ("Transactions", "long"),
         ("AverageTradeSize", "long"),
         ("TimestampInsert", "Instant"),
     ]
@@ -276,10 +276,10 @@ def test_daily_open_close_schema() -> None:
         ("Date", "String"),
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
+        ("Open", "double"),
         ("Close", "double"),
         ("ClosingTrades", "String"),
         ("IsUtc", "boolean"),
-        ("Open", "double"),
         ("OpenTrades", "String"),
         ("TimestampInsert", "Instant"),
     ]
@@ -580,7 +580,8 @@ def test_flat_file_fixtures_have_the_generated_header(
 ) -> None:
     reader = csv.reader(io.StringIO(load_fixture(OWNER, name).decode()))
     header = next(reader)
-    assert header == [f.wire_key for f in source(F, prefix).fields]
+    # The reader matches headers by name; the generated order puts the prices first.
+    assert sorted(header) == sorted(f.wire_key for f in source(F, prefix).fields)
     assert all(len(row) == len(header) for row in reader)
 
 

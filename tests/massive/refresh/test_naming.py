@@ -1,4 +1,7 @@
-"""Tests for the naming policy: PascalCase columns, snake case, short and timestamp-like names."""
+"""Tests for the naming policy.
+
+PascalCase columns, snake case, short and timestamp-like names, and the lead order.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ from deephaven_massive._massive.refresh.naming import (
     is_key_column,
     is_short,
     is_timestamp_like,
+    lead_order,
     snake,
 )
 
@@ -102,3 +106,81 @@ def test_the_key_columns_are_the_ones_the_datasets_produce() -> None:
     # names the run-time key rename and the library's time columns give.
     produced = {*source_columns.KEY_COLUMNS.values(), row_times.START, row_times.INSERT}
     assert produced == KEY_COLUMNS
+
+
+# --- The lead order -------------------------------------------------------------------------
+
+
+def _lead(concepts: str) -> list[str]:
+    return lead_order(concepts.split(), str)
+
+
+def test_the_lead_fields_come_first_in_their_order() -> None:
+    bars = "ticker volume open close high low window_start transactions vwap"
+    assert _lead(bars) == [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "vwap",
+        "ticker",
+        "window_start",
+        "transactions",
+    ]
+    assert _lead("exchange id size price conditions") == [
+        "price",
+        "size",
+        "exchange",
+        "id",
+        "conditions",
+    ]
+
+
+def test_bid_fields_move_to_just_before_their_ask_partners() -> None:
+    quotes = "ticker ask_exchange ask_price ask_size bid_exchange bid_price bid_size tape"
+    assert _lead(quotes) == (
+        [
+            "bid_price",
+            "bid_size",
+            "ask_price",
+            "ask_size",
+            "ticker",
+            "bid_exchange",
+            "ask_exchange",
+            "tape",
+        ]
+    )
+    # A short spelling shares its long spelling's place; a bid with no ask partner stays put.
+    assert _lead("ask bid bid_foo ask_bar x") == ["bid", "ask", "bid_foo", "ask_bar", "x"]
+
+
+def test_each_nested_object_orders_its_own_fields_in_its_own_places() -> None:
+    concepts = (
+        "break_even_price day.decimal_volume day.close day.open fmv "
+        "last_quote.ask last_quote.bid_exchange last_quote.ask_exchange last_quote.bid value"
+    )
+    assert _lead(concepts) == [
+        "value",
+        "day.open",
+        "day.close",
+        "day.decimal_volume",
+        "break_even_price",
+        "last_quote.bid",
+        "last_quote.ask",
+        "last_quote.bid_exchange",
+        "last_quote.ask_exchange",
+        "fmv",
+    ]
+
+
+def test_a_lead_matches_a_field_s_own_whole_name_only() -> None:
+    # `previous_close` ends in `close`, and `update_rules.c.updates_volume` in `volume`.
+    concepts = "previous_close update_rules.c.updates_high update_rules.c.updates_volume close"
+    assert _lead(concepts) == (
+        ["close", "update_rules.c.updates_high", "update_rules.c.updates_volume", "previous_close"]
+    )
+
+
+def test_a_key_column_keeps_its_place() -> None:
+    assert _lead("symbol timestamp exchange price") == ["symbol", "timestamp", "price", "exchange"]

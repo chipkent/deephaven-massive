@@ -159,10 +159,10 @@ def test_quotes_join_the_last_quote_through_its_projection() -> None:
         "Symbol",
         "Date",
         "Timestamp",
-        "AskExchange",
+        "BidPrice",
         "AskPrice",
         "BidExchange",
-        "BidPrice",
+        "AskExchange",
         "Exchange",
         "TimestampInsert",
     ]

@@ -152,9 +152,9 @@ def test_bars_schema() -> None:
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
         ("Open", "double"),
-        ("Close", "double"),
         ("High", "double"),
         ("Low", "double"),
+        ("Close", "double"),
         ("OfficialOpen", "double"),
         ("TimestampInsert", "Instant"),
     ]
@@ -164,21 +164,21 @@ def test_snapshots_schema() -> None:
     # The snapshot in full; its update time keeps its own name, as on every snapshot.
     assert _schema(indices.SNAPSHOTS) == [
         ("Symbol", "String"),
+        ("Value", "double"),
         ("Error", "String"),
         ("LastUpdated", "Instant"),
         ("MarketStatus", "String"),
         ("Message", "String"),
-        ("Name", "String"),
-        ("SessionChange", "double"),
-        ("SessionChangePercent", "double"),
-        ("SessionClose", "double"),
+        ("SessionOpen", "double"),
         ("SessionHigh", "double"),
         ("SessionLow", "double"),
-        ("SessionOpen", "double"),
+        ("SessionClose", "double"),
+        ("SessionChange", "double"),
+        ("SessionChangePercent", "double"),
         ("SessionPreviousClose", "double"),
+        ("Name", "String"),
         ("Timeframe", "String"),
         ("Type", "String"),
-        ("Value", "double"),
         ("TimestampInsert", "Instant"),
     ]
 
@@ -190,11 +190,11 @@ def test_daily_open_close_schema() -> None:
         ("Date", "String"),
         ("TimestampStart", "Instant"),
         ("TimestampEnd", "Instant"),
-        ("AfterHours", "double"),
-        ("Close", "double"),
+        ("Open", "double"),
         ("High", "double"),
         ("Low", "double"),
-        ("Open", "double"),
+        ("Close", "double"),
+        ("AfterHours", "double"),
         ("PreMarket", "double"),
         ("TimestampInsert", "Instant"),
     ]
@@ -279,7 +279,9 @@ def test_flat_file_fixtures_have_the_generated_header(
     load_fixture: Callable[[str, str], bytes], name: str, prefix: str
 ) -> None:
     header = next(csv.reader(io.StringIO(load_fixture(OWNER, name).decode())))
-    assert header == [f.wire_key for f in sources(Transport.FLAT_FILES)[prefix].fields]
+    # The reader matches headers by name; the generated order puts the prices first.
+    generated = sources(Transport.FLAT_FILES)[prefix].fields
+    assert sorted(header) == sorted(f.wire_key for f in generated)
 
 
 # --- Factory methods --------------------------------------------------------------------------

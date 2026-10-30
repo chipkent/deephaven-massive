@@ -20,10 +20,10 @@ Foreign exchange quotes: the best bid and ask of each currency pair, tick by tic
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the quote was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket | `participant_timestamp` | `participant_timestamp` | `t` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request | `ticker` | `p` |
-| `AskExchange` | long | The ask exchange ID | REST, flat files | `ask_exchange` | `ask_exchange` |  |
+| `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `bid_price` | `bid_price` | `b` |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `a` |
 | `BidExchange` | long | The bid exchange ID | REST, flat files | `bid_exchange` | `bid_exchange` |  |
-| `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `bid_price` | `bid_price` | `b` |
+| `AskExchange` | long | The ask exchange ID | REST, flat files | `ask_exchange` | `ask_exchange` |  |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | WebSocket |  |  | `x` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
@@ -44,8 +44,8 @@ The latest best bid and ask of each currency pair.
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `from` parameter. | REST | request |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST |  |
 | `Timestamp` | Instant | The row's primary time, as an Instant. From REST `timestamp`: "The Unix millisecond timestamp." | REST | `timestamp` |
-| `AskPrice` | double | The ask price. | REST | `ask` |
 | `BidPrice` | double | The bid price. | REST | `bid` |
+| `AskPrice` | double | The ask price. | REST | `ask` |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `exchange` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
@@ -66,13 +66,13 @@ Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 UTC of its window's first day (a week's Sunday, a month's, quarter's, or year's 1st), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 UTC after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST, flat files, WebSocket | request, `T` | `ticker` | `pair` |
-| `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST, flat files, WebSocket | `o` | `open` | `o` |
-| `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
 | `High` | double | The highest price for the symbol in the given time period. | REST, flat files, WebSocket | `h` | `high` | `h` |
 | `Low` | double | The lowest price for the symbol in the given time period. | REST, flat files, WebSocket | `l` | `low` | `l` |
-| `Transactions` | long | The number of transactions in the aggregate window. | REST, flat files | `n` | `transactions` |  |
+| `Close` | double | The close price for the symbol in the given time period. | REST, flat files, WebSocket | `c` | `close` | `c` |
+| `Volume` | double | The trading volume of the symbol in the given time period. | REST, flat files, WebSocket | `v` | `volume` | `v` |
 | `Vwap` | double | The volume weighted average price. | REST | `vw` |  |  |
+| `Transactions` | long | The number of transactions in the aggregate window. | REST, flat files | `n` | `transactions` |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
@@ -97,13 +97,13 @@ The previous UTC day's open, high, low, close, and volume of each currency pair.
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 UTC of its window's first day (a week's Sunday, a month's, quarter's, or year's 1st), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." | REST | `t` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 UTC after its window's last day. | REST |  |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `T` |
-| `Volume` | double | The trading volume of the symbol in the given time period. | REST | `v` |
 | `Open` | double | The open price for the symbol in the given time period. | REST | `o` |
-| `Close` | double | The close price for the symbol in the given time period. | REST | `c` |
 | `High` | double | The highest price for the symbol in the given time period. | REST | `h` |
 | `Low` | double | The lowest price for the symbol in the given time period. | REST | `l` |
-| `Transactions` | long | The number of transactions in the aggregate window. | REST | `n` |
+| `Close` | double | The close price for the symbol in the given time period. | REST | `c` |
+| `Volume` | double | The trading volume of the symbol in the given time period. | REST | `v` |
 | `Vwap` | double | The volume weighted average price. | REST | `vw` |
+| `Transactions` | long | The number of transactions in the aggregate window. | REST | `n` |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 
 Massive's documentation of this dataset:
@@ -139,27 +139,27 @@ The current state of currency pairs: today's bar, the last minute, and the last 
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.c` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.o` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.o` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.c` |
 | `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.v` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.a` |
 | `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.b` |
+| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.a` |
 | `LastQuoteParticipantTimestamp` | Instant | The millisecond accuracy timestamp of the quote. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.t` |
 | `LastQuoteExchange` | long | The exchange ID on which this quote happened. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.x` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
 | `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
 | `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
 | `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.c` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.o` |
 | `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.h` |
 | `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.o` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.c` |
 | `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.v` |
 | `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
@@ -181,27 +181,27 @@ The twenty currency pairs that gained or lost the most since the previous UTC cl
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
-| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.c` |
+| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.o` |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.h` |
 | `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.l` |
-| `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.o` |
+| `DayClose` | double | The close price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.c` |
 | `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. Forex daily bars follow the UTC day (00:00 to 23:59 UTC). | REST | `day.v` |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). | REST | `fmv` |
-| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.a` |
 | `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.b` |
+| `LastQuoteAskPrice` | double | The ask price. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.a` |
 | `LastQuoteParticipantTimestamp` | Instant | The millisecond accuracy timestamp of the quote. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.t` |
 | `LastQuoteExchange` | long | The exchange ID on which this quote happened. From the `lastQuote` object: The most recent quote for this ticker. | REST | `lastQuote.x` |
-| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
+| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
 | `LastMinuteHigh` | double | The highest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.h` |
 | `LastMinuteLow` | double | The lowest price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.l` |
-| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
-| `LastMinuteOpen` | double | The open price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.o` |
-| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `LastMinuteClose` | double | The close price for the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.c` |
 | `LastMinuteVolume` | double | The trading volume of the symbol in the given time period. From the `min` object: The most recent minute bar for this ticker. | REST | `min.v` |
-| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.c` |
+| `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.n` |
+| `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. | REST | `min.t` |
+| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.o` |
 | `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.h` |
 | `PrevDayLow` | double | The lowest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.l` |
-| `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.o` |
+| `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.c` |
 | `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.v` |
 | `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker, covering the previous UTC day (00:00 to 23:59 UTC). | REST | `prevDay.vw` |
 | `TodaysChange` | double | The value of the change from the previous day. | REST | `todaysChange` |
@@ -226,8 +226,8 @@ An amount converted between two currencies at the latest quote.
 | `Converted` | double | The result of the conversion. | REST | `converted` |
 | `From` | String | The "from" currency symbol. | REST | `from` |
 | `InitialAmount` | double | The amount to convert. | REST | `initialAmount` |
-| `LastAsk` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.ask` |
 | `LastBid` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.bid` |
+| `LastAsk` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.ask` |
 | `LastExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.exchange` |
 | `LastTimestamp` | Instant | The Unix millisecond timestamp. From the `last` object: Contains the requested quote data for the specified forex currency pair. | REST | `last.timestamp` |
 | `To` | String | The "to" currency symbol. | REST | `to` |

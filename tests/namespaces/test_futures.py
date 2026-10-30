@@ -534,7 +534,8 @@ def test_flat_file_fixtures_are_shaped_by_their_prefix(load_fixture: Loader, nam
     text = load_fixture(OWNER, f"{name}.csv").decode()
     header = next(csv.reader(io.StringIO(text)))
     generated = source(Transport.FLAT_FILES, f"us_futures_{{venue}}/{name}")
-    assert header == [f.wire_key for f in generated.fields]
+    # The reader matches headers by name; the generated order puts the prices first.
+    assert sorted(header) == sorted(f.wire_key for f in generated.fields)
 
 
 # End to end: each dataset through the fake REST server, WebSocket server, and S3 bucket.

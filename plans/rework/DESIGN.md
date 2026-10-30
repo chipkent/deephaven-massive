@@ -5129,8 +5129,8 @@ verification, never a column list.
   object part, and stay objects), treats a `oneOf` or `anyOf` with exactly one branch as that branch, flattens
   nested objects into dotted wire paths below the result key (`results` unless `RESULT_KEYS`
   names another key, a dotted path of keys such as `results.values`, or `None` for a body that
-  is itself the rows), keeps fields in the order the vendor documents them (see the naming
-  policy, rule 6), and records the parameters (wire name,
+  is itself the rows), keeps fields in the order the vendor documents them, then moves the price
+  columns first (see the naming policy, rules 6a and 6b), and records the parameters (wire name,
   `ParamKind`, enum values, path or query, the unit of a `TIMESTAMP`, and the default the spec
   gives the parameter, as a JSON scalar or `null`). A JSON-object body
   without a result key is one row, and its `ENVELOPE_KEYS` are left out of the fields; one of
@@ -5182,7 +5182,7 @@ verification, never a column list.
   with `ask`/`ap` as `AskPrice` and `bid`/`bp` as `BidPrice`. The generator writes each long
   name through the naming rule, and the recorded projection maps every wire key it keeps to
   its PascalCase column, the same vocabulary as `Field.column`. A member whose projection
-  renames is ordered, and gives the order, like an unprojected one (rule 6); a member that
+  renames is ordered, and gives the order, like an unprojected one (rule 6a); a member that
   keeps only some fields does neither, and its source keeps its own order.
 - **Memberships are written into the generated files.** `KINDS` and `PROJECTIONS` are generator
   inputs in `refresh/`, which is not shipped. The generator writes each source's memberships
@@ -5265,8 +5265,10 @@ per-column exceptions:
    from a declared key or from the library's time columns, never from a vendor field that merely
    carries the name. The test lives with the catalog because the roles are declared in
    `_datasets`, which `_massive` cannot import. There are no `Ticker` or `Pair` stand-ins.
-6. **Order.** Columns keep the vendor's natural order, recorded explicitly in each generated
-   file's field lists. Massive's REST documentation lists every object's fields
+6. **Order.** Each generated file's field lists record the column order explicitly, set in two
+   steps.
+
+   6a. **Vendor order.** Columns first take the vendor's natural order. Massive's REST documentation lists every object's fields
    alphabetically (the specification's keys, its pages' response-attribute tables, and their
    sample responses all agree), so a REST source keeps that documented order, and a
    REST-only dataset's columns are alphabetical. The sources of each group of a dataset kind
@@ -5277,6 +5279,28 @@ per-column exceptions:
    renames) takes that order. A group with no flat-file or WebSocket member keeping all its
    fields fails the refresh (`column-order`). The snapshot stores every document in the order served, never re-sorted. The
    dataset's key columns come first at run time.
+
+   6b. **Price columns lead** (owner-approved, 2026-10-30). One rule, after the vendor order,
+   orders every dataset of every asset class and transport alike, so a table opens on its
+   prices, and two feeds of one kind put them in the same place:
+   1. The key columns (`Symbol`, `Date`, `Timestamp*`, `OptionRoot`, `RawSymbol`) come first,
+      unchanged; the generator never moves a field the library treats as a key column.
+   2. A column's group is its nested-object parent, known from its long-name path: the top
+      level, `Day`, `PrevDay`, `LastMinute`, `LastTrade`, `LastQuote`, `Session`,
+      `UnderlyingAsset`, and so on.
+   3. Each lead field moves to the start of its group, in this order: `Price`, `Size`,
+      `BidPrice` or `Bid`, `BidSize`, `AskPrice` or `Ask`, `AskSize`, `Open`, `High`, `Low`,
+      `Close`, `Volume`, `Vwap`, `Value`. A field leads only when its own name, without its
+      parents', is exactly one of these: `DayClose` leads the `Day` group, while
+      `DayDecimalVolume` and a top-level `PreviousClose` do not lead.
+   4. Every other `Bid<X>` moves to just before its `Ask<X>` partner in the same group
+      (`BidExchange` before `AskExchange`). Nothing else moves.
+
+   So bars read `Open High Low Close Volume Vwap …`, trades `Price Size …`, quotes
+   `BidPrice BidSize AskPrice AskSize BidExchange AskExchange …`, and snapshots
+   `DayOpen DayHigh DayLow DayClose DayVolume DayVwap …`. The refresh applies the rule last
+   (`naming.lead_order`): to each kind group's order, and to every REST source as generated,
+   so a source in no kind follows it too.
 7. **Consistency.** Within one dataset kind, one column for two concepts fails the refresh
    (the `concept-collision` gate); one concept always gets one column, by rules 1–4.
 
@@ -5332,7 +5356,7 @@ description for the reviewer. Every gate has a descriptive name, which is how th
 - **`venue-agreement`:** a futures kind whose venue pages differ;
 - **`column-order`:** a source whose column order cannot be taken from its kind: its
   `KINDS` group has no flat-file or WebSocket member keeping all its fields to give the
-  order, or two of its groups order its columns differently (naming policy, rule 6);
+  order, or two of its groups order its columns differently (naming policy, rule 6a);
 - **`concept-collision` (one concept, one column):** within one kind, one column name holding
   two concepts. A concept is a field's full long-name path, each segment in snake case, so `DayClose` and
   `PrevDayClose` are two concepts, while the v2 snapshot's `lastTrade.p` and the unified

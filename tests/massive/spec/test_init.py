@@ -102,7 +102,7 @@ def test_channels_and_prefixes_carry_their_memberships_and_descriptions() -> Non
     assert trades.field("SipTimestamp").unit is WireUnit.MS
     assert trades.field("Price").description == "The price."
     futures = spec.source(Transport.FLAT_FILES, "us_futures_{venue}/trades_v1")
-    assert [f.wire_key for f in futures.fields][:2] == ["ticker", "timestamp"]
+    assert {"ticker", "timestamp"} <= {f.wire_key for f in futures.fields}
     assert futures.field("Timestamp").unit is WireUnit.NS
     (quotes,) = spec.source(Transport.REST, "/v1/last_quote/currencies/{from}/{to}").memberships
     assert quotes.projection == {
