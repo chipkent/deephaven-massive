@@ -5243,11 +5243,12 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   (pytest-xdist): each worker is its own process with its own embedded JVM, and the controller
   that hands out the tests starts none. pytest-cov combines the workers' coverage, so the 100%
   gate is unchanged. A run that only collects or lists fixtures collects in the main process,
-  as xdist does, so that process starts a JVM; `-n` together with a `-m` expression that
-  selects live tests is a usage error, since they share rate limits and one evidence log: the
-  check tries `integration` with every combination of the markers only live tests carry
-  (`integration_limits`, `integration_smoke`, `needs`, `settles`, `requests`), so `-m needs` is
-  refused too. CI runs the suite in one process: its standard runners have 2 CPUs, where two
+  as xdist does, so that process starts a JVM. A parallel run that selects any live test is a
+  usage error, since live tests share rate limits and one evidence log: once a worker has
+  collected, the controller reads the ids of the tests it selected (after `-m`, `-k`, and every
+  other deselection) and ends the run before handing out any test if one is in a
+  `*_integration.py` file. The decision rests on the selection, never on the `-m` expression,
+  so `-m ""` and `-m "integration and needs"` are refused like `-m integration`. CI runs the suite in one process: its standard runners have 2 CPUs, where two
   workers gained nothing once their startup was paid.
 - **Coverage.** `branch = true`, `fail_under = 100`, `exclude_also = ["if TYPE_CHECKING:",
   "@(typing\\.)?overload"]`, each with a reason.

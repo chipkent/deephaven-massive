@@ -25,7 +25,6 @@ import functools
 import gc
 import gzip
 import importlib
-import itertools
 import os
 import re
 import sys
@@ -41,7 +40,6 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
-from _pytest.mark.expression import Expression
 from deephaven_server import Server
 
 from deephaven_massive._errors import EntitlementError, MassiveError
@@ -60,6 +58,7 @@ from tests._live import (
     classes,
     contracts,
     events,
+    parallel,
     plans,
     probe,
     streams,
@@ -68,7 +67,7 @@ from tests._live import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Generator, Iterator, Mapping
+    from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
@@ -124,37 +123,6 @@ def _is_xdist_controller(config: pytest.Config) -> bool:
     )
 
 
-def _selects_live_tests(config: pytest.Config) -> bool:
-    """Tell whether the run's `-m` expression selects any live test.
-
-    A live test carries `integration` and any combination of the markers only live tests use:
-    `integration_limits`, `integration_smoke`, `needs`, `settles`, `verifies`, and `requests`. An
-    `-m` expression matches a marker by name whatever its arguments, so `-m needs` selects every
-    live test with a `needs` marker. Each combination of those markers is tried; a keyword form such
-    as `needs(x=1)` is treated as matching nothing, since their arguments are positional.
-
-    Args:
-        config: The pytest configuration, for the `-m` expression.
-
-    Returns:
-        True if a test with any of those marker sets would be selected.
-    """
-    expression = Expression.compile(config.option.markexpr or "")
-    optional = (_LIMITS, _SMOKE, "needs", "settles", "verifies", "requests")
-
-    def carrying(markers: frozenset[str]) -> Callable[..., bool]:
-        def matcher(name: str, /, **kwargs: str | int | bool | None) -> bool:
-            return not kwargs and name in markers
-
-        return matcher
-
-    return any(
-        expression.evaluate(carrying(frozenset({_INTEGRATION, *extra})))
-        for size in range(len(optional) + 1)
-        for extra in itertools.combinations(optional, size)
-    )
-
-
 # `trylast` matters: pytest's faulthandler plugin installs its SIGSEGV handler in its own
 # `pytest_configure`. The JVM must install its signal handlers after that, chaining to the
 # faulthandler, because the JVM raises SIGSEGV on purpose (implicit null checks, safepoints).
@@ -171,18 +139,13 @@ def pytest_configure(config: pytest.Config) -> None:
         config: The pytest configuration, read to tell an xdist controller from a worker.
 
     Raises:
-        pytest.UsageError: If the JVM did not apply the cycle property, or if the live tests
-            are asked to run on parallel workers.
+        pytest.UsageError: If the JVM did not apply the cycle property.
     """
     # The xdist controller only hands tests to its workers and reports their results; it never
     # imports a test module or runs a test. Each worker is its own process that runs this hook
     # and starts its own JVM, so a JVM in the controller would cost only startup time and
     # memory.
     if _is_xdist_controller(config):
-        # The live tests share Massive's per-key rate limits and write one evidence log and
-        # one summary, which only a single process keeps whole.
-        if _selects_live_tests(config):
-            raise pytest.UsageError("the live tests run in one process: drop -n, or pass -n 0")
         return
     # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
     Server(port=0, jvm_args=_JVM_ARGS).start()
@@ -194,6 +157,28 @@ def pytest_configure(config: pytest.Config) -> None:
     cycle = int(jpy.cast(j_update_graph, periodic).getTargetCycleDurationMillis())
     if cycle != _CYCLE_MILLIS:
         raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_node_collection_finished(ids: Sequence[str]) -> None:
+    """End a parallel run that selected a live test, before any test starts.
+
+    pytest-xdist calls this in its controller once a worker has collected, with the ids of the
+    tests the worker selected after `-m`, `-k`, and every other deselection; the controller
+    hands out no test until every worker has reported. The decision rests on that selection,
+    not on the `-m` expression, so no expression can slip a live test past it. Without
+    pytest-xdist, or with `-n 0`, the hook is never called.
+
+    Every worker selects the same tests (xdist refuses a run whose workers differ), so the
+    first report decides. A refused run ends through `pytest.exit` with pytest's usage-error
+    status, 4, and a message naming how many live tests were selected and the first of them.
+
+    Args:
+        ids: The ids of the tests the worker selected.
+    """
+    message = parallel.refusal(ids)
+    if message is not None:
+        pytest.exit(message, returncode=pytest.ExitCode.USAGE_ERROR)
 
 
 # --- JVM shutdown workaround -------------------------------------------------------------------
@@ -1058,7 +1043,6 @@ _LIMITS = "integration_limits"
 _SMOKE = "integration_smoke"
 _SEPARATE = (_LIMITS, _SMOKE)
 """The live tiers that `-m integration` leaves out: each runs only when `-m` names it."""
-_INTEGRATION_FILE_SUFFIX = "_integration.py"
 
 _LEASES: Final = pytest.StashKey["tuple[GovernorRegistry, int]"]()
 """A test's rate governor registry and its leases when the test began, for the leak check."""
@@ -1292,7 +1276,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     wrong = [
         item.nodeid
         for item in items
-        if item.path.name.endswith(_INTEGRATION_FILE_SUFFIX)
+        if item.path.name.endswith(parallel.INTEGRATION_FILE_SUFFIX)
         != (item.get_closest_marker(_INTEGRATION) is not None)
     ]
     if wrong:

@@ -97,6 +97,7 @@ text), so it is checked both against the real tree and against a synthetic tree 
 
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -2340,10 +2341,23 @@ def test_a_docstring_alone_is_a_valid_layer_package_init(package: str) -> None:
 # check.
 
 
-def test_parallel_workers_refuse_the_live_tests_before_any_jvm_starts() -> None:
-    # Only live tests use the `needs` marker, so `-m needs` selects live tests. The pytest-xdist
-    # controller refuses that in its configure hook, before it starts a worker, and it never
-    # starts a JVM itself, so the run stops within about a second.
+@pytest.mark.parametrize(
+    "marker_option",
+    [
+        # Selects only the live tests that name the plans they need.
+        "-m 'integration and needs'",
+        # Replaces the default expression and selects every test, the live ones included.
+        "-m ''",
+    ],
+)
+def test_parallel_workers_refuse_the_live_tests_the_run_selects(marker_option: str) -> None:
+    # The refusal reads the tests a worker selected, whatever `-m` expression selected them,
+    # and ends the run before the controller hands out any test. `CI` and the missing key
+    # are a second guard: a live test that did start would skip without calling Massive.
+    # The `-m` option goes through PYTEST_ADDOPTS, which pytest reads after the configured
+    # `addopts`, so it replaces the default expression as a command-line `-m` would.
+    env = {k: v for k, v in os.environ.items() if k != "MASSIVE_API_KEY"}
+    env |= {"CI": "1", "PYTEST_ADDOPTS": marker_option}
     result = subprocess.run(
         [
             sys.executable,
@@ -2352,20 +2366,22 @@ def test_parallel_workers_refuse_the_live_tests_before_any_jvm_starts() -> None:
             "-p",
             "no:cacheprovider",
             "-n",
-            "2",
-            "-m",
-            "needs",
-            "tests/test_layout.py",
+            "1",
+            "tests/live/test_streams.py",
+            "tests/datasets/test_timestamps_integration.py",
         ],
         cwd=_ROOT,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
         timeout=60,
     )
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR
-    assert "the live tests run in one process" in result.stderr
-    assert "Server started" not in result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR, output
+    assert "live tests run in one process" in output
+    assert "tests/datasets/test_timestamps_integration.py::" in output
+    assert "no tests ran" in output
 
 
 def test_the_live_marker_check_runs_before_deselection() -> None:
