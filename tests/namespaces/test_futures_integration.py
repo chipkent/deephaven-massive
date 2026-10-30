@@ -148,12 +148,13 @@ def test_where_the_futures_snapshot_carries_the_ticker(
 
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("29")
-@pytest.mark.requests(8)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_the_session_after_a_holiday_and_year_candles(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    classes_on_basic: frozenset[str],
     recent_holiday: Callable[[str], date],
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
@@ -166,10 +167,12 @@ def test_the_session_after_a_holiday_and_year_candles(
     Records the ES schedule around the holiday, the last minute bar before the session after
     it and that session's first minute bars (read raw, from the Friday before), the library's
     minute bars of that session, and the contract's 1-year candles from January 1 and from
-    mid-June of the year before. Reading it: a session opening at or before the previous
-    regular open, with its bars kept by the library, confirms the 4-day margin covers it; a
-    candle of the year before returned for the mid-year filter means `window_start` filters
-    match the candle's start (snap), its absence that they do not.
+    mid-June of the year before. With Futures on Basic, which allows 5 requests a minute, it
+    leaves out the library's minute bars and sends 4 raw requests. Reading it: a session
+    opening at or before the previous regular open, with its bars kept by the library,
+    confirms the 4-day margin covers it; a candle of the year before returned for the mid-year
+    filter means `window_start` filters match the candle's start (snap), its absence that they
+    do not.
     """
     holiday = recent_holiday("martin luther king day")
     session_day = holiday + timedelta(days=1)
@@ -205,11 +208,14 @@ def test_the_session_after_a_holiday_and_year_candles(
         )
     for bar in session[:3]:
         evidence(f"first minute bars of {session_day}: {instant_text(int(bar['window_start']))}")
-    minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
-    evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
-    if minutes:
-        evidence(f"    first {instant_text(minutes[0]['Timestamp'])} {minutes[0]}")
-        evidence(f"    last {instant_text(minutes[-1]['Timestamp'])}")
+    if "futures" in classes_on_basic:
+        evidence(f"Futures on Basic: the library's minute bars of {session_day} are not read")
+    else:
+        minutes = table_rows(live_session.futures.bars(contract).history(session_day, session_day))
+        evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
+        if minutes:
+            evidence(f"    first {instant_text(minutes[0]['Timestamp'])} {minutes[0]}")
+            evidence(f"    last {instant_text(minutes[-1]['Timestamp'])}")
     year = holiday.year - 1
     for start in (date(year, 1, 1), date(year, 6, 15)):
         candles = _aggregates(
@@ -268,12 +274,13 @@ def test_futures_sessions_end_only_on_weekdays(
 
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("40")
-@pytest.mark.requests(10)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
+    classes_on_basic: frozenset[str],
     recent_month: tuple[date, date],
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
@@ -289,7 +296,9 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     by side. Reading it: compare each 2-session bar's `session_end_date` with the 1-session
     list: its first or its last session is the label. Pairs that stay the same for both
     starts align to a calendar; pairs that shift with the start align to `{from}`, and dates
-    cannot select them. A refused resolution is recorded and the rest still run.
+    cannot select them. A refused resolution is recorded and the rest still run. With Futures
+    on Basic, which allows 5 requests a minute, it leaves out the 1-month bars and the
+    library's 2-session bars and sends the other 5 requests.
     """
     contract = front_contract("ES", recent_month[1])
     first = recent_month[0].replace(day=1)
@@ -298,11 +307,12 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     start = _midnight(first)
     end = _midnight(recent_month[1] + timedelta(days=1))
     later_month = _midnight((first + timedelta(days=32)).replace(day=1))
+    basic = "futures" in classes_on_basic
     requests = (
         ("1session", start),
         ("2session", start),
         ("2session", start + timedelta(days=2)),
-        ("1month", start),
+        *(() if basic else (("1month", start),)),
         ("2month", start),
         ("2month", later_month),
     )
@@ -317,6 +327,10 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
             f"{contract} {resolution} from {since:%Y-%m-%d}: {len(bars)} bars; "
             f"(window_start, session_end_date) {labels}"
         )
+    if basic:
+        evidence("Futures on Basic: the 1-month bars and the library's 2-session bars are not read")
+        assert shown
+        return
     library = table_rows(
         live_session.futures.bars(contract, dm.Timespan.SESSION, multiplier=2).history(start, end)
     )

@@ -162,11 +162,12 @@ def _rebuilt(minutes: list[dict[str, Any]], start: datetime, end: datetime) -> t
 
 @pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("1")
-@pytest.mark.requests(8)
+@pytest.mark.requests(4)
 @pytest.mark.timeout(100)
 def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     live_session: dm.MassiveSession,
     *,
+    classes_on_basic: frozenset[str],
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -181,7 +182,9 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     uses another day cut or only another stamp; the minute-rebuild test says which, and the
     library refuses those bars with `MassiveError` (shown here) until that is decided. A
     grouped stamp at no day boundary (such as 20:48 UTC) is the same bar with a write-time
-    stamp if its OHLCV equal the range bar's, otherwise another day cut.
+    stamp if its OHLCV equal the range bar's, otherwise another day cut. With Currencies on
+    Basic, which allows 5 requests a minute, it leaves out the library's `previous_day_bar`
+    and `dm.ALL` history, which read the same `/prev` and grouped daily as the raw requests.
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -210,12 +213,17 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
         f"grouped equal to /prev: {[_same(_ohlcv(b), _ohlcv(prev)) for b in grouped]}"
     )
     bars = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
-    prev_bar = live_session.crypto.previous_day_bar(_PAIR)
-    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
     evidence(
         "library history(REST): "
         f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
     )
+    if "currencies" in classes_on_basic:
+        evidence("Currencies on Basic: the library's previous_day_bar and dm.ALL are not read")
+        assert ranged
+        assert grouped
+        return
+    prev_bar = live_session.crypto.previous_day_bar(_PAIR)
+    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
     every = live_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     outcome = _library_rows(
         lambda: every.history(day, day, source=dm.HistorySource.REST), table_rows
