@@ -18,6 +18,7 @@ from deephaven_massive._datasets.dates import (
 )
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import (
+    WEEKEND_PUBLICATION_DELAY,
     Alternative,
     HistoryWindow,
     SourceChoice,
@@ -465,7 +466,7 @@ def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
         "history() never mixes adjusted and unadjusted prices; pass adjusted=False for the "
         "flat files; "
         "the file for 2025-03-03 is not yet published; flat files land ~11:00 ET next day "
-        "(a day's file counts as published from 11:30 New York time after the day ends). "
+        "(it counts as published from 2025-03-04 11:30 New York time). "
         "REST: stocks.bars history over REST needs explicit symbols."
     )
 
@@ -563,8 +564,8 @@ def test_flat_files_forced_reads_flat_files_or_names_every_violation() -> None:
         "stocks.trades cannot be read from flat files: no S3 credentials are configured "
         "(MassiveConfig s3_access_key_id and s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID "
         "and MASSIVE_S3_SECRET_ACCESS_KEY); the file for 2025-03-03 is not yet published; flat "
-        "files land ~11:00 ET next day (a day's file counts as published from 11:30 New York "
-        "time after the day ends)"
+        "files land ~11:00 ET next day (it counts as published from 2025-03-04 11:30 New York "
+        "time)"
     )
 
 
@@ -805,18 +806,46 @@ def test_flat_file_day_zone_is_the_class_zone() -> None:
 
 
 def test_publish_time_across_the_spring_dst_change() -> None:
+    # Saturday March 8's crypto file has its cutoff on Sunday, so it counts three hours later.
     published = publish_time(date(2025, 3, 8), zone=UTC, cutoff=time(11, 30))
-    assert published == datetime(2025, 3, 9, 11, 30, tzinfo=NEW_YORK)
-    assert published.astimezone(UTC) == datetime(2025, 3, 9, 15, 30, tzinfo=UTC)
+    assert published == datetime(2025, 3, 9, 14, 30, tzinfo=NEW_YORK)
+    assert published.astimezone(UTC) == datetime(2025, 3, 9, 18, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("partition", "expected"),
+    [
+        (date(2026, 10, 29), datetime(2026, 10, 30, 11, 30, tzinfo=NEW_YORK)),  # Thu -> Fri
+        (date(2026, 10, 30), datetime(2026, 10, 31, 14, 30, tzinfo=NEW_YORK)),  # Fri -> Sat
+        (date(2026, 10, 31), datetime(2026, 11, 1, 14, 30, tzinfo=NEW_YORK)),  # Sat -> Sun
+        (date(2026, 11, 1), datetime(2026, 11, 2, 11, 30, tzinfo=NEW_YORK)),  # Sun -> Mon
+    ],
+)
+def test_a_cutoff_on_a_weekend_counts_three_hours_later(
+    partition: date, expected: datetime
+) -> None:
+    # Friday's files landed on Saturday at 10:27 and 11:17 New York time, near the 11:30 cutoff.
+    assert publish_time(partition, zone=NEW_YORK, cutoff=CUTOFF) == expected
+    assert timedelta(hours=3) == WEEKEND_PUBLICATION_DELAY
+
+
+def test_a_weekend_file_is_not_published_until_the_delayed_cutoff() -> None:
+    friday = date(2026, 10, 30)
+    at_noon = datetime(2026, 10, 31, 12, 0, tzinfo=NEW_YORK)
+    assert not flat_file_published(friday, now=at_noon, zone=NEW_YORK, cutoff=CUTOFF)
+    later = datetime(2026, 10, 31, 14, 30, tzinfo=NEW_YORK)
+    assert flat_file_published(friday, now=later, zone=NEW_YORK, cutoff=CUTOFF)
 
 
 def test_publication_compares_instants_across_the_fall_back_hour() -> None:
-    cutoff = time(1, 30)
-    published = publish_time(date(2025, 11, 1), zone=NEW_YORK, cutoff=cutoff)
+    # Saturday November 1's crypto file: its 22:30 EDT cutoff that Saturday evening, three hours
+    # later in UTC, is 01:30 EDT on Sunday, the first of the two 01:30s of the fall back.
+    cutoff = time(22, 30)
+    published = publish_time(date(2025, 11, 1), zone=UTC, cutoff=cutoff)
     assert published.astimezone(UTC) == datetime(2025, 11, 2, 5, 30, tzinfo=UTC)  # 01:30 EDT
     # 01:15 EST (fold=1) is 06:15Z, 45 minutes after publication, though its wall clock reads
     # earlier than 01:30.
     later = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=1)
-    assert flat_file_published(date(2025, 11, 1), now=later, zone=NEW_YORK, cutoff=cutoff)
+    assert flat_file_published(date(2025, 11, 1), now=later, zone=UTC, cutoff=cutoff)
     earlier = datetime(2025, 11, 2, 1, 15, tzinfo=NEW_YORK, fold=0)
-    assert not flat_file_published(date(2025, 11, 1), now=earlier, zone=NEW_YORK, cutoff=cutoff)
+    assert not flat_file_published(date(2025, 11, 1), now=earlier, zone=UTC, cutoff=cutoff)

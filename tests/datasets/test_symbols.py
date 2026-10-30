@@ -62,6 +62,8 @@ CANONICAL = [
     (FUT, "CL:BF Q6-U6-V6"),
     (FUT, "CL:BZ U6-V6"),
     (FUT, "6A:XF:AUDUSD:Q6"),
+    (FUT, "10YF5-10YG5XXX"),  # spreads, as Massive's contracts list writes them
+    (FUT, "1Y:SA 03M F6"),
     (IDX, "I:SPX"),
     (IDX, "I:AAVE10RP"),
     (IDX, "I:APy"),
@@ -195,6 +197,8 @@ CONVERSIONS = [
     (dm.canonical_symbol_future_spread, "TEX 07-05 U6", "TEX 07-05 U6"),
     (dm.canonical_symbol_future_spread, "CL:BF Z6-H7-M7", "CL:BF Z6-H7-M7"),
     (dm.canonical_symbol_future_spread, "6A:XF:AUDUSD:U6", "6A:XF:AUDUSD:U6"),  # any quote currency
+    (dm.canonical_symbol_future_spread, "10YF5-2YYF5XXX", "10YF5-2YYF5XXX"),
+    (dm.canonical_symbol_future_spread, "1Y:SA 03M F8", "1Y:SA 03M F8"),
     (dm.canonical_symbol_crypto, "ABCUS-DT", "X:ABCUSDT"),  # the codes joined as written
     (dm.canonical_symbol_stock_yahoo, "BRK-B", "BRK.B"),
     (dm.canonical_symbol_stock_yahoo, "BAC-PL", "BACpL"),
@@ -434,6 +438,11 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
             r"^'BOB 2-1 U6' is not one of Massive's futures spread spellings: a calendar",
         ),
         (dm.canonical_symbol_future_spread, "X:BTCUSD", "is a crypto ticker"),
+        # Near the forms of Massive's contracts list, but none of them: another mark than XXX,
+        # a one-digit month count, and a strip without its start month.
+        (dm.canonical_symbol_future_spread, "10YF5-10YG5XX", "spread spellings"),
+        (dm.canonical_symbol_future_spread, "1Y:SA 3M F6", "spread spellings"),
+        (dm.canonical_symbol_future_spread, "1Y:SA 03M", "spread spellings"),
         (dm.canonical_symbol_future, "X:ESZ5", "is a crypto ticker"),
         (dm.canonical_symbol_index, "S P X", r"^'S P X' is not a Massive index ticker"),
         (dm.canonical_symbol_index, "C:EURUSD", "is a forex ticker"),

@@ -2,7 +2,8 @@
 
 Planted fake secrets go through `SecretFilter.clean`, which must leave none of them in text,
 and into files under a results folder, where `scan` must find each in every form `forms`
-names: plain, URL-encoded, and base64 at each byte alignment in both alphabets.
+names: plain, URL-encoded, and base64 at each byte alignment in both alphabets, each also
+spelled with JSON escapes.
 """
 
 from __future__ import annotations
@@ -105,3 +106,50 @@ def test_fingerprints_name_the_set_secrets_and_never_hold_a_value() -> None:
     assert found == secret_scrub.fingerprints({"MASSIVE_API_KEY": "PLANTED-fp-key"}, "salt")
     assert found != secret_scrub.fingerprints({"MASSIVE_API_KEY": "PLANTED-fp-key"}, "other")
     assert found != secret_scrub.fingerprints({"MASSIVE_API_KEY": "PLANTED-fp-kez"}, "salt")
+
+
+def _escaped(text: str, every: int) -> str:
+    """Spell every `every`-th character of text as a JSON `u` escape.
+
+    Returns:
+        The text with those characters escaped, their hex digits in upper case.
+    """
+    return "".join(f"\\u{ord(c):04X}" if i % every == 0 else c for i, c in enumerate(text))
+
+
+@pytest.mark.parametrize("every", [1, 2, 5])
+def test_scan_finds_a_secret_spelled_with_json_escapes(tmp_path: Path, every: int) -> None:
+    (tmp_path / "reply.json").write_text(f'ok\n{{"error": "bad key {_escaped(KEY, every)}"}}\n')
+    assert scan(tmp_path, SecretFilter((KEY,))) == ["reply.json: line 2"]
+
+
+def test_scan_finds_short_escapes_and_a_surrogate_pair(tmp_path: Path) -> None:
+    # The key's `/` written `\/`, as JSON encoders may; and a character beyond the BMP.
+    (tmp_path / "a.json").write_text(KEY.replace("/", "\\/") + "\n")
+    (tmp_path / "b.json").write_text("PLANTED\\ud83d\\ude00key\n")
+    assert scan(tmp_path, SecretFilter((KEY, "PLANTED\U0001f600key"))) == [
+        "a.json: line 1",
+        "b.json: line 1",
+    ]
+
+
+def test_scan_finds_escaped_base64_and_names_binary_lines_by_offset(tmp_path: Path) -> None:
+    planted = "PLANTED???value"  # `???` encodes as `Pz8/`, whose `/` JSON may escape
+    escaped = base64.b64encode(planted.encode()).decode().replace("/", "\\/")
+    assert "\\/" in escaped
+    (tmp_path / "rows.parquet").write_bytes(b"\xff\xfe\n" + escaped.encode() + b"\n")
+    assert scan(tmp_path, SecretFilter((planted,))) == ["rows.parquet: byte offset 3"]
+
+
+def test_scan_reads_escapes_as_json_does(tmp_path: Path) -> None:
+    # An escaped backslash before `u0050` is a backslash and the text `u0050`, not a `P`; a
+    # lone surrogate spells nothing; a line without a backslash is not decoded at all.
+    (tmp_path / "quoted.json").write_text("\\\\u0050LANTED-key \\ud83dPLANTED\nplain line\n")
+    assert scan(tmp_path, SecretFilter(("PLANTED-key",))) == []
+    (tmp_path / "plain.txt").write_text("no escapes here\n")
+    assert scan(tmp_path, SecretFilter(("PLANTED-key",))) == []
+
+
+def test_scan_names_a_line_once_however_many_forms_it_holds(tmp_path: Path) -> None:
+    (tmp_path / "log.txt").write_text(f"plain {KEY} and escaped {_escaped(KEY, 1)}\n")
+    assert scan(tmp_path, SecretFilter((KEY,))) == ["log.txt: line 1"]

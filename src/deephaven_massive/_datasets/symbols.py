@@ -31,8 +31,9 @@ written by `wire_symbols.py`, on the grammar's public names (`AS_WRITTEN`, `CANO
 | forex   | `C:` + two three-letter codes (`C:EURUSD`)         | `EUR/USD`, `EURUSD`, any case  |
 | crypto  | `X:` + the joined pair (`X:BTCUSD`)                | `BTC-USD`, `BTCUSD`, any case  |
 
-A futures spread is one of the spellings Massive's samples show (`_SPREADS`: `GCQ6-GCZ6`, `BOB 02-01
-U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`); `canonical_symbol_future` takes single contracts and
+A futures spread is one of the spellings Massive's samples and contracts list show (`_SPREADS`:
+`GCQ6-GCZ6`, `BOB 02-01 U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`, `10YF5-10YG5XXX`, `1Y:SA 03M
+F6`);`canonical_symbol_future` takes single contracts and
 `canonical_symbol_future_spread` spreads, strictly, and `canonical_symbol` either, while a dataset
 takes, and a futures row keeps, any futures ticker as Massive writes it, so what comes out can
 always go back in. A dataset whose
@@ -133,10 +134,16 @@ _SPREADS: Final = (
     # A CME currency cross: `6A:XF:AUDUSD:Q6` (vendor/massive/flat-files/futures/
     # session-aggregates/cme.md).
     re.compile(rf"^[A-Z0-9]+(?::[A-Z0-9]+)+:{_MONTH}$"),
+    # A CBOT calendar spread marked `XXX`: `10YF5-10YG5XXX`, `10YF5-2YYF5XXX`, as Massive's
+    # contracts list wrote three CBOT yield spreads of 2025 in a live read of 2026-10-30.
+    re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}-[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}XXX$"),
+    # A NYMEX strip of a number of months from a start month: `1Y:SA 03M F6`, as Massive's
+    # contracts list wrote three `1Y` strips in a live read of 2026-10-30.
+    re.compile(rf"^[A-Z0-9]+:[A-Z0-9]+ [0-9]{{2}}M {_MONTH}$"),
 )
-"""Massive's spellings of a futures spread, each as written in its vendored samples. Massive
-documents no grammar for them (only `type: 'combo'`), so this list is what the samples show,
-and no ticker is ever built from its legs."""
+"""Massive's spellings of a futures spread, each as written in its vendored samples or its
+contracts list. Massive documents no grammar for them (only `type: 'combo'`), so this list is
+what those show, and no ticker is ever built from its legs."""
 _INDEX: Final = re.compile(r"^I:[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
 """A canonical index ticker: `I:` and letters and digits, as Massive's WebSocket specification
 writes the pattern (`^(I:[a-zA-Z0-9]+)$`), with dotted parts allowed."""
@@ -252,8 +259,8 @@ def _is_spread(text: str) -> bool:
         text: The text.
 
     Returns:
-        True for a calendar spread, a CBOT inter-commodity spread, a NYMEX strategy, or a CME
-        currency cross, each exactly as Massive writes it.
+        True for a calendar spread (marked `XXX` or not), a CBOT inter-commodity spread, a
+        NYMEX strategy or strip, or a CME currency cross, each exactly as Massive writes it.
     """
     return any(pattern.fullmatch(text) is not None for pattern in _SPREADS)
 
@@ -540,8 +547,9 @@ def _convert_spread(text: str) -> str:
     _refuse_surrounding_whitespace(text)
     raise ValueError(
         f"{text!r} is not one of Massive's futures spread spellings: a calendar spread "
-        "'GCQ6-GCZ6', a CBOT inter-commodity spread 'BOB 02-01 U6', a NYMEX strategy "
-        "'CL:BF Q6-U6-V6' or 'CL:BZ U6-V6', or a CME currency cross '6A:XF:AUDUSD:Q6'"
+        "'GCQ6-GCZ6' or '10YF5-10YG5XXX', a CBOT inter-commodity spread 'BOB 02-01 U6', a "
+        "NYMEX strategy 'CL:BF Q6-U6-V6' or 'CL:BZ U6-V6', a NYMEX strip '1Y:SA 03M F6', or a "
+        "CME currency cross '6A:XF:AUDUSD:Q6'"
     )
 
 
@@ -1021,10 +1029,12 @@ def canonical_symbol_future_spread(text: str | None) -> str | None:
     """Check a futures spread ticker, exactly as Massive writes it: `GCQ6-GCZ6`, `BOB 02-01 U6`.
 
     Massive documents no grammar for spreads, so the spellings accepted are those its samples
-    show: a calendar spread of two contracts (`GCQ6-GCZ6`, `10YN6-10YQ6`), a CBOT
+    and its contracts list show: a calendar spread of two contracts (`GCQ6-GCZ6`,
+    `10YN6-10YQ6`), the same marked `XXX` (`10YF5-10YG5XXX`, on some CBOT spreads), a CBOT
     inter-commodity spread (`BOB 02-01 U6`), a NYMEX strategy of one or two products over
-    months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`), and a CME currency
-    cross (`6A:XF:AUDUSD:Q6`). Canonical text comes back unchanged; no ticker is built from its
+    months (the butterfly `CL:BF Q6-U6-V6`, the calendar `CL:BZ U6-V6`), a NYMEX strip of a
+    number of months from a start month (`1Y:SA 03M F6`), and a CME currency cross
+    (`6A:XF:AUDUSD:Q6`). Canonical text comes back unchanged; no ticker is built from its
     legs. A single contract is refused with `canonical_symbol_future`. Pure and thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import

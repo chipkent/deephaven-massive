@@ -193,7 +193,9 @@ class MassiveConfig:
             read flat files. Defaults to 50.
         flat_file_publish_cutoff: A New York wall-clock time, a `datetime.time` without a
             timezone. Before it, yesterday's flat file is treated as not yet published (files
-            land around 11:00 ET). Defaults to 11:30.
+            land around 11:00 ET). On a Saturday or Sunday the file counts as published three
+            hours later (14:30 by default), since Massive publishes Friday's files late on
+            Saturday morning. Defaults to 11:30.
         max_concurrency: Maximum parallel REST requests of one `poll()` fan-out, and parallel
             S3 reads: a count of threads. Defaults to 8.
         rest_basic_subscriptions: The Massive subscriptions this key's account holds on the

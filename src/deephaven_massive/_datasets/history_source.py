@@ -31,6 +31,10 @@ current time comes from `_now`, which tests replace) and makes no network or Dee
 A day's file counts as published from `MassiveConfig.flat_file_publish_cutoff` (New York time)
 after the next day starts in the class's day zone (`publish_time`); futures use their
 Chicago session date. Massive says files land "by approximately 11:00 AM ET the following day".
+On weekdays they land shortly after midnight, but Friday's landed on Saturday at 10:27 and
+11:17 New York time in a live check, close to the 11:30 default; so a file whose cutoff falls
+on a Saturday or Sunday counts as published `WEEKEND_PUBLICATION_DELAY` later (14:30 by
+default).
 """
 
 from __future__ import annotations
@@ -84,6 +88,7 @@ if TYPE_CHECKING:
 __all__ = [
     "NOT_PUBLISHED",
     "PUBLICATION_GRACE",
+    "WEEKEND_PUBLICATION_DELAY",
     "Alternative",
     "HistoryWindow",
     "SourceChoice",
@@ -106,6 +111,16 @@ NOT_PUBLISHED: Final = "not yet published; flat files land ~11:00 ET next day"
 
 PUBLICATION_GRACE: Final = timedelta(days=1)
 """How long after its publication time a missing file may still just be late."""
+
+WEEKEND_PUBLICATION_DELAY: Final = timedelta(hours=3)
+"""How much later than the cutoff a file whose cutoff falls on a weekend counts as published.
+
+Massive publishes a weekday's files shortly after midnight New York time, far ahead of the
+11:30 default cutoff, but Friday's files landed on Saturday at 10:27 and 11:17 in a live check.
+Three hours keeps a margin like a weekday's over that: 14:30 by default."""
+
+_SATURDAY: Final = 5
+"""`date.weekday()` of a Saturday; a larger value is a Sunday."""
 
 _ONE_DAY: Final = timedelta(days=1)
 
@@ -469,9 +484,10 @@ def _unpublished(
     late = [d for d in dates if not flat_file_published(d, now=now, zone=zone, cutoff=cutoff)]
     if not late:
         return None
+    published = publish_time(late[0], zone=zone, cutoff=cutoff)
     return (
-        f"the file for {late[0].isoformat()} is {NOT_PUBLISHED} (a day's file counts as "
-        f"published from {cutoff.isoformat('minutes')} New York time after the day ends)"
+        f"the file for {late[0].isoformat()} is {NOT_PUBLISHED} (it counts as published from "
+        f"{published.strftime('%Y-%m-%d %H:%M')} New York time)"
     )
 
 
@@ -586,6 +602,9 @@ def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
     That is the first `cutoff` in New York strictly after the start of the next day,
     `partition + 1 day`, in the class's day zone. For a New York class it is the cutoff on the
     following day; for a UTC class it is the first cutoff after the following UTC midnight.
+    When that cutoff falls on a Saturday or Sunday in New York, the file counts as published
+    `WEEKEND_PUBLICATION_DELAY` later, since Massive's weekend publication runs later in the
+    morning (Friday's files are published on Saturday).
 
     Args:
         partition: The file's partition date.
@@ -602,6 +621,9 @@ def publish_time(partition: date, *, zone: tzinfo, cutoff: time) -> datetime:
     candidate = datetime.combine(local.date(), cutoff, tzinfo=NEW_YORK)
     if candidate.astimezone(UTC) <= start:
         candidate = datetime.combine(local.date() + _ONE_DAY, cutoff, tzinfo=NEW_YORK)
+    if candidate.weekday() >= _SATURDAY:
+        # Added in UTC, so a daylight-saving change in the delay never yields a missing hour.
+        return (candidate.astimezone(UTC) + WEEKEND_PUBLICATION_DELAY).astimezone(NEW_YORK)
     return candidate
 
 
