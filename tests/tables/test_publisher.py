@@ -151,8 +151,10 @@ def test_a_failure_after_the_table_shut_down_is_not_published(
 def test_a_failure_that_raises_unpins_its_table(
     dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The failure was not queued, so nothing would ever deliver it and release the pin.
+    # The failure was not queued, so nothing would ever deliver it and release the pin. The
+    # pin is released and the table is not marked shut down, so the failure can be retried.
     pinned = _Pinned(dh_exec_ctx)
+    real = pinned.publisher._publisher
 
     def interrupted(_error: Exception) -> None:
         raise KeyboardInterrupt
@@ -162,7 +164,17 @@ def test_a_failure_that_raises_unpins_its_table(
     )
     with pytest.raises(KeyboardInterrupt):
         pinned.publisher.publish_failure(MassiveError("refused"))
-    pinned.scope.release()
-    assert pinned.on_update_graph == [False]  # nothing pins it: the release destroyed it
-    assert pinned.deferred == []
     assert not pinned.failed()
+    monkeypatch.setattr(pinned.publisher, "_publisher", real)
+    pinned.record_publishes(monkeypatch)
+    with shared_lock(dh_exec_ctx.update_graph):
+        pinned.publisher.publish_failure(MassiveError("refused, again"))
+        pinned.scope.release()
+        early = pinned.shut_down.is_set()
+    assert pinned.published == ["refused, again"]
+    assert not early  # the retry pinned the table: the release did not destroy it
+    assert pinned.shut_down.wait(TIMEOUT)
+    assert pinned.failed()
+    assert pinned.deferred_at_shutdown == [1]
+    pinned.deferred[0]()
+    assert pinned.destroyed()
