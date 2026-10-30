@@ -287,11 +287,11 @@ class _Indices(Namespace):
         index can update around the clock (`I:AAVE100`), a week or a longer period covers its whole
         calendar period, weekends included: it starts at 00:00 of its first calendar day (a week's
         Sunday) and ends an hour after the midnight that follows its last. A bar of several days
-        counts trading days, ending as late as holidays could push it (one weekday more, and one
-        more for every five further days), since there is no holiday calendar. A longer bar must be
-        stamped at 00:00 or 01:00 on the day its period starts: a week on its Sunday, where Massive
-        starts it, a month, quarter, or year on its 1st. Any other stamp fails the call with
-        `MassiveError` naming the source, since the bar may cover other days than its label.
+        spans that many calendar days, weekends included, as Massive counts them. A longer bar
+        must be stamped at 00:00 or 01:00 on the day its period starts: a week on its Sunday,
+        where Massive starts it, a month, quarter, or year on its 1st. Any other stamp fails
+        the call with `MassiveError` naming the source, since the bar may cover other days than
+        its label.
         `Date` is null for a bar that spans more than one date.
 
         `dm.ALL` is accepted by the stream verbs and by `history()` from flat files (1-minute
