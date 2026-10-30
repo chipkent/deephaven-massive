@@ -311,12 +311,13 @@ class _Forex(Namespace):
         """The latest best bid and ask of each currency pair.
 
         One row per pair: its most recent quote, in the columns of `quotes()`, with its time,
-        `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of
-        `Timestamp`), and `TimestampInsert`, when the library received it. Served by REST
-        (`/v1/last_quote/currencies/{from}/{to}`) through `fetch()` and `poll()`, one request
-        per pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each new quote. Some plans lack the endpoint (HTTP 403
-        raises `EntitlementError`); `snapshots(symbols)` carries each pair's last quote on every
+        `Timestamp`, its trading day, `Date` (ISO `yyyy-MM-dd` text, the UTC date of `Timestamp`),
+        and `TimestampInsert`, when the library received it. Served by REST
+        (`/v1/last_quote/currencies/{from}/{to}`) through `fetch()` and `poll()`, one request per
+        pair; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
+        `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so a quote between
+        two cycles is never seen (`quotes()` streams every one). Some plans lack the endpoint (HTTP
+        403 raises `EntitlementError`); `snapshots(symbols)` carries each pair's last quote on every
         plan. A pair with no quote (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each pair gives one row. `dm.ALL` is refused,

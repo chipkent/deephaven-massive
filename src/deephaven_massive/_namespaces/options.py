@@ -417,15 +417,16 @@ class _Options(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed options contract.
 
-        One row per contract: its most recent trade, with the columns of `trades()`: price,
-        size, exchange, condition codes, and SIP timestamp (`Timestamp`), its trading day
-        `Date` (ISO `yyyy-MM-dd` text, the New York date of `Timestamp`), and
-        `TimestampInsert`, when the library received it. Served by REST
-        (`/v2/last/trade/{optionsTicker}`) through `fetch()` and `poll()`, one request per
-        contract; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
-        `mode=dm.PollMode.APPEND` appends each new trade. Some plans lack the endpoint (HTTP
-        403 raises `EntitlementError`); `snapshots(symbols)` carries each contract's last trade
-        on every plan. A contract with no trade (HTTP 404) is left out, with a WARNING.
+        One row per contract: its most recent trade, with the columns of `trades()`: price, size,
+        exchange, condition codes, and SIP timestamp (`Timestamp`), its trading day `Date` (ISO
+        `yyyy-MM-dd` text, the New York date of `Timestamp`), and `TimestampInsert`, when the
+        library received it. Served by REST (`/v2/last/trade/{optionsTicker}`) through `fetch()` and
+        `poll()`, one request per contract; `poll()` replaces the table each cycle, keyed by
+        `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last trade when it
+        is new, so a trade between two cycles is never seen (`trades()` streams every one). Some
+        plans lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries
+        each contract's last trade on every plan. A contract with no trade (HTTP 404) is left out,
+        with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each contract gives one row. `dm.ALL` is
         refused, since the endpoint takes one contract per request: use

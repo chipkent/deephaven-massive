@@ -1155,7 +1155,8 @@ rows).
   crypto, and forex snapshots and movers declare `Updated`; the forex conversion
   `LastTimestamp`, the time of the quote it used; every `last_trade` and `last_quote` its
   `Timestamp`, and every `previous_day_bar` its `TimestampStart`, so an explicit `APPEND`
-  records each new trade, quote, or day; the indices snapshots `LastUpdated`; the
+  records each cycle's row when it is new (a trade or quote between two cycles is never
+  seen); the indices snapshots `LastUpdated`; the
   options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`; the unified
   snapshots `LastUpdated`, `LastQuoteLastUpdated`, and `LastTradeLastUpdated`, which together
   cover every asset class; the futures snapshots `LastQuoteLastUpdated` and
@@ -1458,8 +1459,9 @@ endpoint, with `fetch()` and `poll()` like every `Query`:
   checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, so the
   repr shows `timespan=Timespan.DAY`.
 - **`poll()`.** `REPLACE`, keyed by `Symbol`, so a polled one-row dataset holds each symbol's
-  latest row; an explicit `APPEND` records each new trade, quote, or day through its revision
-  key (`Timestamp`, or `TimestampStart` for the bar).
+  latest row; an explicit `APPEND` records each cycle's row when it is new, through its revision
+  key (`Timestamp`, or `TimestampStart` for the bar). A poll sees only the latest trade or quote
+  at each cycle, never the ones between two cycles: `trades()` and `quotes()` stream every one.
 - **What goes.** `fetch()` on a stream or history dataset, the `StreamHistoryLatestQuery` and
   `HistoryLatestQuery` classes, the `DaySpan` overload of `bars()`, and `fetch()` of
   `indices.values`, which read the indices snapshot (`m.indices.snapshots` serves it in full).

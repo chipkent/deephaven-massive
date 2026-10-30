@@ -2085,15 +2085,15 @@ class _Stocks(Namespace):
         """The latest trade of each US-listed stock.
 
         Each row is one symbol's most recent trade reported to the SIP, with the columns of
-        `trades()`: price, size, exchange, conditions, and the SIP, participant, and TRF
-        timestamps (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd`
-        text, the New York date of `Timestamp`), and `TimestampInsert`, when the library
-        received it. Served by REST (`/v2/last/trade/{stocksTicker}`) through `fetch()` and
-        `poll()`, one request per symbol; `poll()` replaces the table each cycle, keyed by
-        `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each new trade. Some plans
-        lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries
-        each ticker's last trade on every plan. A symbol with no trade (HTTP 404) is left out,
-        with a WARNING.
+        `trades()`: price, size, exchange, conditions, and the SIP, participant, and TRF timestamps
+        (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd` text, the New York
+        date of `Timestamp`), and `TimestampInsert`, when the library received it. Served by REST
+        (`/v2/last/trade/{stocksTicker}`) through `fetch()` and `poll()`, one request per symbol;
+        `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
+        `mode=dm.PollMode.APPEND` appends each cycle's last trade when it is new, so a trade between
+        two cycles is never seen (`trades()` streams every one). Some plans lack the endpoint (HTTP
+        403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's last trade on
+        every plan. A symbol with no trade (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
         since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
@@ -2164,15 +2164,15 @@ class _Stocks(Namespace):
         """The latest national best bid and offer of each US-listed stock.
 
         Each row is one symbol's most recent NBBO, with the columns of `quotes()`: bid and ask
-        prices, sizes, and exchanges, conditions, indicators, and the SIP and participant
-        timestamps (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd`
-        text, the New York date of `Timestamp`), and `TimestampInsert`, when the library
-        received it. Served by REST (`/v2/last/nbbo/{stocksTicker}`) through `fetch()` and
-        `poll()`, one request per symbol; `poll()` replaces the table each cycle, keyed by
-        `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each new quote. Some plans
-        lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries
-        each ticker's last quote on every plan. A symbol with no quote (HTTP 404) is left out,
-        with a WARNING.
+        prices, sizes, and exchanges, conditions, indicators, and the SIP and participant timestamps
+        (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd` text, the New York
+        date of `Timestamp`), and `TimestampInsert`, when the library received it. Served by REST
+        (`/v2/last/nbbo/{stocksTicker}`) through `fetch()` and `poll()`, one request per symbol;
+        `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
+        `mode=dm.PollMode.APPEND` appends each cycle's last quote when it is new, so a quote between
+        two cycles is never seen (`quotes()` streams every one). Some plans lack the endpoint (HTTP
+        403 raises `EntitlementError`); `snapshots(symbols)` carries each ticker's last quote on
+        every plan. A symbol with no quote (HTTP 404) is left out, with a WARNING.
 
         `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
         since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
