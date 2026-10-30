@@ -550,7 +550,7 @@ def test_context_manager_closes() -> None:
 def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match="must be a Deephaven Table"):
         massive_session.release(cast("Table", "t"))
-    with pytest.raises(ValueError, match="not a live result"):
+    with pytest.raises(ValueError, match=r"not a live result of this session: release\(\) takes"):
         massive_session.release(new_table([string_col("Symbol", ["A"])]))
 
 

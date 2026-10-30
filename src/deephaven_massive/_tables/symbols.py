@@ -98,7 +98,10 @@ def canonicalize_symbols(
     Args:
         table: Any table with a `String` column of symbols.
         asset_class: The class of every symbol in the column. Required: nothing is inferred.
-        column: The column to convert; the result keeps every other column unchanged.
+        column: The column to convert, `"Symbol"` by default. The converted values replace
+            the column's values and keep its name, so a column named anything but `Symbol`
+            must be renamed before the table is passed as `symbols=`
+            (`.rename_columns("Symbol = Ticker")`). Every other column is kept unchanged.
         convention: The convention the symbols come from: `SymbolConvention.MASSIVE`, the
             default, for Massive's own spelling and the unambiguous spellings of the class, or,
             for stocks only, `YAHOO`, `NASDAQ`, or `CMS`.

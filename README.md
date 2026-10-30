@@ -5,12 +5,73 @@ into live and static [Deephaven](https://deephaven.io) tables. Massive's WebSock
 become refreshing tables, its REST endpoints become static or polled tables, and its S3 flat
 files become historical tables. The library runs inside an existing Deephaven server.
 
-## Status
+## What works today
 
-The library is being rewritten and has no usable public API yet. The REST, WebSocket, and
-flat-file transports are not implemented, so it cannot produce market data tables. Until the rewrite finishes, [`plans/rework/DESIGN.md`](plans/rework/DESIGN.md) is the
-specification and [`plans/rework/PLAN.md`](plans/rework/PLAN.md) is the schedule. A full README
-follows when the public API lands.
+Every dataset in the column references is implemented: live streams, polled REST tables, and
+history from REST or the flat files. The same code runs on every Massive plan, and a dataset
+your plan lacks fails with a message that says so. Each dataset is tested against simulated
+Massive servers that answer the way Massive's documentation says Massive does.
+
+What is not verified yet is Massive itself. The library has not yet been run against the real
+service with a real key, so some details the documentation leaves open are the library's best
+reading of it: which host a delayed plan streams from, how some bars are stamped (index daily
+bars, futures sessions), and the exact text of some refusals. Where it can tell, the library
+checks such a detail in what Massive sends and stops with a clear message rather than return
+rows it cannot vouch for. [`docs/live-tests.md`](docs/live-tests.md) lists every open question
+and the plan that settles it.
+
+The library is not on PyPI yet. [Install](docs/getting-started/install.md) says how to install it
+into a Deephaven server.
+
+## First tables
+
+A session needs your Massive API key in the `MASSIVE_API_KEY` environment variable. Run this in
+the Deephaven console:
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+
+# A live table: each symbol's latest trade, updated as trades arrive.
+latest = m.stocks.trades(["AAPL", "MSFT"]).last_by()
+
+# A history table: Apple's daily bars for one week, read once.
+bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
+week = bars.history("2024-06-03", "2024-06-07")
+
+# What each column of those bars means.
+columns = bars.columns()
+```
+
+Every dataset works this way. A method such as `m.stocks.trades(...)` describes the data, and a
+verb picks the table you get:
+
+| Verb | Table |
+|---|---|
+| `blink()`, `append_only()`, `ring(n)`, `last_by()` | live tables fed by Massive's WebSocket streams |
+| `fetch()` | a table read once from Massive's REST API |
+| `poll(seconds)` | a table that re-reads REST every few seconds |
+| `history(start, end)` | past rows, read once from REST or from Massive's flat files |
+
+A verb a dataset cannot serve does not exist on it, so tab completion in the console shows what
+each dataset can do. `help(dm)` lists the whole API.
+
+## Read next
+
+- [Getting started](docs/getting-started/): [installing](docs/getting-started/install.md),
+  [first tables](docs/getting-started/first-tables.md),
+  [table shapes](docs/getting-started/table-shapes.md),
+  [watchlists](docs/getting-started/watchlists.md),
+  [plans and limits](docs/getting-started/plans.md),
+  [releasing tables](docs/getting-started/releasing.md),
+  [diagnostics](docs/getting-started/diagnostics.md), and
+  [troubleshooting](docs/getting-started/troubleshooting.md).
+- Guides: [reading history](docs/guides/history.md),
+  [following a schedule](docs/guides/schedules.md), and
+  [joining across asset classes](docs/guides/cross-asset.md).
+- [Column references](docs/datasets/), one page per namespace: every dataset's columns, their
+  types, and what each one means.
 
 ## Split adjustment
 
@@ -26,7 +87,8 @@ to get the other kind.
   for it, and never for cash dividends.
 - Its flat files are as traded: not adjusted for splits, dividends, or anything else, and
   they carry no adjustment factor.
-- Live WebSocket bars are as traded and are never adjusted afterwards.
+- Live WebSocket bars are as traded: on the current share basis, which is also the adjusted
+  basis until the next split. They are never adjusted afterwards.
 - Index, forex, crypto, and futures bars have no corporate actions: there is nothing to adjust.
 
 **What the library does.** `m.stocks.bars()`, `m.options.bars()`, and both `daily_open_close()`
@@ -77,10 +139,13 @@ mine = traded.raj(
 
 A bar longer than a day has a null `Date`, so adjust daily bars and aggregate them afterwards.
 
-**Live tables jump at a split.** A live table holds what traded. On a split's execution date
-every price, pre-market included, is already on the new basis, so a live table, or a table that
-joins adjusted history to live bars, shows a step there. That step is the data, not an error.
-Build such a table again after a split, so its history is adjusted to the new basis:
+**Live tables jump at a split.** A live table holds what traded. Until the next split, that is
+the same basis as adjusted history, so adjusted history and live bars join without a seam. On a
+split's execution date every price, pre-market included, moves to the new basis, so a stream
+that runs across a split, or a table that joins adjusted history to live bars, shows a step
+there. That step is the data, not an error. Build such a table again after a split, so its
+history is adjusted to the new basis. The recipe below backfills minute bars; it works for any
+bar shorter than a day:
 
 ```python
 from deephaven import merge
@@ -91,6 +156,11 @@ def history_and_live(symbol, start):
     bars = m.stocks.bars(symbol, dm.Timespan.MINUTE)
     return merge([bars.history(start), bars.append_only()])
 ```
+
+**History and live bars can differ slightly.** Massive recomputes its REST bars with trades
+reported late, after the live bar went out, so a minute's REST bar can differ a little from the
+live bar of the same minute. In the recipe above, the history rows carry REST's values and the
+rows that arrive afterwards carry the stream's.
 
 **What can still mix bases.** A long download that runs while Massive applies a split overnight
 can return pages on both bases, and nothing can detect it: download again after the split.

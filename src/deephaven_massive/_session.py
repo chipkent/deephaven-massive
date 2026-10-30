@@ -432,8 +432,21 @@ class MassiveSession:
         rows. After `close()` this raises `MassiveError` (see `SessionCore.diagnostics_view`).
 
         Returns:
-            A view of the `connections` table, keyed by `Transport`, `AssetClass`, and
-            `Family`; its columns are `CONNECTIONS` in `_tables/diagnostics.py`.
+            A live table keyed by `Transport`, `AssetClass`, and `Family`, with these columns:
+            `Transport` (String), `WebSocket` for a connection or `REST` for a host decision;
+            `AssetClass` (String); `Family` (String), `TICK` or `FMV`; `Host` (String), the
+            host chosen; `Path` (String), such as `/stocks`; `Recency` (String), `REALTIME`,
+            `DELAYED`, or `UNKNOWN`; `Evidence` (String), why the host was chosen; `State`
+            (String), `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT` (another
+            connection with the key holds the slot), `RECONNECTING`, `FAILED`, or `CLOSED`;
+            `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics` (int), the topics
+            wanted, acknowledged, awaiting acknowledgement, and never acknowledged after one
+            re-send; `BufferedRows` (long), rows received and not yet published; `Reconnects`
+            (int); `LastMessageAt`, `NextReconnectAt`, and `UpdatedAt` (Instant), when the last
+            frame arrived, when the next reconnect is due, and when the row was written;
+            `LastError` (String); and `SchemaDrift` (String), the fields frames had beyond the
+            documented schema (`channel:field+`) or lacked (`channel:field-`). How to read it:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
 
         After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
         """
@@ -453,8 +466,19 @@ class MassiveSession:
         `close()` it keeps showing the final rows, `CLOSED` included.
 
         Returns:
-            A view of the `streams` table, keyed by `StreamId`; its columns are `STREAMS` in
-            `_tables/diagnostics.py`.
+            A live table keyed by `StreamId`, with these columns: `StreamId` (long); `Dataset`
+            (String), such as `stocks.trades`; `Query` (String), the query that opened the
+            stream, such as `<StreamHistoryQuery stocks.trades symbols=('AAPL',)>`, which tells
+            two streams of one dataset apart; `SymbolCount` (int), null for `dm.ALL`;
+            `Symbols` (String), a shortened list; `HeldResults` (int), the stream's tables the
+            library still holds; `Deferred` (int), options contracts held back by the
+            per-connection cap; `Transport` (String), `WebSocket` for a stream or `REST` for a
+            `poll()`; `Host` and `Path` (String); `RowsPublished` (long); `RequestsPerCycle`
+            (int), a `poll()` table's REST requests per cycle; `State` (String), `RUNNING`,
+            `FAILED`, `RELEASED`, or `CLOSED`; `Error` (String), why the stream failed, or a
+            warning that does not stop it; `CreatedAt` (Instant); and `SchemaDrift` (String),
+            the fields payloads had beyond the documented schema (`transport:field+`) or
+            lacked (`transport:field-`). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
 
         After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
         """
@@ -476,8 +500,16 @@ class MassiveSession:
         current, and after `close()` it keeps showing the final rows.
 
         Returns:
-            A view of the `rate_limits` table, keyed by `Bucket`; its columns are `RATE_LIMITS`
-            in `_tables/diagnostics.py`.
+            A live table keyed by `Bucket`, with these columns: `Bucket` (String), a
+            subscription (`stocks`, `options`, `indices`, `currencies`, `futures`) or `other`;
+            `State` (String), `READY`, `PACED`, or `PAUSED`; `RequestsPerMinute` (int), the
+            pace, null while unpaced; `LimitSource` (String), `DECLARED` or `LEARNED`, null while
+            unpaced; `InFlight`, `Waiting`, and `RecentRequests` (int), the requests sent and
+            unanswered, waiting for a slot or a pause's end, and sent within the last 61
+            seconds; `Attempts` and `Refusals` (long), every attempt (retries included) and
+            every HTTP 429 since this process's first session with the key; `PausedUntil`
+            (Instant), null without a pause; `LastRefusal` (String), the latest 429 with its
+            status, path, and request id; and `UpdatedAt` (Instant). How to read it: https://github.com/chipkent/deephaven-massive/blob/main/docs/getting-started/diagnostics.md.
 
         After `close()` it raises `MassiveError("MassiveSession #1 is closed")`.
         """
@@ -506,7 +538,12 @@ class MassiveSession:
         if not isinstance(table, Table):
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
         if not self._core.results.release(table):
-            raise ValueError("table is not a live result of this session")
+            raise ValueError(
+                "table is not a live result of this session: release() takes a table that a "
+                "live verb (blink(), append_only(), ring(), last_by(), poll()) of this session "
+                "returned. A table derived from one stops with it once you delete it (del) and "
+                "nothing else holds it; a static fetch() or history() table has no stream to stop"
+            )
 
     def close(self) -> None:
         """Stop every stream and poller of the session now, and fail every live table. Idempotent.
