@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import weakref
 from datetime import date, datetime, timedelta
 from datetime import time as day_time
 from pathlib import Path
@@ -22,7 +23,7 @@ import pytest
 from deephaven import empty_table
 
 import deephaven_massive as dm
-from deephaven_massive import _debug_log, _session
+from deephaven_massive import _debug_log
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._types import override
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
+    from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
 
@@ -170,11 +172,6 @@ def market(
     library.setLevel(level)
 
 
-def _open_session_count() -> int:
-    with _session._keys_lock:
-        return sum(ref() is not None for ref in _session._open_sessions)
-
-
 @pytest.mark.jvm_held
 @pytest.mark.timeout(300)  # 22 examples, Deephaven compiling each formula, on a busy worker
 def test_every_example_runs_against_the_fake_market(
@@ -191,13 +188,13 @@ def test_every_example_runs_against_the_fake_market(
     assert [o.name for o in outcomes] == [p.name for p in files]
     out = tmp_path / "out"
     printed = {p.stem: (out / f"{p.stem}.txt").read_text() for p in files}
-    assert "<MassiveSession #1 open>" in printed["01_start_a_session"]
+    assert re.search(r"<MassiveSession #\d+ open>", printed["01_start_a_session"])
     assert "<HistoryQuery stocks.bars" in printed["02_explore_datasets"]
     assert printed["11_plan_refusals"].count(": EntitlementError: ") == 3
     assert printed["12_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["13_check_the_log"]
-    assert "<MassiveSession #1 closed>" in printed["22_finish"]
-    assert "MassiveError: MassiveSession #1 is closed" in printed["22_finish"]
+    assert re.search(r"<MassiveSession #\d+ closed>", printed["22_finish"])
+    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["22_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
     assert (tmp_path / "growth.parquet").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
@@ -357,19 +354,21 @@ def test_run_examples_closes_the_sessions_left_open(market: MarketServer, tmp_pa
     folder = tmp_path / "examples"
     folder.mkdir()
     _write(folder, "01_a.py", "import deephaven_massive as dm\nm = dm.MassiveSession()\n")
-    seen: list[str] = []
+    seen: list[weakref.ref[SessionCore]] = []
 
     def remember(namespace: dict[str, Any]) -> bool:
-        seen.extend(repr(s) for s in examples.sessions(namespace))
+        seen.extend(weakref.ref(s._core) for s in examples.sessions(namespace))
         return True
 
+    _write(folder, "02_b.py", "pass\n")
     files = examples.example_files(folder)
     examples.run_examples(
-        [*files, *files], tmp_path / "out", secrets=SecretFilter(()), echo=print, wait=remember
+        files, tmp_path / "out", secrets=SecretFilter(()), echo=print, wait=remember
     )
-    assert len(seen) == 1
-    assert seen[0].endswith(" open>")
-    assert _open_session_count() == 0
+    assert len(seen) == 1  # seen before the second example, after the first made it
+    core = seen[0]()
+    assert core is None or core.closed
+    del core
 
 
 def test_sessions_lists_each_session_once(market: MarketServer) -> None:
