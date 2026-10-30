@@ -177,6 +177,30 @@ def test_an_existing_object_opens_and_a_missing_one_is_none(
     assert fake_s3.requests == [("flatfiles", KEY), ("flatfiles", KEY.replace("03-03", "03-04"))]
 
 
+def test_each_object_request_is_logged_at_debug(
+    *, client: FlatFileClient, fake_s3: FakeS3, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_s3.put(KEY, b"data")
+    missing = KEY.replace("03-03", "03-04")
+    refused = KEY.replace("03-03", "03-05")
+    fake_s3.refuse(refused, status=403, code="AccessDenied", message="Access Denied")
+    with caplog.at_level(logging.DEBUG, logger=client_module.__name__):
+        file = client.open(KEY)
+        assert client.open(missing) is None
+        with pytest.raises(WireError):
+            client.open(refused)
+    assert file is not None
+    file.close()
+    at = "at https://files.massive.com"
+    request_id = fake_s3.request_id
+    # A refused request is logged too, with its status, S3's code, and its request id.
+    assert caplog.messages == [
+        f"GET s3://flatfiles/{KEY} {at} -> 200, 4 bytes (request_id {request_id})",
+        f"GET s3://flatfiles/{missing} {at} -> 404 NoSuchKey (request_id {request_id})",
+        f"GET s3://flatfiles/{refused} {at} -> 403 AccessDenied (request_id {request_id})",
+    ]
+
+
 def test_the_client_is_created_once_on_first_use_from_its_settings(fake_s3: FakeS3) -> None:
     client = make_client(endpoint_url="https://s3.example.com", bucket="other", max_pool=3)
     try:
@@ -482,7 +506,7 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
         (logging.INFO, f"{error}; retry 1 of 3 in 0.55 s"),
         (logging.INFO, f"{error}; retry 2 of 3 in 1.10 s"),
         (logging.INFO, f"{error}; retry 3 of 3 in 2.20 s"),
-        (logging.ERROR, f"{error}; giving up after 4 attempts"),
+        (logging.WARNING, f"{error}; giving up after 4 attempts"),
     ]
 
 
@@ -752,7 +776,7 @@ def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
         (logging.INFO, f"{error}; reading it again from its start, reread 1 of 3 in 0.55 s"),
         (logging.INFO, f"{error}; reading it again from its start, reread 2 of 3 in 1.10 s"),
         (logging.INFO, f"{error}; reading it again from its start, reread 3 of 3 in 2.20 s"),
-        (logging.ERROR, f"{error}; giving up after 4 reads"),
+        (logging.WARNING, f"{error}; giving up after 4 reads"),
     ]
 
 
@@ -1578,7 +1602,7 @@ def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
         logging.INFO,
         logging.INFO,
         logging.INFO,
-        logging.ERROR,
+        logging.WARNING,
     ]
 
 

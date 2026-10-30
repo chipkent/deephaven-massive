@@ -16,6 +16,12 @@ internally, the governor, which locks its own state, and the closed `Cancel` tok
 request listens to a token of its own, made from the client's and the caller's, so closing
 the client ends its waits and nobody else's. No call modifies its arguments.
 
+**Logging.** Each attempt logs one DEBUG line on this module's logger: the full URL, the status,
+the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
+the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
+up at WARNING: the call that fails logs the one ERROR, so a failure shows once in the
+console. Nothing logs a header.
+
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
 
@@ -58,7 +64,7 @@ from deephaven_massive._massive.net.retry import (
 )
 from deephaven_massive._massive.rest.governor import UNLIMITED, is_basic_refusal
 from deephaven_massive._massive.rest.query import next_target, request_target
-from deephaven_massive._massive.rest.response import Request, decode_page, http_error
+from deephaven_massive._massive.rest.response import Request, body_excerpt, decode_page, http_error
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -526,7 +532,7 @@ class RestClient:
                 if not isinstance(outcome, _Retryable):
                     return cast("Page", outcome)
                 if retry == MAX_RETRIES:
-                    _log.error("%s; giving up after %d attempts", outcome.error, retry + 1)
+                    _log.warning("%s; giving up after %d attempts", outcome.error, retry + 1)
                     raise outcome.error
                 wait = transient_wait(retry, _JITTER.random())
                 _log.info(
@@ -621,30 +627,83 @@ class RestClient:
                 self._governor.done(permit, answered=True)
             raise unreadable
         elapsed = self._clock.monotonic() - started
-        # Cleaned before anything reads it, so no row, error, or log line can quote the key.
+        return self._answered(
+            job, request, permit=permit, response=response, body=body, elapsed=elapsed
+        )
+
+    def _answered(
+        self,
+        job: _Job,
+        request: Request,
+        *,
+        permit: Permit,
+        response: BaseHTTPResponse,
+        body: bytearray,
+        elapsed: float,
+    ) -> Page | _Retryable | object:
+        """Clean a body read in full, log the attempt, and turn it into what `_attempt` returns.
+
+        The body is cleaned of the key once, here, before anything reads it, so no row, error,
+        or log line can quote it. A 200 is decoded into a page; any other status is logged at
+        DEBUG with its body, then a 429 goes to the governor as a refusal, and every other status
+        is reported answered.
+
+        Args:
+            job: The call's path, bucket, and cancellation.
+            request: The request.
+            permit: The attempt's permit: refused for a 429, done otherwise.
+            response: The response, for its status and headers.
+            body: Its whole body, as read.
+            elapsed: Seconds from sending the request to reading its body.
+
+        Returns:
+            What `_attempt` returns.
+
+        Raises:
+            WireError: For a failure that is not retryable, as `_attempt` describes, including a
+                200 whose page cannot be read, which is logged at DEBUG with its body first.
+        """
         data = self._redactor.received(body)
-        if response.status == HTTPStatus.TOO_MANY_REQUESTS:
-            self._refused(permit, http_error(response.status, data, request), response)
-            return _REFUSED
-        self._governor.done(permit, answered=True)
         if response.status == HTTPStatus.OK:
-            page = decode_page(data, job.rest_path, request)
+            self._governor.done(permit, answered=True)
+            try:
+                page = decode_page(data, job.rest_path, request)
+            except WireError as unreadable:
+                # The attempt's line still names it, with the body the page could not be read
+                # from; the call that fails logs the error itself.
+                if _log.isEnabledFor(logging.DEBUG):
+                    _log.debug(
+                        "GET %s -> 200 in %.3f s, but the page cannot be read (%s); body: %s",
+                        self._base + request.target,
+                        elapsed,
+                        unreadable,
+                        body_excerpt(data),
+                    )
+                raise
             _log.debug(
                 "GET %s -> 200 (request_id %s): %d rows in %.3f s",
-                request.target,
+                self._base + request.target,
                 page.request_id,
                 len(page.rows),
                 elapsed,
             )
             return page
         failure = http_error(response.status, data, request)
-        _log.debug(
-            "GET %s -> %d (request_id %s) in %.3f s",
-            request.target,
-            response.status,
-            failure.request_id,
-            elapsed,
-        )
+        if _log.isEnabledFor(logging.DEBUG):
+            # The whole body (up to 2,000 characters, already cleaned of the key), so the line
+            # shows every word Massive or a proxy said; the error quotes only its message.
+            _log.debug(
+                "GET %s -> %d (request_id %s) in %.3f s; body: %s",
+                self._base + request.target,
+                response.status,
+                failure.request_id,
+                elapsed,
+                body_excerpt(data),
+            )
+        if response.status == HTTPStatus.TOO_MANY_REQUESTS:
+            self._refused(permit, failure, response)
+            return _REFUSED
+        self._governor.done(permit, answered=True)
         if response.status in TRANSIENT_STATUSES:
             return _Retryable(failure)
         raise failure

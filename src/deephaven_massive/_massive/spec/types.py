@@ -61,6 +61,7 @@ __all__ = [
     "ENVELOPE_KEYS",
     "Conversion",
     "DriftReport",
+    "DriftSample",
     "Field",
     "Membership",
     "Param",
@@ -623,6 +624,21 @@ class Provenance:
         object.__setattr__(self, "urls", MappingProxyType(frozen))
 
 
+@dataclass(frozen=True)
+class DriftSample:
+    """The first row of a payload in which a drifted field was seen, for the drift's log line.
+
+    Attributes:
+        symbol: The row's symbol as the wire spells it, or None when the decoder does not know
+            which key holds it (a REST page, whose symbol the request names).
+        value: The field's value as `spec.convert.excerpt` quotes it (its JSON text, up to 200
+            characters) for an extra field; None for a missing one.
+    """
+
+    symbol: str | None
+    value: str | None
+
+
 @dataclass(frozen=True, kw_only=True)
 class DriftReport:
     """How one payload differed from its source's fields.
@@ -637,8 +653,19 @@ class DriftReport:
         statuses: REST envelope `status` values outside the documented ones (`OK`,
             `DELAYED`, `success`, and the error statuses); the page's rows were still decoded.
             Always empty for WebSocket and flat files.
+        samples: For each wire key in `extra` or `missing`, the first row that showed it
+            (`DriftSample`), so a drift WARNING can quote a symbol and a value; a key may have
+            none (a flat-file header). Read-only. Not part of equality, the hash, or the
+            `repr`: two reports of the same drift are equal whichever rows showed it.
     """
 
     extra: frozenset[str] = frozenset()
     missing: frozenset[str] = frozenset()
     statuses: frozenset[str] = frozenset()
+    samples: Mapping[str, DriftSample] = dataclasses.field(
+        default_factory=dict, compare=False, hash=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        """Freeze a copy of the samples, so the report stays immutable."""
+        object.__setattr__(self, "samples", MappingProxyType(dict(self.samples)))

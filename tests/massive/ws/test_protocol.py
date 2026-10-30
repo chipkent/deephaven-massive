@@ -16,12 +16,14 @@ from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.types import (
     Conversion,
     DriftReport,
+    DriftSample,
     Field,
     Source,
     Transport,
     WireType,
     WireUnit,
 )
+from deephaven_massive._massive.ws import protocol
 from deephaven_massive._massive.ws.protocol import (
     MAX_TOPICS_PER_FRAME,
     Data,
@@ -263,6 +265,52 @@ def test_drift_reports_extra_keys_and_only_vendor_required_fields_as_missing(
     assert [r["SipTimestamp"] for r in data.rows] == [1, None, None]
 
 
+def test_drift_samples_name_the_first_symbol_and_value_of_each_key(decoder: FrameDecoder) -> None:
+    decoder.set_required("T", frozenset(), symbol="Ticker")
+    [data] = decoder.decode(
+        _frame(
+            {"ev": "T", "sym": "A", "t": 1, "new": {"deep": [1, "é"]}},
+            {"ev": "T", "sym": "B", "new": 2, "z": "x" * 300},
+            {"ev": "T", "sym": 7, "t": None},
+        )
+    )
+    assert isinstance(data, Data)
+    assert (
+        dict(data.drift.samples)
+        == {
+            "new": DriftSample("A", '{"deep": [1, "é"]}'),  # the first row's value, not B's
+            "z": DriftSample("B", json.dumps("x" * 300)[:200]),
+            "t": DriftSample("B", None),  # first missing in B's row; a missing key has no value
+        }
+    )
+
+
+def test_drift_samples_have_no_symbol_without_a_declared_symbol(decoder: FrameDecoder) -> None:
+    data = _decode_one(decoder, {"ev": "T", "sym": "A", "t": 1, "new": True})
+    assert dict(data.drift.samples) == {"new": DriftSample(None, "true")}
+
+
+def test_drift_samples_are_read_only_and_outside_equality_and_repr() -> None:
+    first = DriftReport(extra=frozenset({"x"}), samples={"x": DriftSample("A", "1")})
+    second = DriftReport(extra=frozenset({"x"}), samples={"x": DriftSample("B", "2")})
+    assert first == second
+    assert hash(first) == hash(second)
+    assert "samples" not in repr(first)
+    with pytest.raises(TypeError):
+        first.samples["y"] = DriftSample(None, None)  # type: ignore[index]  # the point: read-only
+
+
+def test_a_reject_carries_its_whole_row_and_logs_it_at_debug(
+    decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
+) -> None:
+    decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
+    row = {"ev": "T", "sym": "AAPL", "p": "182.33a", "s": 100, "t": 1761660187112}
+    with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
+        [reject] = _decode_one(decoder, row).rejects
+    assert reject.raw == '{"ev":"T","sym":"AAPL","p":"182.33a","s":100,"t":1761660187112}'
+    assert caplog.messages == [f"{reject.error.message}; the row: {reject.raw}"]
+
+
 def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) -> None:
     # Present in every object, but only ever as null.
     [data] = decoder.decode(_frame({"ev": "T", "sym": "A", "t": None}, {"ev": "T", "t": None}))
@@ -398,10 +446,10 @@ def test_a_value_its_named_conversion_cannot_read_rejects_its_row(
     )
 
 
-def test_a_reject_quotes_at_most_50_characters_of_the_value(decoder: FrameDecoder) -> None:
-    data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "x" * 200})
+def test_a_reject_quotes_at_most_200_characters_of_the_value(decoder: FrameDecoder) -> None:
+    data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "x" * 300})
     message = data.rejects[0].error.message
-    assert message.endswith("got " + json.dumps("x" * 200)[:50])
+    assert message.endswith("got " + json.dumps("x" * 300)[:200])
 
 
 # --- required keys and symbols ------------------------------------------------------------------

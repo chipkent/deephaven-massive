@@ -49,7 +49,7 @@ from deephaven_massive._massive.spec.types import ENVELOPE_KEYS, DriftReport
 if TYPE_CHECKING:
     from deephaven_massive._massive.spec.types import RestPath
 
-__all__ = ["GOOD_STATUSES", "Page", "Request", "decode_page", "http_error"]
+__all__ = ["GOOD_STATUSES", "Page", "Request", "body_excerpt", "decode_page", "http_error"]
 
 GOOD_STATUSES = frozenset({"OK", "DELAYED", "success"})
 """The documented envelope statuses of a good page; any other non-error status is drift."""
@@ -163,6 +163,28 @@ class Page:
             return None
         echoed = self.body.get("adjusted")
         return echoed if isinstance(echoed, bool) else None
+
+
+_BODY_EXCERPT = 2000
+"""How many characters of a failed response's body the client's DEBUG line quotes."""
+
+
+def body_excerpt(data: bytes | bytearray) -> str:
+    """Return the start of a failed response's body as text, for the client's DEBUG line.
+
+    Longer than an error's excerpt, so the line shows Massive's whole error envelope or the
+    meaningful part of a proxy's page. The client has already cleaned the body of its secrets
+    (`net.redaction`).
+
+    Args:
+        data: The body.
+
+    Returns:
+        The first 2,000 characters, with undecodable bytes replaced; empty for an empty body.
+    """
+    # A UTF-8 character is at most 4 bytes, so this many bytes hold the excerpt: a large body
+    # is never decoded whole only to be cut.
+    return bytes(data[: _BODY_EXCERPT * 4]).decode("utf-8", "replace")[:_BODY_EXCERPT]
 
 
 def _excerpt(data: bytes | bytearray) -> str:

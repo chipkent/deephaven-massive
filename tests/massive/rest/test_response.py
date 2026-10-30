@@ -14,6 +14,7 @@ from deephaven_massive._massive.rest.response import (
     GOOD_STATUSES,
     Page,
     Request,
+    body_excerpt,
     decode_page,
     http_error,
 )
@@ -381,3 +382,13 @@ def test_the_adjusted_echo_is_a_json_boolean_of_the_envelope(
 ) -> None:
     rest_path = _BODY if isinstance(body, list) else _RESULTS
     assert _decode(body, rest_path).adjusted is echoed
+
+
+def test_a_body_excerpt_is_its_first_2000_characters_of_any_width() -> None:
+    assert body_excerpt(b"") == ""
+    assert body_excerpt(bytearray(b"short")) == "short"
+    wide = "\u00e9" * 3000  # two bytes each in UTF-8
+    assert body_excerpt(wide.encode()) == "\u00e9" * 2000
+    huge = b"x" * 10_000_000
+    assert body_excerpt(huge) == "x" * 2000
+    assert body_excerpt(b"\xff" + b"y" * 5) == "\ufffdyyyyy"  # an undecodable byte, replaced

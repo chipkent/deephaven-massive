@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -8,10 +9,12 @@ import pyarrow as pa
 import pytest
 
 from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.rest import batch as batch_module
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.spec.types import (
     Conversion,
     DriftReport,
+    DriftSample,
     Field,
     Param,
     ParamKind,
@@ -137,8 +140,33 @@ def test_dotted_wire_keys_reach_into_nested_objects() -> None:
 
 
 def test_a_nested_object_that_is_not_an_object_is_unconvertible() -> None:
-    with pytest.raises(WireError, match=r"^/v3/x: wire key 'day' expects an object, got 5$"):
+    with pytest.raises(WireError, match=r"^/v3/x: row 0: wire key 'day' expects an object, got 5$"):
         to_batch([{"day": 5}], _path(_field("day.c", WireType.DOUBLE)), required=())
+
+
+def test_a_row_whose_nested_object_is_not_one_is_logged_whole_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rows: list[dict[str, object]] = [{"day": {"c": 1.0}}, {"day": 5, "note": "x"}]
+    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__), pytest.raises(WireError):
+        to_batch(rows, _path(_field("day.c", WireType.DOUBLE)), required=())
+    assert caplog.messages == [
+        ('/v3/x: row 1: wire key \'day\' expects an object, got 5; the row: {"day":5,"note":"x"}')
+    ]
+
+
+def test_a_rejected_row_is_not_serialized_with_debug_off(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def refuse(_row: object) -> str:
+        raise AssertionError("the row was serialized with DEBUG off")
+
+    monkeypatch.setattr(batch_module, "row_excerpt", refuse)
+    with (
+        caplog.at_level(logging.INFO, logger=batch_module.__name__),
+        pytest.raises(WireError, match="row 0"),
+    ):
+        to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
 
 
 def test_a_json_text_field_keeps_its_object_whole() -> None:
@@ -155,11 +183,17 @@ def test_extra_keys_are_dropped_and_reported_by_their_dotted_key() -> None:
     path = _path(_field("day.c", WireType.DOUBLE))
     rows: list[dict[str, object]] = [
         {"day": {"c": 1.0, "zz": 2}, "new": {"a": 1, "b": 2}},
-        {"other": None},
+        {"other": None, "new": 5},
     ]
     batch, drift = to_batch(rows, path, required=())
     assert batch.schema.names == ["DayC"]
     assert drift == DriftReport(extra=frozenset({"day.zz", "new", "other"}))
+    # Each extra key's first value, quoted; a REST page leaves the symbol to the caller.
+    assert dict(drift.samples) == {
+        "day.zz": DriftSample(None, "2"),
+        "new": DriftSample(None, '{"a": 1, "b": 2}'),
+        "other": DriftSample(None, "null"),
+    }
 
 
 def test_a_missing_vendor_required_field_is_reported() -> None:
@@ -242,12 +276,32 @@ def test_a_value_that_does_not_fit_is_a_wire_error(wire_type: WireType, value: o
     assert str(_bad(wire_type, value)).startswith(expected)
 
 
-def test_an_unconvertible_value_names_the_field_type_and_50_characters() -> None:
+def test_an_unconvertible_value_names_the_field_type_and_200_characters() -> None:
     # The clause after the row is the one `spec.convert` shares with the WebSocket decoder.
-    error = _bad(WireType.LONG, "x" * 100)
-    assert str(error) == f"/v3/x: row 0: V (wire key 'v') expects long, got \"{'x' * 49}"
+    error = _bad(WireType.LONG, "x" * 300)
+    assert str(error) == f"/v3/x: row 0: V (wire key 'v') expects long, got \"{'x' * 199}"
     assert (error.status, error.path, error.host) == (None, "/v3/x", None)
     assert error.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("row", "problem"),
+    [
+        (
+            {"price": "1.5x", "sip_timestamp": 1},
+            "Price (wire key 'price') expects double, got \"1.5x\"",
+        ),
+        ({"price": 1.0}, "no SipTimestamp (wire key 'sip_timestamp'), which the dataset needs"),
+    ],
+)
+def test_a_row_that_cannot_be_read_is_logged_whole_at_debug(
+    row: dict[str, object], problem: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    rows: list[dict[str, object]] = [{"price": 1.0, "sip_timestamp": 1}, row]
+    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__), pytest.raises(WireError):
+        to_batch(rows, _TRADES, required={"SipTimestamp"})
+    whole = json.dumps(row, separators=(",", ":"))
+    assert caplog.messages == [f"/v3/trades/{{stockTicker}}: row 1: {problem}; the row: {whole}"]
 
 
 def test_a_declared_conversion_is_applied_and_named_on_failure() -> None:
