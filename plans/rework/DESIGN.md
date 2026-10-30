@@ -215,9 +215,8 @@ dm.LogOutput               # Enum, not a wire value: STDERR, the default output
 dm.__version__             # from importlib.metadata
 ```
 
-The six query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`,
-`StreamHistoryLatestQuery`, `HistoryLatestQuery`) are importable from the private module
-`deephaven_massive._query` for type annotations only. Users never construct them. The type
+The four query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`) are
+importable from the private module `deephaven_massive._query` for type annotations only. Users never construct them. The type
 aliases `Symbols`, `DateLike`, and `FilterValue` are importable from `deephaven_massive._types`
 for the same purpose. Every query also has `columns()`
 ([section 7](#7-query-classes-and-verbs)), a method rather than an export, so the list above
@@ -286,7 +285,7 @@ _debug_log.py            enable_debug_logging, LogOutput, the DEEPHAVEN_MASSIVE_
 _session.py              MassiveSession: builds the catalog, the core, and the session's clients
                          (section 6); applies the logging variables and logs the environment
                          line; NAMESPACE_MODULES and CATALOG (section 4.3)
-_query.py                the six query classes and their verbs, through the core's ports
+_query.py                the four query classes and their verbs, through the core's ports
                          (section 7); query_class and bar_query_class, which choose a dataset's
                          query class
 _namespaces/
@@ -1042,22 +1041,22 @@ There is no `stop()` on queries. Release is automatic (garbage collection) or ex
 
 ## 7. Query classes and verbs
 
-Six classes, defined in `_query.py`. Nothing touches the network until a verb is called. Queries
+Four classes, defined in `_query.py`. Nothing touches the network until a verb is called. Queries
 are immutable, hashable, and reusable. A query's repr names its class, its dataset, and the
 arguments that differ from their defaults, for example
-`<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
+`<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`; `ALL` shows as `ALL` and a
 symbol table, static or refreshing, as `<symbol table>`. Queries have no other attributes: the verbs and `columns()`
 are their whole API (§ 22, “Sessions and queries expose no introspection attributes” and
 “`columns()` on every query”).
 
 ```python
-class QueryBase:                           # the base of all six classes below
+class QueryBase:                           # the base of all four classes below
     def columns(self) -> Table: ...        # static; the dataset's columns and what they mean;
                                            # no network, not a verb, not a result
 ```
 
 ```python
-class Query:                               # REST list and snapshot datasets
+class Query:                               # REST list, snapshot, and one-row datasets
     def fetch(self) -> Table: ...          # static; every row the endpoint returns, fully paginated
     def poll(self, interval: float | timedelta, *, mode: PollMode | None = None) -> Table: ...
                                            # live; re-runs fetch() every interval
@@ -1073,13 +1072,6 @@ class HistoryQuery:                        # datasets with a historical retrieva
                 source: HistorySource = HistorySource.AUTO) -> Table: ...   # static
 
 class StreamHistoryQuery(StreamQuery, HistoryQuery): ...
-
-class StreamHistoryLatestQuery(StreamHistoryQuery):   # adds a REST "last" endpoint
-    def fetch(self) -> Table: ...          # static; exactly one row per symbol in the stream schema;
-                                           # ALL raises ValueError naming snapshots()
-
-class HistoryLatestQuery(HistoryQuery):   # daily bars only
-    def fetch(self) -> Table: ...          # static; one row per symbol: the previous completed session's bar
 ```
 
 **The query class of a dataset** is derived from its `DatasetSpec`, never declared on it, so
@@ -1093,13 +1085,15 @@ it has a fetch path, `query_class(spec)` in `_namespaces/base.py` gives:
 | yes | no | no | `StreamQuery` |
 | no | yes | no | `HistoryQuery` |
 | yes | yes | no | `StreamHistoryQuery` |
-| yes | yes | yes | `StreamHistoryLatestQuery` |
 | no | no | no | rejected: no verb |
-| yes | no | yes | rejected: no class streams and fetches without history, and no streamed dataset has `poll()` |
-| no | yes | yes | rejected outside `bars`: `HistoryLatestQuery` is kept for daily bars |
+| yes or no | yes or no, not both no | yes | rejected: a fetch path is a dataset of its own |
 
 `DatasetSpec.__post_init__` raises `ValueError`, naming the dataset, for the rejected rows. A
-`bars` spec must have H; `query_class` gives it `HistoryQuery`, the class of its general
+fetch path never shares a dataset with a stream or a history source, so `fetch()` always means
+every row the endpoint returns: a REST endpoint that answers one row per symbol (the last
+trade, the last quote, the previous day's bar) is a one-row dataset of its own, named after the
+endpoint ([section 7.5](#75-one-row-datasets)). A
+`bars` spec must have H and no F; `query_class` gives it `HistoryQuery`, the class of its general
 overload, and `bar_query_class(spec, timespan, multiplier)` picks the class of each call
 ([section 7.1](#71-bars-overloads)). A test in `tests/namespaces/test_base.py` checks that every
 factory's return annotation is `query_class(spec)` for its catalog spec, that each `bars`
@@ -1149,16 +1143,10 @@ is. The table is the same for every query of one dataset: the arguments choose t
 fetches, never the columns. Its own four columns carry column descriptions too
 ([section 7.4](#74-column-descriptions)).
 
-**`fetch()`.** Returns exactly what the dataset's REST endpoint returns for the request. On
-`Query` that is a list or snapshot endpoint. On `StreamHistoryLatestQuery` it is the dataset's
-"last" endpoint: `/v2/last/trade`, `/v2/last/nbbo`, `/v1/last_quote/currencies`,
-`/v1/last/crypto`, or `/v3/snapshot/indices` projected to the values schema through its
-membership of the values kind ([section 19.4](#194-generated-schemas)). Each "last" path is a
-member of its dataset's kind, so its rows come out in the stream schema. On
-`HistoryLatestQuery` it is `/v2/aggs/ticker/{t}/prev`, documented as "the prior session's open,
-high, low, close, and volume"; the docstring says "previous completed session". No streamed
-dataset has `poll()`. Current state on every tier is `m.<class>.snapshots(symbols).poll(n)`, one
-request per cycle.
+**`fetch()`.** Returns every row the dataset's REST endpoint returns for the request, fully
+paginated: a list, a snapshot, or a one-row endpoint ([section 7.5](#75-one-row-datasets)).
+Only `Query` has it, and no streamed or history dataset has `fetch()` or `poll()`. Current
+state on every tier is `m.<class>.snapshots(symbols).poll(n)`, one request per cycle.
 
 **`poll()`.** `mode=None` uses the catalog default: `PollMode.APPEND` for `reference.news`,
 every `stocks.filings.*` but the two taxonomies, `insider_activity`, and `insider_holdings`
@@ -1192,7 +1180,10 @@ rows).
   history: every snapshot and movers dataset declares its update time, so each new state of a
   symbol is a new row, while `REPLACE` and `UPSERT` stay keyed by `Symbol`. The stocks,
   crypto, and forex snapshots and movers declare `Updated`; the forex conversion
-  `LastTimestamp`, the time of the quote it used; the indices snapshots `LastUpdated`; the
+  `LastTimestamp`, the time of the quote it used; every `last_trade` and `last_quote` its
+  `Timestamp`, and every `previous_day_bar` its `TimestampStart`, so an explicit `APPEND`
+  records each cycle's row when it is new (a trade or quote between two cycles is never
+  seen); the indices snapshots `LastUpdated`; the
   options snapshots and chain `LastQuoteLastUpdated` and `LastTradeSipTimestamp`; the unified
   snapshots `LastUpdated`, `LastQuoteLastUpdated`, and `LastTradeLastUpdated`, which together
   cover every asset class; the futures snapshots `LastQuoteLastUpdated` and
@@ -1235,7 +1226,8 @@ example `by="Exchange"`) the filter comes first, `blink.where_in(symbol_table,
 latest row came from a removed symbol. Each group then shows the latest row of a symbol that was
 watched when the row arrived, and keeps it after that symbol is removed until a watched symbol
 ticks in the group.
-`last_by()` never seeds from REST. The "last" endpoints are absent from Starter and base Business
+`last_by()` never seeds from REST. The last-trade and last-quote endpoints (the one-row
+datasets of [section 7.5](#75-one-row-datasets)) are absent from Starter and base Business
 plans, so a seed would behave differently per tier; `snapshots(symbols).poll(n)` is the
 tier-identical way to get current state.
 
@@ -1266,13 +1258,13 @@ rows between the two can be missing or duplicated. The user owns that boundary.
 ### 7.1 `bars()` overloads
 
 The bar timespan decides which transport exists: `SECOND` and `MINUTE` have WebSocket channels,
-`DAY` has the `/prev` endpoint, and everything else is history only. Typed overloads pick the
-class statically so no verb-time error is needed for the timespan.
+and everything else is history only. The previous day's bar from `/prev` is the
+`previous_day_bar` dataset, not a verb of `bars()` ([section 7.5](#75-one-row-datasets)).
+Typed overloads pick the class statically so no verb-time error is needed for the timespan.
 
 ```python
 # _types.py
 StreamSpan = Literal[Timespan.SECOND, Timespan.MINUTE]
-DaySpan = Literal[Timespan.DAY]
 FuturesSpan = Literal[Timespan.SECOND, Timespan.MINUTE, Timespan.HOUR, Timespan.SESSION,
                       Timespan.WEEK, Timespan.MONTH, Timespan.QUARTER, Timespan.YEAR]   # no DAY
 
@@ -1280,9 +1272,6 @@ class _Stocks:   # same shape on m.options; m.indices, m.forex, and m.crypto hav
     @overload
     def bars(self, symbols: Symbols, timespan: StreamSpan = Timespan.MINUTE, *,
              multiplier: Literal[1] = 1, adjusted: bool = True) -> StreamHistoryQuery: ...
-    @overload
-    def bars(self, symbols: Symbols, timespan: DaySpan, *,
-             multiplier: Literal[1] = 1, adjusted: bool = True) -> HistoryLatestQuery: ...
     @overload
     def bars(self, symbols: Symbols, timespan: Timespan = Timespan.MINUTE, *,
              multiplier: int = 1, adjusted: bool = True) -> HistoryQuery: ...
@@ -1298,8 +1287,8 @@ class _Futures:
 
 The implementation returns the most specific class for the actual values. The general overload
 returns the base class, so the overlapping overloads type-check (the narrower return type is a
-subtype). `bars(syms)` is stream plus history. `bars(syms, Timespan.DAY)` is history plus
-`/prev`. `bars(syms, Timespan.MINUTE, multiplier=5)` is history only.
+subtype). `bars(syms)` is stream plus history. `bars(syms, Timespan.DAY)` and
+`bars(syms, Timespan.MINUTE, multiplier=5)` are history only.
 
 `Timespan.DAY` on futures is a static type error and a synchronous `ValueError` at construction:
 the futures aggregates endpoint accepts the units `sec`, `min`, `hour`, `session`, `week`,
@@ -1311,8 +1300,8 @@ maxima are validated by the server (HTTP 400 becomes `MassiveError`).
 
 ### 7.2 Synchronous `ValueError`s for parameter values
 
-- `fetch()` with `ALL` on a `StreamHistoryLatestQuery` or a `HistoryLatestQuery` (the "last"
-  and `/prev` endpoints take one ticker per request).
+- `ALL` passed to a one-row dataset, at construction (the last-trade, last-quote, and `/prev`
+  endpoints take one ticker per request; [section 7.5](#75-one-row-datasets)).
 - `history()` with `ALL` over REST, except daily bars (the grouped-daily endpoint).
 - `history(source=HistorySource.REST)` on `indices.values` (flat files only).
 - `history(source=HistorySource.FLAT_FILES)` when a flat-file constraint is violated
@@ -1463,6 +1452,63 @@ column is null. Readers can see what each table holds before they install.
   method's indentation and the opening quotes, within the 100-character line length, is
   shortened in the spec, never wrapped in the docstring.
 
+### 7.5 One-row datasets
+
+A REST endpoint that answers one row per symbol is a dataset of its own, named after the
+endpoint, with `fetch()` and `poll()` like every `Query`:
+
+| Dataset | Classes | REST | Kind |
+|---|---|---|---|
+| `last_trade(symbols)` | stocks, options, crypto | `/v2/last/trade/{t}`, `/v2/last/trade/{o}`, `/v1/last/crypto/{from}/{to}` | trades |
+| `last_quote(symbols)` | stocks, forex | `/v2/last/nbbo/{t}`, `/v1/last_quote/currencies/{from}/{to}` | quotes |
+| `previous_day_bar(symbols)`, with `adjusted: bool = True` on stocks and options | stocks, options, indices, forex, crypto | `/v2/aggs/ticker/{t}/prev` | bars |
+
+- **One request per symbol.** Each endpoint takes one ticker per request, so `ALL` raises
+  `ValueError` at construction, naming the alternative: `m.<class>.snapshots(dm.ALL).fetch()`
+  for the last trade or quote (`m.options.chain(underlying).fetch()` for options, whose
+  snapshot of every contract is slow), and `m.<class>.bars(dm.ALL, dm.Timespan.DAY)
+  .history(day, day)` for the previous day's bar (with `adjusted=False` for options and
+  without `adjusted` for indices, whose `dm.ALL` daily bars only the flat files serve). A
+  symbol with no data (HTTP 404) is left out with a WARNING, as for every per-symbol path.
+- **The kind's columns.** Each one-row dataset is a member of its kind
+  ([section 19.4](#194-generated-schemas)), and its rows have the columns of its kind that its
+  endpoint fills, under the kind's names and types, so a column it shares with
+  `m.stocks.trades(syms).history(...)` means the same thing in both. A kind's group may be
+  split over several datasets of its class: each source of the group is read by exactly one
+  of them, and the merged schema walks the group's sources in their positions, whichever
+  dataset reads them, so the columns are in the same order as before the split.
+- **Bars.** `previous_day_bar` rows are 1-day bars with the day rules of
+  [section 12](#12-timestamp-units-and-day-boundaries): `TimestampStart` at 00:00 of the day in
+  the class day zone, whatever `/prev` stamps, `TimestampEnd` 00:00 of the next day (01:00 New
+  York time for indices), and a stamp at a time of day Massive is not known to use raises
+  `MassiveError`, naming `bars(symbols, dm.Timespan.DAY).history()` for that day. Stock and
+  option bars are split-adjusted unless `adjusted=False`, and every page's `adjusted` echo is
+  checked as for `bars()`. The query's request carries `Timespan.DAY` and multiplier 1, so the
+  repr shows `timespan=Timespan.DAY`.
+- **`poll()`.** `REPLACE`, keyed by `Symbol`, so a polled one-row dataset holds each symbol's
+  latest row; an explicit `APPEND` records each cycle's row when it is new, through its revision
+  key (`Timestamp`, or `TimestampStart` for the bar). A poll sees only the latest trade or quote
+  at each cycle, never the ones between two cycles: `trades()` and `quotes()` stream every one.
+- **What goes.** `fetch()` on a stream or history dataset, the `StreamHistoryLatestQuery` and
+  `HistoryLatestQuery` classes, the `DaySpan` overload of `bars()`, and `fetch()` of
+  `indices.values`, which read the indices snapshot (`m.indices.snapshots` serves it in full).
+  The indices snapshot leaves the values kind.
+
+### 7.6 A verb a query does not have
+
+A verb a dataset cannot serve does not exist on its query, so tab completion and `hasattr`
+stay honest, and calling one raises `AttributeError`. `QueryBase.__getattr__` gives that
+error a reason and an alternative when the attribute is a verb name (`fetch`, `poll`, `blink`,
+`append_only`, `ring`, `last_by`, `history`): the dataset, the verbs it does have, and, where
+one exists, the dataset of the same kind and class that has the verb
+(`m.stocks.trades(syms).fetch()` names `m.stocks.last_trade(...).fetch()`, and
+`m.stocks.bars(syms, dm.Timespan.DAY).fetch()` names `m.stocks.previous_day_bar(...).fetch()`);
+`fetch()` or `poll()` of intraday bars names `history(start, end)` first, then the previous
+day's bar;
+`fetch()` or `poll()` of a stream dataset with no such sibling names the class's
+`snapshots(...)`, and `history()` of a dataset with a time axis names its `start=` and `end=`
+arguments. Any other missing attribute raises Python's plain `AttributeError`.
+
 ## 8. Namespace tree
 
 Notation:
@@ -1532,9 +1578,12 @@ Notation:
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols)` | StreamHistoryLatestQuery | `T` | fetch `/v2/last/trade/{t}`; history `/v3/trades/{t}` | `us_stocks_sip/trades_v1` |
-| `quotes(symbols)` | StreamHistoryLatestQuery | `Q` | fetch `/v2/last/nbbo/{t}`; history `/v3/quotes/{t}` | `us_stocks_sip/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads ([7.1](#71-bars-overloads)) | `A` (1 s), `AM` (1 min) | fetch `/v2/aggs/ticker/{t}/prev` (DAY only); history `/v2/aggs/ticker/{t}/range/{m}/{span}/{from}/{to}`; `ALL` with DAY: `/v2/aggs/grouped/locale/us/market/stocks/{date}` per day | `us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1` (`adjusted=False` only) |
+| `trades(symbols)` | StreamHistoryQuery | `T` | history `/v3/trades/{t}` | `us_stocks_sip/trades_v1` |
+| `last_trade(symbols)` ([7.5](#75-one-row-datasets)) | Query | | `/v2/last/trade/{t}` per symbol | |
+| `quotes(symbols)` | StreamHistoryQuery | `Q` | history `/v3/quotes/{t}` | `us_stocks_sip/quotes_v1` |
+| `last_quote(symbols)` | Query | | `/v2/last/nbbo/{t}` per symbol | |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads ([7.1](#71-bars-overloads)) | `A` (1 s), `AM` (1 min) | history `/v2/aggs/ticker/{t}/range/{m}/{span}/{from}/{to}`; `ALL` with DAY: `/v2/aggs/grouped/locale/us/market/stocks/{date}` per day | `us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1` (`adjusted=False` only) |
+| `previous_day_bar(symbols, *, adjusted=True)` | Query | | `/v2/aggs/ticker/{t}/prev` per symbol | |
 | `luld(symbols)` | StreamQuery | `LULD` | | |
 | `imbalances(symbols)` | StreamQuery | `NOI` | | |
 | `fmv(symbols)` | StreamQuery | `FMV` (FMV family, `business.massive.com/stocks`) | | |
@@ -1561,9 +1610,11 @@ Notation:
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols)` | StreamHistoryLatestQuery | `T` | fetch `/v2/last/trade/{o}`; history `/v3/trades/{o}` | `us_options_opra/trades_v1` |
+| `trades(symbols)` | StreamHistoryQuery | `T` | history `/v3/trades/{o}` | `us_options_opra/trades_v1` |
+| `last_trade(symbols)` | Query | | `/v2/last/trade/{o}` per contract | |
 | `quotes(symbols)` | StreamHistoryQuery | `Q` | history `/v3/quotes/{o}` | `us_options_opra/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `A`, `AM` | `/prev` (DAY); range | `us_options_opra/{minute,day}_aggs_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1, adjusted=True)` | overloads | `A`, `AM` | range | `us_options_opra/{minute,day}_aggs_v1` |
+| `previous_day_bar(symbols, *, adjusted=True)` | Query | | `/v2/aggs/ticker/{o}/prev` per contract | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/options`) | | |
 | `chain(underlying: str, *, contract_type: ContractType \| None = None, …F)`; `filters` takes `strike_price_*`, `expiration_date_*` | Query | | `/v3/snapshot/options/{u}` | |
 | `snapshots(symbols, *, …F)`; OCC contracts; `Underlying` from `underlying_asset.ticker`; `ALL` is every contract, paginated (slow, documented) | Query | | `/v3/snapshot?ticker.any_of=O:…`, 250 per request, always with `type=options`, so `ALL` lists only options contracts; `type` is set by the library and rejected as a filter. Same fields as the per-contract endpoint, including greeks. `/v3/snapshot/options/{u}/{o}` is listed in the catalog as covered by this dataset. | |
@@ -1608,16 +1659,18 @@ at a time as `session_end_date=<date>`. The `trades` and `quotes` factories take
 a query built with a `session_end_date` filter (any form) and date bounds is refused with
 `ValueError` before any request, whatever the source, since the dates set it.
 
-No futures dataset has a "last" endpoint, so no futures stream query has `fetch()`.
-`snapshots(symbols).fetch()` is the one-request answer. There is no futures `day_aggs` flat
+Massive has no futures last-trade, last-quote, or previous-bar endpoint, so futures has no
+one-row dataset ([section 7.5](#75-one-row-datasets)). `snapshots(symbols).fetch()` is the
+one-request answer. There is no futures `day_aggs` flat
 file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 
 ### 8.4 `m.indices`
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `values(symbols)` | StreamHistoryLatestQuery | `V` | fetch `/v3/snapshot/indices` projected to `Value`, with `Timestamp` from `last_updated`; history flat files only | `us_indices/values_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: the endpoint has none) | overloads | `A`, `AM` | `/prev` (DAY); range | `us_indices/{minute,day}_aggs_v1` |
+| `values(symbols)` | StreamHistoryQuery | `V` | none: history flat files only | `us_indices/values_v1` |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: the endpoint has none) | overloads | `A`, `AM` | range | `us_indices/{minute,day}_aggs_v1` |
+| `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{t}/prev` per index | |
 | `snapshots(symbols, *, …F)` | Query | | `/v3/snapshot/indices`, 250 tickers per request | |
 | `daily_open_close(symbols, date: DateLike)` | Query | | `/v1/open-close/{t}/{date}` | |
 
@@ -1625,8 +1678,10 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `quotes(symbols)` | StreamHistoryLatestQuery | `C` | fetch `/v1/last_quote/currencies/{from}/{to}`; history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
-| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp raises `MassiveError`, [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | `/prev`; range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `quotes(symbols)` | StreamHistoryQuery | `C` | history `/v3/quotes/{C:…}` | `global_forex/quotes_v1` |
+| `last_quote(symbols)` | Query | | `/v1/last_quote/currencies/{from}/{to}` per pair | |
+| `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: currency pairs have no corporate actions, so no request sends it and flat files serve every timespan they hold; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: grouped daily, `/prev`, and `day_aggs_v1`'s 23:59:59.999 UTC are moved to the day's start, and any other stamp raises `MassiveError`, [section 12](#12-timestamp-units-and-day-boundaries)) | overloads | `CAS` (1 s), `CA` (1 min) | range; `ALL` with DAY: `/v2/aggs/grouped/locale/global/market/fx/{date}` | `global_forex/{minute,day}_aggs_v1` |
+| `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{C:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/forex`) | | |
 | `snapshots(symbols)`; `ALL` is all pairs | Query | | `/v2/snapshot/locale/global/markets/forex/tickers` | |
 | `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/forex/{gainers\|losers}` | |
@@ -1636,9 +1691,11 @@ file; `Timespan.DAY` is rejected ([section 7.1](#71-bars-overloads)).
 
 | Method | Class | WebSocket | REST | Flat files |
 |---|---|---|---|---|
-| `trades(symbols)` | StreamHistoryLatestQuery | `XT` | fetch `/v1/last/crypto/{from}/{to}`; history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
+| `trades(symbols)` | StreamHistoryQuery | `XT` | history `/v3/trades/{X:…}` | `global_crypto/trades_v1` |
+| `last_trade(symbols)` | Query | | `/v1/last/crypto/{from}/{to}` per pair | |
 | `quotes(symbols)` | StreamQuery | `XQ` | | |
 | `bars(symbols, timespan=Timespan.MINUTE, *, multiplier=1)` (no `adjusted`: crypto has no corporate actions, so the parameter is never sent; a 1-day bar is the UTC day, `TimestampStart` 00:00 UTC on every source: `day_aggs_v1`'s 23:59:59.999 UTC is moved to the day's start, and any stamp elsewhere in the day than its first or last millisecond (the documented REST samples sit at midnight New York time or, for grouped daily, at times such as 20:48 UTC), or a REST bar of several days or longer not at 00:00 UTC, raises `MassiveError` naming the dataset, the source, and the other source; `AUTO` chooses as for every dataset; [section 12](#12-timestamp-units-and-day-boundaries), [section 23](#23-open-verification-items) item 1) | overloads | `XAS` (1 s), `XA` (1 min) | as forex; grouped `/v2/aggs/grouped/locale/global/market/crypto/{date}` | `global_crypto/{minute,day}_aggs_v1` |
+| `previous_day_bar(symbols)` | Query | | `/v2/aggs/ticker/{X:…}/prev` per pair | |
 | `fmv(symbols)` | StreamQuery | `FMV` (`business.massive.com/crypto`) | | |
 | `snapshots(symbols)`, `movers(direction: Direction)` | Query | | `/v2/snapshot/locale/global/markets/crypto/{tickers,gainers,losers}` | |
 | `daily_open_close(symbols, date: DateLike)` (no `adjusted`, as `bars`: the parameter is never sent) | Query | | `/v1/open-close/crypto/{from}/{to}/{date}` per pair | |
@@ -2424,7 +2481,8 @@ of 1-day bars names `source=dm.HistorySource.FLAT_FILES`, and for adjusted bars
 (`adjusted=True`, the stocks' and options' default) adds `adjusted=False`, since the files hold
 only as-traded prices and an explicit flat-file source refuses an adjusted request; REST
 `history()` of longer or multiplied bars, which no flat file holds, says to request 1-day bars;
-`fetch()` and `poll()` of `/prev` say to use `history()` for that day; an indicator says to
+`previous_day_bar`'s `fetch()` and `poll()` say to use `bars(symbols, dm.Timespan.DAY)
+.history()` for that day; an indicator says to
 compute it from `bars().history()` of the same timespan; the flat files name
 `source=dm.HistorySource.REST`, or, for `dm.ALL` of a dataset without a grouped-daily path
 (indices), passing explicit symbols to read REST. It asks for the stamp to be reported at the
@@ -3244,16 +3302,15 @@ How a request is built from a `DatasetSpec` and a `Request`:
   class but futures, start at 00:00 of their day in the class day zone: each stamp
   Massive is known to use for the class is moved there, and any other raises `MassiveError`
   naming the path and the verb's way out (`source=dm.HistorySource.FLAT_FILES` for 1-day
-  `history()`, requesting 1-day bars for longer ones, `history()` for `fetch()` and `poll()`;
+  `history()`, requesting 1-day bars for longer ones, `bars(...).history()` for
+  `previous_day_bar`;
   [section 12](#12-timestamp-units-and-day-boundaries)). Bars are stamped before `_keep` drops
   the rows outside the window, so an unknown stamp outside it still raises.
 - **Symbol batching.** `DatasetSpec.symbols_per_request: int | None = None` caps the symbols
   of one request when the symbol parameter is list-valued (`ticker.any_of`). When it is set
   (250 on the unified snapshot, the indices snapshot, and the stocks, forex, and crypto
   snapshots), the transport splits the symbol list into batches of at most that size, issues
-  them in order, and concatenates the rows; None sends every symbol in one request. A
-  projected `fetch()` (`indices.values`) batches the same way, so it is not one request per
-  symbol.
+  them in order, and concatenates the rows; None sends every symbol in one request.
 - **A path per symbol class.** `DatasetSpec.fetch_paths_by_class: Mapping[AssetClass, str]`
   (empty by default) names the fetch path that serves symbols of one class, for a dataset that
   spans classes whose vendor templates differ (the indicators:
@@ -3277,8 +3334,7 @@ How a request is built from a `DatasetSpec` and a `Request`:
 - **Error rows in multi-ticker snapshots.** A snapshot of several tickers answers a ticker it
   cannot serve (`NOT_FOUND`, `NOT_ENTITLED`) with a row carrying `error` and `message`.
   `snapshots()` keeps such rows, with their `Error` and `Message` columns, and logs each
-  ticker once. A projected `fetch()` (`indices.values`) drops an error row and logs one
-  WARNING naming the ticker and the vendor's message, so its result holds only values.
+  ticker once.
 
 ## 14. Publishers, fan-out, and failure semantics
 
@@ -4646,9 +4702,8 @@ verification, never a column list.
   becomes a `date`.
 - **Projections.** `PROJECTIONS {(kind, source): Projection}` changes how a source joins
   one kind, **inside one membership only**, in one of two forms. `fields` keeps only the
-  listed keys, under the listed long names: `/v3/snapshot/indices`'s membership of the values
-  kind is `{"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}`, for
-  `indices.values.fetch()`, while `indices.snapshots` uses the same source in full. `renames`
+  listed keys, under the listed long names; no membership uses it since the indices snapshot
+  left the values kind ([section 7.5](#75-one-row-datasets)). `renames`
   keeps every field and renames only the listed ones, so a field the vendor adds later joins
   under its own name: the forex last quote and the crypto `XQ` stream join the quotes kind
   with `ask`/`ap` as `AskPrice` and `bid`/`bp` as `BidPrice`. The generator writes each long
@@ -4955,7 +5010,7 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
                                             # published under it (first writer wins)
   members = datasets of spec.kind, ordered by the group and position of the memberships of
             their sources                         (spec alone for a dataset in no kind)
-  for each member m, each source s of m (its role paths, channels, prefixes):
+  for each group, each source s of the group in its position, read by the member m:
       fields = s.fields through the projection of s's membership of (m.kind, m's group), if any
       cols(m, s) = rename(m, s, fields)      # m's keys for s: symbol -> Symbol, time ->
                                              # Timestamp, an instrument fanout -> Underlying
@@ -4964,7 +5019,7 @@ dataset_schema(spec):                       # cached per dataset; computed outsi
                                              # a constant column; nothing else changes
   schema = ordered union by column name of every cols(m, s):
            Symbol, then Timestamp, first where the dataset declares them; then first
-           appearance in member, then source, then field order
+           appearance in group, then source position, then field order
   each column's WireType = WireType.common_type over every contribution
 ```
 
@@ -5152,8 +5207,10 @@ every transport plan agree. Every outlet of
   datasets that declare none and pass, one of them with an asset class (`futures.exchanges`);
 - **Unique columns:** after the rename, no source has a duplicate column;
 - **Member types:** across members, one column name gets one `WireType`;
-- **Kind membership:** each kind dataset's sources equal the sources holding a membership of its
-  `(kind, group)`;
+- **Kind membership:** each kind dataset reads only sources holding a membership of its
+  `(kind, group)`, and the datasets of one `(kind, group)` together read each of those sources
+  exactly once (a group split over a stream dataset and its one-row dataset,
+  [section 7.5](#75-one-row-datasets));
 - **Wire parameters:** every declared wire name (time-axis pair, symbol parameter, path
   placeholders) is a parameter of its `RestPath`;
 - **Append keys:** a dataset whose default `poll()` mode is `APPEND` declares its own
@@ -5493,7 +5550,7 @@ bars = m.stocks.bars(syms, dm.Timespan.MINUTE).append_only()   # snapshot has no
                                                                # -> delayed.massive.com/stocks
 snap = m.stocks.snapshots(syms).poll(30)                    # REST; current state on every tier
 daily = m.stocks.bars(syms, dm.Timespan.DAY).history("2025-01-01", "2025-06-30")   # 3 symbols -> REST
-prev = m.stocks.bars(syms, dm.Timespan.DAY).fetch()         # previous completed session (/prev)
+prev = m.stocks.previous_day_bar(syms).fetch()              # previous completed session (/prev)
 divs = m.stocks.dividends(syms, start="2025-01-01",
                           filters={"pay_date_lte": "2025-12-31"}).fetch()
 conns = m.connections()                                     # Host=delayed.massive.com Recency=DELAYED
@@ -6045,6 +6102,17 @@ document already reflects them.
       its own wait with its own patience and keeps sharing the lookup, and tries again when
       the caller making it gives up or is interrupted (issue #206).
     ([section 13.4](#134-rest), [section 17](#17-diagnostics)).
+63. **One-row endpoints are datasets of their own** (2026-10-29; the coordinator decided after
+    an adversarial review by a Deephaven quant user and a library maintainer; the owner may object).
+    The last trade, the last quote, and the previous day's bar become `last_trade`, `last_quote`,
+    and `previous_day_bar`, each with `fetch()` and `poll()`, in every class Massive has them;
+    `fetch()` leaves the stream and daily-bar queries, and with it the `StreamHistoryLatestQuery`
+    and `HistoryLatestQuery` classes and `indices.values.fetch()`, which was the indices snapshot
+    that `m.indices.snapshots` already serves. `fetch()` then always means every row the endpoint
+    returns. The one-row datasets have the columns of their kind that their endpoint fills, and a
+    missing verb's `AttributeError` names the dataset that has it. Reason: datasets are named by
+    what they are and verbs name table shapes; a new verb such as `latest()` would break the second
+    ([section 7.5](#75-one-row-datasets), [section 7.6](#76-a-verb-a-query-does-not-have)).
 
 ## 23. Open verification items
 
@@ -6108,7 +6176,7 @@ descriptions settles them in the embedded test JVM and the web UI, and they need
 | 48 | The grammar of Massive's futures spread tickers: whether the forms of the vendored samples (calendar `GCQ6-GCZ6`, CBOT inter-commodity `BOB 02-01 U6`, NYMEX strategy `CL:BF Q6-U6-V6` and `CL:BZ U6-V6`, CME cross `6A:XF:AUDUSD:Q6`) are all of them, and how each is built from its legs | `canonical_symbol_future_spread` accepts exactly those forms as written; a futures row keeps any ticker as written; no function builds a spread from its legs | `tests/datasets/test_symbols.py`: each form is canonical and converts unchanged, a single contract and a spread refuse each other's function; `tests/namespaces/test_futures.py`: a file of spreads reads every ticker as written, and a spread filters it | `tests/namespaces/test_futures_integration.py`: `products(type='combo')` and `contracts(type='combo')` on every venue; record every ticker form and its legs, then decide on a builder |
 | 49 | Whether Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, read with `active=true` and with `active=false`) holds every pair, delisted ones included, its WebSocket channels and the last-trade and daily open/close paths serve, with a `base_currency_symbol` and `currency_symbol` that join to the ticker | Any `X:` ticker is canonical; wherever a pair must be split (a stream, `/v1/last/crypto/{from}/{to}`, `/v1/open-close/crypto/{from}/{to}/{date}`) the split comes only from that list, both reads once per session (a ticker in both keeps its listed row), and a pair the list does not hold, or whose currencies do not join to it, is refused there; every other path serves it | `tests/ingest/test_ws.py`, `tests/ingest/test_rest.py`, `tests/namespaces/test_crypto.py`: `X:DOTUSD`, `X:SHIBUSD`, `X:USDTUSD`, `X:BTCPYUSD`, and `X:ETHWBTC` subscribe the topic the list gives, `X:BTCXYZ`, unlisted, is refused, and a delisted `X:FTTUSD` splits from the delisted read | `tests/namespaces/test_crypto_integration.py`: both reads of the list; record every row whose currencies do not join to its ticker, and stream a sample of pairs to confirm their topics |
 | 50 | The stamps of stock 1-day and longer bars on every source: the range (00:00 New York time in the samples), grouped daily, `/prev`, and `us_stocks_sip/day_aggs_v1` (16:00 New York time, the session close, in the samples), on a full day and on a day that closes early at 13:00 (the Friday after Thanksgiving), and of week and month bars from the range; `/prev`'s short-day stamp can be seen only when a run falls on the trading day after a half day, and every short-day stamp the library accepts (13:00, 16:00, 13:15, and 16:15 New York time) maps to 00:00 of the same New York day | A 1-day stamp at 00:00, 13:00 (a short day's close, presumed), or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar must be stamped 00:00 New York time on the day its period starts, and any other stamp raises `MassiveError` naming the dataset, the source, and the verb's way out | `tests/datasets/test_row_times.py`, `tests/namespaces/test_stocks.py`: the documented stamps of every source and a 13:00 close map to 00:00 New York time; 14:30 raises | `tests/namespaces/test_stocks_integration.py`: one 1-day bar of AAPL for the Wednesday before and the Friday after (a short day, closing at 13:00) the most recent Thanksgiving whose week has ended at run time, computed from the exchanges' holiday rule so the dates stay inside every plan's history, from the range, grouped daily, and `day_aggs_v1`; `/prev`, which serves only the most recent completed trading day, read at run time beside the range bar of that same day and marked when that day is a half day; and the week bars of that Thanksgiving week and the week before and the month bars of the two whole months before the run's month from the range, one bar for each period; record each `TimestampStart` and which day's range bar each other source matches, with its largest relative error |
-| 51 | The stamps of option 1-day and longer bars on every source: the range and `us_options_opra/day_aggs_v1` (00:00 New York time in the samples) and `/prev` (16:00 New York time); and whether `/prev` stamps an index option (SPXW) at its own 16:15 close, or 13:15 on a short day; `/prev`'s short-day stamp can be seen only when a run falls on the trading day after a half day, and every short-day stamp the library accepts (13:00, 16:00, 13:15, and 16:15 New York time) maps to 00:00 of the same New York day | As item 50, for options, with 16:15 and 13:15 also accepted for 1-day bars (presumed) | `tests/datasets/test_row_times.py`, `tests/namespaces/test_options.py`: the documented stamps and a 13:00 close map to 00:00 New York time; another stamp raises, naming `history()` as the way out of `fetch()` | `tests/namespaces/test_options_integration.py`: one 1-day bar of a listed SPY contract and of a listed SPXW contract from the range and `day_aggs_v1` for the Wednesday before and the Friday after (a short day, closing at 13:00) the most recent Thanksgiving whose week has ended at run time, computed from the exchanges' holiday rule so the dates stay inside every plan's history, and their week bars of that Thanksgiving week and the week before from the range; the contracts expire on the third Friday of that December and are struck near SPY's close of that Wednesday (ten times it for SPXW); `/prev` of a SPY and an SPXW call listed at run time, found in the contracts reference, for the most recent completed trading day, beside the range bar of that same day and marked when that day is a half day; record each `TimestampStart` |
+| 51 | The stamps of option 1-day and longer bars on every source: the range and `us_options_opra/day_aggs_v1` (00:00 New York time in the samples) and `/prev` (16:00 New York time); and whether `/prev` stamps an index option (SPXW) at its own 16:15 close, or 13:15 on a short day; `/prev`'s short-day stamp can be seen only when a run falls on the trading day after a half day, and every short-day stamp the library accepts (13:00, 16:00, 13:15, and 16:15 New York time) maps to 00:00 of the same New York day | As item 50, for options, with 16:15 and 13:15 also accepted for 1-day bars (presumed) | `tests/datasets/test_row_times.py`, `tests/namespaces/test_options.py`: the documented stamps and a 13:00 close map to 00:00 New York time; another stamp raises, naming `bars(...).history()` as the way out of `previous_day_bar` | `tests/namespaces/test_options_integration.py`: one 1-day bar of a listed SPY contract and of a listed SPXW contract from the range and `day_aggs_v1` for the Wednesday before and the Friday after (a short day, closing at 13:00) the most recent Thanksgiving whose week has ended at run time, computed from the exchanges' holiday rule so the dates stay inside every plan's history, and their week bars of that Thanksgiving week and the week before from the range; the contracts expire on the third Friday of that December and are struck near SPY's close of that Wednesday (ten times it for SPXW); `/prev` of a SPY and an SPXW call listed at run time, found in the contracts reference, for the most recent completed trading day, beside the range bar of that same day and marked when that day is a half day; record each `TimestampStart` |
 | 52 | The stamps of index 1-day and longer bars on every source: the range and `us_indices/day_aggs_v1` (01:00 New York time, midnight in Chicago, in the samples) and `/prev` (16:00 New York time), on a full day and on a short day (the Friday after Thanksgiving); whether a bar stamped 01:00 New York time covers the New York day, the Chicago day, or the trading session; whether week, month, quarter, and year bars are stamped 01:00 too; and whether an index that updates around the clock has weekend values in its week bars; `/prev`'s short-day stamp can be seen only when a run falls on the trading day after a half day, and every short-day stamp the library accepts (13:00, 16:00, 13:15, and 16:15 New York time) maps to 00:00 of the same New York day | A 1-day stamp at 00:00, 01:00, 13:00 (presumed), or 16:00 New York time is moved to 00:00 New York time of its day, a longer bar stamped 00:00 or 01:00 New York time on the day its period starts to 00:00, and any other stamp raises `MassiveError` naming the dataset, the source, and the verb's way out (explicit symbols for `dm.ALL` from the files); an index week, month, quarter, or year ends an hour after its calendar period, weekend included | `tests/namespaces/test_indices.py`: the documented stamps of every source map to 00:00 New York time; another stamp raises; a week ends an hour after the next Monday begins | `tests/namespaces/test_indices_integration.py`: one 1-day bar of `I:SPX` and of `I:AAVE100` (which updates around the clock) from the range and `day_aggs_v1` for the Wednesday before and the Friday after (a short day, closing at 13:00) the most recent Thanksgiving whose week has ended at run time, computed from the exchanges' holiday rule so the dates stay inside every plan's history, rebuilt from minute bars over the New York and the Chicago day; `/prev` of each, for the most recent completed trading day at run time, beside the range bar of that same day and marked when that day is a half day; the week bars of that Thanksgiving week and the week before, each against its weekdays, its whole calendar week, and the seven days from its stamp rebuilt from minute bars; and, anchored to the run's day so they stay inside the plan's history, the month bars of the two whole months and the quarter bars of the two whole quarters before the current ones and this year's unfinished year bar, read from January 1 to the run's day (left out, and recorded as such, before the year's first trading day); in the two weeks before the next Thanksgiving week ends, the day and week reads sit just past one year old and a plan that keeps one year of index history refuses them, failing the check until that week ends; record each `TimestampStart` and which day the OHLC match |
 | 53 | Split adjustment of stock bars across a split: NVDA's 10-for-1 split executed on 2024-06-10 | `adjusted=True` is REST only and each page's `adjusted` echo is checked; flat files and `adjusted=False` are as traded | `tests/ingest/test_rest.py`, `tests/namespaces/test_stocks.py`: a mismatched echo raises; flat files refuse `adjusted=True` | `tests/namespaces/test_stocks_integration.py`: NVDA's 2024-06-07 day bar from `day_aggs_v1` and REST `adjusted=false` (about 1208) and REST `adjusted=true` (about 120.9, volume about 10 times), and 2024-06-10 as the control, on which all three agree |
 | 54 | Whether every page echoes `adjusted`, `next_url` pages and each grouped-daily day included | A page without the echo logs a WARNING once per dataset, path, and session; a different echo raises | `tests/ingest/test_rest.py`: absent and mismatched echoes, on a second page too | `tests/namespaces/test_stocks_integration.py`: a multi-page minute download and a grouped-daily download; record each page's `adjusted` |

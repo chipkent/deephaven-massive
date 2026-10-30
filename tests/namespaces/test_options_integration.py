@@ -480,8 +480,8 @@ def _prev_answered(
     except WireError as error:
         evidence(f"{ticker} /prev: {type(error).__name__}: {error}")
         return False
-    bars = session.options.bars(ticker, dm.Timespan.DAY)
-    evidence(f"library {ticker} fetch() (/prev): {library_stamps(bars.fetch)}")
+    previous = session.options.previous_day_bar(ticker)
+    evidence(f"library {ticker} previous_day_bar fetch() (/prev): {library_stamps(previous.fetch)}")
     return found > 0
 
 

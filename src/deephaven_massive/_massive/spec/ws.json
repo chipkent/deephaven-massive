@@ -394,7 +394,7 @@
     {"column": "Timestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ms", "wire_key": "t"}
    ],
    "memberships": [
-    {"group": "indices", "kind": "values", "position": 1, "projection": null}
+    {"group": "indices", "kind": "values", "position": 0, "projection": null}
    ]
   },
   {

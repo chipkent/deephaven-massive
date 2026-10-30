@@ -229,9 +229,18 @@ def test_the_quote_prices_are_generated_names(real: generate.Generated) -> None:
 
 def test_memberships_follow_kinds_and_projections(real: generate.Generated) -> None:
     rest = {p.key: p for p in real.rest}
-    (values,) = rest["/v3/snapshot/indices"].memberships
+    (quotes,) = rest["/v1/last_quote/currencies/{from}/{to}"].memberships
+    assert (quotes.kind, quotes.group, quotes.position) == ("quotes", "forex", 1)
+    assert quotes.projection == {
+        "ask": "AskPrice",
+        "bid": "BidPrice",
+        "exchange": "Exchange",
+        "timestamp": "Timestamp",
+    }
+    # The indices snapshot is in no kind; the values stream leads its group.
+    assert rest["/v3/snapshot/indices"].memberships == ()
+    (values,) = {c.key: c for c in real.ws}["indices/V"].memberships
     assert (values.kind, values.group, values.position) == ("values", "indices", 0)
-    assert values.projection == {"ticker": "Ticker", "value": "Value", "last_updated": "Timestamp"}
     ws = {c.key: c for c in real.ws}
     (trades,) = ws["stocks/T"].memberships
     assert (trades.kind, trades.group, trades.position, trades.projection) == (

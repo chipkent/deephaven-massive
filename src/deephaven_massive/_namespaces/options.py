@@ -1,6 +1,8 @@
 """The `m.options` namespace: US-listed options contracts, as reported by OPRA.
 
-Datasets: `trades`, `quotes`, `bars`, `fmv` (fair market value), `chain` (one underlying's
+Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars`,
+`previous_day_bar` (each contract's bar of the previous session), `fmv` (fair market value),
+`chain` (one underlying's
 option chain), `snapshots` (the current state of chosen contracts), `contracts` (contract
 reference data), and `daily_open_close`.
 
@@ -54,14 +56,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._query import (
-        HistoryLatestQuery,
         HistoryQuery,
         Query,
-        StreamHistoryLatestQuery,
         StreamHistoryQuery,
         StreamQuery,
     )
-    from deephaven_massive._types import DateLike, DaySpan, FilterValue, StreamSpan, Symbols
+    from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
 
 __all__ = ["DATASETS", "_Options"]
 
@@ -145,18 +145,29 @@ TRADES: Final = DatasetSpec(
     summary="Trades of US-listed options contracts (OPRA), tick by tick.",
     asset_class=AssetClass.OPTIONS,
     kind="trades",
-    fetch_path=_LAST_TRADE,
     history_path=_TRADES,
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: _TRADE_FILES},
     keys={
-        (_REST, _LAST_TRADE): _keys("Ticker", "SipTimestamp"),
         (_REST, _TRADES): _from_path("SipTimestamp"),
         (_WS, "options/T"): _keys("Ticker", "SipTimestamp"),
         (_FLAT, _TRADE_FILES): _keys("Ticker", "SipTimestamp"),
     },
     time_axis=("timestamp.gte", "timestamp.lt"),
     page_size=_TICK_PAGE,
+)
+
+# Each one-row dataset joins the kind of its stream and history dataset, so its rows have the
+# same columns; an explicit APPEND poll() records each new row by its time.
+LAST_TRADE: Final = DatasetSpec(
+    name="options.last_trade",
+    summary="The latest trade of each US-listed options contract.",
+    asset_class=AssetClass.OPTIONS,
+    kind="trades",
+    fetch_path=_LAST_TRADE,
+    keys={(_REST, _LAST_TRADE): _keys("Ticker", "SipTimestamp")},
+    per_symbol=True,
+    revision_keys=("Timestamp",),
 )
 
 QUOTES: Final = DatasetSpec(
@@ -182,12 +193,10 @@ BARS: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     is_bars=True,
     kind="bars",
-    fetch_path=_PREV,
     history_path=_RANGE,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
     flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
     keys={
-        (_REST, _PREV): _keys("Ticker", "WindowStart"),
         (_REST, _RANGE): _from_path("WindowStart"),
         (_WS, "options/A"): _stream_bar_keys(),
         (_WS, "options/AM"): _stream_bar_keys(),
@@ -195,6 +204,18 @@ BARS: Final = DatasetSpec(
         (_FLAT, _DAY_FILES): _keys("Ticker", "WindowStart"),
     },
     page_size=_TICK_PAGE,
+    column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
+)
+
+PREVIOUS_DAY_BAR: Final = DatasetSpec(
+    name="options.previous_day_bar",
+    summary="The previous trading day's open, high, low, close, and volume of options contracts.",
+    asset_class=AssetClass.OPTIONS,
+    kind="bars",
+    fetch_path=_PREV,
+    keys={(_REST, _PREV): _keys("Ticker", "WindowStart")},
+    per_symbol=True,
+    revision_keys=("TimestampStart",),
     column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
 )
 
@@ -265,8 +286,10 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
     TRADES,
+    LAST_TRADE,
     QUOTES,
     BARS,
+    PREVIOUS_DAY_BAR,
     FMV,
     CHAIN,
     SNAPSHOTS,
@@ -350,7 +373,7 @@ class _Options(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "options"
 
-    def trades(self, symbols: Symbols) -> StreamHistoryLatestQuery:
+    def trades(self, symbols: Symbols) -> StreamHistoryQuery:
         """Trades of US-listed options contracts (OPRA), tick by tick.
 
         One row per trade: its price, size, exchange, condition codes, and SIP timestamp
@@ -358,13 +381,12 @@ class _Options(Namespace):
         New York date of `Timestamp`), and `TimestampInsert`, when the library received it. The
         stream verbs read the WebSocket `T` channel. `history()` reads the REST trades endpoint
         (`/v3/trades/{optionsTicker}`, one request series per contract) or the
-        `us_options_opra/trades_v1` flat files, and `fetch()` returns each contract's last trade
-        (`/v2/last/trade/{optionsTicker}`). There is no `limit`: `history()` pages internally
-        and returns the whole range.
+        `us_options_opra/trades_v1` flat files; each contract's latest trade is `last_trade()`.
+        There is no `limit`: `history()` pages internally and returns the whole range.
 
         `dm.ALL` streams every contract (the `T.*` topic) and reads every contract of a day's
-        flat file; `fetch()` and REST `history()` take explicit contracts and raise `ValueError`
-        for `dm.ALL`. One `/options` connection carries at most 1,000 contract topics.
+        flat file; REST `history()` takes explicit contracts and raises `ValueError` for
+        `dm.ALL`. One `/options` connection carries at most 1,000 contract topics.
 
         The columns, their types, and what each holds are listed in the column reference,
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#trades,
@@ -381,7 +403,7 @@ class _Options(Namespace):
                 `dm.ALL`.
 
         Returns:
-            A query with `fetch()`, `history()`, and the stream verbs.
+            A query with `history()` and the stream verbs.
 
         Example:
             ::
@@ -390,7 +412,54 @@ class _Options(Namespace):
                 ticks = q.blink()
                 day = q.history("2025-01-02", "2025-01-02")
         """
-        return cast("StreamHistoryLatestQuery", build_query(self._core, TRADES, symbols=symbols))
+        return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
+
+    def last_trade(self, symbols: Symbols) -> Query:
+        """The latest trade of each US-listed options contract.
+
+        One row per contract: its most recent trade, with the columns of its kind that its endpoint
+        fills: price, size, exchange, condition codes, and SIP timestamp (`Timestamp`), its trading
+        day `Date` (ISO `yyyy-MM-dd` text, the New York date of `Timestamp`), and `TimestampInsert`,
+        when the library received it. Served by REST (`/v2/last/trade/{optionsTicker}`) through
+        `fetch()` and `poll()`, one request per contract; `poll()` replaces the table each cycle,
+        keyed by `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each cycle's last trade
+        when it is new, so a trade between two cycles is never seen (`trades()` streams every one).
+        Some plans lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)`
+        carries each contract's last trade on every plan. A contract with no trade (HTTP 404) is
+        left out, with a WARNING.
+
+        `fetch()` and `poll()` take no `limit`: each contract gives one row. `dm.ALL` is
+        refused, since the endpoint takes one contract per request: use
+        `m.options.chain(underlying).fetch()` for every contract of an underlying.
+
+        The columns, their types, and what each holds are listed in the column reference,
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#last_trade,
+        in the web UI's column tooltips, and by `columns()`.
+
+        It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a symbol
+        is not an OCC option symbol, a sequence is empty or an exhausted generator, or a table
+        has no `Symbol` column; `TypeError` if `symbols` is of another type.
+
+        Args:
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
+                sequence, or a Deephaven table with a `Symbol` column, re-read each `poll()`
+                cycle.
+
+        Returns:
+            A query with `fetch()` and `poll()`.
+
+        Example:
+            ::
+
+                last = m.options.last_trade(["O:AAPL250117C00150000"]).fetch()
+        """
+        query = build_query(
+            self._core,
+            LAST_TRADE,
+            symbols=symbols,
+            all_alternative="m.options.chain(underlying).fetch()",
+        )
+        return cast("Query", query)
 
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """Quotes of US-listed options contracts (OPRA), tick by tick.
@@ -443,15 +512,6 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: DaySpan,
-        *,
-        multiplier: Literal[1] = 1,
-        adjusted: bool = True,
-    ) -> HistoryLatestQuery: ...
-    @overload
-    def bars(
-        self,
-        symbols: Symbols,
         timespan: Timespan = Timespan.MINUTE,
         *,
         multiplier: int = 1,
@@ -474,10 +534,8 @@ class _Options(Namespace):
 
         - `Timespan.SECOND` or `Timespan.MINUTE` with `multiplier=1`: the WebSocket `A` (one
           second) or `AM` (one minute) channel, plus `history()`.
-        - `Timespan.DAY` with `multiplier=1`: `history()`, plus `fetch()`, which returns each
-          contract's bar of the previous completed session
-          (`/v2/aggs/ticker/{optionsTicker}/prev`).
-        - Anything else: `history()` only.
+        - Anything else: `history()` only. Each contract's bar of the previous completed
+          session is `previous_day_bar()`.
 
         `history()` reads the REST aggregates endpoint
         (`/v2/aggs/ticker/{optionsTicker}/range/...`, one request series per contract) or, for
@@ -492,9 +550,7 @@ class _Options(Namespace):
         bars; it is not when Massive published the bar. An intraday bar ends its length
         after its start. A bar of a day or longer runs from 00:00 New York time of its
         window's first day to 00:00 after its last, whatever the source: the range and the
-        day files stamp a 1-day bar at the day's start, while `/prev` stamps it at the 16:00
-        session close (13:00 on a short trading day; 16:15 or 13:15 for index options such
-        as SPXW), which is moved to the day's start. A week runs Monday to Friday and a
+        day files stamp a 1-day bar at the day's start. A week runs Monday to Friday and a
         longer period from its first to its last weekday. A bar of several days counts
         trading days, ending as late as holidays could push it (one weekday more, and one
         more for every five further days), since there is no holiday calendar. A longer bar
@@ -510,8 +566,8 @@ class _Options(Namespace):
         every page's own `adjusted` must match the request, or the call raises `MassiveError`.
         Live bars are never adjusted after the fact, so a live table shows a jump at a split.
 
-        `dm.ALL` streams every contract and reads every contract of a day's flat file; `fetch()`
-        and REST `history()` take explicit contracts and raise `ValueError` for `dm.ALL`. One
+        `dm.ALL` streams every contract and reads every contract of a day's flat file; REST
+        `history()` takes explicit contracts and raises `ValueError` for `dm.ALL`. One
         `/options` connection carries at most 1,000 contract topics.
 
         The columns, their types, and what each holds are listed in the column reference,
@@ -535,13 +591,12 @@ class _Options(Namespace):
                 flat files only when this is False.
 
         Returns:
-            A `StreamHistoryQuery`, `HistoryLatestQuery`, or `HistoryQuery`, as listed above.
+            A `StreamHistoryQuery` or `HistoryQuery`, as listed above.
 
         Example:
             ::
 
                 minute = m.options.bars("O:AAPL250117C00150000").append_only()
-                prev = m.options.bars("O:AAPL250117C00150000", dm.Timespan.DAY).fetch()
                 hourly = m.options.bars(
                     "O:AAPL250117C00150000", dm.Timespan.HOUR, multiplier=4
                 ).history("2025-01-02", "2025-01-10")
@@ -557,6 +612,67 @@ class _Options(Namespace):
                 adjusted=adjusted,
             ),
         )
+
+    def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> Query:
+        """The previous trading day's open, high, low, close, and volume of options contracts.
+
+        One row per contract: its 1-day bar of the previous completed session, which Massive
+        documents as "the prior session's open, high, low, close, and volume", with the columns of
+        its kind that its endpoint fills: its window, from `TimestampStart`, 00:00 New York time of
+        the day, to the exclusive `TimestampEnd`, 00:00 of the next day, its trading day `Date` (ISO
+        `yyyy-MM-dd` text), its prices and volume, and `TimestampInsert`, when the library received
+        it. Served by REST (`/v2/aggs/ticker/{optionsTicker}/prev`) through `fetch()` and `poll()`,
+        one request per contract; `poll()` replaces the table each cycle, keyed by `Symbol`, and an
+        explicit `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar at the
+        16:00 session close (13:00 on a short trading day; 16:15 or 13:15 for index options such as
+        SPXW), which is moved to the day's start; any other stamp raises `MassiveError` naming
+        `bars(symbols, dm.Timespan.DAY).history()` for that day. A contract with no bar (HTTP 404)
+        is left out, with a WARNING.
+
+        Prices and volumes are adjusted for splits of the underlying when `adjusted` is True,
+        the default, as `bars()` describes, and a page whose own `adjusted` differs from the
+        request raises `MassiveError`.
+
+        `fetch()` and `poll()` take no `limit`: each contract gives one row. `dm.ALL` is
+        refused, since the endpoint takes one contract per request: use
+        `m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`, which reads
+        every contract's bar of a day from the flat files.
+
+        The columns, their types, and what each holds are listed in the column reference,
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.md#previous_day_bar,
+        in the web UI's column tooltips, and by `columns()`.
+
+        It raises at once, before any request: `ValueError` if `symbols` is `dm.ALL`, a symbol
+        is not an OCC option symbol, a sequence is empty or an exhausted generator, or a table
+        has no `Symbol` column; `TypeError` if `adjusted` is not a `bool` or `symbols` is of
+        another type.
+
+        Args:
+            symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
+                sequence, or a Deephaven table with a `Symbol` column, re-read each `poll()`
+                cycle.
+            adjusted: Whether the bar is adjusted for splits of the underlying; True by
+                default.
+
+        Returns:
+            A query with `fetch()` and `poll()`.
+
+        Example:
+            ::
+
+                prev = m.options.previous_day_bar("O:AAPL250117C00150000").fetch()
+        """
+        query = build_query(
+            self._core,
+            PREVIOUS_DAY_BAR,
+            symbols=symbols,
+            all_alternative=(
+                "m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)"
+            ),
+            timespan=Timespan.DAY,
+            adjusted=adjusted,
+        )
+        return cast("Query", query)
 
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value of US-listed options contracts, streamed in real time.

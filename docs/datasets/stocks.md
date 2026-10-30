@@ -4,7 +4,7 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
-In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.stocks.trades`, `m.stocks.quotes`, `m.stocks.bars`, `m.stocks.luld`, `m.stocks.imbalances`, `m.stocks.fmv`, `m.stocks.snapshots`, `m.stocks.movers`, `m.stocks.daily_open_close`, `m.stocks.dividends`, `m.stocks.splits`, `m.stocks.ipos`, `m.stocks.short_interest`, `m.stocks.short_volume`, `m.stocks.share_float`, `m.stocks.financials.ratios`, `m.stocks.filings.index`, `m.stocks.filings.sections_10k`, `m.stocks.filings.text_8k`, and `m.stocks.filings.risk_factors` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.stocks.trades`, `m.stocks.last_trade`, `m.stocks.quotes`, `m.stocks.last_quote`, `m.stocks.bars`, `m.stocks.previous_day_bar`, `m.stocks.luld`, `m.stocks.imbalances`, `m.stocks.fmv`, `m.stocks.snapshots`, `m.stocks.movers`, `m.stocks.daily_open_close`, `m.stocks.dividends`, `m.stocks.splits`, `m.stocks.ipos`, `m.stocks.short_interest`, `m.stocks.short_volume`, `m.stocks.share_float`, `m.stocks.financials.ratios`, `m.stocks.filings.index`, `m.stocks.filings.sections_10k`, `m.stocks.filings.text_8k`, and `m.stocks.filings.risk_factors` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
 
 <a id="trades"></a>
 
@@ -14,21 +14,21 @@ Trades of US-listed stocks, tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
-| `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
-| `Correction` | long | The trade correction indicator. | REST, flat files | `e`, `correction` | `correction` |  |
-| `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `x`, `exchange` | `exchange` | `x` |
-| `Id` | String | The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID. | REST, flat files, WebSocket | `i`, `id` | `id` | `i` |
-| `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange. | REST, flat files, WebSocket | `y`, `participant_timestamp` | `participant_timestamp` | `pt` |
-| `Price` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST, flat files, WebSocket | `p`, `price` | `price` | `p` |
-| `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | REST, flat files, WebSocket | `q`, `sequence_number` | `sequence_number` | `q` |
-| `Size` | double | The size of a trade (also known as volume). | REST, flat files, WebSocket | `s`, `size` | `size` | `s` |
-| `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST, flat files, WebSocket | `z`, `tape` | `tape` | `z` |
-| `TrfId` | long | The ID for the Trade Reporting Facility where the trade took place. | REST, flat files, WebSocket | `r`, `trf_id` | `trf_id` | `trfi` |
-| `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST, flat files, WebSocket | `f`, `trf_timestamp` | `trf_timestamp` | `trft` |
-| `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. | REST, WebSocket | `ds`, `decimal_size` |  | `ds` |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
+| `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `conditions` | `conditions` | `c` |
+| `Correction` | long | The trade correction indicator. | REST, flat files | `correction` | `correction` |  |
+| `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `exchange` | `exchange` | `x` |
+| `Id` | String | The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID. | REST, flat files, WebSocket | `id` | `id` | `i` |
+| `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange. Omitted on OTC trades reported through the FINRA ORF (exchange 62), which carry no participant timestamp. | REST, flat files, WebSocket | `participant_timestamp` | `participant_timestamp` | `pt` |
+| `Price` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST, flat files, WebSocket | `price` | `price` | `p` |
+| `SequenceNumber` | long | The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day. | REST, flat files, WebSocket | `sequence_number` | `sequence_number` | `q` |
+| `Size` | double | The size of a trade (also known as volume). | REST, flat files, WebSocket | `size` | `size` | `s` |
+| `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST, flat files, WebSocket | `tape` | `tape` | `z` |
+| `TrfId` | long | The ID for the Trade Reporting Facility where the trade took place. | REST, flat files, WebSocket | `trf_id` | `trf_id` | `trfi` |
+| `TrfTimestamp` | Instant | The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this trade. | REST, flat files, WebSocket | `trf_timestamp` | `trf_timestamp` | `trft` |
+| `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. | REST, WebSocket | `decimal_size` |  | `ds` |
 | `ReportSequence` | long | Always null for `stocks.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `Channel` | long | Always null for `stocks.trades`; supplied by `futures.trades`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `stocks.trades`; supplied by `crypto.trades`. |  |  |  |  |
@@ -37,9 +37,40 @@ Trades of US-listed stocks, tick by tick.
 Massive's documentation of this dataset:
 
 - <https://massive.com/docs/flat-files/stocks/trades.md>
-- <https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md>
 - <https://massive.com/docs/rest/stocks/trades-quotes/trades.md>
 - <https://massive.com/docs/websocket/stocks/trades.md>
+
+<a id="last_trade"></a>
+
+## `m.stocks.last_trade`
+
+The latest trade of each US-listed stock.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under." | REST | `T` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST |  |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." | REST | `t` |
+| `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST | `c` |
+| `Correction` | long | The trade correction indicator. | REST | `e` |
+| `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `x` |
+| `Id` | String | The Trade ID which uniquely identifies a trade. These are unique per combination of ticker, exchange, and TRF. For example: A trade for AAPL executed on NYSE and a trade for AAPL executed on NASDAQ could potentially have the same Trade ID. | REST | `i` |
+| `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange. | REST | `y` |
+| `Price` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. | REST | `p` |
+| `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | REST | `q` |
+| `Size` | double | The size of a trade (also known as volume). | REST | `s` |
+| `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST | `z` |
+| `TrfId` | long | The ID for the Trade Reporting Facility where the trade took place. | REST | `r` |
+| `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST | `f` |
+| `DecimalSize` | String | The size of the trade including the fractional component. This is represented as a decimal string. | REST | `ds` |
+| `ReportSequence` | long | Always null for `stocks.last_trade`; supplied by `futures.trades`. |  |  |
+| `Channel` | long | Always null for `stocks.last_trade`; supplied by `futures.trades`. |  |  |
+| `ReceivedTimestamp` | Instant | Always null for `stocks.last_trade`; supplied by `crypto.trades`. |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/trades-quotes/last-trade.md>
 
 <a id="quotes"></a>
 
@@ -49,35 +80,69 @@ National best bid and offer quotes of US-listed stocks, tick by tick.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | request | `ticker` | `sym` |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |  |  |  |
-| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it."; REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `t`, `sip_timestamp` | `sip_timestamp` | `t` |
-| `AskExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `X`, `ask_exchange` | `ask_exchange` | `ax` |
-| `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `P`, `ask_price` | `ask_price` | `ap` |
-| `AskSize` | double | The ask size. This represents the number of shares sellers are offering at the given ask price. | REST, flat files, WebSocket | `S`, `ask_size` | `ask_size` | `as` |
-| `BidExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST, flat files, WebSocket | `x`, `bid_exchange` | `bid_exchange` | `bx` |
-| `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `p`, `bid_price` | `bid_price` | `bp` |
-| `BidSize` | double | The bid size. This represents the number of shares buyers are bidding for at the given bid price. | REST, flat files, WebSocket | `s`, `bid_size` | `bid_size` | `bs` |
-| `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `c`, `conditions` | `conditions` | `c` |
-| `Indicators` | int[] | A list of indicator codes. See the Conditions and Indicators (https://massive.com/glossary/conditions-indicators) glossary for what each code means. | REST, flat files, WebSocket | `i`, `indicators` | `indicators` | `i` |
-| `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange. | REST, flat files, WebSocket | `y`, `participant_timestamp` | `participant_timestamp` | `pt` |
-| `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | REST, flat files, WebSocket | `q`, `sequence_number` | `sequence_number` | `q` |
-| `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST, flat files, WebSocket | `z`, `tape` | `tape` | `z` |
-| `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST, flat files | `f`, `trf_timestamp` | `trf_timestamp` |  |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket | `sip_timestamp` | `sip_timestamp` | `t` |
+| `AskExchange` | long | The ask exchange ID | REST, flat files, WebSocket | `ask_exchange` | `ask_exchange` | `ax` |
+| `AskPrice` | double | The ask price. | REST, flat files, WebSocket | `ask_price` | `ask_price` | `ap` |
+| `AskSize` | double | The ask size. This represents the number of shares sellers are offering at the given ask price. | REST, flat files, WebSocket | `ask_size` | `ask_size` | `as` |
+| `BidExchange` | long | The bid exchange ID | REST, flat files, WebSocket | `bid_exchange` | `bid_exchange` | `bx` |
+| `BidPrice` | double | The bid price. | REST, flat files, WebSocket | `bid_price` | `bid_price` | `bp` |
+| `BidSize` | double | The bid size. This represents the number of shares buyers are bidding for at the given bid price. | REST, flat files, WebSocket | `bid_size` | `bid_size` | `bs` |
+| `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket | `conditions` | `conditions` | `c` |
+| `Indicators` | int[] | A list of indicator codes. See the Conditions and Indicators (https://massive.com/glossary/conditions-indicators) glossary for what each code means. | REST, flat files, WebSocket | `indicators` | `indicators` | `i` |
+| `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange. | REST, flat files, WebSocket | `participant_timestamp` | `participant_timestamp` | `pt` |
+| `SequenceNumber` | long | The sequence number represents the sequence in which quote events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). Values reset after each trading session/day. | REST, flat files, WebSocket | `sequence_number` | `sequence_number` | `q` |
+| `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST, flat files, WebSocket | `tape` | `tape` | `z` |
+| `TrfTimestamp` | Instant | The nanosecond accuracy TRF (Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this quote. | REST, flat files | `trf_timestamp` | `trf_timestamp` |  |
 | `ReportSequence` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `AskTimestamp` | Instant | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `BidTimestamp` | Instant | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
 | `Channel` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`. |  |  |  |  |
-| `Exchange` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`, `forex.quotes`, `crypto.quotes`. |  |  |  |  |
+| `Exchange` | long | Always null for `stocks.quotes`; supplied by `futures.quotes`, `forex.last_quote`, `forex.quotes`, `crypto.quotes`. |  |  |  |  |
 | `ReceivedTimestamp` | Instant | Always null for `stocks.quotes`; supplied by `crypto.quotes`. |  |  |  |  |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST, flat files, WebSocket |  |  |  |
 
 Massive's documentation of this dataset:
 
 - <https://massive.com/docs/flat-files/stocks/quotes.md>
-- <https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md>
 - <https://massive.com/docs/rest/stocks/trades-quotes/quotes.md>
 - <https://massive.com/docs/websocket/stocks/quotes.md>
+
+<a id="last_quote"></a>
+
+## `m.stocks.last_quote`
+
+The latest national best bid and offer of each US-listed stock.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under." | REST | `T` |
+| `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST |  |
+| `Timestamp` | Instant | The row's primary time, as an Instant. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." | REST | `t` |
+| `AskExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `X` |
+| `AskPrice` | double | The ask price. | REST | `P` |
+| `AskSize` | double | The ask size. This represents the number of shares sellers are offering at the given ask price. | REST | `S` |
+| `BidExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/market-operations/exchanges) for Massive's mapping of exchange IDs. | REST | `x` |
+| `BidPrice` | double | The bid price. | REST | `p` |
+| `BidSize` | double | The bid size. This represents the number of shares buyers are bidding for at the given bid price. | REST | `s` |
+| `Conditions` | int[] | A list of condition codes. See Stocks Condition Codes (https://massive.com/docs/rest/stocks/market-operations/condition-codes) for what each code means. | REST | `c` |
+| `Indicators` | int[] | A list of indicator codes. See the Conditions and Indicators (https://massive.com/glossary/conditions-indicators) glossary for what each code means. | REST | `i` |
+| `ParticipantTimestamp` | Instant | The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange. | REST | `y` |
+| `SequenceNumber` | long | The sequence number represents the sequence in which message events happened. These are increasing and unique per ticker symbol, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). | REST | `q` |
+| `Tape` | long | There are 3 tapes which define which exchange the ticker is listed on. These are integers in our objects which represent the letter of the alphabet. Eg: 1 = A, 2 = B, 3 = C. * Tape A is NYSE listed securities * Tape B is NYSE ARCA / NYSE American * Tape C is NASDAQ | REST | `z` |
+| `TrfTimestamp` | Instant | The nanosecond accuracy TRF(Trade Reporting Facility) Unix Timestamp. This is the timestamp of when the trade reporting facility received this message. | REST | `f` |
+| `ReportSequence` | long | Always null for `stocks.last_quote`; supplied by `futures.quotes`. |  |  |
+| `AskTimestamp` | Instant | Always null for `stocks.last_quote`; supplied by `futures.quotes`. |  |  |
+| `BidTimestamp` | Instant | Always null for `stocks.last_quote`; supplied by `futures.quotes`. |  |  |
+| `Channel` | long | Always null for `stocks.last_quote`; supplied by `futures.quotes`. |  |  |
+| `Exchange` | long | Always null for `stocks.last_quote`; supplied by `futures.quotes`, `forex.last_quote`, `forex.quotes`, `crypto.quotes`. |  |  |
+| `ReceivedTimestamp` | Instant | Always null for `stocks.last_quote`; supplied by `crypto.quotes`. |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/trades-quotes/last-quote.md>
 
 <a id="bars"></a>
 
@@ -87,7 +152,7 @@ Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 
 | Column | Deephaven type | Description | Supplied by | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under."; REST: the request's `stocksTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | `T`, request | `ticker` | `sym` |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST: the request's `stocksTicker` parameter; REST `T`: "The exchange symbol that this item is traded under."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket | request, `T` | `ticker` | `sym` |
 | `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST, flat files, WebSocket |  |  |  |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window."; REST `t`: "The Unix millisecond timestamp for the end of the aggregate window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket | `t` | `window_start` | `s` |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. | REST, flat files, WebSocket |  |  | `e` |
@@ -116,9 +181,43 @@ Massive's documentation of this dataset:
 - <https://massive.com/docs/flat-files/stocks/minute-aggregates.md>
 - <https://massive.com/docs/rest/stocks/aggregates/custom-bars.md>
 - <https://massive.com/docs/rest/stocks/aggregates/daily-market-summary.md>
-- <https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md>
 - <https://massive.com/docs/websocket/stocks/aggregates-per-minute.md>
 - <https://massive.com/docs/websocket/stocks/aggregates-per-second.md>
+
+<a id="previous_day_bar"></a>
+
+## `m.stocks.previous_day_bar`
+
+The previous trading day's bar (open, high, low, close, volume) of US stocks.
+
+| Column | Deephaven type | Description | Supplied by | REST field |
+| --- | --- | --- | --- | --- |
+| `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `T`: "The exchange symbol that this item is traded under." | REST | `T` |
+| `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. | REST |  |
+| `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it; each source's own stamp, quoted next, is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." | REST | `t` |
+| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `aj(t, bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. | REST |  |
+| `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST | `v` |
+| `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `o` |
+| `Close` | double | The close price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `c` |
+| `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `h` |
+| `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `l` |
+| `Transactions` | long | The number of transactions in the aggregate window. | REST | `n` |
+| `Vwap` | double | The volume weighted average price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST | `vw` |
+| `Otc` | boolean | Always null for `stocks.previous_day_bar`; supplied by `stocks.bars`. |  |  |
+| `DecimalVolume` | String | Always null for `stocks.previous_day_bar`; supplied by `stocks.bars`. |  |  |
+| `AccumulatedVolume` | long | Always null for `stocks.previous_day_bar`; supplied by `stocks.bars`, `options.bars`. |  |  |
+| `AccumulatedDecimalVolume` | String | Always null for `stocks.previous_day_bar`; supplied by `stocks.bars`. |  |  |
+| `OfficialOpen` | double | Always null for `stocks.previous_day_bar`; supplied by `stocks.bars`, `options.bars`, `indices.bars`. |  |  |
+| `DayVwap` | double | Always null for `stocks.previous_day_bar`; supplied by `stocks.bars`, `options.bars`. |  |  |
+| `AverageTradeSize` | long | Always null for `stocks.previous_day_bar`; supplied by `stocks.bars`, `options.bars`, `crypto.bars`. |  |  |
+| `DollarVolume` | double | Always null for `stocks.previous_day_bar`; supplied by `futures.bars`. |  |  |
+| `SettlementPrice` | double | Always null for `stocks.previous_day_bar`; supplied by `futures.bars`. |  |  |
+| `Exchange` | long | Always null for `stocks.previous_day_bar`; supplied by `futures.bars`. |  |  |
+| `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
+
+Massive's documentation of this dataset:
+
+- <https://massive.com/docs/rest/stocks/aggregates/previous-day-bar.md>
 
 <a id="luld"></a>
 
