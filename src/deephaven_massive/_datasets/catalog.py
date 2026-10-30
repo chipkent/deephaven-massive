@@ -347,8 +347,8 @@ class DatasetSpec:
             statements), so one page decompresses to some tens of megabytes at most, far below
             the REST client's cap on a response body. `limit` is a separate total-row cap.
         fixed_params: Query parameters the library sets itself on every REST request, by wire
-            name, such as the options snapshot's `{"type": "options"}`; they have no argument
-            of their own. Every REST path of the dataset must take each one (the catalog's
+            name, such as the indicators' `{"expand_underlying": False}`; they have no
+            argument of their own. Every REST path of the dataset must take each one (the catalog's
             `wire parameters` gate), so a request never carries a parameter its path lacks.
             Each is reserved, with its whole family, from `filters`.
         row_times: Which of the library's time columns the rows carry (`RowTimes`);

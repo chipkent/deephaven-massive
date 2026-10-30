@@ -477,12 +477,15 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
     assert type(q) is Query
     assert request_of(q) == {
         "symbols": (CONTRACT,),
-        "params": {"type": "options"},
+        "params": {},
         "filters": {"ticker_gte": "O:A"},
     }
     assert snapshots(dm.ALL)._request.symbols is dm.ALL
+    assert dict(snapshots(dm.ALL)._request.params) == {"type": "options"}
     with pytest.raises(ValueError, match=r"^type is set through its own argument"):
         snapshots(dm.ALL, filters={"type": "stocks"})
+    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
+        snapshots([CONTRACT], filters={"type": "options"})
     with pytest.raises(ValueError, match=r"^ticker_any_of is set through symbols=, not"):
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})
 
@@ -899,7 +902,22 @@ def test_snapshots_ask_for_options_250_contracts_a_request(
     # The two requests run concurrently, so they arrive in either order.
     chunks = sorted((q["ticker.any_of"][0].split(",") for _, q in requests), key=len)
     assert chunks == [contracts[-1:], contracts[:250]]
-    assert all(q["type"] == ["options"] and q["limit"] == ["250"] for _, q in requests)
+    assert all("type" not in q and q["limit"] == ["250"] for _, q in requests)
+
+
+def test_snapshots_send_no_type_beside_tickers(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # Massive answers `type` beside `ticker.any_of` with HTTP 400 "Cannot specify tickers and
+    # type.", so only `dm.ALL` sends it; this is the exact query sent for one contract.
+    fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
+    rest_session.options.snapshots(["O:NCLH221014C00005000"]).fetch()
+    assert [r.target for r in fake_rest.requests if r.method == "GET"] == [
+        "/v3/snapshot?limit=250&ticker.any_of=O%3ANCLH221014C00005000"
+    ]
 
 
 def test_snapshots_keep_the_error_row_of_a_contract(

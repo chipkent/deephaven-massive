@@ -339,7 +339,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         sort="ticker",
         order=dm.Order.DESC,
         limit=3,
-        filters={"type": "options"},
+        filters={"ticker_gte": "A"},
     )
     assert type(query) is Query
     assert query._spec is snapshots.SNAPSHOTS
@@ -347,7 +347,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
     assert query._request == Request(
         symbols=("AAPL", "C:EURUSD", "O:SPY251219C00600000", "X:BTCUSD"),
         params=(("order", dm.Order.DESC), ("sort", "ticker")),
-        filters=(("type", "options"),),
+        filters=(("ticker_gte", "A"),),
         limit=3,
     )
     with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
@@ -356,8 +356,8 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         massive_session.snapshots(["AAPL"], order=cast("dm.Order", "asc"))
     with pytest.raises(ValueError, match="limit must be positive"):
         massive_session.snapshots(["AAPL"], limit=0)
-    with pytest.raises(ValueError, match="filter 'type' takes"):
-        massive_session.snapshots(["AAPL"], filters={"type": "CS"})
+    with pytest.raises(ValueError, match=r"^snapshots takes no type filter: Massive refuses type"):
+        massive_session.snapshots(["AAPL"], filters={"type": "options"})
     with pytest.raises(ValueError, match="ticker_any_of"):
         massive_session.snapshots(["AAPL"], filters={"ticker_any_of": ["MSFT"]})
 

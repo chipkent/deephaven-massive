@@ -29,6 +29,7 @@ import itertools
 import logging
 import threading
 import weakref
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, Self, cast
 
 from deephaven.execution_context import get_exec_ctx
@@ -72,7 +73,6 @@ from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from types import TracebackType
 
     from deephaven_massive._enums import Order
@@ -396,14 +396,24 @@ class MassiveSession:
             limit: The maximum total number of rows across pages; None for every row. The
                 page size is internal.
             filters: Further query parameters of the endpoint, by wire name with dots written
-                as underscores, such as `{"type": "options"}`.
+                as underscores. `type` is refused: every request sends tickers, and Massive
+                answers `type` beside tickers with HTTP 400; a ticker's prefix selects its class.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
 
-        `dm.ALL`, an invalid symbol, or an unknown filter raises `ValueError`; an argument of
-        the wrong type raises `TypeError`.
+        Raises:
+            ValueError: At once, before any request, for a `type` filter; `dm.ALL`, an
+                invalid symbol, or an unknown filter raises it too.
+
+        An argument of the wrong type raises `TypeError`.
         """
+        if isinstance(filters, Mapping) and "type" in filters:
+            logger.debug("snapshots: refused the type filter %r, sent beside tickers", filters)
+            raise ValueError(
+                "snapshots takes no type filter: Massive refuses type beside tickers, and each "
+                "ticker's prefix selects its class"
+            )
         query = build_query(
             self._core,
             snapshots.SNAPSHOTS,
