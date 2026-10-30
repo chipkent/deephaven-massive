@@ -286,11 +286,11 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
         multiplier=5,
         adjusted=False,
         start="2025-01-02",
-        params={"sort": "timestamp"},
+        params={"sort": "asc"},
     )
     assert repr(bars) == (
         "<HistoryQuery forex.bars symbols=('C:EURUSD',) timespan=Timespan.MINUTE multiplier=5 "
-        "adjusted=False start=2025-01-02 params={'sort': 'timestamp'}>"
+        "adjusted=False start=2025-01-02 params={'sort': 'asc'}>"
     )
     # Without a time axis, the date filters are free for `filters=`.
     unbounded = dataclasses.replace(NEWS_SPEC, time_axis=None)
@@ -395,21 +395,24 @@ def test_fetch_and_poll_delegate(massive_session: dm.MassiveSession, rest: Recor
     q = feed(massive_session)
     q.fetch()
     q.poll(30)
+    q.poll(30, mode=PollMode.AUTO)
     q.poll(timedelta(minutes=1), mode=PollMode.REPLACE)
     shown = repr(q)
+    # AUTO, the default, is the dataset's own mode: APPEND for this feed.
     assert [(c[0], c[3]) for c in rest.calls] == [
         ("fetch", {}),
+        ("poll", {"interval": timedelta(seconds=30), "mode": PollMode.APPEND, "query": shown}),
         ("poll", {"interval": timedelta(seconds=30), "mode": PollMode.APPEND, "query": shown}),
         ("poll", {"interval": timedelta(minutes=1), "mode": PollMode.REPLACE, "query": shown}),
     ]
 
 
-@pytest.mark.parametrize("mode", [None, PollMode.REPLACE])
+@pytest.mark.parametrize("mode", [PollMode.AUTO, PollMode.REPLACE])
 def test_a_feed_without_start_refuses_to_poll(
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
-    mode: PollMode | None,
+    mode: PollMode,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Every cycle would re-read Massive's whole archive; the message names the fix.
@@ -788,17 +791,43 @@ def test_history_reads_a_reactive_symbol_table_once_for_every_source(
     assert rest.calls[1][2].symbols == ("AAPL", "MSFT")  # AUTO: the dataset has no flat files
 
 
-def test_history_refuses_a_symbol_table_row_that_is_not_canonical(
-    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+def strict(session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The session's rule for symbol-table rows becomes RAISE.
+    config = dataclasses.replace(session._core.config, noncanonical_symbols=dm.OnError.RAISE)
+    monkeypatch.setattr(session._core, "config", config)
+
+
+def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    strict(massive_session, monkeypatch)
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
     for source in HistorySource:
         with pytest.raises(
-            ValueError, match=r"^a symbol table holds 'msft' .*dm\.canonicalize_symbols"
+            ValueError,
+            match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
         ):
             q.history("2025-03-03", "2025-03-03", source=source)
     assert rest.calls == []
     assert flat.calls == []
+
+
+def test_history_skips_a_symbol_table_row_that_is_not_canonical(
+    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+) -> None:
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
+    q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+    assert rest.calls[0][2].symbols == ("AAPL",)
+    assert flat.calls == []
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
+    with pytest.raises(
+        ValueError, match=r"^stocks\.trades: no row of the symbol table is Massive's ticker"
+    ):
+        only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
 
 
 def test_history_rejects_a_symbol_table_without_symbols(
@@ -860,6 +889,8 @@ def test_duplicate_last_by_keys_open_no_stream(
         (["Symbol", "Nope"], (ValueError, "Nope")),
         ([1], (TypeError, "only column names")),
         ({"Symbol"}, (TypeError, "by must be a str or a sequence of str")),
+        # None is no mode: the default is "Symbol", written out.
+        (None, (TypeError, "by must be a str or a sequence of str, not NoneType")),
         (["Symbol", "Exchange", "Symbol"], (ValueError, r"by names \['Symbol'\] more than once")),
     ],
 )
@@ -939,17 +970,38 @@ def test_a_static_symbol_table_without_symbols_opens_no_stream(
 
 
 @pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
-def test_a_static_symbol_table_row_that_is_not_canonical_opens_no_stream(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
+def test_a_static_symbol_table_row_that_is_not_canonical_opens_no_stream_under_raise(
+    massive_session: dm.MassiveSession,
+    *,
+    fake_streams: FakeStreams,
+    verb: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Refused, as the same text in a list is: never canonicalized and never dropped.
+    # Refused, as the same text in a list always is: never canonicalized and never dropped.
+    strict(massive_session, monkeypatch)
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
     call = getattr(q, verb)
     with pytest.raises(
-        ValueError, match=r"^a symbol table holds 'msft' .*dm\.canonicalize_symbols"
+        ValueError,
+        match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
     ):
         call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
+
+
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_a_static_symbol_table_row_that_is_not_canonical_is_skipped(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
+) -> None:
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    call = getattr(q, verb)
+    massive_session.release(call(3) if verb == "ring" else call())
+    assert len(fake_streams.opened) == 1
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
+    call = getattr(only_bad, verb)
+    with pytest.raises(ValueError, match=r"^stocks\.trades: no row of the symbol table is"):
+        call(3) if verb == "ring" else call()
+    assert len(fake_streams.opened) == 1
 
 
 def test_bar_channels_follow_the_timespan(
@@ -1217,14 +1269,17 @@ def test_last_by_matches_the_rows_of_a_reactive_table(
     massive_session.release(current)
 
 
-def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams
+def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreams, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    strict(massive_session, monkeypatch)
     watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, StreamQuery)
     for verb in (q.blink, q.append_only, q.last_by):
-        with pytest.raises(ValueError, match=r"^a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"):
+        with pytest.raises(
+            ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"
+        ):
             verb()
     assert fake_streams.publishers == {}
 
@@ -1258,15 +1313,16 @@ def test_ring_accepts_its_lower_bound(
     massive_session.release(result)
 
 
-def test_an_empty_window_in_a_warn_session_has_the_raw_symbol_column() -> None:
-    # The empty result of a window no row fits in has the session's columns, RawSymbol
-    # included, as every other result of a WARN session does.
-    config = dm.MassiveConfig(api_key="test-key", unknown_symbols=dm.UnknownSymbols.WARN)
+@pytest.mark.parametrize("unreadable", list(dm.OnError))
+def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None:
+    # The empty result of a window no row fits in has the session's columns, with RawSymbol
+    # exactly when the session keeps unreadable rows, as every other result of it does.
+    config = dm.MassiveConfig(api_key="test-key", unreadable_symbols=unreadable)
     with dm.MassiveSession(config) as session:
         q = trades(session)
         empty = q._empty()
         names = [c.name for c in empty.columns]
-        assert "RawSymbol" in names
+        assert ("RawSymbol" in names) is (unreadable is not dm.OnError.RAISE)
         assert names == [name for (name,) in q.columns().iter_tuple(cols="Name")]
 
 

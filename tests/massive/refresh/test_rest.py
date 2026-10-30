@@ -1175,6 +1175,26 @@ def test_a_stated_date_format_does_not_replace_a_timestamp_unit() -> None:
     assert (path.params[1].kind, path.params[1].unit) == (ParamKind.TIMESTAMP, WireUnit.NS)
 
 
+def test_a_parameter_keeps_the_scalar_default_its_schema_documents() -> None:
+    params = [
+        _param("window", {"type": "integer", "default": 50}),
+        _param("timespan", {"type": "string", "enum": ["day", "week"], "default": "day"}),
+        _param("adjusted", {"type": "boolean", "default": True}),
+        _param("ratio", {"type": "number", "default": 0.5}),
+        _param("tickers", {"type": "array", "items": {"type": "string"}, "default": ["A"]}),
+        _param("search", {"type": "string"}),
+    ]
+    path = _one(_row(price={"type": "number"}), params=params)
+    assert [(p.name, p.default) for p in path.params[1:]] == [
+        ("window", 50),
+        ("timespan", "day"),
+        ("adjusted", True),
+        ("ratio", 0.5),
+        ("tickers", None),  # not a scalar
+        ("search", None),
+    ]
+
+
 def test_path_item_parameters_come_first() -> None:
     item = _item(_row(price={"type": "number"}))
     item["parameters"] = [_param("shared", {"type": "string"})]

@@ -5,12 +5,7 @@ import pytest
 
 from deephaven_massive import _log_limits
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
-from deephaven_massive._log_limits import (
-    BoundedWarnings,
-    log_failure,
-    log_once,
-    mark_failure_logged,
-)
+from deephaven_massive._log_limits import BoundedLog, log_failure, log_once, mark_failure_logged
 
 
 def test_log_once_logs_each_key_once(
@@ -48,32 +43,20 @@ def test_log_once_is_once_across_threads(
     assert caplog.messages == ["once"]
 
 
-def test_bounded_warnings_report_each_value_once_up_to_the_limit(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize("level", [logging.ERROR, logging.WARNING, logging.DEBUG])
+def test_bounded_log_reports_each_value_once_up_to_the_limit(
+    caplog: pytest.LogCaptureFixture, level: int
 ) -> None:
-    warnings = BoundedWarnings(logging.getLogger("bounded"), limit=2)
-    with caplog.at_level(logging.WARNING, logger="bounded"):
+    bad = BoundedLog(logging.getLogger("bounded"), limit=2, level=level)
+    with caplog.at_level(logging.DEBUG, logger="bounded"):
         for value in ("a", "a", "b", "c", "d", "a"):
-            warnings.warn(value, "bad %s", value)
+            bad.log(value, "bad %s", value)
     assert [r.getMessage() for r in caplog.records] == [
         "bad a",
         "bad b",
         "2 values were reported; further ones are not logged",
     ]
-    assert {r.levelno for r in caplog.records} == {logging.WARNING}
-
-
-def test_bounded_warnings_log_at_the_level_their_owner_picks(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    errors = BoundedWarnings(logging.getLogger("bounded-errors"), limit=1, level=logging.ERROR)
-    with caplog.at_level(logging.WARNING, logger="bounded-errors"):
-        for value in ("a", "b", "c"):
-            errors.warn(value, "bad %s", value)
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.ERROR, "bad a"),
-        (logging.ERROR, "1 values were reported; further ones are not logged"),
-    ]
+    assert {r.levelno for r in caplog.records} == {level}
 
 
 def test_a_failure_is_logged_once_however_many_tables_it_fails(

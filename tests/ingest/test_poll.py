@@ -250,7 +250,7 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     # left to aggregate, so the table holds each distinct row once, across cycles, with the
     # time of the latest cycle that returned it.
     spec = _session.CATALOG.by_name["reference.related_companies"]
-    schema = _session.CATALOG.dataset_schema(spec)
+    schema = _session.CATALOG.dataset_schema(spec, raw_symbol=False)
     assert {*spec.poll_keys, "TimestampInsert"} == set(schema.column_names)
     deferred: list[LivenessScope] = []  # nothing fails the table: it stays empty
     scope = new_scope()
@@ -635,18 +635,22 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert "the symbol table failed, so the result can no longer follow it" in row["Error"]
+    assert "failed upstream, so the result can no longer follow it" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
 
-def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table(
+def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_raise(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    core = massive_session._core
+    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
+    monkeypatch.setattr(core, "config", strict)
     watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     script.rows()
@@ -661,12 +665,45 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("stocks.dividends poll(): a symbol table holds 'msft'")
+    assert row["Error"].startswith("stocks.dividends: a symbol table holds 'msft'")
     assert (
-        "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.NULL)"
+        "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, on_error=dm.OnError.LOG)"
         in (row["Error"])
     )
     assert script.symbols == [("AAPL",)]
+
+
+def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    watch = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    assert script.symbols == [("AAPL",)]  # the bad row is never requested
+    (row,) = stream_rows()
+    assert row["Error"] == (
+        "skipping 1 symbol-table value that is not Massive's ticker: 'msft'; fix or delete that row"
+    )
+    watch.delete(new_table([string_col("Symbol", ["msft"])]))  # deleting it clears the text
+    watch.add(new_table([string_col("Symbol", ["MSFT"])]))  # and the fixed row is requested
+    until(lambda: watch.size == 2 and "msft" not in [r[0] for r in watch.iter_tuple()])
+    script.rows()
+    next_cycle(clock)
+    assert script.symbols[-1] == ("AAPL", "MSFT")
+    (row,) = stream_rows()
+    assert row["State"] == "RUNNING"
+    assert row["Error"] is None
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
 
 
 # --- Lifetime ------------------------------------------------------------------------------------
@@ -1075,7 +1112,7 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
         rest_session._core, DIVIDENDS, symbols=new_table([string_col("Symbol", ["aapl"])])
     )
     assert isinstance(bad, Query)
-    with pytest.raises(ValueError, match=r"^a symbol table holds 'aapl'"):
+    with pytest.raises(ValueError, match=r"^stocks\.dividends: no row of the symbol table is"):
         bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
@@ -1587,9 +1624,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         {"id": "c", "ticker": "@@2"},
     ]
     fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unknown_symbols=dm.UnknownSymbols.WARN
-    )
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with dm.MassiveSession(config) as m:
         q = build_query(m._core, spec, symbols=["AAPL"], start="2025-01-02")
         assert isinstance(q, Query)

@@ -96,7 +96,7 @@ from deephaven_massive._ingest.subscriptions import (
     stream_topics,
     wildcard,
 )
-from deephaven_massive._log_limits import BoundedWarnings, log_failure, mark_failure_logged
+from deephaven_massive._log_limits import BoundedLog, log_failure, mark_failure_logged
 from deephaven_massive._massive import Cancel, Transport, WireAuthError, WsState
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
@@ -109,7 +109,7 @@ from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink, open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
-from deephaven_massive._tables.watchlist import read_symbols
+from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
@@ -166,7 +166,7 @@ trade; the check runs with each `SUMMARY_INTERVAL` summary."""
 
 _UNREADABLE_ROW_LIMIT: Final = 100
 """The most distinct rows with no valid symbol logged at ERROR per process."""
-_unreadable_rows: Final = BoundedWarnings(logger, limit=_UNREADABLE_ROW_LIMIT, level=logging.ERROR)
+_unreadable_rows: Final = BoundedLog(logger, limit=_UNREADABLE_ROW_LIMIT, level=logging.ERROR)
 
 CONNECTION_SETTINGS: Final = (
     "api_key",
@@ -1112,7 +1112,7 @@ class Connection:
             symbol = canonical_from_wire(self.asset_class, reject.symbol)
             why = f"{reject.symbol!r} is not a spelling the library reads"
         if symbol is None:
-            _unreadable_rows.warn(
+            _unreadable_rows.log(
                 f"{self.path}\0{channel}\0{reject.symbol}",
                 "%s%s: a %s row has no valid symbol (%s); failing the channel's ALL streams: "
                 "%s. %s",
@@ -2110,7 +2110,8 @@ class WsConnections:
         symbols = request.symbol_key()
         if asset_class is AssetClass.CRYPTO:
             if isinstance(symbols, SymbolTable):
-                self.resolve_pairs(read_symbols(spec, symbols.table))
+                rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
+                self.resolve_pairs(read_symbols(rule, symbols.table).symbols)
             elif isinstance(symbols, tuple):
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
@@ -2216,7 +2217,7 @@ class WsConnections:
             plan = self._plans.get((spec, channel))
         if plan is None:
             built = ChannelPlan.build(
-                core.catalog, spec, channel, unknown_symbols=core.config.unknown_symbols
+                core.catalog, spec, channel, unreadable_symbols=core.config.unreadable_symbols
             )
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)

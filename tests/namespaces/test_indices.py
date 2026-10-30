@@ -119,7 +119,11 @@ def test_values_history_is_flat_files_only() -> None:
 def _schema(spec: DatasetSpec) -> list[tuple[str, str]]:
     # The columns the dataset's own sources fill. A kind's schema also holds the columns only
     # its other members supply, which this dataset always leaves null.
-    return [(c.name, c.type.value) for c in CATALOG.dataset_schema(spec).columns if c.supplied_by]
+    return [
+        (c.name, c.type.value)
+        for c in CATALOG.dataset_schema(spec, raw_symbol=False).columns
+        if c.supplied_by
+    ]
 
 
 def test_values_schema() -> None:
@@ -589,6 +593,7 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
     ]
     assert out[0] == {
         "Symbol": "I:SPX",
+        "RawSymbol": None,
         "Error": None,
         "LastUpdated": 1748894400 * NS,
         "MarketStatus": "closed",
@@ -771,6 +776,7 @@ def test_daily_open_close_fetches_each_index_for_the_day(
         "Date": "2025-06-02",
         "TimestampStart": MIDNIGHT_MS * MS,
         "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
+        "RawSymbol": None,
         "High": 5940.35,
         "Low": 5876.0,
         "Open": 5896.68,
@@ -804,6 +810,7 @@ def wait_for(condition: Callable[[], bool]) -> None:
                 "Symbol": "I:SPX",
                 "Date": "2025-06-02",
                 "Timestamp": 1748894399000 * MS,
+                "RawSymbol": None,
                 "Value": 5935.94,
             },
         ),

@@ -4,7 +4,7 @@
 
 Each section lists one dataset's columns in the order every verb returns them. **Supplied by** names the transports that fill a column; a column the serving transport does not fill is null. The wire-field columns name the Massive fields behind each column (`request` for a value the library fills from the request). The same descriptions appear in the web UI's column tooltips and in a query's `columns()`.
 
-In a session with `unknown_symbols=dm.UnknownSymbols.WARN` (or `MASSIVE_UNKNOWN_SYMBOLS=warn`), `m.reference.tickers`, `m.reference.ticker_details`, and `m.reference.related_companies` also have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. The tables below show the default session, without it.
+`m.reference.tickers`, `m.reference.ticker_details`, and `m.reference.related_companies` have a `RawSymbol` String column, which holds Massive's spelling of a symbol the library cannot read; that row's `Symbol` is null, and `RawSymbol` is null on every other row. It is the one column whose presence depends on a setting: a session with `unreadable_symbols=dm.OnError.RAISE` (or `DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=raise`) fails on such a row instead and has no `RawSymbol`. The tables below show the default session, with it.
 
 <a id="tickers"></a>
 
@@ -15,6 +15,7 @@ Every ticker Massive supports, across asset classes, with its listing details.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `Active` | boolean | Whether or not the asset is actively traded. False means the asset has been delisted. | REST | `active` |
 | `BaseCurrencyName` | String | The name of the currency that this asset is priced against. | REST | `base_currency_name` |
 | `BaseCurrencySymbol` | String | The ISO 4217 code of the currency that this asset is priced against. | REST | `base_currency_symbol` |
@@ -48,6 +49,7 @@ One ticker's company and listing details: address, branding, shares, and more.
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "The exchange symbol that this item is traded under." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `Active` | boolean | Whether or not the asset is actively traded. False means the asset has been delisted. | REST | `active` |
 | `AddressAddress1` | String | The first line of the company's headquarters address. From the `address` object: Company headquarters address details. | REST | `address.address1` |
 | `AddressAddress2` | String | The second line of the company's headquarters address, if applicable. From the `address` object: Company headquarters address details. | REST | `address.address2` |
@@ -134,6 +136,7 @@ The companies Massive relates to a ticker, from news and returns data, one row e
 | Column | Deephaven type | Description | Supplied by | REST field |
 | --- | --- | --- | --- | --- |
 | `Symbol` | String | The instrument, in the library's canonical symbol form. From REST `ticker`: "A ticker related to the requested ticker." | REST | `ticker` |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose spelling the library cannot read as the dataset's class (its `Symbol` is then null); null on every other row. Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on such a row instead. | REST | `ticker` |
 | `Underlying` | String | The instrument Massive links the row to, exactly as Massive sends it; for an option, the linked instrument, not what the contract delivers. From REST: the request's `ticker` parameter. | REST | request |
 | `TimestampInsert` | Instant | When the library received the row, as an Instant: the local clock when the REST page, flat-file block, or WebSocket frame that carried it arrived, the same for every row of one. It is not monotonic and is not Massive's own receive time; on history() rows it is the download time, and in a poll() table the latest poll's. | REST |  |
 

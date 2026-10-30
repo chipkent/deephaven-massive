@@ -26,13 +26,13 @@ from deephaven_massive._datasets.symbols import (
     normalize,
     option_roots,
     symbol_class,
-    unknown_symbol_message,
+    unreadable_symbol_message,
     wire_spellings,
     ws_symbol,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, UnknownSymbols
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
 from deephaven_massive._errors import LIBRARY_BUG
-from deephaven_massive._log_limits import BoundedWarnings
+from deephaven_massive._log_limits import BoundedLog
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -680,21 +680,22 @@ def test_symbol_class(symbol: str, asset_class: AssetClass) -> None:
     assert symbol_class(symbol) is asset_class
 
 
-def test_the_unknown_symbol_message_names_the_spellings_and_the_switch() -> None:
-    message = unknown_symbol_message("forex.quotes", ["b", "a"])
+def test_the_unreadable_symbol_message_names_the_spellings_the_setting_and_the_bug() -> None:
+    message = unreadable_symbol_message("forex.quotes", ["b", "a"])
     assert message.startswith("forex.quotes: Massive sent the symbols 'a', 'b', spellings the")
-    one = unknown_symbol_message("forex.quotes", ["a"])
+    one = unreadable_symbol_message("forex.quotes", ["a"])
     assert one.startswith("forex.quotes: Massive sent the symbol 'a', a spelling the library")
-    assert "MASSIVE_UNKNOWN_SYMBOLS=warn" in message
-    assert "MassiveConfig(unknown_symbols=dm.UnknownSymbols.WARN)" in message
+    assert "DEEPHAVEN_MASSIVE_UNREADABLE_SYMBOLS=log" in message
+    assert "MassiveConfig(unreadable_symbols=dm.OnError.LOG)" in message
+    assert message.endswith(LIBRARY_BUG)
 
 
 @pytest.fixture
 def fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    log = logging.getLogger(symbols.__name__)
+    monkeypatch.setattr(symbols, "_logged_spellings", BoundedLog(log, limit=2, level=logging.ERROR))
     monkeypatch.setattr(
-        symbols,
-        "_unknown_spellings",
-        BoundedWarnings(logging.getLogger(symbols.__name__), limit=2, level=logging.ERROR),
+        symbols, "_ignored_spellings", BoundedLog(log, limit=2, level=logging.DEBUG)
     )
 
 
@@ -702,15 +703,15 @@ def fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    reader = WireSymbols("forex.quotes", FX, UnknownSymbols.WARN)
+    reader = WireSymbols("forex.quotes", FX, OnError.LOG)
     raw = pa.array(["EUR/USD", None, "??", "X:EUR-USD", "??", "!!", "##"])
     cache: dict[str, str | None] = {}
-    with caplog.at_level(logging.WARNING, logger=symbols.__name__):
+    with caplog.at_level(logging.DEBUG, logger=symbols.__name__):
         read = reader.read(raw, cache)
         reader.read(raw, {})  # a fresh read reports no spelling twice
     assert read.symbols.to_pylist() == ["C:EURUSD", None, None, "C:EURUSD", None, None, None]
     assert read.raw.to_pylist() == [None, None, "??", None, "??", "!!", "##"]
-    assert read.unknown == ("!!", "##", "??")
+    assert read.unreadable == ("!!", "##", "??")
     assert cache == {
         "EUR/USD": "C:EURUSD",
         "??": None,
@@ -718,10 +719,7 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
         "!!": None,
         "##": None,
     }
-    # Two spellings are reported, then one record says the rest are not. A spelling the
-    # library cannot read is a gap in its grammar: an ERROR asking for a bug report (the
-    # fixture's copy has the module's level, which the next test checks).
-    assert {r.levelno for r in caplog.records} == {logging.ERROR}
+    # Two spellings are reported, then one record says the rest are not.
     messages = [r.getMessage() for r in caplog.records]
     assert messages == [
         (
@@ -734,26 +732,28 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
         ),
         "2 values were reported; further ones are not logged",
     ]
-
-
-def test_an_unreadable_spelling_is_a_library_defect_logged_at_error(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # The module's own reporter, not the fixture's: a spelling no other test sends.
-    reader = WireSymbols("forex.quotes", FX, UnknownSymbols.WARN)
-    with caplog.at_level(logging.WARNING, logger=symbols.__name__):
-        reader.read(pa.array(["%%only-here"]), {})
-    [record] = caplog.records
-    assert record.levelno == logging.ERROR
-    assert record.getMessage().endswith(LIBRARY_BUG)
+    assert {r.levelno for r in caplog.records} == {logging.ERROR}  # a gap in the library
 
 
 @pytest.mark.usefixtures("fresh_warnings")
-def test_wire_symbols_log_nothing_under_fail(caplog: pytest.LogCaptureFixture) -> None:
-    reader = WireSymbols("forex.quotes", FX, UnknownSymbols.FAIL)
-    with caplog.at_level(logging.WARNING, logger=symbols.__name__):
+def test_wire_symbols_keep_what_they_cannot_read_quietly_under_ignore(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reader = WireSymbols("forex.quotes", FX, OnError.IGNORE)
+    assert reader.keeps
+    with caplog.at_level(logging.DEBUG, logger=symbols.__name__):
         read = reader.read(pa.array(["??", "C:EURUSD"]), {})
-    assert read.unknown == ("??",)
+    assert read.raw.to_pylist() == ["??", None]
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+
+
+@pytest.mark.usefixtures("fresh_warnings")
+def test_wire_symbols_log_nothing_under_raise(caplog: pytest.LogCaptureFixture) -> None:
+    reader = WireSymbols("forex.quotes", FX, OnError.RAISE)
+    assert not reader.keeps
+    with caplog.at_level(logging.DEBUG, logger=symbols.__name__):
+        read = reader.read(pa.array(["??", "C:EURUSD"]), {})
+    assert read.unreadable == ("??",)
     assert read.symbols.to_pylist() == [None, "C:EURUSD"]
     assert caplog.records == []
 
@@ -788,10 +788,10 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
         assert canonical_from_wire(STK, bad, as_written=True) is None
         with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
             check_symbol(STK, bad, as_written=True)
-    reader = WireSymbols("partners.tmx.corporate_events", STK, UnknownSymbols.FAIL, as_written=True)
+    reader = WireSymbols("partners.tmx.corporate_events", STK, OnError.RAISE, as_written=True)
     read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]
-    assert read.unknown == (" x",)
+    assert read.unreadable == (" x",)
 
 
 CONVERTERS = [

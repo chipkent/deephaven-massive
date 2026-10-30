@@ -47,8 +47,9 @@ Public API:
     - The enums (all `StrEnum`s; a value is Massive's wire string where the enum reaches the
       wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `FuturesVenue`,
       `Direction`, `ContractType`, `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`,
-      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError`, `UnknownSymbols`; and
-      `Subscription`, Massive's five subscriptions.
+      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError` (what a bad symbol
+      does, in `canonicalize_symbols` and in `MassiveConfig`'s `noncanonical_symbols` and
+      `unreadable_symbols`); and `Subscription`, Massive's five subscriptions.
       Parameters take only enum members; convert text with, for example,
       `Timespan("minute")`.
     - `enable_debug_logging(output=LogOutput.STDERR)` and `LogOutput`: send the library's log,
@@ -110,7 +111,6 @@ __all__ = [
     "TickerType",
     "Timeframe",
     "Timespan",
-    "UnknownSymbols",
     "__version__",
     "canonical_symbol",
     "canonical_symbol_crypto",
@@ -170,7 +170,6 @@ _EXPORTS: dict[str, str] = {
     "canonicalize_symbols": "deephaven_massive._tables.symbols",
     "OnError": "deephaven_massive._enums",
     "SymbolConvention": "deephaven_massive._enums",
-    "UnknownSymbols": "deephaven_massive._enums",
     "disable_debug_logging": "deephaven_massive._debug_log",
     "enable_debug_logging": "deephaven_massive._debug_log",
 }
@@ -216,7 +215,6 @@ if TYPE_CHECKING:
         TickerType,
         Timeframe,
         Timespan,
-        UnknownSymbols,
     )
     from deephaven_massive._errors import (
         AuthenticationError,

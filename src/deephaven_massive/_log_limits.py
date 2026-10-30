@@ -6,10 +6,10 @@ without end. The helpers here keep these records from flooding the log:
 - `log_once` logs a fact the first time its key is seen in the process, and never again: the
   unit the FMV magnitude rule detected, the WebSocket host chosen for a Business key, a futures
   one-second bar whose end from Massive is not its start plus one second.
-- `BoundedWarnings` logs a record (a WARNING unless its owner picks another level) the first
-  time each value is seen, for at most a fixed number of distinct values, so a stream of bad
-  values that may never end (a watchlist row typed wrong, a symbol spelling Massive keeps
-  sending) keeps both the log and the memory it uses bounded.
+- `BoundedLog` logs a record at its level the first time each value is seen, for at most a
+  fixed number of distinct values, so a stream of bad values that may never end (a watchlist
+  row typed wrong, a symbol spelling Massive keeps sending) keeps both the log and the memory
+  it uses bounded.
 - `log_failure` logs a failure that fails a live table, once per failure object, at the level
   its cause gives (`_errors.ErrorCause`): one connection failure that fails a hundred streams
   is one record, not a hundred.
@@ -28,7 +28,7 @@ import weakref
 
 from deephaven_massive._errors import ErrorCause, MassiveError, cause_of, failure_text
 
-__all__ = ["BoundedWarnings", "log_failure", "log_once", "mark_failure_logged"]
+__all__ = ["BoundedLog", "log_failure", "log_once", "mark_failure_logged"]
 
 
 _logged_lock = threading.Lock()
@@ -58,37 +58,36 @@ def log_once(
     log.log(level, message, *args)
 
 
-class BoundedWarnings:
+class BoundedLog:
     """Log a record the first time each value is seen, for at most `limit` distinct values.
 
     For a stream of bad values that may never end (a watchlist row typed wrong, a symbol
-    spelling Massive keeps sending): each value is reported once, and once `limit` values have
-    been reported, one last record says that further values are not logged, so the set it
-    remembers and the log stay bounded. The records are WARNINGs unless the owner passes
-    another `level`: a symbol spelling the library cannot read is a defect, logged at ERROR.
-    Created by its owner (a module, or one call of `canonicalize_symbols`) and shared by every
-    thread that reports: one leaf lock guards the set and is never held while logging.
+    spelling Massive keeps sending): each value is reported once, at the level the owner gives,
+    and once `limit` values have been reported, one last record at the same level says that
+    further values are not logged, so the set it remembers and the log stay bounded. Created by
+    its owner (a module, or one call of `canonicalize_symbols`) and shared by every thread that
+    reports: one leaf lock guards the set and is never held while logging.
 
     Example:
         ::
 
             import logging
 
-            from deephaven_massive._log_limits import BoundedWarnings
+            from deephaven_massive._log_limits import BoundedLog
 
-            warnings = BoundedWarnings(logging.getLogger("example"), limit=10)
-            warnings.warn("BRK/B", "%r is not a ticker; its rows are null", "BRK/B")
+            bad = BoundedLog(logging.getLogger("example"), limit=10, level=logging.WARNING)
+            bad.log("BRK/B", "%r is not a ticker; its rows are null", "BRK/B")
     """
 
     __slots__ = ("_level", "_limit", "_lock", "_log", "_seen")
 
-    def __init__(self, log: logging.Logger, *, limit: int, level: int = logging.WARNING) -> None:
+    def __init__(self, log: logging.Logger, *, limit: int, level: int) -> None:
         """Start with no value reported.
 
         Args:
             log: The logger to write to.
             limit: The most distinct values reported; a positive count.
-            level: The level of every record, the last one included; WARNING by default.
+            level: The level of every record, such as `logging.WARNING`.
         """
         self._log = log
         self._limit = limit
@@ -96,8 +95,8 @@ class BoundedWarnings:
         self._lock = threading.Lock()
         self._seen: set[str] = set()
 
-    def warn(self, value: str, message: str, *args: object) -> None:
-        """Log `message` at the instance's level if `value` is new and the limit is not reached.
+    def log(self, value: str, message: str, *args: object) -> None:
+        """Log `message` at the owner's level if `value` is new and the limit is not reached.
 
         Args:
             value: Identifies what is reported; a value already seen logs nothing.

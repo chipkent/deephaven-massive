@@ -610,11 +610,12 @@ def failed_after_flush(ws_session: WsSession, table: Table) -> bool:
     return bool(table.j_table.isFailed())
 
 
-def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream(
-    ws_session: WsSession,
+def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise(
+    make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
+    ws_session = make_ws_session(noncanonical_symbols=dm.OnError.RAISE)
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     result = ws_session.query(TRADES, watchlist).append_only()
@@ -623,16 +624,48 @@ def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("a symbol table holds 'msft'")
+    assert row["Error"].startswith("test.trades: a symbol table holds 'msft'")
     assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, " in row["Error"]
     # The row that is not canonical never became a topic.
     sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
     assert sent == {"T.AAPL"}
 
 
-def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams(
-    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    result = ws_session.query(TRADES, watchlist).append_only()
+    ws_session.subscribed("T.AAPL")
+    skipped = (
+        "skipping 1 symbol-table value that is not Massive's ticker: 'msft'; fix or delete that row"
+    )
+
+    def error() -> object:
+        ws_session.flush()
+        (row,) = streams_of(ws_session, dh_to_pylist)
+        return row["Error"]
+
+    wait_for(lambda: error() == skipped)
+    watchlist.delete(new_table([string_col("Symbol", ["msft"])]))  # fixed: the text clears
+    watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+    ws_session.subscribed("T.MSFT")
+    wait_for(lambda: error() is None)
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] != "FAILED"
+    sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
+    assert "T.msft" not in ",".join(sent)  # the bad row never became a topic
+    failed = bool(result.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+
+
+def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams_under_raise(
+    make_ws_session: Callable[..., WsSession], dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    ws_session = make_ws_session(unreadable_symbols=dm.OnError.RAISE)
     every = ws_session.query(TRADES, dm.ALL).append_only()
     ws_session.subscribed("T.*")
     ws_session.send(trade("BRK/B"))
@@ -642,9 +675,10 @@ def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams(
     assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
 
 
-def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too(
-    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
+    make_ws_session: Callable[..., WsSession], dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:
+    ws_session = make_ws_session(unreadable_symbols=dm.OnError.RAISE)
     # The row cannot be routed, so no symbol stream may starve on it silently.
     one = ws_session.query(TRADES, ["AAPL"]).append_only()
     ws_session.subscribed("T.AAPL")
@@ -669,13 +703,13 @@ def test_a_failing_upstream_watchlist_fails_the_stream(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("the symbol table failed, so the result can no longer follow")
+    assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
 
 
-def test_a_frame_symbol_the_library_cannot_read_is_kept_under_warn(
+def test_a_frame_symbol_the_library_cannot_read_is_kept_by_default(
     make_ws_session: Callable[..., WsSession], *, rows_when: RowsWhen
 ) -> None:
-    warned = make_ws_session(unknown_symbols=dm.UnknownSymbols.WARN)
+    warned = make_ws_session()
     every = warned.query(TRADES, dm.ALL).append_only()
     warned.subscribed("T.*")
     warned.send(trade("BRK/B"), trade("AAPL"))
@@ -2310,6 +2344,79 @@ def test_a_stream_waiting_for_a_slot_says_so(
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
     wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
     del capped, every
+
+
+SKIPPED_SPY = (
+    "skipping 1 symbol-table value that is not Massive's ticker: 'spy'; fix or delete that row"
+)
+"""The `Error` text of a stream whose options watchlist holds the bad row `spy`."""
+
+
+def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
+    *,
+    fake_ws_server: FakeMassiveServer,
+    make_ws_session: Callable[..., WsSession],
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: ToPylist,
+) -> None:
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    ws_session = make_ws_session(backoff=1.0)
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "spy"]
+    watchlist.add(new_table([string_col("Symbol", contracts)]))
+    capped = ws_session.query(OPTIONS, watchlist).blink()
+    ws_session.subscribed("T.O:SPY251219C00600000")
+
+    def error() -> object:
+        return streams_of(ws_session, dh_to_pylist)[0]["Error"]
+
+    cap = "over capacity: 2/1; 1 deferred"
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    fake_ws_server.auth_replies.append("max_connections")
+    fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
+    ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
+    stall = (
+        "waiting for a WebSocket slot on socket.test/options: another connection with this "
+        "API key, perhaps from another process, holds it; the plan allows one connection "
+        "per cluster"
+    )
+    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")  # the stall keeps the skipped row
+    watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == stall)  # fixing the row keeps the stall
+    watchlist.add(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == f"{stall}; {SKIPPED_SPY}")
+    ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall clears alone
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    del capped
+
+
+def test_skipped_rows_and_the_options_cap_neither_hide_nor_clear_each_other(
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    contracts = ["O:SPY251219C00610000", "O:SPY251219C00600000", "spy"]
+    watchlist.add(new_table([string_col("Symbol", contracts)]))
+    result = ws_session.query(OPTIONS, watchlist).blink()
+    ws_session.subscribed("T.O:SPY251219C00600000")
+    connection = ws_session.connection("wss://socket.test/options")
+
+    def error() -> object:
+        ws_session.on_loop(connection, lambda: None)
+        return streams_of(ws_session, dh_to_pylist)[0]["Error"]
+
+    cap = "over capacity: 2/1; 1 deferred"
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == cap)  # fixing the row keeps the cap's warning
+    watchlist.add(new_table([string_col("Symbol", ["spy"])]))
+    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    watchlist.delete(new_table([string_col("Symbol", ["O:SPY251219C00600000"])]))
+    ws_session.subscribed("T.O:SPY251219C00610000")
+    wait_for(lambda: error() == SKIPPED_SPY)  # the cap frees up and keeps the skipped row
+    del result
 
 
 def freed(core: weakref.ref[SessionCore]) -> bool:

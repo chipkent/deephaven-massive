@@ -40,8 +40,9 @@ one (its publisher's `publish_failure`), so the failure shows where Deephaven us
 also logged, at the level its cause gives, and shown in `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
-fix, which is not exported. The rate-limited log helpers, `log_once` and `BoundedWarnings`,
-are in `_log_limits`.
+fix, which is not exported, and `LIBRARY_BUG`, the sentence that ends every message about a
+defect of the library itself. The rate-limited log helpers, `log_once` and `BoundedLog`, are in
+`_log_limits`.
 
 The public names are re-exported by `deephaven_massive/__init__.py`; this module is private.
 """
