@@ -671,7 +671,7 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def opening() -> None:
         m = dm.MassiveSession(config)
         sessions.append(m)
-        made["fetch"] = m.stocks.trades("AAPL").fetch()
+        made["fetch"] = m.stocks.last_trade("AAPL").fetch()
         bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
         made["rest"] = bars.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST)
         files = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
@@ -690,7 +690,7 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def closing() -> None:
         sessions[0].close()
         with dm.MassiveSession(config) as other:  # opened and closed within one command
-            made["other"] = other.stocks.trades("AAPL").fetch()
+            made["other"] = other.stocks.last_trade("AAPL").fetch()
 
     console_command(closing)
     assert [r["Price"] for r in dh_to_pylist(made["other"])] == [129.84]

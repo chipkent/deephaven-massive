@@ -46,7 +46,7 @@ R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 DOCS = Path(__file__).resolve().parents[2] / "docs" / "datasets"
 SITE = "https://github.com/chipkent/deephaven-massive/blob/main/"
 # The wire interface names `Source.memberships` but exports no constructor for an element.
-MEMBERSHIP = type(source(R, "/v3/snapshot/indices").memberships[0])
+MEMBERSHIP = type(source(Transport.WS, "stocks/T").memberships[0])
 
 
 # --- The parity of docs/datasets ---------------------------------------------------------------
@@ -390,7 +390,7 @@ _STOCK_TRADES = DatasetSpec(
     summary="Trades of stocks, tick by tick.",
     asset_class=AssetClass.STOCKS,
     kind="trades",
-    fetch_path="/last/{ticker}",
+    extra_paths=("/last/{ticker}",),
     history_path="/trades/{ticker}",
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks/trades"},
@@ -482,7 +482,7 @@ def test_the_rendered_stocks_page() -> None:
     )
     price = (
         "| `Price` | double | The price, bid \\| ask. | REST, flat files, WebSocket "
-        "| `price`, `p` | `price` | `p` |"
+        "| `p`, `price` | `price` | `p` |"
     )
     expected = f"""# Columns of the `m.stocks` datasets
 
@@ -503,7 +503,7 @@ Trades of stocks, tick by tick.
 
 {head}
 | --- | --- | --- | --- | --- | --- | --- |
-| `Symbol` | String | {symbol} | {every} | `ticker`, request | `ticker` | `sym` |
+| `Symbol` | String | {symbol} | {every} | request, `ticker` | `ticker` | `sym` |
 | `Date` | String | {day} | {every} |  |  |  |
 | `Timestamp` | Instant | {stamp} | {every} | `t` | `sip_timestamp` | `t` |
 {price}

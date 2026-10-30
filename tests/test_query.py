@@ -36,11 +36,9 @@ from deephaven_massive._ingest import poll
 from deephaven_massive._massive import Transport
 from deephaven_massive._namespaces.base import build_query
 from deephaven_massive._query import (
-    HistoryLatestQuery,
     HistoryQuery,
     Query,
     QueryBase,
-    StreamHistoryLatestQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -60,15 +58,20 @@ TRADES_SPEC = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     channels={NotBars.ANY: "T"},
-    fetch_path="/v2/last/trade/{stocksTicker}",
     history_path="/v3/trades/{stockTicker}",
     keys={
-        (R, "/v2/last/trade/{stocksTicker}"): TICKER_AND_SIP,
         (R, "/v3/trades/{stockTicker}"): SourceKeys(
             KeySpec("stockTicker", from_request=True), KeySpec("SipTimestamp")
         ),
         (W, "stocks/T"): TICKER_AND_SIP,
     },
+)
+LAST_TRADE_SPEC = DatasetSpec(
+    name="stocks.last_trade",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.STOCKS,
+    fetch_path="/v2/last/trade/{stocksTicker}",
+    keys={(R, "/v2/last/trade/{stocksTicker}"): TICKER_AND_SIP},
 )
 BARS_SPEC = DatasetSpec(
     name="forex.bars",
@@ -76,7 +79,6 @@ BARS_SPEC = DatasetSpec(
     asset_class=AssetClass.FOREX,
     is_bars=True,
     channels={Timespan.SECOND: "CAS", Timespan.MINUTE: "CA"},
-    fetch_path="/v2/aggs/ticker/{forexTicker}/prev",
     history_path="/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}",
     grouped_daily_path="/v2/aggs/grouped/locale/global/market/fx/{date}",
 )
@@ -175,9 +177,15 @@ def make(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Que
     return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
 
 
-def trades(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamHistoryLatestQuery:
+def trades(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamHistoryQuery:
     q = make(session, TRADES_SPEC, symbols=symbols)
-    assert isinstance(q, StreamHistoryLatestQuery)
+    assert isinstance(q, StreamHistoryQuery)
+    return q
+
+
+def last_trade(session: dm.MassiveSession) -> Query:
+    q = make(session, LAST_TRADE_SPEC, symbols=("AAPL",))
+    assert isinstance(q, Query)
     return q
 
 
@@ -203,7 +211,6 @@ def test_queries_are_immutable_hashable_and_typed(massive_session: dm.MassiveSes
         "append_only",
         "blink",
         "columns",
-        "fetch",
         "history",
         "last_by",
         "ring",
@@ -214,15 +221,12 @@ def test_queries_are_immutable_hashable_and_typed(massive_session: dm.MassiveSes
 
 def test_query_repr(massive_session: dm.MassiveSession) -> None:
     assert repr(trades(massive_session, ["MSFT", "AAPL"])) == (
-        "<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>"
+        "<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>"
     )
-    assert (
-        repr(trades(massive_session, dm.ALL))
-        == "<StreamHistoryLatestQuery stocks.trades symbols=ALL>"
-    )
+    assert repr(trades(massive_session, dm.ALL)) == "<StreamHistoryQuery stocks.trades symbols=ALL>"
     watchlist = new_table([string_col("Symbol", ["A"])])
     assert repr(trades(massive_session, watchlist)) == (
-        "<StreamHistoryLatestQuery stocks.trades symbols=<symbol table>>"
+        "<StreamHistoryQuery stocks.trades symbols=<symbol table>>"
     )
     assert repr(make(massive_session, NEWS_SPEC)) == "<Query economy.inflation>"
     bars = make(
@@ -247,13 +251,80 @@ def test_query_repr(massive_session: dm.MassiveSession) -> None:
 def test_class_hierarchy() -> None:
     assert issubclass(StreamHistoryQuery, StreamQuery)
     assert issubclass(StreamHistoryQuery, HistoryQuery)
-    assert issubclass(StreamHistoryLatestQuery, StreamHistoryQuery)
-    assert issubclass(HistoryLatestQuery, HistoryQuery)
     assert not hasattr(StreamQuery, "fetch")
     assert not hasattr(StreamQuery, "poll")
     assert not hasattr(HistoryQuery, "fetch")
     assert not hasattr(StreamHistoryQuery, "fetch")
     assert not hasattr(Query, "history")
+
+
+def _missing(query: QueryBase, verb: str) -> str:
+    # The message of the AttributeError a missing verb raises.
+    with pytest.raises(AttributeError) as info:
+        getattr(query, verb)
+    assert (info.value.name, info.value.obj) == (verb, query)
+    return str(info.value)
+
+
+def test_a_missing_verb_names_the_dataset_of_the_same_kind_that_has_it(
+    massive_session: dm.MassiveSession,
+) -> None:
+    m = massive_session
+    assert not hasattr(m.stocks.trades("AAPL"), "fetch")
+    assert _missing(m.stocks.trades("AAPL"), "fetch") == (
+        "stocks.trades has no fetch(); its verbs are blink(), append_only(), ring(), last_by(), "
+        "history(); use m.stocks.last_trade(...).fetch()"
+    )
+    assert _missing(m.stocks.bars("AAPL", dm.Timespan.DAY), "poll") == (
+        "stocks.bars has no poll(); its verbs are history(); use "
+        "m.stocks.previous_day_bar(...).poll()"
+    )
+    # And back: the stream and the history of a one-row dataset are its kind's other datasets.
+    assert _missing(m.stocks.last_quote("AAPL"), "last_by") == (
+        "stocks.last_quote has no last_by(); its verbs are fetch(), poll(); use "
+        "m.stocks.quotes(...).last_by()"
+    )
+    assert _missing(m.indices.previous_day_bar("I:SPX"), "history") == (
+        "indices.previous_day_bar has no history(); its verbs are fetch(), poll(); use "
+        "m.indices.bars(...).history()"
+    )
+
+
+def test_a_missing_verb_without_a_sibling_names_what_else_serves(
+    massive_session: dm.MassiveSession,
+) -> None:
+    m = massive_session
+    # No last-quote endpoint for options: the snapshot is each contract's current state.
+    assert _missing(m.options.quotes("O:AAPL250117C00150000"), "fetch") == (
+        "options.quotes has no fetch(); its verbs are blink(), append_only(), ring(), "
+        "last_by(), history(); for each symbol's current state use "
+        "m.options.snapshots(...).fetch()"
+    )
+    assert _missing(m.stocks.dividends("AAPL"), "history") == (
+        "stocks.dividends has no history(); its verbs are fetch(), poll(); pass start= and end= "
+        "to m.stocks.dividends(...) instead"
+    )
+    assert _missing(m.stocks.bars("AAPL", dm.Timespan.HOUR), "blink") == (
+        "stocks.bars has no blink(); its verbs are history(); only bars of dm.Timespan.SECOND "
+        "and dm.Timespan.MINUTE with multiplier=1 stream"
+    )
+    # Nothing else serves it: the message names the verbs the query has.
+    assert _missing(m.stocks.luld("AAPL"), "history") == (
+        "stocks.luld has no history(); its verbs are blink(), append_only(), ring(), last_by()"
+    )
+    assert _missing(make(m, HISTORY_SPEC), "fetch") == (
+        "economy.yields has no fetch(); its verbs are history()"
+    )
+
+
+def test_any_other_missing_attribute_raises_python_s_own_error(
+    massive_session: dm.MassiveSession,
+) -> None:
+    q = trades(massive_session)
+    with pytest.raises(AttributeError, match=r"^'StreamHistoryQuery' object has no attribute "):
+        _ = q.fetchh
+    assert not hasattr(q, "__setstate_ex__")
+    assert callable(q.blink)  # a verb the query has never reaches the fallback
 
 
 # --- fetch and poll --------------------------------------------------------------------------
@@ -307,29 +378,24 @@ def _calls(caplog: pytest.LogCaptureFixture) -> list[str]:
 def test_each_static_verb_is_one_logged_call(
     massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
-    bars = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.DAY)
-    assert isinstance(bars, HistoryLatestQuery)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
         news(massive_session).fetch()
-        trades(massive_session).fetch()
-        bars.fetch()
+        last_trade(massive_session).fetch()
         trades(massive_session).history("2025-03-03", "2025-03-04", source=HistorySource.REST)
     query = repr(trades(massive_session))
     assert _calls(caplog) == [
         f"call 1 start: {news(massive_session)!r}.fetch()",
         "call 1 done: 0 rows in <s> s",
-        f"call 2 start: {query}.fetch()",
+        f"call 2 start: {last_trade(massive_session)!r}.fetch()",
         "call 2 done: 0 rows in <s> s",
-        f"call 3 start: {bars!r}.fetch()",
-        "call 3 done: 0 rows in <s> s",
         (
-            f"call 4 start: {query}.history('2025-03-03', '2025-03-04', "
+            f"call 3 start: {query}.history('2025-03-03', '2025-03-04', "
             "source=<HistorySource.REST: 'rest'>)"
         ),
-        "call 4 done: 0 rows in <s> s",
+        "call 3 done: 0 rows in <s> s",
     ]
     # The transport gets the id, and names its worker threads after it.
-    assert rest.call_ids == [1, 2, 3, 4]
+    assert rest.call_ids == [1, 2, 3]
 
 
 def test_a_failed_call_logs_its_error(
@@ -340,9 +406,12 @@ def test_a_failed_call_logs_its_error(
         caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
         pytest.raises(ValueError, match="needs explicit symbols") as info,
     ):
-        every.fetch()
+        every.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
     assert _calls(caplog) == [
-        f"call 1 start: {every!r}.fetch()",
+        (
+            f"call 1 start: {every!r}.history('2025-03-03', '2025-03-03', "
+            "source=<HistorySource.REST: 'rest'>)"
+        ),
         f"call 1 failed after <s> s: ValueError: {info.value}",
     ]
     # A caller's mistake is DEBUG, with its traceback for the log.
@@ -381,18 +450,13 @@ def test_a_history_call_through_flat_files_passes_its_id(
     assert flat.call_ids == [1]
 
 
-def test_latest_fetch_rejects_all(massive_session: dm.MassiveSession, rest: Recorder) -> None:
-    with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
-        trades(massive_session, dm.ALL).fetch()
-    trades(massive_session).fetch()
-    assert rest.calls[0][2].symbols == ("AAPL",)
-
-
-def test_previous_session_fetch(massive_session: dm.MassiveSession, rest: Recorder) -> None:
-    q = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.DAY)
-    assert isinstance(q, HistoryLatestQuery)
-    q.fetch()
-    assert rest.calls[0][2].symbols == ("C:EURUSD",)
+def test_a_one_row_fetch_passes_its_symbols(
+    massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    last_trade(massive_session).fetch()
+    assert [(c[0], c[1], c[2].symbols) for c in rest.calls] == [
+        ("fetch", LAST_TRADE_SPEC, ("AAPL",))
+    ]
 
 
 # --- history ---------------------------------------------------------------------------------
@@ -475,7 +539,7 @@ def test_history_rest_rejects_all_except_grouped_daily(
     with pytest.raises(ValueError, match="needs explicit symbols"):
         five.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
     daily = make(massive_session, BARS_SPEC, symbols=dm.ALL, timespan=Timespan.DAY)
-    assert isinstance(daily, HistoryLatestQuery)
+    assert type(daily) is HistoryQuery
     daily.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
     assert len(rest.calls) == 1
 
@@ -818,9 +882,10 @@ def test_a_refused_static_verb_logs_nothing(
     # The verb's guard comes first: a refused verb (here, on a closed session) takes no call id
     # and logs no call line.
     q = trades(massive_session)
+    one_row = last_trade(massive_session)
     massive_session.close()
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
-        for verb in (q.fetch, lambda: q.history("2025-03-03", source=HistorySource.REST)):
+        for verb in (one_row.fetch, lambda: q.history("2025-03-03", source=HistorySource.REST)):
             with pytest.raises(dm.MassiveError, match="is closed"):
                 verb()
     assert [r.getMessage() for r in caplog.records if r.levelno < logging.WARNING] == []
@@ -887,22 +952,18 @@ def test_every_static_verb_is_described(
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
     monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: flat)
-    stream_latest = trades(s3_session)
-    previous = make(s3_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.DAY)
-    assert isinstance(previous, HistoryLatestQuery)
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     cases = [
         (NEWS_SPEC, news(s3_session).fetch()),
-        (TRADES_SPEC, stream_latest.fetch()),
-        (BARS_SPEC, previous.fetch()),
-        (TRADES_SPEC, stream_latest.history("2025-03-03", "2025-03-04")),  # REST
+        (LAST_TRADE_SPEC, last_trade(s3_session).fetch()),
+        (TRADES_SPEC, trades(s3_session).history("2025-03-03", "2025-03-04")),  # REST
         (VALUES_SPEC, values.history("2025-03-03", "2025-03-04")),  # flat files
     ]
     for spec, table in cases:
         assert_described(s3_session, spec, table)
         assert not table.is_refreshing
-    assert [c[0] for c in rest.calls] == ["fetch", "fetch", "fetch", "history"]
+    assert [c[0] for c in rest.calls] == ["fetch", "fetch", "history"]
     assert [c[0] for c in flat.calls] == ["history"]
 
 
@@ -1057,16 +1118,6 @@ def test_last_by_over_groups_of_symbols_filters_before_aggregating(
     massive_session.release(current)
 
 
-def test_previous_session_fetch_rejects_all(
-    massive_session: dm.MassiveSession, rest: Recorder
-) -> None:
-    q = make(massive_session, BARS_SPEC, symbols=dm.ALL, timespan=Timespan.DAY)
-    assert isinstance(q, HistoryLatestQuery)
-    with pytest.raises(ValueError, match=r"forex\.bars\.fetch\(\) needs explicit symbols"):
-        q.fetch()
-    assert rest.calls == []
-
-
 def test_ring_accepts_its_lower_bound(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
@@ -1172,9 +1223,8 @@ def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str
         yield "ring(5)", query.ring(5)
         yield "last_by()", query.last_by()
         yield f"last_by({columns[-1]!r})", query.last_by(columns[-1])
-    if isinstance(query, Query | StreamHistoryLatestQuery | HistoryLatestQuery):
-        yield "fetch()", query.fetch()
     if isinstance(query, Query):
+        yield "fetch()", query.fetch()
         for mode in PollMode:
             yield f"poll(mode={mode.name})", query.poll(60, mode=mode)
     if isinstance(query, HistoryQuery):

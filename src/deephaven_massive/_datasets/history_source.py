@@ -473,10 +473,10 @@ def stamp_rule(
         stocks, options, indices, forex, and crypto; None for intraday bars, futures bars,
         and every dataset whose rows are not bars.
     """
-    indicator = not spec.is_bars and spec.times is RowTimes.BAR
+    indicator = not spec.holds_bars and spec.times is RowTimes.BAR
     cls = asset_class if indicator else spec.asset_class
     if (
-        not (spec.is_bars or indicator)
+        not (spec.holds_bars or indicator)
         or request.timespan not in _DAYS_OR_LONGER
         or not isinstance(cls, AssetClass)
         or cls not in DAY_ZONES

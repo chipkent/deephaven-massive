@@ -1,20 +1,22 @@
-"""The six query classes and their verbs.
+"""The four query classes and their verbs.
 
 A dataset method such as `m.stocks.trades(["AAPL"])` returns a *query*: an immutable,
 hashable description of what to fetch. Nothing touches the network until a *verb* is called,
 and each verb returns a Deephaven `Table` of a particular shape:
 
-| Class                      | Verbs                                                     |
-|----------------------------|-----------------------------------------------------------|
-| `Query`                    | `fetch()`, `poll(interval)`                               |
-| `StreamQuery`              | `blink()`, `append_only()`, `ring(capacity)`, `last_by()` |
-| `HistoryQuery`             | `history(start, end=None)`                                |
-| `StreamHistoryQuery`       | the stream verbs and `history()`                          |
-| `StreamHistoryLatestQuery` | the above and `fetch()` (the "last" endpoint)             |
-| `HistoryLatestQuery`       | `history()` and `fetch()` (the previous session's bar)    |
+| Class                | Verbs                                                     |
+|----------------------|-----------------------------------------------------------|
+| `Query`              | `fetch()`, `poll(interval)`                               |
+| `StreamQuery`        | `blink()`, `append_only()`, `ring(capacity)`, `last_by()` |
+| `HistoryQuery`       | `history(start, end=None)`                                |
+| `StreamHistoryQuery` | the stream verbs and `history()`                          |
 
-A verb that cannot work for a dataset does not exist on its query class, so tab completion is the
-contract. Every query also has `columns()`, which is not a verb: it lists the dataset's columns,
+A verb that cannot work for a dataset does not exist on its query class, so tab completion and
+`hasattr` are the contract; calling one raises an `AttributeError` that names the verbs the
+query has and, where one exists, the dataset that has the verb (`QueryBase.__getattr__`): a
+one-row endpoint, such as each symbol's last trade, is a `Query` dataset of its own
+(`m.stocks.last_trade`), never a `fetch()` of the stream. Every query also has `columns()`,
+which is not a verb: it lists the dataset's columns,
 their types, and what each one means, as a static table built without any network call.
 Verbs validate their parameters synchronously on the calling thread: a wrong type raises
 `TypeError` and an invalid value raises `ValueError`. Every verb also raises `ValueError` on a
@@ -71,7 +73,7 @@ from deephaven_massive._errors import MassiveError
 from deephaven_massive._tables.columns import column_table, describe
 from deephaven_massive._tables.liveness import entered, refuse_update_graph_thread
 from deephaven_massive._tables.watchlist import read_symbols
-from deephaven_massive._types import ALL, override
+from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -84,11 +86,9 @@ if TYPE_CHECKING:
     from deephaven_massive._types import DateLike
 
 __all__ = [
-    "HistoryLatestQuery",
     "HistoryQuery",
     "Query",
     "QueryBase",
-    "StreamHistoryLatestQuery",
     "StreamHistoryQuery",
     "StreamQuery",
 ]
@@ -97,6 +97,12 @@ logger = logging.getLogger(__name__)
 
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
+
+_VERBS: Final = ("fetch", "poll", "blink", "append_only", "ring", "last_by", "history")
+"""Every verb's name, in the order a missing verb's message lists the verbs a query has."""
+
+_STREAM_VERBS: Final = frozenset({"blink", "append_only", "ring", "last_by"})
+"""The verbs a dataset with WebSocket channels serves."""
 
 _Q = TypeVar("_Q", bound="QueryBase")
 _P = ParamSpec("_P")
@@ -155,22 +161,26 @@ def _interval(value: object) -> timedelta:
     return period
 
 
-def _require_explicit_symbols(spec: DatasetSpec, request: Request) -> None:
-    """Reject `dm.ALL` for a per-ticker `fetch()` endpoint.
+def _serves(spec: DatasetSpec, verb: str) -> bool:
+    """Tell whether a dataset's query has a verb, from the transports its spec declares.
+
+    The query classes follow from the same transports (`query_class` in
+    `_namespaces/base.py`): a fetch path gives `fetch()` and `poll()`, channels the stream
+    verbs, and a history source `history()`. A `bars` dataset streams at some timespans only,
+    which is enough to name it as the dataset that streams.
 
     Args:
         spec: The dataset.
-        request: The normalized arguments.
+        verb: A verb's name, one of `_VERBS`.
 
-    Raises:
-        ValueError: If the symbols are `dm.ALL`; the message names `snapshots(dm.ALL)`.
+    Returns:
+        True when the dataset serves the verb.
     """
-    if request.symbols is ALL:
-        namespace = spec.name.split(".", 1)[0]
-        raise ValueError(
-            f"{spec.name}.fetch() needs explicit symbols; "
-            f"use m.{namespace}.snapshots(dm.ALL).fetch() for every symbol"
-        )
+    if verb in _STREAM_VERBS:
+        return spec.has_channels
+    if verb == "history":
+        return spec.has_history
+    return spec.has_fetch
 
 
 def _read_symbol_table(
@@ -284,11 +294,79 @@ class QueryBase:
         """Show the query class, the dataset, and the non-default arguments.
 
         Returns:
-            For example `<StreamHistoryLatestQuery stocks.trades symbols=('AAPL', 'MSFT')>`.
+            For example `<StreamHistoryQuery stocks.trades symbols=('AAPL', 'MSFT')>`.
         """
         described = self._request.describe()
         suffix = f" {described}" if described else ""
         return f"<{type(self).__name__} {self._spec.name}{suffix}>"
+
+    def __getattr__(self, name: str) -> object:
+        """Explain a verb this query does not have, and name the dataset that has it.
+
+        Python calls this only when the normal lookup fails, so the query's own verbs,
+        `columns()`, and every other attribute resolve as usual, and `hasattr(q, "fetch")` is
+        False on a query without `fetch()`. The return type is `object`, not `NoReturn`, so a
+        type checker still refuses a call of a verb the query's class lacks.
+
+        Args:
+            name: The attribute that was not found.
+
+        Returns:
+            Never: it always raises.
+
+        Raises:
+            AttributeError: Always. For a verb's name, the message names the dataset, the verbs
+                its query has, and where one exists the dataset that has the verb, such as
+                `"stocks.trades has no fetch(); its verbs are blink(), append_only(), ring(),
+                last_by(), history(); use m.stocks.last_trade(...).fetch()"`
+                (`_missing_verb`); for any other name, Python's own message.
+        """
+        if name not in _VERBS:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}", name=name, obj=self
+            )
+        raise AttributeError(self._missing_verb(name), name=name, obj=self)
+
+    def _missing_verb(self, verb: str) -> str:
+        """Say why this query has no `verb`, and what to call instead.
+
+        The alternative, where there is one, is in order: the other datasets of the same kind
+        and asset class that serve the verb (a stream's one-row dataset, such as
+        `stocks.last_trade` for `fetch()` of `stocks.trades`, and back); for `fetch()` or
+        `poll()`, the class's `snapshots` dataset, the current state on every plan; for
+        `history()` of a dataset with a time axis, its `start=` and `end=` arguments; for a
+        stream verb of bars that do not stream, the timespans that do. Reads only
+        the catalog: no request, no Deephaven call.
+
+        Args:
+            verb: The missing verb's name, one of `_VERBS`.
+
+        Returns:
+            The `AttributeError` message.
+        """
+        spec = self._spec
+        has = ", ".join(f"{name}()" for name in _VERBS if hasattr(type(self), name))
+        text = f"{spec.name} has no {verb}(); its verbs are {has}"
+        by_name = self._core.catalog.by_name
+        siblings = [
+            other.name
+            for other in by_name.values()
+            if other is not spec
+            and spec.kind is not None
+            and (other.kind, other.group) == (spec.kind, spec.group)
+            and _serves(other, verb)
+        ]
+        if siblings:
+            return f"{text}; use " + " or ".join(f"m.{n}(...).{verb}()" for n in siblings)
+        snapshots = by_name.get(f"{spec.name.partition('.')[0]}.snapshots")
+        if verb in ("fetch", "poll") and snapshots is not None:
+            return f"{text}; for each symbol's current state use m.{snapshots.name}(...).{verb}()"
+        if verb == "history" and spec.time_axis is not None:
+            return f"{text}; pass start= and end= to m.{spec.name}(...) instead"
+        if verb in _STREAM_VERBS and spec.is_bars and spec.has_channels:
+            spans = " and ".join(f"dm.Timespan.{span.name}" for span in spec.channels)
+            return f"{text}; only bars of {spans} with multiplier=1 stream"
+        return text
 
     def _described(self, table: Table) -> Table:
         """Describe the static table a transport returned, as the verb's result (`describe`).
@@ -334,22 +412,6 @@ class QueryBase:
             elapsed = time.monotonic() - started
             logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
         return table
-
-    def _fetch_latest(self, call: int) -> Table:
-        """Run the `fetch()` of a "last" or previous-bar endpoint as call `call`.
-
-        Args:
-            call: The call id.
-
-        Returns:
-            The static table, one row per symbol.
-
-        Symbols of `dm.ALL` raise the `ValueError` of `_require_explicit_symbols`.
-        """
-        _require_explicit_symbols(self._spec, self._request)
-        return self._described(
-            self._core.rest_transport().fetch(self._spec, self._static_request(), call=call)
-        )
 
     def _static_request(self) -> Request:
         """Return the request with a symbol table read once, for a static verb.
@@ -973,82 +1035,3 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
     """
 
     __slots__ = ()
-
-
-class StreamHistoryLatestQuery(StreamHistoryQuery):
-    """A stream-and-history dataset with a REST "last" endpoint, served by `fetch()`.
-
-    Built by a dataset method, such as `m.stocks.trades(...)`; immutable and reusable.
-
-    Example:
-        ::
-
-            q = m.stocks.trades(["AAPL", "MSFT"])
-            last = q.fetch()  # one row per symbol: its latest trade
-            tape = q.ring(10_000)
-    """
-
-    __slots__ = ()
-
-    @_verb
-    def fetch(self) -> Table:
-        """Return exactly one row per symbol, the latest, from the dataset's "last" endpoint.
-
-        The requests run on the calling thread, or on up to `max_concurrency` threads: one per
-        symbol for a per-symbol endpoint (`/v2/last/trade`), or one per batch of symbols for a
-        snapshot endpoint (the indices snapshot). A reactive symbol table is read once, when
-        the verb is called. The "last" endpoints are absent from some plans;
-        `snapshots(symbols).fetch()` is the alternative that works on every plan. A failed
-        request raises `MassiveError` (`EntitlementError` on HTTP 403).
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
-
-        Symbols of `dm.ALL` raise `ValueError` naming `snapshots(dm.ALL)`.
-
-        Returns:
-            A static table in the stream's schema.
-        """
-        return self._logged_call("fetch()", self._fetch_latest)
-
-
-class HistoryLatestQuery(HistoryQuery):
-    """Daily bars: `history()` plus `fetch()` of the previous completed session's bar.
-
-    The `bars()` of stocks, options, indices, forex, and crypto return this class for 1-day
-    bars with `multiplier=1`. A query is built by the namespace method, holds no state of its
-    own beyond its arguments, and may be used from any thread but a Deephaven update-graph
-    thread.
-
-    Example:
-        ::
-
-            q = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY)
-            prev = q.fetch()  # each symbol's bar of the previous completed session
-            march = q.history("2025-03-03", "2025-03-31")
-    """
-
-    __slots__ = ()
-
-    @_verb
-    def fetch(self) -> Table:
-        """Return one row per symbol: the bar of the previous completed session.
-
-        Massive documents the endpoint as "the prior session's open, high, low, close, and
-        volume". The bar's `TimestampStart` is 00:00 of its day in the class day zone (New
-        York for stocks, options, and indices; UTC for forex and crypto), whatever time Massive
-        stamps it at, its `TimestampEnd` 00:00 of the next day (01:00 New York time for
-        indices), and its `Date` that day. A stamp at a time of day Massive is not known to use
-        for the class raises `MassiveError`, naming the dataset and `/prev`. Stock and option
-        bars are split-adjusted unless the query says `adjusted=False`, and a page whose
-        `adjusted` echo differs from the request raises `MassiveError`. A failed request raises
-        `MassiveError` (`EntitlementError` on HTTP 403).
-        Like every verb, it raises `ValueError` on a Deephaven update-graph thread and
-        `MassiveError` once the session is closed.
-
-        The endpoint takes one ticker per request, so symbols of `dm.ALL` raise `ValueError`
-        naming `snapshots(dm.ALL)`; `history()` serves every symbol's daily bars.
-
-        Returns:
-            A static table in the bars schema.
-        """
-        return self._logged_call("fetch()", self._fetch_latest)

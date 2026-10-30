@@ -144,14 +144,15 @@ INDEX_SNAPSHOTS = DatasetSpec(
     symbol_param="ticker.any_of",
     keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
 )
-INDEX_VALUES = DatasetSpec(
+# A tick dataset over the indices snapshot: each index's level, timed by its `last_updated`.
+INDEX_LEVELS = DatasetSpec(
     summary="A dataset for the tests.",
-    name="indices.values",
+    name="indices.levels",
     asset_class=AssetClass.INDICES,
-    kind="values",
+    row_times=RowTimes.TICK,
     fetch_path=INDEX_SNAPSHOT_PATH,
     symbol_param="ticker.any_of",
-    keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("Timestamp"))},
+    keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("LastUpdated"))},
 )
 TRADES_PATH = "/v3/trades/{stockTicker}"
 TRADES = DatasetSpec(
@@ -309,7 +310,7 @@ SPECS = (
     SMA,
     CONVERSION,
     INDEX_SNAPSHOTS,
-    INDEX_VALUES,
+    INDEX_LEVELS,
     TRADES,
     BARS,
     FUTURES_BARS,
@@ -1380,22 +1381,6 @@ def test_the_first_part_of_a_page_gives_a_drift_sample(
     assert drift.endswith('; first value "good"')
 
 
-def test_error_rows_of_a_projected_path_are_dropped_with_a_warning(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
-) -> None:
-    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
-    spx = {"ticker": "I:SPX", "value": 5900.0, "last_updated": 1704310200000000000}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx])))
-    with caplog.at_level(logging.WARNING, LOGGER):
-        out = fetch(session, INDEX_VALUES, symbols=["I:SPX", "I:VIX"])
-    assert [(r["Symbol"], r["Timestamp"], r["Value"]) for r in out] == [
-        ("I:SPX", 1704310200000000000, 5900.0)
-    ]
-    assert (
-        "Massive answered NOT_ENTITLED for I:VIX: Not entitled; the row is dropped" in caplog.text
-    )
-
-
 def test_drift_is_reported_once_per_field_and_status(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2164,7 +2149,7 @@ def test_columns_a_path_does_not_carry_are_null(
     assert (row["Symbol"], row["CashAmount"], row["StrikePrice"]) == ("AAPL", 0.25, None)
 
 
-def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
+def test_a_missing_symbol_and_an_error_row_warn_once_per_session(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
@@ -2173,9 +2158,11 @@ def test_a_missing_symbol_and_a_dropped_row_warn_once_per_session(
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
-            assert fetch(session, INDEX_VALUES, symbols=["I:VIX"]) == []
+            (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
+            assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
     assert caplog.text.count("X:ETHUSD has no data") == 1
-    assert caplog.text.count("for I:VIX: Not entitled; the row is dropped") == 1
+    kept = "the row is kept with its Error and Message columns"
+    assert caplog.text.count(f"for I:VIX: Not entitled; {kept}") == 1
 
 
 def test_a_read_fans_out_on_the_callers_pool(
@@ -3094,7 +3081,7 @@ def test_a_tick_dataset_dates_each_row_in_its_day_zone(
     snapshot = {"ticker": "I:SPX", "value": 1.0, "last_updated": late}
     other = {"ticker": "I:NDX", "value": 2.0, "last_updated": late}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot, other])))
-    q = query(session, INDEX_VALUES, symbols=["I:NDX", "I:SPX"])
+    q = query(session, INDEX_LEVELS, symbols=["I:NDX", "I:SPX"])
     assert isinstance(q, Query)
     table = q.fetch()
     row = rows(table)[0]

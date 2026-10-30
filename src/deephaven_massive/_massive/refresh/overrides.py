@@ -1356,7 +1356,7 @@ KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
             ],
         },
         "values": {
-            "indices": ["/v3/snapshot/indices", "indices/V", "us_indices/values_v1"],
+            "indices": ["indices/V", "us_indices/values_v1"],
         },
         "luld": {"stocks": ["stocks/LULD"]},
         "imbalances": {"stocks": ["stocks/NOI"]},
@@ -1396,13 +1396,6 @@ PROJECTIONS: Mapping[tuple[str, str], Projection] = MappingProxyType(
             reason=_QUOTE_PRICES.format(
                 source="The crypto quote stream, named after crypto's own last quote,"
             ),
-        ),
-        ("values", "/v3/snapshot/indices"): Projection(
-            fields={"ticker": "ticker", "value": "value", "last_updated": "timestamp"},
-            reason="The indices snapshot answers the latest value of an index: its ticker, its "
-            "value, and the time of that value, which the WebSocket and the flat file name "
-            "`timestamp`. Its other fields (the session bar, the market status) belong to the "
-            "snapshot, not to a value row.",
         ),
     }
 )

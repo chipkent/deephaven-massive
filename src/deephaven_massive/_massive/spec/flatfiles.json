@@ -205,7 +205,7 @@
     {"column": "Timestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "timestamp"}
    ],
    "memberships": [
-    {"group": "indices", "kind": "values", "position": 2, "projection": null}
+    {"group": "indices", "kind": "values", "position": 1, "projection": null}
    ]
   },
   {

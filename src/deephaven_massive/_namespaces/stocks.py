@@ -1,9 +1,9 @@
 """The `m.stocks` namespace: US equities.
 
-Datasets: trades, quotes, bars, LULD bands, net order imbalances, fair market value,
-snapshots, movers, daily open/close, dividends, splits, IPOs, short interest and volume, share
-float, and the nested `m.stocks.financials` (`_StockFinancials`) and `m.stocks.filings`
-(`_StockFilings`) namespaces.
+Datasets: trades, quotes, bars, each symbol's last trade, last quote, and previous day's bar, LULD
+bands, net order imbalances, fair market value, snapshots, movers, daily open/close, dividends,
+splits, IPOs, short interest and volume, share float, and the nested `m.stocks.financials`
+(`_StockFinancials`) and `m.stocks.filings` (`_StockFilings`) namespaces.
 
 Each dataset is one factory method that validates its arguments and returns a query; nothing
 touches the network until a verb is called on the query. This module owns the namespace's
@@ -55,15 +55,13 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from deephaven_massive._query import (
-        HistoryLatestQuery,
         HistoryQuery,
         Query,
-        StreamHistoryLatestQuery,
         StreamHistoryQuery,
         StreamQuery,
     )
     from deephaven_massive._tables.core import SessionCore
-    from deephaven_massive._types import DateLike, DaySpan, FilterValue, StreamSpan, Symbols
+    from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
 
 __all__ = ["DATASETS", "_StockFilings", "_StockFinancials", "_Stocks"]
 
@@ -115,12 +113,10 @@ TRADES: Final = DatasetSpec(
     summary="Trades of US-listed stocks, tick by tick.",
     asset_class=_STOCKS,
     kind="trades",
-    fetch_path=_LAST_TRADE,
     history_path=_TRADES,
     channels={NotBars.ANY: "T"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/trades_v1"},
     keys={
-        (_R, _LAST_TRADE): _ticker_keys("SipTimestamp"),
         (_R, _TRADES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
         (_W, "stocks/T"): _ticker_keys("SipTimestamp"),
         (_F, "us_stocks_sip/trades_v1"): _ticker_keys("SipTimestamp"),
@@ -128,17 +124,27 @@ TRADES: Final = DatasetSpec(
     time_axis=("timestamp.gte", "timestamp.lt"),
     page_size=50_000,
 )
+# Each one-row dataset joins the kind of its stream and history dataset, so its rows have the
+# same columns; an explicit APPEND poll() records each new row by its time.
+LAST_TRADE: Final = DatasetSpec(
+    name="stocks.last_trade",
+    summary="The latest trade of each US-listed stock.",
+    asset_class=_STOCKS,
+    kind="trades",
+    fetch_path=_LAST_TRADE,
+    keys={(_R, _LAST_TRADE): _ticker_keys("SipTimestamp")},
+    per_symbol=True,
+    revision_keys=("Timestamp",),
+)
 QUOTES: Final = DatasetSpec(
     name="stocks.quotes",
     summary="National best bid and offer quotes of US-listed stocks, tick by tick.",
     asset_class=_STOCKS,
     kind="quotes",
-    fetch_path=_LAST_QUOTE,
     history_path=_QUOTES,
     channels={NotBars.ANY: "Q"},
     flat_file_prefixes={NotBars.ANY: "us_stocks_sip/quotes_v1"},
     keys={
-        (_R, _LAST_QUOTE): _ticker_keys("SipTimestamp"),
         (_R, _QUOTES): SourceKeys(symbol=_request("stockTicker"), time=_row("SipTimestamp")),
         (_W, "stocks/Q"): _ticker_keys("SipTimestamp"),
         (_F, "us_stocks_sip/quotes_v1"): _ticker_keys("SipTimestamp"),
@@ -146,19 +152,30 @@ QUOTES: Final = DatasetSpec(
     time_axis=("timestamp.gte", "timestamp.lt"),
     page_size=50_000,
 )
+LAST_QUOTE: Final = DatasetSpec(
+    name="stocks.last_quote",
+    summary="The latest national best bid and offer of each US-listed stock.",
+    asset_class=_STOCKS,
+    kind="quotes",
+    fetch_path=_LAST_QUOTE,
+    keys={(_R, _LAST_QUOTE): _ticker_keys("SipTimestamp")},
+    per_symbol=True,
+    revision_keys=("Timestamp",),
+)
+_BAR_NOTES: Final = adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",))
+"""The split-adjustment notes of the stock bars' price and volume columns."""
+
 BARS: Final = DatasetSpec(
     name="stocks.bars",
     summary="Aggregate bars (open, high, low, close, volume) of US-listed stocks.",
     asset_class=_STOCKS,
     is_bars=True,
     kind="bars",
-    fetch_path=_PREV,
     history_path=_RANGE,
     grouped_daily_path=_GROUPED,
     channels={Timespan.SECOND: "A", Timespan.MINUTE: "AM"},
     flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
     keys={
-        (_R, _PREV): _ticker_keys("WindowStart"),
         (_R, _RANGE): SourceKeys(symbol=_request("stocksTicker"), time=_row("WindowStart")),
         (_R, _GROUPED): _ticker_keys("WindowStart"),
         (_W, "stocks/A"): _stream_bar_keys(),
@@ -167,7 +184,18 @@ BARS: Final = DatasetSpec(
         (_F, _DAY_FILES): _ticker_keys("WindowStart"),
     },
     page_size=50_000,
-    column_notes=adjustment_notes(("Open", "High", "Low", "Close", "Vwap"), ("Volume",)),
+    column_notes=_BAR_NOTES,
+)
+PREVIOUS_DAY_BAR: Final = DatasetSpec(
+    name="stocks.previous_day_bar",
+    summary="The previous trading day's bar (open, high, low, close, volume) of US stocks.",
+    asset_class=_STOCKS,
+    kind="bars",
+    fetch_path=_PREV,
+    keys={(_R, _PREV): _ticker_keys("WindowStart")},
+    per_symbol=True,
+    revision_keys=("TimestampStart",),
+    column_notes=_BAR_NOTES,
 )
 LULD: Final = DatasetSpec(
     name="stocks.luld",
@@ -636,8 +664,11 @@ DISCLOSURE_TAXONOMY: Final = DatasetSpec(
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
     TRADES,
+    LAST_TRADE,
     QUOTES,
+    LAST_QUOTE,
     BARS,
+    PREVIOUS_DAY_BAR,
     LULD,
     IMBALANCES,
     FMV,
@@ -2013,7 +2044,7 @@ class _Stocks(Namespace):
         """The SEC filings and taxonomy datasets (`m.stocks.filings`)."""
         return self._filings
 
-    def trades(self, symbols: Symbols) -> StreamHistoryLatestQuery:
+    def trades(self, symbols: Symbols) -> StreamHistoryQuery:
         """Trades of US-listed stocks, tick by tick.
 
         Each row is one trade reported to the SIP: price, size, exchange, conditions, and the
@@ -2022,11 +2053,10 @@ class _Stocks(Namespace):
         `Timestamp`), and `TimestampInsert`, when the library received it. Streams over the
         WebSocket (`T`) through `blink()`, `append_only()`, `ring()`, and `last_by()`;
         `history()` reads REST (`/v3/trades/{stockTicker}`) or the flat files
-        (`us_stocks_sip/trades_v1`); `fetch()` returns each symbol's last trade
-        (`/v2/last/trade/{stocksTicker}`), one request per symbol.
+        (`us_stocks_sip/trades_v1`). Each symbol's latest trade is `last_trade()`.
 
         `history()` has no `limit`: it pages internally. `dm.ALL` streams every ticker and
-        reads every ticker from the flat files; REST `history()` and `fetch()` refuse it.
+        reads every ticker from the flat files; REST `history()` refuses it.
         Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#trades,
         the web UI's column tooltips, or `columns()`.
@@ -2049,9 +2079,53 @@ class _Stocks(Namespace):
                 recent = q.ring(10_000)
                 friday = q.history("2025-06-06", "2025-06-06")
         """
-        return cast("StreamHistoryLatestQuery", build_query(self._core, TRADES, symbols=symbols))
+        return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
 
-    def quotes(self, symbols: Symbols) -> StreamHistoryLatestQuery:
+    def last_trade(self, symbols: Symbols) -> Query:
+        """The latest trade of each US-listed stock.
+
+        Each row is one symbol's most recent trade reported to the SIP, with the columns of
+        `trades()`: price, size, exchange, conditions, and the SIP, participant, and TRF
+        timestamps (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd`
+        text, the New York date of `Timestamp`), and `TimestampInsert`, when the library
+        received it. Served by REST (`/v2/last/trade/{stocksTicker}`) through `fetch()` and
+        `poll()`, one request per symbol; `poll()` replaces the table each cycle, keyed by
+        `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each new trade. Some plans
+        lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries
+        each ticker's last trade on every plan. A symbol with no trade (HTTP 404) is left out,
+        with a WARNING.
+
+        `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
+        since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
+        Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#last_trade,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
+        accepted forms; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker,
+        or a `Table` has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
+                column (re-read each `poll()` cycle).
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                last = m.stocks.last_trade(["AAPL", "MSFT"]).fetch()
+        """
+        query = build_query(
+            self._core,
+            LAST_TRADE,
+            symbols=symbols,
+            all_alternative="m.stocks.snapshots(dm.ALL).fetch()",
+        )
+        return cast("Query", query)
+
+    def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """National best bid and offer quotes of US-listed stocks, tick by tick.
 
         Each row is one NBBO update: bid and ask prices, sizes, and exchanges, conditions,
@@ -2060,11 +2134,10 @@ class _Stocks(Namespace):
         `Timestamp`), and `TimestampInsert`, when the library received it. Streams over the
         WebSocket (`Q`) through `blink()`, `append_only()`, `ring()`, and `last_by()`;
         `history()` reads REST (`/v3/quotes/{stockTicker}`) or the flat files
-        (`us_stocks_sip/quotes_v1`); `fetch()` returns each symbol's last NBBO
-        (`/v2/last/nbbo/{stocksTicker}`), one request per symbol.
+        (`us_stocks_sip/quotes_v1`). Each symbol's latest NBBO is `last_quote()`.
 
         `history()` has no `limit`: it pages internally. `dm.ALL` streams every ticker and
-        reads every ticker from the flat files; REST `history()` and `fetch()` refuse it.
+        reads every ticker from the flat files; REST `history()` refuses it.
         Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#quotes,
         the web UI's column tooltips, or `columns()`.
@@ -2085,7 +2158,51 @@ class _Stocks(Namespace):
 
                 top = m.stocks.quotes(["AAPL", "SPY"]).last_by()
         """
-        return cast("StreamHistoryLatestQuery", build_query(self._core, QUOTES, symbols=symbols))
+        return cast("StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols))
+
+    def last_quote(self, symbols: Symbols) -> Query:
+        """The latest national best bid and offer of each US-listed stock.
+
+        Each row is one symbol's most recent NBBO, with the columns of `quotes()`: bid and ask
+        prices, sizes, and exchanges, conditions, indicators, and the SIP and participant
+        timestamps (`Timestamp` is the SIP time), its trading day `Date` (ISO `yyyy-MM-dd`
+        text, the New York date of `Timestamp`), and `TimestampInsert`, when the library
+        received it. Served by REST (`/v2/last/nbbo/{stocksTicker}`) through `fetch()` and
+        `poll()`, one request per symbol; `poll()` replaces the table each cycle, keyed by
+        `Symbol`, and an explicit `mode=dm.PollMode.APPEND` appends each new quote. Some plans
+        lack the endpoint (HTTP 403 raises `EntitlementError`); `snapshots(symbols)` carries
+        each ticker's last quote on every plan. A symbol with no quote (HTTP 404) is left out,
+        with a WARNING.
+
+        `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
+        since the endpoint takes one ticker per request: use `m.stocks.snapshots(dm.ALL).fetch()`.
+        Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#last_quote,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `symbols` is not one of the
+        accepted forms; `ValueError` if `symbols` is `dm.ALL`, empty, or holds an invalid ticker,
+        or a `Table` has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
+                column (re-read each `poll()` cycle).
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                spreads = m.stocks.last_quote(["AAPL", "SPY"]).poll(5)
+        """
+        query = build_query(
+            self._core,
+            LAST_QUOTE,
+            symbols=symbols,
+            all_alternative="m.stocks.snapshots(dm.ALL).fetch()",
+        )
+        return cast("Query", query)
 
     @overload
     def bars(
@@ -2096,15 +2213,6 @@ class _Stocks(Namespace):
         multiplier: Literal[1] = 1,
         adjusted: bool = True,
     ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self,
-        symbols: Symbols,
-        timespan: DaySpan,
-        *,
-        multiplier: Literal[1] = 1,
-        adjusted: bool = True,
-    ) -> HistoryLatestQuery: ...
     @overload
     def bars(
         self,
@@ -2129,9 +2237,8 @@ class _Stocks(Namespace):
         time), its open, high, low, close, volume, VWAP, and trade count, and `TimestampInsert`,
         when the library received it. The timespan picks the transports and the query class:
         one-second and one-minute bars also stream over the WebSocket (`A`, `AM`) as a
-        `StreamHistoryQuery`; one-day bars add `fetch()` of the previous completed session
-        (`/v2/aggs/ticker/{stocksTicker}/prev`, one request per symbol) as a
-        `HistoryLatestQuery`; every other combination is history only. `history()` reads REST
+        `StreamHistoryQuery`; every other combination is history only, and the previous
+        completed session's bar is `previous_day_bar()`. `history()` reads REST
         (`/v2/aggs/ticker/{stocksTicker}/range/...`) or, for unadjusted one-minute and one-day
         bars, the flat files (`us_stocks_sip/minute_aggs_v1`, `us_stocks_sip/day_aggs_v1`); with
         `dm.ALL`, one-day REST history reads the grouped daily bars
@@ -2142,7 +2249,7 @@ class _Stocks(Namespace):
         window had closed; it is not when Massive published the bar. An intraday bar ends
         its length after its start. A bar of a day or longer runs from 00:00 New York time
         of its window's first day to 00:00 after its last, whatever the source: the range
-        stamps a 1-day bar at the day's start, while grouped daily, `/prev`, and the day
+        stamps a 1-day bar at the day's start, while grouped daily and the day
         files stamp it at the 16:00 session close (13:00 on a short trading day), which is
         moved to the day's start. A week runs Monday to Friday and a month, quarter, or year
         from its first to its last weekday. A bar of several days counts trading days,
@@ -2174,7 +2281,7 @@ class _Stocks(Namespace):
         day's, week's, or month's bar never appears, and a 2-day bar from a Thursday is left
         out of a range that ends on the Friday, since a holiday could carry it into Monday.
         `dm.ALL` streams every ticker and works with `history()` where a flat file or the
-        grouped daily path serves it; `fetch()` refuses it. Columns:
+        grouped daily path serves it. Columns:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#bars,
         the web UI's column tooltips, or `columns()`.
 
@@ -2189,7 +2296,7 @@ class _Stocks(Namespace):
             timespan: The bar unit, a `dm.Timespan` other than `SESSION`; defaults to
                 `MINUTE`.
             multiplier: The number of `timespan` units per bar, a positive `int`; defaults to
-                1. Only 1 streams or has `fetch()`.
+                1. Only 1 streams.
             adjusted: True (the default) for bars adjusted for splits, from REST only; False
                 for bars as traded, which the flat files can also serve. Streams are always as
                 traded.
@@ -2216,6 +2323,60 @@ class _Stocks(Namespace):
             adjusted=require_bool("adjusted", adjusted),
         )
         return cast("HistoryQuery", query)
+
+    def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> Query:
+        """The previous trading day's bar (open, high, low, close, volume) of US stocks.
+
+        Each row is one symbol's 1-day bar of the previous completed session, which Massive
+        documents as "the prior session's open, high, low, close, and volume", with the
+        columns of `bars()`: its window, from `TimestampStart`, 00:00 New York time of the day,
+        to the exclusive `TimestampEnd`, 00:00 of the next day, its trading day `Date` (ISO
+        `yyyy-MM-dd` text), open, high, low, close, volume, VWAP, and trade count, and
+        `TimestampInsert`, when the library received it. Served by REST
+        (`/v2/aggs/ticker/{stocksTicker}/prev`) through `fetch()` and `poll()`, one request per
+        symbol; `poll()` replaces the table each cycle, keyed by `Symbol`, and an explicit
+        `mode=dm.PollMode.APPEND` appends each new day's bar. Massive stamps the bar at the
+        16:00 session close (13:00 on a short day), which is moved to the day's start; any
+        other stamp raises `MassiveError` naming `bars(symbols, dm.Timespan.DAY).history()`
+        for that day. A symbol with no bar (HTTP 404) is left out, with a WARNING.
+
+        Prices are split-adjusted when `adjusted` is True, the default, as `bars()` describes,
+        and a page whose own `adjusted` differs from the request raises `MassiveError`.
+
+        `fetch()` and `poll()` take no `limit`: each symbol gives one row. `dm.ALL` is refused,
+        since the endpoint takes one ticker per request: use
+        `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` for every ticker's bar of a
+        day. Columns:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.md#previous_day_bar,
+        the web UI's column tooltips, or `columns()`.
+
+        Arguments are checked when the query is built: `TypeError` if `adjusted` is not a
+        `bool`, or `symbols` is not an accepted form; `ValueError` if `symbols` is `dm.ALL`,
+        empty, or holds an invalid ticker, or a `Table` has no `Symbol` column.
+
+        Args:
+            symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
+                column (re-read each `poll()` cycle).
+            adjusted: True (the default) for prices and volume adjusted for splits; False for
+                the bar as traded.
+
+        Returns:
+            The query; nothing is requested until a verb runs.
+
+        Example:
+            ::
+
+                prev = m.stocks.previous_day_bar(["AAPL", "MSFT"]).fetch()
+        """
+        query = build_query(
+            self._core,
+            PREVIOUS_DAY_BAR,
+            symbols=symbols,
+            all_alternative="m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)",
+            timespan=Timespan.DAY,
+            adjusted=require_bool("adjusted", adjusted),
+        )
+        return cast("Query", query)
 
     def luld(self, symbols: Symbols) -> StreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.

@@ -733,9 +733,6 @@ class _Converter:
             that are not filled from the request.
         required_on_error: The required columns of an error row (`hosts.is_error_row`): only
             its symbol key, so a ticker the plan does not include keeps its row.
-        projected: True when the path joins the dataset through a projection of its kind
-            membership (the indices snapshot as index values): a row that carries an `error`
-            has no value to project, so it is dropped instead of kept.
         symbols: How a symbol read from the rows becomes canonical (`WireSymbols`), and
             what a spelling the library cannot read does.
         symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
@@ -750,7 +747,6 @@ class _Converter:
     arrow_schema: pa.Schema
     required: frozenset[str]
     required_on_error: frozenset[str]
-    projected: bool
     symbols: WireSymbols
     symbol_key: str | None
     time_name: str
@@ -788,10 +784,6 @@ class _Converter:
             arrow_schema=schema.arrow_schema(),
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
             required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
-            projected=any(
-                m.kind == spec.kind and m.group == spec.group and m.projection is not None
-                for m in rest_path.memberships
-            ),
             symbols=WireSymbols(
                 spec.name, spec.asset_class, unknown_symbols, spec.symbols_as_written
             ),
@@ -805,16 +797,14 @@ class _Converter:
         """Convert one page's rows into batches of the dataset's schema.
 
         Error rows (`hosts.is_error_row`: a ticker the plan does not include) are decoded
-        apart, with only their symbol required, and come after the page's other rows; a
-        projected path drops them instead.
+        apart, with only their symbol required, and come after the page's other rows.
 
         Args:
             rows: The page's rows.
             symbol: The request's one symbol, which fills the keys taken from the request.
 
         Returns:
-            The batches (none for an empty page), the page's drift, and the error rows, kept or
-            dropped.
+            The batches (none for an empty page), the page's drift, and the error rows.
 
         Raises:
             RowDataError: If a row lacks a required key or holds a value that does not convert
@@ -826,8 +816,7 @@ class _Converter:
         extra: set[str] = set()
         missing: set[str] = set()
         samples: dict[str, DriftSample] = {}
-        kept = [] if self.projected else flagged
-        for part, required in ((good, self.required), (kept, self.required_on_error)):
+        for part, required in ((good, self.required), (flagged, self.required_on_error)):
             if not part:
                 continue
             try:
@@ -1492,7 +1481,7 @@ class RestReader:
                 and both values.
         """
         sent = request.adjusted
-        if not spec.is_bars or sent is None:
+        if not spec.holds_bars or sent is None:
             return
         if echoed is None:
             if self.state.first("adjusted-echo", spec.name, template):
@@ -1516,8 +1505,7 @@ class RestReader:
     ) -> None:
         """Log each ticker of an error row once per session, naming Massive's message.
 
-        A projected path dropped the row; any other path kept it, with its `Error` and
-        `Message` columns.
+        The row is kept, with its `Error` and `Message` columns.
 
         Args:
             converter: The path's conversion.
@@ -1525,18 +1513,17 @@ class RestReader:
             symbol: The request's one symbol, for a path whose rows do not carry it.
         """
         dataset = converter.dataset
-        fate = "dropped" if converter.projected else "kept with its Error and Message columns"
         for row in flagged:
             key = converter.symbol_key
             ticker = str(symbol if key is None else row.get(key))
             if self.state.first("error-row", dataset, ticker):
                 logger.warning(
-                    "%s: Massive answered %s for %s: %s; the row is %s",
+                    "%s: Massive answered %s for %s: %s; the row is kept with its Error and "
+                    "Message columns",
                     dataset,
                     row.get("error"),
                     ticker,
                     row.get("message"),
-                    fate,
                 )
 
     def _public(self, error: WireError) -> MassiveError:
@@ -2459,8 +2446,9 @@ flat files serve only unadjusted bars, so the way out names the price basis it c
 _LONGER_REMEDY: Final = "request 1-day bars; no other source serves these"
 """What a `history()` caller of longer or multiplied bars can do: only REST serves them."""
 
-_FETCH_REMEDY: Final = "use history() for that day"
-"""What a `fetch()` or `poll()` caller can do when `/prev`'s stamp is refused."""
+_FETCH_REMEDY: Final = "use bars(symbols, dm.Timespan.DAY).history() for that day"
+"""What a `previous_day_bar` caller can do when `/prev`'s stamp is refused: the 1-day bars of
+`history()` hold the same day, from a source whose stamp the day rules accept."""
 
 _INDICATOR_REMEDY: Final = "compute the indicator from bars().history() of the same timespan"
 """What an indicator caller can do when a value's stamp is refused: no other source serves the
@@ -2474,10 +2462,10 @@ def _fetch_remedy(spec: DatasetSpec) -> str:
         spec: The dataset.
 
     Returns:
-        Computing the indicator from bars for an indicator; reading `history()` for the day
-        for `/prev`'s bars.
+        Computing the indicator from bars for an indicator; reading the 1-day bars'
+        `history()` for the day for `previous_day_bar`.
     """
-    if not spec.is_bars and spec.times is RowTimes.BAR:
+    if not spec.holds_bars and spec.times is RowTimes.BAR:
         return _INDICATOR_REMEDY
     return _FETCH_REMEDY
 

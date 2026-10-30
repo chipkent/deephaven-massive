@@ -248,8 +248,6 @@ def _public_callables() -> list[tuple[str, object]]:
             "StreamQuery",
             "HistoryQuery",
             "StreamHistoryQuery",
-            "StreamHistoryLatestQuery",
-            "HistoryLatestQuery",
         )
     ]
     seen: set[type] = set()
@@ -352,8 +350,6 @@ ENUM_PARAMETERS = {
     "Query.poll.mode": "test_query.py::test_poll_mode_is_an_enum",
     "HistoryQuery.history.source": "test_query.py::test_history_argument_errors",
     "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
-    "StreamHistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
-    "HistoryLatestQuery.history.source": "test_query.py::test_history_argument_errors",
     "_Futures.trades.venue": _FUTURES_ENUMS,
     "_Futures.quotes.venue": _FUTURES_ENUMS,
     "_Futures.bars.venue": _FUTURES_ENUMS,
