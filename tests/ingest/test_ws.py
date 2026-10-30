@@ -2463,6 +2463,30 @@ def test_a_futures_watchlist_looks_up_the_contracts_it_adds(ws_session: WsSessio
     ws_session.session.release(result)
 
 
+def test_a_futures_watchlist_change_during_a_close_is_dropped(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The session closes after the change found the stream's connection: the change is dropped
+    # quietly, never raised into the watchlist's listener, which would fail the stream.
+    watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
+    result = ws_session.query(FUTURES, watchlist).blink()
+    looked_up(ws_session, "ESZ5")
+    (stream_id,) = ws_session.connections.group.streams
+
+    def closed() -> futures_calendar.FuturesCalendar:
+        raise dm.MassiveError("MassiveSession #1 is closed")
+
+    monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
+        ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
+    assert (
+        f"stream {stream_id}: watchlist change of 1 symbols dropped, the session is closing "
+        "(MassiveSession #1 is closed)"
+    ) in caplog.text
+    ws_session.session.release(result)
+
+
 def test_a_stock_stream_makes_no_calendar(ws_session: WsSession) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")

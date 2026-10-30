@@ -347,6 +347,32 @@ def test_open_stream_tables_releases_its_scope_on_failure(
     assert shut_down.wait(TIMEOUT)
 
 
+def test_open_stream_tables_releases_its_scope_when_interrupted_at_the_end(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An interrupt after every table exists, as the handle is built, still releases the scope.
+    shut_down = threading.Event()
+
+    def interrupted(*_: object, **__: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(stream, "StreamHandle", interrupted)
+    core = massive_session._core
+    with pytest.raises(KeyboardInterrupt):
+        open_stream_tables(
+            ChannelPlan.build(core.catalog, TRADES, "T", unknown_symbols=UnknownSymbols.FAIL),
+            core.catalog.dataset_schema(TRADES),
+            ALL,
+            core=core,
+            stream_id=1,
+            host="socket.test",
+            path="/stocks",
+            on_shutdown=shut_down.set,
+            on_symbols=lambda *_: None,
+        )
+    assert shut_down.wait(TIMEOUT)
+
+
 def test_a_reactive_stream_starts_with_no_symbols(massive_session: dm.MassiveSession) -> None:
     watchlist = input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     sink, _ = make_sink(massive_session._core, SymbolTable(watchlist))
@@ -858,8 +884,72 @@ def test_a_dying_flush_thread_fails_its_streams(
         assert f.join(TIMEOUT)
     assert healthy.failed  # a stream that cannot be failed does not spare the others
     assert "dying-flush died; its streams fail" in caplog.text
-    assert "dying-flush: could not fail a stream" in caplog.text
+    assert "dying-flush: could not fail stream 2" in caplog.text
     assert [args.exc_type for args in escaped] == [_Fatal]
+
+
+class _Recording:
+    # A routed stream that records the errors it is failed with.
+    def __init__(self, stream_id: int) -> None:
+        self.stream_id = stream_id
+        self.errors: list[MassiveError] = []
+
+    def fail(self, error: MassiveError) -> bool:
+        self.errors.append(error)
+        return True
+
+
+def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    rows_when: RowsWhen,
+) -> None:
+    # A queued failure that raises leaves the other failures, every stream's rows, and the
+    # row counts of the flush in place.
+    core = massive_session._core
+    healthy, healthy_blink = make_sink(core, ALL)
+    shown = blink_to_append_only(healthy_blink)
+    recording = _Recording(3)
+    flusher.routes.add("T", healthy)
+    flusher.routes.add("Q", cast("StreamSink", _Stubborn()))
+    flusher.routes.add("Q", cast("StreamSink", recording))
+    flusher.fail([2], MassiveError("refused"))
+    flusher.fail([3], MassiveError("also refused"))
+    flusher.rows("T", [trade("AAPL")])
+    flusher.flush()
+    assert [str(error) for error in recording.errors] == ["also refused"]
+    rows_when(shown, lambda rows: len(rows) == 1)
+    assert healthy.rows_published == 1
+    assert "test-flush: could not fail stream 2 (refused)" in caplog.text
+
+
+def test_a_drift_report_that_raises_costs_the_flush_nothing(
+    *,
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The streams' row counts still reach their session after a drift report fails.
+    core = massive_session._core
+    sink, _ = make_sink(core, ALL)
+    flusher.routes.add("T", sink)
+    reported: list[dict[int, StreamUpdate]] = []
+    monkeypatch.setattr(core, "update_streams", reported.append)
+
+    def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("no drift")
+
+    monkeypatch.setattr(Flusher, "_report_drift", staticmethod(broken))
+    flusher.drift("T", DriftReport(extra=frozenset({"zz"})), where="wss://h/stocks channel T")
+    flusher.rows("T", [trade("AAPL")])
+    flusher.flush()
+    assert [update[1].rows_published for update in reported] == [1]
+    assert "test-flush: could not report the drift of channel T (wss://h/stocks channel T)" in (
+        caplog.text
+    )
 
 
 class _BrokenFlusher(Flusher):

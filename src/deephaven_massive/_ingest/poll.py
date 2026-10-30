@@ -518,7 +518,7 @@ class Poller:
             return self._publish_cycle(core, pool)
         except _FATAL as error:
             if not self._stop.is_set():
-                self._fail_once(core, error)
+                self._fail_fatal(core, error)
             return False
         except MassiveError as error:  # any other library error: the next cycle runs
             return self._carry_on(core, error)
@@ -566,6 +566,28 @@ class Poller:
         )
         core.update_streams({self._stream_id: update})
         return True
+
+    def _fail_fatal(self, core: SessionCore, error: MassiveError) -> None:
+        """Fail the table with a cycle's fatal error; a failure that raises is logged at ERROR.
+
+        The poller ends either way. Without the guard, an exception from the failure itself
+        (Deephaven's `publish_failure`) would end the poller's thread through
+        `threading.excepthook`, past the library's log, with its row already `FAILED` and its
+        table never failed.
+
+        Args:
+            core: The session's core.
+            error: The cycle's fatal error.
+        """
+        try:
+            self._fail_once(core, error)
+        except Exception:
+            logger.exception(
+                "%s poll() stream %d: could not fail its table with %s",
+                self._spec.name,
+                self._stream_id,
+                error,
+            )
 
     def _carry_on(self, core: SessionCore, error: Exception) -> bool:
         """Show a cycle's error in the table's row; the table keeps its rows.
@@ -1015,23 +1037,24 @@ def open_poll(
     stop = Cancel()
     with entered(core.exec_ctx):
         (result, publisher), scope = _build(core, spec, mode=mode, stream_id=stream_id, stop=stop)
-    poller = Poller(
-        core,
-        spec=spec,
-        request=request,
-        interval=interval,
-        mode=mode,
-        stream_id=stream_id,
-        read=read,
-        pollers=pollers,
-        clock=clock,
-        publisher=publisher,
-        stop=stop,
-    )
-    symbols = request.symbols
-    count, text = (None, "") if symbols is None else describe_symbols(symbols)
+    poller: Poller | None = None
     registered = False
     try:
+        poller = Poller(
+            core,
+            spec=spec,
+            request=request,
+            interval=interval,
+            mode=mode,
+            stream_id=stream_id,
+            read=read,
+            pollers=pollers,
+            clock=clock,
+            publisher=publisher,
+            stop=stop,
+        )
+        symbols = request.symbols
+        count, text = (None, "") if symbols is None else describe_symbols(symbols)
         core.register_poll(
             StreamRow(
                 stream_id=stream_id,
@@ -1052,8 +1075,9 @@ def open_poll(
         core.results.track(result, scope, poller.release)
     except BaseException:
         try:
-            poller.stop()
-            pollers.discard(poller)
+            if poller is not None:
+                poller.stop()
+                pollers.discard(poller)
             if registered:
                 core.release_poll(stream_id)
         finally:

@@ -13,6 +13,7 @@ import importlib
 import inspect
 import itertools
 import logging
+import re
 import sys
 import threading
 import weakref
@@ -1452,6 +1453,25 @@ def test_a_failure_while_the_shape_is_derived_is_named(
     assert isinstance(raised.value.__cause__, DHError)
     drain()
     assert core.results.held() == 0
+
+
+def test_a_close_while_the_shape_is_derived_raises_the_closed_session(
+    massive_session: dm.MassiveSession, fake_streams: FakeStreamTransport
+) -> None:
+    # The close fails the stream: the verb names the close, not a failure of the stream.
+    core = massive_session._core
+    q = stream_query(massive_session)
+
+    def closing_then_shaping(blink: Table) -> Table:
+        core.close()
+        assert fake_streams.shutdown[1].wait(TIMEOUT)
+        return blink_to_append_only(blink)
+
+    with pytest.raises(dm.MassiveError, match=rf"^{re.escape(core.label)} is closed$") as raised:
+        core.stream_result(
+            SPEC, q._request, channel="T", query="<Query test>", build=closing_then_shaping
+        )
+    assert isinstance(raised.value.__cause__, DHError)
 
 
 def test_a_failure_while_the_blink_copy_is_described_is_named(
