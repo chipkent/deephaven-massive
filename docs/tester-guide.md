@@ -419,7 +419,7 @@ bar_columns = bars.columns()
 **You should see** this line, and two panels:
 
 ```text
-<HistoryQuery stocks.bars symbols=('AAPL', 'MSFT', 'NVDA') timespan=Timespan.DAY adjusted=True>
+m.stocks.bars(['AAPL', 'MSFT', 'NVDA'], dm.Timespan.DAY)
 ```
 
 `catalog` lists every dataset, what it holds, its *verbs* (the methods that fetch data, such
@@ -634,7 +634,7 @@ except dm.MassiveError as error:
     print(f"the latest trade: {type(error).__name__}: {error}")
 
 try:
-    m.stocks.bars(["AAPL"]).append_only()
+    m.stocks.bars(["AAPL"], dm.Timespan.MINUTE).append_only()
     print("live minute bars: no error, so your plan includes them")
 except dm.MassiveError as error:
     print(f"live minute bars: {type(error).__name__}: {error}")
@@ -810,7 +810,9 @@ curve_chart = Figure().plot_xy(series_name="10y - 2y", t=curve, x="Day", y="Spre
 # Needs a paid Stocks plan (Starter or higher). Keeps the latest minute bar of five stocks,
 # updated live. You should see a new table, latest_bars, with one row per stock while the
 # market is open; on a free key you see an EntitlementError instead.
-latest_bars = m.stocks.bars(["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]).last_by()
+latest_bars = m.stocks.bars(
+    ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"], dm.Timespan.MINUTE
+).last_by()
 ```
 
 ### 19. History and live in one table, paid plans (`19_history_plus_live.py`)
