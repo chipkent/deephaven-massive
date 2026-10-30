@@ -2284,8 +2284,10 @@ Symbols = str | Sequence[str] | Table | _All      # dm.ALL is the only _All inst
   ([section 23](#23-open-verification-items)).
 - **The converters** are the public way to another spelling. `dm.canonical_symbol(text,
   asset_class, *, convention=SymbolConvention.MASSIVE)` takes a required `AssetClass`: the class is never guessed,
-  so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes any
-  ticker as Massive writes it. One function per class
+  so `SPX` becomes `I:SPX` only because the caller names the class; for `FUTURES` it takes a
+  single contract or a spread, as strictly as `canonical_symbol_future` and
+  `canonical_symbol_future_spread`, and refuses other text with `canonical_symbol_future`'s
+  message. One function per class
   (`canonical_symbol_stock`, `_option`, `_future`, `_index`, `_forex`, `_crypto`), the spread
   function `canonical_symbol_future_spread`, and one per
   stock convention (`canonical_symbol_stock_yahoo`, `_nasdaq`, `_cms`) take only the text, for

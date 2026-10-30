@@ -36,8 +36,9 @@ owns that grammar and three things built on it:
 
 A futures spread is one of the spellings Massive's samples show (`_SPREADS`: `GCQ6-GCZ6`, `BOB 02-01
 U6`, `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`); `canonical_symbol_future` takes single contracts and
-`canonical_symbol_future_spread` spreads, strictly, while a dataset takes, and a futures row keeps,
-any futures ticker as Massive writes it, so what comes out can always go back in. A dataset whose
+`canonical_symbol_future_spread` spreads, strictly, and `canonical_symbol` either, while a dataset
+takes, and a futures row keeps, any futures ticker as Massive writes it, so what comes out can
+always go back in. A dataset whose
 symbols are a third party's global tickers (`DatasetSpec.symbols_as_written`) takes and keeps them
 as Massive writes them. A stock's case is meaningful (`KIMpL` is Kimco's series L preferred), so
 stock, index, and futures text is never re-cased; the option, forex, and crypto grammars are all
@@ -789,7 +790,10 @@ def canonical_symbol(
     the default, canonical text comes back unchanged; another spelling of the class converts
     (`EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX`); anything else raises. Under another convention,
     only that convention's grammar applies, so text it does not spell raises even when it
-    happens to be a Massive ticker. The class is never guessed: `SPX` is an index only because
+    happens to be a Massive ticker. For futures, a single contract (`ESZ5`) or a spread in one
+    of Massive's spellings (`GCQ6-GCZ6`) comes back unchanged and anything else raises, with
+    the message of `canonical_symbol_future`, although a dataset takes any futures ticker as
+    Massive writes it. The class is never guessed: `SPX` is an index only because
     the caller says so. In a Deephaven query string, call the per-class functions instead
     (`canonical_symbol_forex`), which need no enum argument; a function called through the
     module (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
@@ -836,6 +840,10 @@ def canonical_symbol(
         return None
     if chosen is not SymbolConvention.MASSIVE:
         return _convert_stock_from(value, chosen)
+    if resolved is AssetClass.FUTURES:
+        # A dataset takes any futures ticker as Massive writes it, but the converter checks
+        # the grammar of a contract or a spread, as the per-class functions do.
+        return value if _is_spread(value) else _convert_single_future(value)
     if _CANONICAL[resolved](value):
         return value
     return _CONVERTERS[resolved](value)
