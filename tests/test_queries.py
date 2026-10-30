@@ -35,8 +35,7 @@ def test_a_dataset_method_returns_one_of_its_classes(massive_session: MassiveSes
 
 
 def test_importing_the_package_does_not_import_it() -> None:
-    # A fresh interpreter without a JVM: the package and every public name it resolves lazily
-    # never load the query types.
+    # A fresh interpreter without a JVM: importing the package does not load the query types.
     result = subprocess.run(
         [
             sys.executable,

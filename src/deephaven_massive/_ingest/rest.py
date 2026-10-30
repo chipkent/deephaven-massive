@@ -945,6 +945,9 @@ class _Converter:
 def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
     """Drop the repeats of a row that several symbols' requests returned, keeping its first.
 
+    A row is identified by `keys` alone. A row with a null key is never merged with another:
+    a null cannot tell two rows apart, so every such row is kept, in place.
+
     Args:
         rows: The rows of every request, in request order.
         keys: The columns that identify a row (`DatasetSpec.poll_keys`).
@@ -953,8 +956,12 @@ def _first_copies(rows: pa.Table, keys: Sequence[str]) -> pa.Table:
         The rows, each identity once, in the order of their first copies.
     """
     numbered = rows.append_column(_ROW_NUMBER, pa.array(range(rows.num_rows), pa.int64()))
-    firsts = numbered.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
-    return rows.take(firsts[f"{_ROW_NUMBER}_min"].sort())
+    keyed = functools.reduce(pc.and_, (pc.is_valid(rows[key]) for key in keys))
+    identified = numbered.filter(keyed)
+    firsts = identified.group_by(list(keys), use_threads=False).aggregate([(_ROW_NUMBER, "min")])
+    unkeyed = numbered.filter(pc.invert(keyed))[_ROW_NUMBER]
+    kept = pa.chunked_array([*firsts[f"{_ROW_NUMBER}_min"].chunks, *unkeyed.chunks], pa.int64())
+    return rows.take(kept.sort())
 
 
 def _whole(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:

@@ -2,16 +2,18 @@
 
 A dataset method such as `m.stocks.trades("AAPL")` returns a query, and the query's class says
 which verbs it has. Import the classes from here to annotate code of your own, such as a helper
-that takes any dataset with both a live stream and history::
+that takes any dataset with a live stream and keeps each symbol's latest row::
 
-    from deephaven import merge
     from deephaven.table import Table
 
-    from deephaven_massive.queries import DateLike, StreamHistoryQuery
+    from deephaven_massive.queries import StreamQuery
 
 
-    def backfilled(query: StreamHistoryQuery, start: DateLike) -> Table:
-        return merge([query.history(start), query.append_only()])
+    def latest(query: StreamQuery) -> Table:
+        return query.last_by()
+
+
+    quotes = latest(m.stocks.quotes(["AAPL", "MSFT"]))
 
 | Name | What it is |
 |---|---|

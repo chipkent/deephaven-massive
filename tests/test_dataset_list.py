@@ -8,11 +8,12 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._dataset_list import DATASET_LIST_DESCRIPTIONS
+from deephaven_massive._datasets.column_reference import PAGES_URL
 from deephaven_massive._session import CATALOG
 
 ToPylist = Callable[[Table], list[dict[str, Any]]]
 
-_PAGES = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
+_PAGES = PAGES_URL
 
 
 def _by_dataset(table: Table, to_pylist: ToPylist) -> dict[str, dict[str, Any]]:

@@ -864,8 +864,8 @@ class HistoryQuery(QueryBase):
           (`session_end_date`) it is, which opens at 17:00 Chicago time the evening before
           (earlier after a holiday).
         - **Instants** (an aware `datetime`, ISO text with an offset, or a Java `Instant` or
-          `ZonedDateTime` such as `dh_now()` or a cell of an `Instant` column) are exact
-          instants, half-open: rows with `start <= Timestamp < end` (for bars,
+          `ZonedDateTime` such as `dh_now()`, cut to the microsecond) are exact instants,
+          half-open: rows with `start <= Timestamp < end` (for bars,
           `TimestampStart`). Equal instants give an empty table.
 
         `end=None`, the default, reads through now. A bar is returned only when its whole window
@@ -947,28 +947,26 @@ class HistoryQuery(QueryBase):
             no row lies in the range.
 
         Errors. `TypeError` if `source` is not a `HistorySource` or a bound is none of the
-        `DateLike` types. `ValueError`, synchronously, before any request: a naive or
-        unparseable bound, a `numpy.datetime64` finer than a day, or a Java instant finer than
-        a microsecond; a date mixed with a datetime; `start` after `end` (or after now when
-        `end` is None); a symbol table without a symbol, or with a row that is not canonical;
-        futures trades or quotes named by session dates on a query that also filters
-        `session_end_date` in any form; a source that cannot serve the request (`REST` without
-        REST history or with `dm.ALL` and no grouped-daily endpoint; `FLAT_FILES` when a
-        flat-file condition above fails; `AUTO` when neither can, with every violated condition
-        listed); or a call on a Deephaven update-graph thread. `MassiveError` when a request
-        fails (`EntitlementError` on HTTP 403, which for futures flat files names the venue and
-        the `venue=` parameter; `AuthenticationError` when S3 rejects the flat-file
+        `DateLike` types. `ValueError`, synchronously, before any request: a naive or unparseable
+        bound, or a `numpy.datetime64` finer than a day or `NaT`; a date mixed with a datetime;
+        `start` after `end` (or after now when `end` is None); a symbol table without a symbol, or
+        with a row that is not canonical; futures trades or quotes named by session dates on a query
+        that also filters `session_end_date` in any form; a source that cannot serve the request
+        (`REST` without REST history or with `dm.ALL` and no grouped-daily endpoint; `FLAT_FILES`
+        when a flat-file condition above fails; `AUTO` when neither can, with every violated
+        condition listed); or a call on a Deephaven update-graph thread. `MassiveError` when a
+        request fails (`EntitlementError` on HTTP 403, which for futures flat files names the venue
+        and the `venue=` parameter; `AuthenticationError` when S3 rejects the flat-file
         credentials); when a page of adjusted bars echoes another basis than the request; when a
         symbol's later page answers HTTP 404, its data cut short (a symbol with no data at all
-        simply returns no rows); when the flat file of the last requested day is missing within
-        a day after its publication time ("... is not yet published (flat files land ~11:00 ET
-        next day), or was a market holiday"; after that the day is skipped with a WARNING, as a
-        holiday); when a futures range named by instants ends on a holiday and the next
-        session's file, which holds the holiday's hours, is not published yet or does not exist
-        within 7 days; when a bar of a day or longer is stamped at a time of day, or on a day,
-        Massive is not known to use for its class (a crypto 1-day bar at midnight New York time,
-        or a crypto week bar on a Sunday), naming the dataset, the source, and what to do
-        instead; or once the session is closed.
+        simply returns no rows); when the flat file of the last requested day is missing within a
+        day after its publication time ("... is not yet published (flat files land ~11:00 ET next
+        day), or was a market holiday"; after that the day is skipped with a WARNING, as a holiday);
+        when a futures range named by instants ends on a holiday and the next session's file, which
+        holds the holiday's hours, is not published yet or does not exist within 7 days; when a bar
+        of a day or longer is stamped at a time of day, or on a day, Massive is not known to use for
+        its class (a crypto 1-day bar at midnight New York time, or a crypto week bar on a Sunday),
+        naming the dataset, the source, and what to do instead; or once the session is closed.
 
         Example:
             ::

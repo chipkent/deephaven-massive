@@ -2274,11 +2274,15 @@ sides of the boundary.
 **Dates.** Parameters accept an ISO-8601 `str`, a `date`, a timezone-aware `datetime`, the
 Java time values Deephaven hands its users (`java.time.Instant` and `ZonedDateTime`, which are
 instants, and `LocalDate`, a date: what `dh_now()`, `dh_today()`, and the cells of an `Instant`
-column give), or a `numpy.datetime64` of day precision (a date). `_datasets/dates.py`
+column give when read as Java values), or a `numpy.datetime64` of day precision (a date). `_datasets/dates.py`
 (`parse_date_like`) turns each into a `date` or an aware `datetime`, outside the wire package;
-it recognizes a Java value by its jpy class name, so it imports neither Deephaven nor jpy, and a
-Java instant finer than a microsecond, a `numpy.datetime64` finer than a day (it has no
-timezone), and `NaT` raise `ValueError`. Type checkers see Deephaven's Java values as `Any`, so
+it recognizes a Java value by its jpy class name, so it imports neither Deephaven nor jpy. A
+Java instant is cut to the microsecond, less than a microsecond earlier: unlike typed text,
+whose extra digits raise, Deephaven's instants carry nanoseconds the user never chose
+(`dh_now()` on Linux, a SIP `Timestamp`), and an earlier start still includes the row an
+instant came from. A `numpy.datetime64` finer than a day (it has no timezone; the message
+names `deephaven.time.to_j_instant`), `NaT`, and a time outside years 1 to 9999 raise
+`ValueError`. Type checkers see Deephaven's Java values as `Any`, so
 `DateLike` names only `numpy.datetime64` beside the Python types. A
 naive `datetime`, or an ISO string with a time but no offset, raises a `ValueError` that names
 the parameter, the value, and the fix, for example `start=datetime.datetime(2025, 1, 2, 9, 30)
@@ -6155,16 +6159,18 @@ document already reflects them.
     what they are and verbs name table shapes; a new verb such as `latest()` would break the second
     ([section 7.5](#75-one-row-datasets), [section 7.6](#76-a-verb-a-query-does-not-have)).
 
-64. **More inputs and a list of datasets** (2026-10-30; the coordinator decided after an
-    adversarial review by a Deephaven quant user and a library maintainer; the owner may
-    object).
+64. **More inputs and a list of datasets** (2026-10-30; the owner approved each item in the
+    API review; the coordinator decided the details below after an adversarial review by a
+    Deephaven quant user and a library maintainer, and the owner may object to any).
     - Date and time arguments (`history()`'s bounds and every `start=`, `end=`, `as_of=`, and
       single day) also accept Deephaven's Java `Instant`, `ZonedDateTime`, and `LocalDate`, and
       a day-precision `numpy.datetime64`. A Deephaven library takes the values Deephaven hands
       its users, rather than making them format text in a second grammar. The conversion
-      lives outside the wire package, in `_datasets/dates.py`, and refuses what it cannot
-      place exactly: a Java instant finer than a microsecond, a `numpy.datetime64` finer than
-      a day (it has no timezone), and `NaT`.
+      lives outside the wire package, in `_datasets/dates.py`. A Java instant is cut to the
+      microsecond, since Deephaven's instants carry nanoseconds the user never chose and an
+      earlier start by under a microsecond still includes the row an instant came from; a
+      `numpy.datetime64` finer than a day (it has no timezone) and `NaT` are refused.
+      `filters=` values are left to the change that settles their type.
     - `dm.datasets()`, a static table of every dataset with its summary, verbs, transports,
       and documentation link, at module level, since the catalog needs no key or session
       ([section 7.7](#77-the-dataset-list)).

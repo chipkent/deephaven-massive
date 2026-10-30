@@ -1,5 +1,6 @@
 """Tests for date parsing, the kinds of bounds, and the day rules."""
 
+import importlib
 import re
 from datetime import UTC, date, datetime, timedelta
 from typing import TypeVar, cast
@@ -398,13 +399,22 @@ def test_deephaven_java_dates_and_instants_are_bounds() -> None:
     "value",
     [
         pytest.param("2025-03-03T14:30:00.123456789Z", id="instant"),
-        pytest.param("2025-03-03T09:30:00.000000001 America/New_York", id="zoned"),
+        pytest.param("2025-03-03T09:30:00.123456789 America/New_York", id="zoned"),
     ],
 )
-def test_java_instants_finer_than_a_microsecond_are_refused_not_cut(value: str) -> None:
+def test_java_instants_are_cut_to_the_microsecond(value: str) -> None:
+    # Deephaven's instants carry nanoseconds the user never chose; an earlier start by under a
+    # microsecond still includes the row the instant came from.
     java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
-    with pytest.raises(ValueError, match=r"^start=.* has more than six fractional digits"):
-        parse_date_like(java, "start")
+    moment = cast("datetime", parse_date_like(java, "start"))
+    assert moment.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
+
+
+def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
+    jpy = importlib.import_module("jpy")  # untyped: Java's own extreme values
+    for java in (jpy.get_type("java.time.Instant").MAX, jpy.get_type("java.time.LocalDate").MAX):
+        with pytest.raises(ValueError, match=r"^start=.* is not a time from year 1 to 9999"):
+            parse_date_like(java, "start")
 
 
 def test_a_numpy_day_is_a_date() -> None:
@@ -416,8 +426,10 @@ def test_a_numpy_day_is_a_date() -> None:
     [
         (np.datetime64("2025-03-03T09:30"), r"datetime64\[m\], which has no timezone"),
         (np.datetime64("2025-03"), r"datetime64\[M\], which has no timezone"),
-        (np.datetime64("NaT", "D"), "is not a date from year 1 to 9999"),
-        (np.datetime64("10000-01-01"), "is not a date from year 1 to 9999"),
+        (np.datetime64("NaT", "D"), "is NaT, not a date"),
+        (np.datetime64("NaT", "ns"), "is NaT, not a date"),
+        (np.datetime64("10000-01-01"), "is not a time from year 1 to 9999"),
+        (np.datetime64("2025-03-03T09:30:00", "ns"), r"deephaven.time.to_j_instant converts"),
     ],
 )
 def test_a_numpy_time_that_is_not_one_day_is_refused(value: np.datetime64, message: str) -> None:

@@ -314,7 +314,8 @@ class _Reference(Namespace):
             exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
             cusip: The CUSIP to look up; None for any.
             cik: The SEC Central Index Key to look up; None for any.
-            date: The day the listing is as of: a `date` or ISO-8601 date text (a `datetime`
+            date: The day the listing is as of: a `date`, ISO-8601 date text, a Java `LocalDate`
+                (`dh_today()`), or a day-precision `numpy.datetime64` (a `datetime` or an instant
                 raises `ValueError`: it is a calendar date); None for today.
             active: True lists tickers traded on `date`; False lists delisted ones.
             search: Text matched against the ticker and the company name; None for no search.
@@ -374,8 +375,9 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers, of any asset classes, or a Deephaven table with a `Symbol`
                 column.
-            date: The day the details are as of: a `date` or ISO-8601 date text (a
-                `datetime` raises `ValueError`: it is a calendar date); None for the latest.
+            date: The day the details are as of: a `date`, ISO-8601 date text, a Java `LocalDate`
+                (`dh_today()`), or a day-precision `numpy.datetime64` (a `datetime` or an instant
+                raises `ValueError`: it is a calendar date); None for the latest.
 
         Returns:
             A `Query`; call `fetch()` or `poll(interval)` on it.
@@ -500,9 +502,11 @@ class _Reference(Namespace):
         ticker and keeps an article that mentions several of them once, by its `Id`. Rows
         come ticker by ticker, in ticker order. `limit`, `sort`, and `order` apply to each
         ticker's request, not to the whole table: `limit=10` reads up to ten articles per
-        ticker, and `order` sorts within each ticker's articles; sort the table itself for one
-        order. A watchlist table is followed: `fetch()` reads its rows once, and `poll()`
-        re-reads them every cycle, so a ticker added to the table is read from the next cycle.
+        ticker, and `order` sorts within each ticker's articles. For one order across tickers,
+        sort the result, such as `table.sort_descending("PublishedUtc")`. A watchlist table is
+        followed: `fetch()` reads its rows once, and `poll()` re-reads them every cycle, so a
+        ticker added to the table is read from the next cycle; the articles of a ticker removed
+        from it stay, since a `poll()` table only appends.
         Each ticker costs one request a cycle or more: on a plan limited to 5 requests a
         minute, `poll(60)` of a 50-ticker watchlist cannot keep up, and the table logs the
         slow-poll WARNING. `symbols=None` reads every article in one request series;
@@ -513,8 +517,9 @@ class _Reference(Namespace):
         Args:
             symbols: The tickers whose articles to read: one symbol, a list, or a Deephaven
                 table with a `Symbol` column (a watchlist); None for every article.
-            start: The earliest publication: a date is its 00:00 in New York, a `datetime`
-                is used as is; None for no lower bound, which reads the whole archive.
+            start: The earliest publication (`DateLike`): a date is its 00:00 in New York, an
+                instant (an aware `datetime`, a Java `Instant`) is used as is; None for no
+                lower bound, which reads the whole archive.
             end: The end of the range, of the same kind as `start` (mixing a date with a
                 `datetime` raises `ValueError`): a date includes that whole day, a
                 `datetime` is exclusive; None for no upper bound.

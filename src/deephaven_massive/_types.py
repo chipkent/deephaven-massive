@@ -109,16 +109,19 @@ One of:
 
 - an ISO-8601 string, `"2025-03-03"` or `"2025-03-03T09:30:00-05:00"`;
 - a `date`, or a timezone-aware `datetime`;
-- a Java `java.time.LocalDate` (a date), or a Java `Instant` or `ZonedDateTime` (an instant),
-  the values Deephaven's own time functions return, such as `deephaven.time.dh_now()` or
-  `dh_today()` and the cells of an `Instant` column;
+- a Java `java.time.LocalDate` (a date), or a Java `Instant` or `ZonedDateTime` (an instant,
+  cut to the microsecond), the values Deephaven's own time functions return, such as
+  `deephaven.time.dh_now()` and `dh_today()`, and an `Instant` cell read as a Java value
+  (through `iter_dict`, for one; `to_numpy` gives a `numpy.datetime64` in nanoseconds instead,
+  which `deephaven.time.to_j_instant` converts);
 - a `numpy.datetime64` of day precision (a date), such as `numpy.datetime64("2025-03-03")`.
 
 Type checkers see Deephaven's Java values as `Any`, so the alias does not name them. A naive
-`datetime`, an ISO string with a time but no UTC offset, or a `numpy.datetime64` finer than a
-day raises a `ValueError` that names the parameter and the fix ("needs a timezone: pass an
-aware datetime or a date"), since a time without a zone cannot be placed. A date-only value
-is a whole day in the asset class's day zone.
+`datetime` or an ISO string with a time but no UTC offset raises a `ValueError` that names the
+parameter and the fix ("needs a timezone: pass an aware datetime or a date"), and a
+`numpy.datetime64` finer than a day one that says it "has no timezone" and names the values
+to pass instead, since a time without a zone cannot be placed. A date-only value is a whole
+day in the asset class's day zone.
 """
 
 FilterValue: TypeAlias = str | int | float | bool | date | datetime | Sequence[str]

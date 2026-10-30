@@ -40,7 +40,7 @@ DATASET_LIST_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
             "The verbs its queries have, such as fetch and poll. Bars stream only at some "
             "timespans, as their docstring says."
         ),
-        "Transports": "Where its rows come from: REST, WebSocket, flat files.",
+        "Transports": "Where its rows come from: REST, flat files, WebSocket.",
         "Documentation": "The web address of its section in the column reference.",
     }
 )
@@ -90,7 +90,7 @@ def datasets() -> Table:
                     tuple(
                         label
                         for transport, label in TRANSPORT_LABELS.items()
-                        if any(source[0] is transport for source in spec.sources)
+                        if any(source is transport for source, _ in spec.sources)
                     )
                     for spec in specs
                 ],

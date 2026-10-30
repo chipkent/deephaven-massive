@@ -2576,8 +2576,9 @@ class _Stocks(Namespace):
         Args:
             symbols: The tickers: one `str`, a sequence of them, or a `Table` with a `Symbol`
                 column (re-read each `poll()` cycle).
-            date: The trading day: an ISO-8601 date or a `date`. It is a calendar date, so a
-                `datetime` raises `ValueError`.
+            date: The trading day: an ISO-8601 date, a `date`, a Java `LocalDate` (`dh_today()`), or
+                a day-precision `numpy.datetime64`. It is a calendar date, so a `datetime` or an
+                instant raises `ValueError`.
             adjusted: True (the default) for prices and volume adjusted for splits (never for
                 dividends); False for the prices as traded. Massive does not echo the basis
                 here, so it cannot be checked.

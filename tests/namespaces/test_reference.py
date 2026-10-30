@@ -704,22 +704,26 @@ def test_news_of_a_watchlist_reads_each_ticker_and_keeps_an_article_once(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToRows
 ) -> None:
     shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
+    # An article without an id cannot be told from another, so neither copy is dropped.
+    unnamed = {
+        k: v for k, v in _article("", "2024-06-24T15:00:00Z", "AAPL", "MSFT").items() if k != "id"
+    }
     fake_rest.reply(
-        _news_target("AAPL", limit=2),
-        Reply(envelope([shared, _article("a1", "2024-06-24T17:00:00Z", "AAPL")])),
+        _news_target("AAPL", limit=3),
+        Reply(envelope([shared, _article("a1", "2024-06-24T17:00:00Z", "AAPL"), unnamed])),
     )
     fake_rest.reply(
-        _news_target("MSFT", limit=2),
-        Reply(envelope([shared, _article("m1", "2024-06-24T16:00:00Z", "MSFT")])),
+        _news_target("MSFT", limit=3),
+        Reply(envelope([shared, _article("m1", "2024-06-24T16:00:00Z", "MSFT"), unnamed])),
     )
-    out = dh_to_pylist(rest_session.reference.news(symbols=["MSFT", "AAPL"], limit=2).fetch())
+    out = dh_to_pylist(rest_session.reference.news(symbols=["MSFT", "AAPL"], limit=3).fetch())
     assert sorted(r.target for r in fake_rest.requests) == [
-        _news_target("AAPL", limit=2),
-        _news_target("MSFT", limit=2),
+        _news_target("AAPL", limit=3),
+        _news_target("MSFT", limit=3),
     ]
     # Ticker by ticker, in ticker order; the shared article once, where AAPL's request had it,
     # and `limit` caps each ticker's articles, not the table.
-    assert [row["Id"] for row in out] == ["both", "a1", "m1"]
+    assert [row["Id"] for row in out] == ["both", "a1", None, "m1", None]
 
 
 def test_news_polls_follow_a_live_watchlist(

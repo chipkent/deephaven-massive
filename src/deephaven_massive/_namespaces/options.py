@@ -914,8 +914,9 @@ class _Options(Namespace):
             underlying: Only contracts linked to this exact Massive ticker, such as `"AAPL"`
                 or `"I:SPX"`; None for every underlying.
             contract_type: Only calls or only puts; None for both.
-            as_of: The day whose contracts to list, as an ISO-8601 date or a `date` (a
-                `datetime` raises `ValueError`: it is a calendar date); None for today.
+            as_of: The day whose contracts to list, as an ISO-8601 date, a `date`, a Java
+                `LocalDate` (`dh_today()`), or a day-precision `numpy.datetime64` (a `datetime` or
+                an instant raises `ValueError`: it is a calendar date); None for today.
             expired: True for expired contracts only, False for active ones only; None for
                 the endpoint's default, active contracts.
             sort: The field to sort by: `"ticker"`, `"underlying_ticker"`,
@@ -982,8 +983,9 @@ class _Options(Namespace):
         Args:
             symbols: The contracts, as Massive's tickers (`O:` and the OCC symbol); one `str`, a
                 sequence, or a Deephaven table with a `Symbol` column.
-            date: The trading day, as an ISO-8601 date or a `date`. It is a calendar date, so a
-                `datetime` raises `ValueError`.
+            date: The trading day, as an ISO-8601 date, a `date`, a Java `LocalDate` (`dh_today()`),
+                or a day-precision `numpy.datetime64`. It is a calendar date, so a `datetime` or an
+                instant raises `ValueError`.
             adjusted: Whether the prices and volume are adjusted for splits of the underlying
                 (never for dividends); True by default. Massive does not echo the basis here,
                 so it cannot be checked.
