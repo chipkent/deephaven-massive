@@ -6831,6 +6831,40 @@ document already reflects them.
     guard (a page whose `adjusted` echo differs from the request raises `MassiveError`) stays:
     it keeps one table from mixing split-adjusted and as-traded prices, which is not a stamp
     question.
+71. **Every `bars()` call names its bar size** (2026-10-30, owner). `timespan` is required,
+    with no default, on the stocks, options, futures, indices, forex, and crypto `bars()`; a
+    call without it is a static type error and a `TypeError`. No length suits most uses, and
+    the length is the first thing a reader of the call needs. The indicators keep
+    `timespan=Timespan.DAY` ([section 7.1](#71-bars-overloads)).
+72. **A futures contract is a symbol** (2026-10-30, owner). `futures.contracts` names the row's
+    `ticker` `Symbol` (with `RawSymbol`), takes optional positional `symbols` sent as
+    `ticker.any_of`, polls by `Symbol` and `Date`, and with `products` takes `as_of`, sent as
+    `date`. A contracts table then feeds the market-data datasets directly. Benzinga consensus
+    ratings take `Symbol` from the row's own `ticker` (`KeySpec("Ticker")`), as the other
+    Benzinga datasets do ([section 8.3](#83-mfutures)).
+73. **A query's repr is the call the user typed** (2026-10-30, owner): public names, `symbols`
+    first and positionally, `… (N more)` after five symbols, a required argument by position,
+    and only the arguments that differ from their defaults
+    ([section 7](#7-query-classes-and-verbs)).
+74. **`limit` caps each symbol's rows where a request names one symbol** (2026-10-30, owner),
+    so a few symbols with many rows never crowd out the rest; elsewhere it stays a total cap.
+75. **Price columns lead every table** (2026-10-30, owner): the naming policy's rule 6b,
+    applied at refresh time by `naming.lead_order`.
+76. **The debug log says what it needs to** (2026-10-30, owner). A rate-limit pause logs its
+    length, its reason, and its end, and each GET its wait for a permit; an HTTP 429 logs once.
+    The WebSocket client's `max_connections` warning and its reconnect attempts log at DEBUG,
+    since the connection already warns once per outage, and its close line gives the server's
+    close reason (without the key) and how long the connection was up. The bug-report form
+    asks for the log as an attached file. The environment line names the git commit and the
+    platform; `DEEPHAVEN_MASSIVE_LOG_FILE` alone turns the log on at DEBUG; the line that turns
+    it on gives the file's resolved path; a session's configuration shows `s3_access_key_id`
+    only as set or unset. The library never rotates the log file
+    ([section 17.1](#171-the-log)).
+77. **A crypto day summary not in UTC is served with a warning** (2026-10-30, owner). A crypto
+    `daily_open_close` row whose `isUTC` is false is returned with the UTC day's window and
+    logs one WARNING per dataset per session, through the session's once-per-session warnings
+    as decision 70's bar stamps do: its day boundary differs from the other crypto tables', so
+    its dates may not line up with theirs. It never raises.
 
 ## 23. Open verification items
 
