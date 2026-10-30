@@ -530,7 +530,7 @@ class Poller:
             return self._publish_cycle(core, pool)
         except _FATAL as error:
             if not self._stop.is_set():
-                self._fail_once(core, error)
+                self._fail_fatal(core, error)
             return False
         except MassiveError as error:  # any other library error: the next cycle runs
             return self._carry_on(core, error)
@@ -581,6 +581,28 @@ class Poller:
         )
         core.update_streams({self._stream_id: update})
         return True
+
+    def _fail_fatal(self, core: SessionCore, error: MassiveError) -> None:
+        """Fail the table with a cycle's fatal error; a failure that raises is logged at ERROR.
+
+        The poller ends either way. Without the guard, an exception from the failure itself
+        (Deephaven's `publish_failure`) would end the poller's thread through
+        `threading.excepthook`, past the library's log, with its row already `FAILED` and its
+        table never failed.
+
+        Args:
+            core: The session's core.
+            error: The cycle's fatal error.
+        """
+        try:
+            self._fail_once(core, error)
+        except Exception:
+            logger.exception(
+                "%s poll() stream %d: could not fail its table with %s",
+                self._spec.name,
+                self._stream_id,
+                error,
+            )
 
     def _carry_on(self, core: SessionCore, error: Exception) -> bool:
         """Show a cycle's error in the table's row; the table keeps its rows.
@@ -744,8 +766,9 @@ class Poller:
         The failure is recorded first, as `StreamSink.fail` does for a stream, so the row is on
         its way to `m.streams()` before anyone can see the table failed. When the session's
         close came first, the table fails with the close's error instead and nothing is logged,
-        so the table and its `CLOSED` row name the same cause. The table counts as failed only
-        once `publish_failure` has returned, so a failure that raises can be retried.
+        so the table and its `CLOSED` row name the same cause. The table counts as failed even
+        when `publish_failure` raises (the exception then propagates): its row already reads
+        `FAILED`, so it publishes no more rows, and the failure is not tried again.
 
         Args:
             core: The session's core.
@@ -762,10 +785,12 @@ class Poller:
                 logger.error(
                     "%s poll() stream %d failed: %s", self._spec.name, self._stream_id, error
                 )
-            self._publisher.publish_failure(
-                error if closed in (None, str(error)) else MassiveError(closed)
-            )
-            self._failed = True
+            try:
+                self._publisher.publish_failure(
+                    error if closed in (None, str(error)) else MassiveError(closed)
+                )
+            finally:  # the row reads FAILED: the table publishes nothing more either way
+                self._failed = True
             return True
 
 
@@ -999,7 +1024,10 @@ def open_poll(
     the row released. Only then does the poller's thread start, unless the session closed
     meanwhile: the result is then released and the closed session's `MassiveError` raised. If
     any step raises, even `KeyboardInterrupt`, every step already taken is undone and nothing
-    keeps running.
+    keeps running. Asynchronous exceptions are handled on a best-effort basis, as
+    `release_scope` documents for its own lock: a `KeyboardInterrupt` landing in the instant
+    between the table's creation returning and the cleanup's `try` would leave the table's
+    scope unreleased.
 
     Args:
         core: The session's core.
@@ -1027,23 +1055,24 @@ def open_poll(
     stop = Cancel()
     with entered(core.exec_ctx):
         (result, publisher), scope = _build(core, spec, mode=mode, stream_id=stream_id, stop=stop)
-    poller = Poller(
-        core,
-        spec=spec,
-        request=request,
-        interval=interval,
-        mode=mode,
-        stream_id=stream_id,
-        read=read,
-        pollers=pollers,
-        clock=clock,
-        publisher=publisher,
-        stop=stop,
-    )
-    symbols = request.symbols
-    count, text = (None, "") if symbols is None else describe_symbols(symbols)
+    poller: Poller | None = None
     registered = False
     try:
+        poller = Poller(
+            core,
+            spec=spec,
+            request=request,
+            interval=interval,
+            mode=mode,
+            stream_id=stream_id,
+            read=read,
+            pollers=pollers,
+            clock=clock,
+            publisher=publisher,
+            stop=stop,
+        )
+        symbols = request.symbols
+        count, text = (None, "") if symbols is None else describe_symbols(symbols)
         core.register_worker(
             StreamRow(
                 stream_id=stream_id,
@@ -1065,8 +1094,9 @@ def open_poll(
         core.results.track(result, scope, poller.release)
     except BaseException:
         try:
-            poller.stop()
-            pollers.discard(poller)
+            if poller is not None:
+                poller.stop()
+                pollers.discard(poller)
             if registered:
                 core.release_worker(stream_id)
         finally:

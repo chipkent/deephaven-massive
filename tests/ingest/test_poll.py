@@ -734,6 +734,70 @@ def test_a_failed_registration_releases_everything(
     assert (row["State"], row["HeldResults"]) == ("RELEASED", 0)
 
 
+@pytest.mark.parametrize("step", ["Poller", "describe_symbols"])
+def test_an_interrupt_before_registration_releases_the_table(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+) -> None:
+    # The table exists before the poller does: an interrupt in either step still shuts it down,
+    # which sets the poller's stop token.
+    made: list[Cancel] = []
+
+    def token() -> Cancel:
+        made.append(Cancel())
+        return made[-1]
+
+    def interrupted(*_: object, **__: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(poll, "Cancel", token)
+    monkeypatch.setattr(poll, step, interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        start(massive_session, script=script, pollers=pollers, clock=clock)
+    monkeypatch.undo()
+    until(made[0].is_set)
+    assert pollers._live == set()
+    assert massive_session._core._workers == {}
+
+
+def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Deephaven refusing the failure is logged by the library, and the poller's thread ends
+    # without an exception escaping it.
+    escaped: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", escaped.append)
+
+    def refused(publisher: TablePublisher, error: Exception) -> None:
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(TablePublisher, "publish_failure", refused)
+    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    poller = poller_of(pollers)
+    poller.thread.join(TIMEOUT)
+    assert not poller.thread.is_alive()
+    assert escaped == []
+    assert not poller.fail(dm.MassiveError("closed"))  # counted as failed: not tried again
+    assert (
+        "stocks.dividends poll() stream 1: could not fail its table with HTTP 403 from GET "
+        "/stocks/v1/dividends"
+    ) in caplog.text
+    monkeypatch.undo()
+    massive_session.release(table)
+
+
 def test_a_collected_table_stops_its_poller(
     *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers, clock: FakeClock
 ) -> None:

@@ -673,11 +673,14 @@ class SessionCore:
         failure, with the hold released. A failure that lands while the shape is being derived
         makes Deephaven raise `DHError` ("Can not listen to failed table"), or jpy's
         `RuntimeError` from the described copy; that error is wrapped in the same
-        `MassiveError`. Either way `m.streams()` shows `FAILED`. A session that closes while
-        the result is built is checked once more after the result is tracked: the result is
-        released and the closed session's `MassiveError` raised, so a close that started before
-        that check never leaves the verb returning a table about to fail; a close that starts
-        after it fails the returned table like any other.
+        `MassiveError`. Either way `m.streams()` shows `FAILED`. When the session has closed
+        by the time such a Deephaven error reaches this call, the error is wrapped in the
+        closed session's `MassiveError` (`"MassiveSession #1 is closed"`) instead, whether or
+        not the stream's row records the close yet. A session that closes while the result is
+        built is checked once more after the result is tracked: the result is released and the
+        closed session's `MassiveError` raised, so a close that started before that check never
+        leaves the verb returning a table about to fail; a close that starts after it fails the
+        returned table like any other.
 
         The result record's owner callback holds the core weakly (`_call`); the stream's
         record, and through it the live set, keeps the session alive while the stream runs.
@@ -696,7 +699,9 @@ class SessionCore:
             The live result, a distinct Python object per call.
 
         Raises:
-            MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`).
+            MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`),
+                or the session closed while the result was built (`"MassiveSession #1 is
+                closed"`).
         """
         key: StreamKey = (spec.name, channel, request.symbol_key())
         handle = self._acquire(spec, request, key, channel=channel, query=query)
@@ -724,6 +729,10 @@ class SessionCore:
                     release_scope(self.exec_ctx, scope)
             finally:
                 self._release_hold(handle.stream_id)
+            # The close failed the stream's tables: its row may not read `CLOSED` yet, or may
+            # be gone already, so the close is named whether or not a failure was recorded.
+            if deephaven and self.closed:
+                raise MassiveError(f"{self.label} is closed") from error
             if failure is not None:
                 raise MassiveError(
                     f"{spec.name} stream {handle.stream_id} failed: {failure}"
