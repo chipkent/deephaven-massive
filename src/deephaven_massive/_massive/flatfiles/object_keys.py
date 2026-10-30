@@ -1,4 +1,4 @@
-"""The key layout of Massive's flat-file bucket: where each day's file of a dataset lives.
+"""The object keys of Massive's flat-file bucket: where each day's file of a dataset lives.
 
 Massive publishes one gzip CSV file per dataset and day in its S3 bucket, under keys
 `<prefix>/<YYYY>/<MM>/<YYYY-MM-DD>.csv.gz`, for example
@@ -6,7 +6,7 @@ Massive publishes one gzip CSV file per dataset and day in its S3 bucket, under 
 a futures prefix holds the placeholder `{venue}` (`us_futures_{venue}/trades_v1`), which a key
 fills with the venue's lowercase name (`us_futures_cme/trades_v1`).
 
-This module knows only the layout. Which prefix a dataset has, which venues a request reads,
+This module knows only the key scheme. Which prefix a dataset has, which venues a request reads,
 and which dates a range needs are the library's decisions (`_ingest/flatfiles.py` and
 `_datasets/history_source.py`). It imports only the standard library.
 """

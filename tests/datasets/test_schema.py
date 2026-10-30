@@ -21,7 +21,6 @@ from deephaven_massive._datasets.schema import (
     Schema,
     SourceColumn,
     dataset_schema,
-    join,
     key_column,
     pascal_case,
     rename,
@@ -198,18 +197,6 @@ def test_widening_gives_each_column_its_merged_arrow_type() -> None:
     assert widen(longs, pa.list_(pa.int32())).to_pylist() == [[100], None]
     lists = pa.array([[1], None], pa.list_(pa.int32()))
     assert widen(lists, pa.list_(pa.int32())).to_pylist() == [[1], None]
-
-
-def test_join_widens_only_by_the_lattice() -> None:
-    long, double, ints = WireType.LONG, WireType.DOUBLE, WireType.LONG_ARRAY
-    assert join(long, double) is join(double, long) is WireType.DOUBLE
-    assert join(long, ints) is join(ints, long) is WireType.LONG_ARRAY
-    assert join(WireType.EPOCH, WireType.EPOCH) is WireType.EPOCH
-    for same in WireType:
-        assert join(same, same) is same
-    assert join(double, ints) is None
-    assert join(WireType.EPOCH, WireType.ISO_INSTANT) is None
-    assert join(WireType.STRING, WireType.JSON_TEXT) is None
 
 
 # --- The rename ------------------------------------------------------------------------------

@@ -25,7 +25,7 @@ from deephaven.stream import blink_to_append_only
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import KeySpec
-from deephaven_massive._datasets.dates import CHICAGO
+from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._massive import Transport, object_key, source
 from deephaven_massive._namespaces import futures
 from deephaven_massive._namespaces.base import Namespace, build_query, query_class

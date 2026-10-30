@@ -7,11 +7,11 @@ source order. Once every transport is generated, this module:
 
 1. resolves `KINDS` and `PROJECTIONS` into `Member`s, one per source and group, reporting an
    entry that names a source the snapshot does not generate (`stale-entry`);
-2. checks that one column joins to one `WireType` within a kind (`type-agreement`), by the
-   type lattice: `long` with `double` gives `double`, `long` with `long-array` gives
-   `long-array`, two `epoch`s give an `epoch` (each source keeping its unit), and any other
-   pair is a conflict, printed with both fields' descriptions since it is first a possible
-   naming error;
+2. checks that one column joins to one `WireType` within a kind (`type-agreement`), by
+   `WireType.common_type`, the rule the run-time schema merge uses too: `long` with
+   `double` gives `double`, `long` with `long-array` gives `long-array`, two `epoch`s give an
+   `epoch` (each source keeping its unit), and any other pair is a conflict, printed with
+   both fields' descriptions since it is first a possible naming error;
 3. checks that, within a group whose sources span two or more transports, every column is on
    at least two transports or is in `TRANSPORT_ONLY` for that group (`transport-agreement`),
    which catches a
@@ -53,7 +53,6 @@ __all__ = [
     "Member",
     "apply",
     "column_orders",
-    "join",
     "members",
     "transport_agreement",
     "type_agreement",
@@ -217,28 +216,6 @@ def _projection(
     return projection
 
 
-def join(first: WireType, second: WireType) -> WireType | None:
-    """Join two types of one column by the type lattice.
-
-    Args:
-        first: One type.
-        second: The other.
-
-    Returns:
-        The joined type: either type when both are the same (two `epoch`s keep their units);
-        `double` for `long` and `double`; `long-array` for `long` and `long-array` (a scalar
-        becomes a one-element list); `None` for any other pair, a conflict.
-    """
-    if first is second:
-        return first
-    pair = {first, second}
-    if pair == {WireType.LONG, WireType.DOUBLE}:
-        return WireType.DOUBLE
-    if pair == {WireType.LONG, WireType.LONG_ARRAY}:
-        return WireType.LONG_ARRAY
-    return None
-
-
 def type_agreement(found: Sequence[Member]) -> Iterator[Problem]:
     """Require one `WireType` per column within each kind.
 
@@ -258,13 +235,15 @@ def type_agreement(found: Sequence[Member]) -> Iterator[Problem]:
                 seen[key] = (item.wire_type, [(member, item)])
                 continue
             joined, contributors = seen[key]
-            merged = join(joined, item.wire_type)
+            merged = joined.common_type(item.wire_type)
             if merged is not None:
                 seen[key] = (merged, [*contributors, (member, item)])
             elif key not in reported:
                 reported.add(key)
                 other, field = next(
-                    (m, f) for m, f in contributors if join(f.wire_type, item.wire_type) is None
+                    (m, f)
+                    for m, f in contributors
+                    if f.wire_type.common_type(item.wire_type) is None
                 )
                 yield Problem(
                     gate=Gate.TYPE_AGREEMENT,

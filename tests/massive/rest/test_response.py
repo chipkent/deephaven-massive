@@ -13,7 +13,7 @@ from deephaven_massive._massive.net.errors import (
 from deephaven_massive._massive.rest.response import (
     GOOD_STATUSES,
     Page,
-    Request,
+    RequestTarget,
     body_excerpt,
     decode_page,
     http_error,
@@ -24,7 +24,7 @@ from deephaven_massive._types import override
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_REQUEST = Request(host="api.massive.com", target="/v3/x?limit=5")
+_REQUEST = RequestTarget(host="api.massive.com", target="/v3/x?limit=5")
 _RESULTS = RestPath(key="/v3/x", fields=())
 _LAST = RestPath(key="/v1/last/crypto", fields=(), result_key="last")
 _VALUES = RestPath(key="/v1/indicators/sma", fields=(), result_key="results.values")

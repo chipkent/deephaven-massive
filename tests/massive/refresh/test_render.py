@@ -7,7 +7,7 @@ import datetime as dt
 import json
 
 from deephaven_massive._massive.refresh import render
-from deephaven_massive._massive.spec import parse
+from deephaven_massive._massive.spec.generated_schemas import parse
 from deephaven_massive._massive.spec.types import (
     Field,
     Membership,

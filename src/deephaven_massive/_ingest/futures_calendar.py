@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 
-from deephaven_massive._datasets.dates import futures_session
+from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import MassiveError

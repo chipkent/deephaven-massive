@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._enums import Order
     from deephaven_massive._query import Query
-    from deephaven_massive._tables.core import SessionCore
+    from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
 __all__ = ["DATASETS", "_Benzinga", "_EtfGlobal", "_Fable", "_Partners", "_Tmx"]
