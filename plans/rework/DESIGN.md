@@ -472,7 +472,12 @@ each skips unless `MASSIVE_API_KEY` is set (and always under CI). The same expre
 deselects the `benchmark` marker, which the extra points of the stream fan-out benchmark carry:
 that test records rates and never asserts, so the default run keeps only its default point,
 and `-m benchmark` runs the other eight. `-m` applies to a node id too, so a single extra
-point runs with its node id and `-m benchmark`. No test pins the `addopts` string or the
+point runs with its node id and `-m benchmark`. It deselects the `soak` marker too, which the
+soak tests carry: long stress runs against the fakes (a fast fake feed, many streams, and
+churn), each lasting `MASSIVE_SOAK_SECONDS` (20 by default), that fail on a lost or repeated
+row, a hang, or memory or threads that keep growing; `-m soak` runs them, and
+[`docs/dev/soak-tests.md`](../../docs/dev/soak-tests.md) is their runbook, overnight runs
+included. No test pins the `addopts` string or the
 marker list: pytest's `strict` setting already rejects an unregistered marker.
 [`docs/live-tests.md`](../../docs/live-tests.md) is the runbook for them. The live tests that deliberately exceed Massive's subscription and connection
 limits also carry `integration_limits`, and the smoke tier (every dataset and verb once,
@@ -5596,7 +5601,7 @@ reason comment in `pyproject.toml`; adding one needs owner approval.
   non-gating second checker.
 - **Pytest 9** (native `[tool.pytest]` table). `strict = true`, `filterwarnings = ["error"]`,
   `addopts = ["-ra", "--import-mode=importlib", "-m",
-  "not integration and not benchmark"]`, `pythonpath = ["."]` (test code imports
+  "not integration and not benchmark and not soak"]`, `pythonpath = ["."]` (test code imports
   helpers as `tests._fakes…`, so `tests/massive/` never shadows a top-level `massive`),
   `faulthandler_timeout = 120` with
   `faulthandler_exit_on_timeout = true`, and `pytest-timeout` at 60 seconds. Neither coverage
