@@ -23,7 +23,7 @@ from deephaven.table import Table
 
 from deephaven_massive._datasets.symbols import canonical_symbol
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
-from deephaven_massive._errors import BoundedWarnings
+from deephaven_massive._log_limits import BoundedWarnings
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable

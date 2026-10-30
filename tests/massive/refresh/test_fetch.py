@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Self
 import pytest
 
 from deephaven_massive._massive.net import USER_AGENT
-from deephaven_massive._massive.refresh import fetch
+from deephaven_massive._massive.refresh import fetch, knowledge_base
 from tests._fakes.rest import REFUSED_PORT, LoopbackHTTPServer
 
 if TYPE_CHECKING:
@@ -59,6 +59,12 @@ _INDEX = (
     f"## Flat Files\n- [Trades]({_FILE}): Trades\n"
 )
 _SPEC = b'{"paths": {}, "openapi": "3.0.3"}'
+_SLUG = next(iter(knowledge_base.ARTICLES))
+_ARTICLE = knowledge_base.article_url(_SLUG)
+_ARTICLE_PAGE = (
+    b"<html><head><title>A question? | Massive</title></head><body><nav>Menu</nav>"
+    b"<article><p>Five   a minute.  </p></article></body></html>"
+)
 _WS_SPEC = b'{"paths": {"/stocks/T": {}}}'
 
 
@@ -70,6 +76,7 @@ def _sources(**overrides: bytes) -> dict[str, bytes]:
         _PAGE: b"**Endpoint:** `GET /v3/trades/{stockTicker}`  \n",
         _FEED: b"The channel prefix for this feed is `T`.\n",
         _FILE: b"## Columns\n",
+        _ARTICLE: _ARTICLE_PAGE,
     }
     sources.update(overrides)
     return sources
@@ -103,6 +110,7 @@ def test_fetch_stores_every_source_canonically_with_a_manifest(tmp_path: Path) -
         _PAGE,
         _FEED,
         _FILE,
+        _ARTICLE,
     ]
     assert names == [
         "openapi.json",
@@ -111,6 +119,7 @@ def test_fetch_stores_every_source_canonically_with_a_manifest(tmp_path: Path) -
         "rest/stocks/trades-quotes/trades.md",
         "websocket/stocks/trades.md",
         "flat-files/stocks/trades.md",
+        f"knowledge-base/{_SLUG}.md",
         "manifest.json",
     ]
     stored_spec = (target / "openapi.json").read_bytes()
@@ -127,6 +136,14 @@ def test_fetch_stores_every_source_canonically_with_a_manifest(tmp_path: Path) -
         "stored_sha256": _sha(stored_spec),
     }
     assert manifest["files"]["rest/stocks/trades-quotes/trades.md"]["stored_sha256"] == _sha(page)
+    # An article is stored as the Markdown of its page; the manifest hashes the page as fetched.
+    article = (target / "knowledge-base" / f"{_SLUG}.md").read_bytes()
+    assert article == b"# A question?\n\nFive a minute.\n"
+    assert manifest["files"][f"knowledge-base/{_SLUG}.md"] == {
+        "url": _ARTICLE,
+        "fetched_sha256": _sha(_ARTICLE_PAGE),
+        "stored_sha256": _sha(article),
+    }
     assert set(manifest["files"]) == set(names[:-1])
     assert (target / "manifest.json").read_text(encoding="utf-8").endswith("}\n")
 
@@ -163,6 +180,25 @@ def test_an_index_without_an_area_s_links_fails(tmp_path: Path) -> None:
     index = _INDEX.split("## WebSocket", maxsplit=1)[0].encode()
     with pytest.raises(fetch.FetchError, match="no 'WebSocket' links"):
         fetch.fetch(tmp_path / "s", get=_getter(_sources(**{fetch.LLMS_URL: index})))
+
+
+@pytest.mark.parametrize(
+    ("page", "message"),
+    [
+        (b"<html><title>A question?</title><main>No article.</main></html>", "no <article>"),
+        (b"\xff", "is not UTF-8"),
+    ],
+    ids=["no-article", "not-utf8"],
+)
+def test_an_article_page_without_its_article_fails_and_keeps_the_old_snapshot(
+    tmp_path: Path, page: bytes, message: str
+) -> None:
+    target = tmp_path / "snapshot"
+    target.mkdir()
+    (target / "openapi.json").write_text("old\n", encoding="utf-8")
+    with pytest.raises(fetch.FetchError, match=f"^{_ARTICLE} .*{message}"):
+        fetch.fetch(target, get=_getter(_sources(**{_ARTICLE: page})))
+    assert sorted(p.name for p in target.iterdir()) == ["openapi.json"]
 
 
 def test_the_fetch_date_defaults_to_today_in_utc(tmp_path: Path) -> None:
@@ -321,5 +357,6 @@ def test_fetch_uses_and_closes_an_http_getter_by_default(
         _PAGE,
         _FEED,
         _FILE,
+        _ARTICLE,
         "closed",
     ]

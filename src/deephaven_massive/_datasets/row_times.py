@@ -99,7 +99,8 @@ from deephaven_massive._datasets.dates import (
 )
 from deephaven_massive._datasets.timestamps import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
-from deephaven_massive._errors import MassiveError, log_once
+from deephaven_massive._errors import MassiveError
+from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
     from datetime import tzinfo

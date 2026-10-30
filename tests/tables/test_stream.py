@@ -29,7 +29,8 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars, UnknownSymbols
-from deephaven_massive._errors import BoundedWarnings, MassiveError
+from deephaven_massive._errors import MassiveError
+from deephaven_massive._log_limits import BoundedWarnings
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table

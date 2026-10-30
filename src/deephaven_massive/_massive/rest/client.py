@@ -334,24 +334,27 @@ class RestClient:
         }
         proxy = https_proxy(self._host)
         timeout = urllib3.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT)
+        # One context for both legs: looking it up examines the certificate files once, and
+        # the proxy and Massive legs can never see two different trust stores.
+        context = ssl_context(TlsConsumer.URLLIB3)
         self._pool: urllib3.PoolManager
         if proxy:
             proxy_url, proxy_headers = proxy_credentials(proxy)
             self._pool = urllib3.ProxyManager(
                 proxy_url,
                 proxy_headers=proxy_headers,
-                proxy_ssl_context=ssl_context(TlsConsumer.URLLIB3),
+                proxy_ssl_context=context,
                 maxsize=max_concurrency,
                 retries=_NO_RETRIES,
                 timeout=timeout,
-                ssl_context=ssl_context(TlsConsumer.URLLIB3),
+                ssl_context=context,
             )
         else:
             self._pool = urllib3.PoolManager(
                 maxsize=max_concurrency,
                 retries=_NO_RETRIES,
                 timeout=timeout,
-                ssl_context=ssl_context(TlsConsumer.URLLIB3),
+                ssl_context=context,
             )
         self._closed = Cancel()
 

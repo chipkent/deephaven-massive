@@ -31,7 +31,7 @@ from deephaven_massive._datasets.symbols import (
     ws_symbol,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, UnknownSymbols
-from deephaven_massive._errors import BoundedWarnings
+from deephaven_massive._log_limits import BoundedWarnings
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

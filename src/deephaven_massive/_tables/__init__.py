@@ -11,8 +11,8 @@
 - `stream`: live streams' publishers, the flush thread, and the shared-batch fan-out.
 
 Layer: tables, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
-`_errors`, `_types`), and the datasets (`_datasets`), which it may import; it never imports
-the ingest layer (`_ingest`) or the API, and never holds a wire client, so it is tested
+`_errors`, `_log_limits`, `_types`), and the datasets (`_datasets`), which it may import; it never
+imports the ingest layer (`_ingest`) or the API, and never holds a wire client, so it is tested
 without a fake server. The package defines no names of its own: import the module that owns a
 name.
 """

@@ -37,6 +37,17 @@ developer.
   code knows ("wire client", "enum member", "channel") does not belong in a title.
 - **Keep it current.** When the scope of the PR changes, retitle it (`gh pr edit <n> --title`).
 
+CI checks every new or changed title against the rules a program can check: the type and the
+one scope, a lowercase letter to start the summary, no trailing period, and the 60-character
+limit (lifted for Dependabot's titles, which name a package and two versions). It comments on
+the PR with each rule the title breaks. Run the same check before you open a PR:
+
+```bash
+uv run python scripts/check_pr_title.py "fix: stop a failed live table from crashing the server"
+```
+
+Whether the title is specific, plain, and about one idea is for you and the reviewers.
+
 ### Before and after
 
 Real titles from this project, and how an editor would rewrite them:

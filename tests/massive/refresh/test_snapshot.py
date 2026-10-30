@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from deephaven_massive._massive.refresh import docs, snapshot
+from deephaven_massive._massive.refresh import docs, knowledge_base, snapshot
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.snapshot import Snapshot, VendorFile
 
@@ -52,6 +52,10 @@ def test_the_real_snapshot_matches_its_manifest() -> None:
         assert urls.keys() == pages.keys()
         for name, url in urls.items():
             assert manifest["files"][f"{area}/{name}"]["url"] == url
+    assert loaded.articles.keys() == knowledge_base.ARTICLES.keys()
+    for slug, url in loaded.article_urls.items():
+        assert url == knowledge_base.article_url(slug)
+        assert manifest["files"][f"knowledge-base/{slug}.md"]["url"] == url
 
 
 def test_a_missing_snapshot_says_to_run_from_a_source_checkout(tmp_path: Path) -> None:
@@ -146,12 +150,17 @@ def test_each_area_s_pages_are_stored_below_its_directory(
     assert snapshot.page_file(url, area) == stored
 
 
+def test_an_article_is_stored_by_its_slug_below_the_knowledge_base_directory() -> None:
+    assert snapshot.article_file("a-question") == "knowledge-base/a-question.md"
+
+
 # --- Loading --------------------------------------------------------------------------------
 
 
 _EXTRA_PAGES = {
     "websocket/stocks/trades.md": "feed",
     "flat-files/stocks/trades.md": "columns",
+    "knowledge-base/a-question.md": "# A question?\n",
 }
 
 
@@ -196,6 +205,9 @@ def test_a_stored_snapshot_loads(tmp_path: Path) -> None:
     assert loaded.flat_file_page_urls == {
         "stocks/trades.md": "https://example.com/flat-files/stocks/trades.md"
     }
+    # The articles are whichever the manifest lists, by slug.
+    assert loaded.articles == {"a-question": "# A question?\n"}
+    assert loaded.article_urls == {"a-question": "https://example.com/knowledge-base/a-question.md"}
 
 
 def _edit_manifest(directory: Path, change: dict[str, object]) -> None:
