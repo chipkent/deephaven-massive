@@ -3038,7 +3038,9 @@ def test_a_silent_connection_warns_once_while_its_market_trades(
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
-    last = time.time_ns()  # the connection's last frame, fixed so the test owns the times
+    # The connection's last frame, fixed an hour ahead so the test owns the times: a status
+    # frame that arrives meanwhile records the real time, which is earlier and changes nothing.
+    last = time.time_ns() + 3600 * 10**9
     ws_session.on_loop(connection, lambda: setattr(connection._episodes, "last_frame_at", last))
     quiet = last + int(ws.NO_FRAMES_WARNING * 1e9)
 
